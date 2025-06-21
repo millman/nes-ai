@@ -416,7 +416,12 @@ class KeyboardController(ControllerBase):
             for k, v in self.key_map.items():
                 self.is_pressed[v] = keys[k]
         else:
+            if event.key not in self.key_map:
+                # User may have pressed a key that isn't on the controller, used for debugging.
+                return
+
             button_index = self.key_map[event.key]
+
             if event.type == pygame.KEYDOWN:
                 self.is_pressed[button_index] = 1
                 self.is_pressed_user[button_index] = 1
