@@ -1011,12 +1011,9 @@ def main():
             # Observed new level via jump on the transition from 1-3 to 2-1.
             #
             if patch_id.jump_count != 0:
-                first_patch_id = PatchId(patch_id.patch_x, patch_id.patch_y, jump_count=0)
-                print(f"Reached new level from patch with jump: {patch_id}, rewrite to have no jump: {first_patch_id}")
-                patch_id = first_patch_id
-
-                # TODO(millman): is this still happening?
-                raise AssertionError(f"Reached new level from patch with jump: {patch_id}, rewrite to have no jump: {first_patch_id}")
+                first_patch_id_in_level = PatchId(patch_id.patch_x, patch_id.patch_y, jump_count=0)
+                print(f"Reached new level from patch with jump: {patch_id}, rewrite to have no jump: {first_patch_id_in_level}")
+                patch_id = first_patch_id_in_level
 
             # Set number of ticks in level to the current ticks.
             level_ticks = get_time_left(ram)
