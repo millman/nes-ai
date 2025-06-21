@@ -331,7 +331,8 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
 
     # Threshold entropy.  When we have fewer than the max possible transitions, just assume we have max entropy.
     if True:
-        if total < max_possible_transitions:
+        threshold = max_possible_transitions / 2.0
+        if total < threshold:
             # Max possible entropy is a single count for every possible transition.
             max_probs = np.full(max_possible_transitions, fill_value=1.0 / max_possible_transitions, dtype=np.float64)
             probs = max_probs
@@ -345,15 +346,15 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
     # possible that Mario is about to die, in which case we want to reduce the probability
     # that this cell gets selected.  Otherwise, Mario can get stuck on this cell if it's
     # entropy score is very high.
-    e = 0.0
-    beta = 0.0
-    transition_score = (transition_entropy + e) / (p_stats.num_visited + beta)
+    e = 1.0
+    beta = 1.0
+    transition_score = (transition_entropy + e) / (p_stats.num_selected + beta)
 
     # Prefer states that have unexplored neighbors.  This makes it more likely that we pick patches
     # near the frontier of exploration.
-    e = 0.0
-    beta = 0.0
-    frontier_score = (max_possible_transitions - len(p_stats.transitioned_to_patch) + e) / (p_stats.num_visited + beta)
+    e = 1.0
+    beta = 1.0
+    frontier_score = (max_possible_transitions - len(p_stats.transitioned_to_patch) + e) / (p_stats.num_selected + beta)
 
     # Some sample values for score parts:
     #   productivity_score=1.0 transition_entropy=0.7219 total=5 max_possible_transitions=4
@@ -371,8 +372,8 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
     #   really interesting.
 
     p_coef = 1.0
-    t_coef = 0.3
-    f_coef = 0.1
+    t_coef = 0.2
+    f_coef = 0.2
     score = p_coef * productivity_score + t_coef * transition_score + f_coef * frontier_score
 
     return score
@@ -544,7 +545,7 @@ _MAX_LEVEL_DIST = 6400
 def _history_length_for_level(default_history_length: int, natural_world_level: tuple[int, int]) -> int:
     WORLD_LEVEL_TO_LEN = {
         (7, 4): 20,
-        (8, 4): 20,
+        (8, 4): 3,
     }
 
     world, level = natural_world_level
@@ -619,7 +620,7 @@ class Args:
     start_level: tuple[int,int] = (7,4)
 
     # Specific experiments
-    patch_size: int = 32
+    patch_size: int = 20
 
      # About 30 frames/tick
     action_bucket_size: int = 150
@@ -627,11 +628,22 @@ class Args:
     # NOTE: Need enough history to distinguish between paths for 7-4 and 8-4; works with len=20.
     #   All other levels are much faster with history of length 3, or even 1.  This value may be
     #   overwritten elsewhere based on the level, if the specified value is too small.
-    reservoir_history_length: int = 1
+    #
+    # NOTE: Level 2-2, when entering the pipe at the end, there is not an obvious way to tell that
+    #   Mario is in a different position.  The x and y coordinates in the above-ground (after pipe)
+    #   overlap with the in-water (before pipe).  There must be some other indicator to show where
+    #   Mario is in the level.  Until then, we can use a history>1 to make the x,y position unique.
+    #   The jump into the x,y patch will be discontinuous, from the right side of the screen.
+    #
+    reservoir_history_length: int = 2
+
+
+    # TODO(millman): We should consider the visitation counts based on a patch that includes some amount of history.
+    #   Otherwise, we won't know to expand jumps.
 
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = 3
-    max_trajectory_revisit_x: int = 2
+    max_trajectory_revisit_x: int = -1
 
     flip_prob: float = 0.03
 
