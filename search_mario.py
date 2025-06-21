@@ -793,7 +793,7 @@ def main():
         prev_lives = lives
 
         # Update action every frame.
-        controller = controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
+        controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
 
         action_history.append(controller)
 
