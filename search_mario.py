@@ -564,6 +564,13 @@ def _history_length_for_level(default_history_length: int, natural_world_level: 
         return default_history_length
 
 
+def _save_ram_snapshot(ram: NdArrayUint8, filename: str):
+    with open(filename, 'w') as f:
+        for i, byte in enumerate(ram):
+            f.write(f"[0x{i:04x}]: {byte}\n")
+    print(f"Wrote ram snapshot to: {filename}")
+
+
 @dataclass
 class Args:
     r"""
@@ -847,20 +854,10 @@ def main():
                 user_args = None
 
         if pygame.K_1 in nes.keys_pressed:
-            # Save ram snapshot.
-            filename = '/tmp/a.txt'
-            with open(filename, 'w') as f:
-                for i, byte in enumerate(ram):
-                    f.write(f"[0x{i:04x}]: {byte}\n")
-            print(f"Wrote ram snapshot to: {filename}")
+            _save_ram_snapshot(ram, '/tmp/a.txt')
 
         if pygame.K_2 in nes.keys_pressed:
-            # Save ram snapshot.
-            filename = '/tmp/b.txt'
-            with open(filename, 'w') as f:
-                for i, byte in enumerate(ram):
-                    f.write(f"[0x{i:04x}]: {byte}\n")
-            print(f"Wrote ram snapshot to: {filename}")
+            _save_ram_snapshot(ram, '/tmp/b.txt')
 
         # Clear out user key presses.
         nes.keys_pressed = []
