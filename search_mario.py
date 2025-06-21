@@ -38,6 +38,7 @@ NdArrayRGB8 = np.ndarray[tuple[Literal[3]], np.dtype[np.uint8]]
 class PatchId:
     patch_x: int
     patch_y: int
+    jump_count: int
 
     def __post_init__(self):
         # Convert value from np.uint8 to int.
@@ -45,7 +46,8 @@ class PatchId:
         object.__setattr__(self, 'patch_y', int(self.patch_y))
 
     def __repr__(self) -> str:
-        return f"PatchId({self.patch_x},{self.patch_y})"
+        jump_str = f",{self.jump_count}" if self.jump_count else ""
+        return f"PatchId({self.patch_x},{self.patch_y}{jump_str})"
 
     __str__ = __repr__
 
@@ -59,6 +61,7 @@ class SaveInfo:
     world: int
     level_ticks: int
     ticks_left: int
+    jump_count: int
     save_state: Any
     action_history: list
     state_history: list
@@ -138,7 +141,7 @@ class PatchReservoir:
         self._reservoir_stats = defaultdict(ReservoirStats)
 
     def patch_id_from_save(self, save: SaveInfo) -> tuple:
-        patch_id = PatchId(save.x // self.patch_size, save.y // self.patch_size)
+        patch_id = PatchId(save.x // self.patch_size, save.y // self.patch_size, save.jump_count)
         return patch_id
 
     def reservoir_id_from_save(self, save: SaveInfo) -> tuple:
@@ -766,6 +769,7 @@ def main():
     patch_history = []
     visited_patches_x = set()
 
+    jump_count = 0
     revisited_x = 0
 
     reservoir_history_length = _history_length_for_level(args.reservoir_history_length, args.start_level)
@@ -855,8 +859,6 @@ def main():
         lives = life(ram)
         ticks_left = get_time_left(ram)
 
-        patch_id = PatchId(x // patch_size, y // patch_size)
-
         # Calculate derived states.
         ticks_used = max(1, level_ticks - ticks_left)
 
@@ -869,7 +871,10 @@ def main():
                 # print(f"Discontinuous x position, died, lives: {prev_lives} -> {lives}")
                 pass
             else:
-                print(f"Discountinuous x position: {prev_x} -> {x}")
+                print(f"Discountinuous x position: {prev_x} -> {x}, jump_count: {jump_count}")
+                jump_count += 1
+
+        patch_id = PatchId(x // patch_size, y // patch_size, jump_count)
 
         # ---------------------------------------------------------------------
         # Trajectory ending criteria
@@ -942,7 +947,10 @@ def main():
         #
         #   Overall, seems like there needs to be a smarter algorithm to find states that are
         #   accessible, but not easily accessible.
+        #
+        #   Related, level 2-2 has a jump backwards after entering the pipe.
         elif (
+            # TODO(millman): change to patch_x and patch_y for retrace? Either way MUST include jump_count.
             patch_history and
             patch_id.patch_x != patch_history[-1].patch_x and
             patch_id.patch_x in visited_patches_x and
@@ -975,6 +983,7 @@ def main():
             visited_patches_x = set()
 
             revisited_x = 0
+            jump_count = 0
 
             visited_patches_in_level.add(patch_id)
             visited_patches_x.add(patch_id.patch_x)
@@ -1005,6 +1014,7 @@ def main():
                 world=world,
                 level_ticks=level_ticks,
                 ticks_left=ticks_left,
+                jump_count=jump_count,
                 save_state=nes.save(),
                 action_history=action_history.copy(),
                 state_history=state_history.copy(),
@@ -1086,6 +1096,8 @@ def main():
 
             patch_history.append(patch_id)
 
+            assert patch_id.jump_count == jump_count
+
             save_info = SaveInfo(
                 save_id=next_save_id,
                 x=x,
@@ -1094,6 +1106,7 @@ def main():
                 world=world,
                 level_ticks=level_ticks,
                 ticks_left=ticks_left,
+                jump_count=jump_count,
                 save_state=nes.save(),
                 action_history=action_history.copy(),
                 state_history=state_history.copy(),
@@ -1121,7 +1134,7 @@ def main():
 
             # If we reached a new level, serialize all of the states to disk, then clear the save state buffer.
             # Also dump state histogram.
-            if world != prev_world or level != prev_level:
+            if (world != prev_world or level != prev_level) and termination:
                 raise AssertionError(f"Reached a new world ({prev_world}-{prev_level} -> {world}-{level}), but also terminated?")
 
             # In AutoresetMode.DISABLED, we have to reset ourselves.
@@ -1169,6 +1182,7 @@ def main():
             visited_patches_x = save_info.visited_patches_x.copy()
 
             revisited_x = 0
+            jump_count = save_info.jump_count
 
             # Read current state.
             world = get_world(ram)

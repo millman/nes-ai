@@ -13,6 +13,19 @@ PatchId = Any
 _SPACE_R = 0
 
 
+_MATLAB_COLORS_RGB = [
+    (0, 255, 0),      # Not actually a matlab color, but a nice bright default.
+
+    (0, 114, 189),    # Blue
+    (217, 83, 25),    # Red-orange
+    (237, 177, 32),   # Yellow-orange
+    (126, 47, 142),   # Purple
+    (119, 172, 48),   # Green
+    (77, 190, 238),   # Cyan
+    (162, 20, 47),    # Dark red
+]
+
+
 def optimal_patch_layout(screen_width: int, screen_height: int, n_patches: int) -> tuple[int, int, int]:
     max_patch_size = 0
     best_cols = best_rows = None
@@ -142,13 +155,15 @@ def build_patch_histogram_rgb(
         patch_r = hr - max_patch_y + current_patch.patch_y
         patch_c = _calc_c_for_special_section(current_patch, hr=hr, hc=hc)
 
+    color = _MATLAB_COLORS_RGB[current_patch.jump_count % len(_MATLAB_COLORS_RGB)]
+
     try:
-        grid_rgb[patch_r][patch_c] = (0, 255, 0)
+        grid_rgb[patch_r][patch_c] = color
     except IndexError:
         print(f"PATCH LAYOUT: max_patches_x={max_patch_x} max_patches_y={max_patch_y} pixel_size={pixel_size} hr={hr} hc={hc}")
         print(f"BAD CALC? wrap_i={wrap_i} hr={hr} hc={hc} r={r} c={c} patch_x={patch_x} patch_y={patch_y}")
 
-        grid_rgb[hr][hc] = (0, 255, 0)
+        grid_rgb[hr][hc] = color
 
     # Convert to screen.
     img_gray = Image.fromarray(grid_rgb, mode='RGB')
@@ -246,10 +261,12 @@ def draw_patch_path(
         y = (r + 0.5) * pixel_size * scale_y
         x = (c + 0.5) * pixel_size * scale_x
 
+        color = _MATLAB_COLORS_RGB[p.jump_count % len(_MATLAB_COLORS_RGB)]
+
         if prev_xy is None or prev_special != is_special:
-            draw.line([(x,y), (x,y)], fill=(0, 255, 0), width=1)
+            draw.line([(x,y), (x,y)], fill=color, width=1)
         else:
-            draw.line([prev_xy, (x,y)], fill=(0, 255, 0), width=1)
+            draw.line([prev_xy, (x,y)], fill=color, width=1)
 
         prev_xy = x, y
         prev_special = is_special
