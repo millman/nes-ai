@@ -828,6 +828,22 @@ def main():
 
                 user_args = None
 
+        if pygame.K_1 in nes.keys_pressed:
+            # Save ram snapshot.
+            filename = '/tmp/a.txt'
+            with open(filename, 'w') as f:
+                for i, byte in enumerate(ram):
+                    f.write(f"[0x{i:04x}]: {byte}\n")
+            print(f"Wrote ram snapshot to: {filename}")
+
+        if pygame.K_2 in nes.keys_pressed:
+            # Save ram snapshot.
+            filename = '/tmp/b.txt'
+            with open(filename, 'w') as f:
+                for i, byte in enumerate(ram):
+                    f.write(f"[0x{i:04x}]: {byte}\n")
+            print(f"Wrote ram snapshot to: {filename}")
+
         # Clear out user key presses.
         nes.keys_pressed = []
 
@@ -1268,6 +1284,31 @@ def main():
             )
             screen.blit_image(img_rgb_240, screen_index=3)
 
+            if False and patch_id_and_weight_pairs:
+                min_patch_and_weight = min(patch_id_and_weight_pairs, key=lambda p_id_and_w: p_id_and_w[1])
+                max_patch_and_weight = max(patch_id_and_weight_pairs, key=lambda p_id_and_w: p_id_and_w[1])
+
+                b_min = min_patch_and_weight[1]
+                b_max = max_patch_and_weight[1]
+
+                # Quick and dirty histogram.
+                n_bins = 10
+                bin_width = (b_max - b_min) / n_bins
+                bins = np.zeros(n_bins + 1, dtype=np.int64)
+
+                for p_id, w in patch_id_and_weight_pairs:
+                    bin = int((w  - b_min) / bin_width)
+                    bins[bin] += 1
+
+                print("patch_id_and_weight_pairs")
+                print(f"  min: {min_patch_and_weight[0]}, {min_patch_and_weight[1]:.4f}")
+                print(f"  max: {max_patch_and_weight[0]}, {max_patch_and_weight[1]:.4f}")
+                print()
+                for i, count in enumerate(bins):
+                    b0 = b_min + i*bin_width
+                    b1 = b_min + (i+1)*bin_width
+                    print(f"  [{b0:.2f} -> {b1:.2f}]: {count}")
+
             # Histogram of sampling weight.
             img_rgb_240 = build_patch_histogram_rgb(
                 patch_id_and_weight_pairs,
@@ -1301,6 +1342,47 @@ def main():
         if user_args is not None:
             time.sleep(1.0 / 60)
 
+            if False:
+                # Debug printouts for level pos
+                print(f"DEBUG POS:")
+                print(f"  world:      ram[0x75f]: {ram[0x75f]}")
+                print(f"  stage:      ram[0x75c]: {ram[0x75f]}")
+                print(f"  area:       ram[0x760]: {ram[0x760]}")
+                print(f"  screen_x:   ram[0x 6d]: {ram[0x6d]}")
+                print(f"  offset_x:   ram[0x 86]: {ram[0x86]}")
+                print(f"  y_pixel:    ram[0x3b8]: {ram[0x3b8]}")
+                print(f"  y_pos:      ram[0x ce]: {ram[0xce]}")
+                print(f"  y_viewport: ram[0x b5]: {ram[0xb5]}")
+                print(f"  screen:     ram[0x71a]: {ram[0x71a]}")
+                print(f"  next scrn:  ram[0x71b]: {ram[0x71b]}")
+
+                # Nothing seems like a problem?
+
+                # Before pipe:
+                #     DEBUG POS:
+                #     world:      ram[0x75f]: 1
+                #     stage:      ram[0x75c]: 1
+                #     area:       ram[0x760]: 2
+                #     screen_x:   ram[0x 6d]: 11
+                #     offset_x:   ram[0x 86]: 56
+                #     y_pixel:    ram[0x3b8]: 144
+                #     y_pos:      ram[0x ce]: 144
+                #     y_pixel:    ram[0x b5]: 1
+                #     screen:     ram[0x71a]: 11
+                #     next scrn:  ram[0x71b]: 11
+
+                # After pipe:
+                #     DEBUG POS:
+                #     world:      ram[0x75f]: 1
+                #     stage:      ram[0x75c]: 1
+                #     area:       ram[0x760]: 2
+                #     screen_x:   ram[0x 6d]: 11
+                #     offset_x:   ram[0x 86]: 82
+                #     y_pixel:    ram[0x3b8]: 160
+                #     y_pos:      ram[0x ce]: 160
+                #     y_viewport: ram[0x b5]: 1
+                #     screen:     ram[0x71a]: 11
+                #     next scrn:  ram[0x71b]: 12
 
 if __name__ == "__main__":
     main()
