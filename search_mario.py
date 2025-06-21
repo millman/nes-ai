@@ -128,6 +128,15 @@ class ReservoirStats:
     # Number of times visited from any trajectories.
     num_visited: int = 0
 
+    # Number of times selected as a start point.
+    num_selected: int = 0
+
+    # The total number of unique, previously unvisited cells discovered by exploring from this cell.
+    num_children: int = 0
+
+    # Number of new children found from this specific cell since last choosing this cell as a start point.
+    num_children_since_last_selected: int = 0
+
 
 class PatchReservoir:
 
@@ -146,9 +155,11 @@ class PatchReservoir:
         patch_id = PatchId(save.x // self.patch_size, save.y // self.patch_size, save.jump_count)
         return patch_id
 
+    def reservoir_id_from_state(self, patch_history: list[PatchId]) -> tuple:
+        return ReservoirId(tuple(patch_history[-self.reservoir_history_length:]))
+
     def reservoir_id_from_save(self, save: SaveInfo) -> tuple:
-        reservoir_id = ReservoirId(tuple(save.patch_history[-self.reservoir_history_length:]))
-        return reservoir_id
+        return ReservoirId(tuple(save.patch_history[-self.reservoir_history_length:]))
 
     def add(self, save: SaveInfo):
         patch_id = self.patch_id_from_save(save)
@@ -381,6 +392,20 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
     return score
 
 
+def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats) -> float:
+    # Score recommended by Go-Explore paper: https://arxiv.org/abs/1901.10995, an estimate of recent productivity.
+    # If the patch has recently produced children, keep exploring.  As the patch gets selected more,
+    # its productivity will drop.
+    e = 1.0
+    beta = 1.0
+    productivity_score = (res_stats.num_children_since_last_selected + e) / (res_stats.num_selected + beta)
+
+    if _DEBUG_SCORE_PATCH:
+        print(f"Scored reservoir: {res_id}: productivity_score={productivity_score:.4f}")
+
+    return productivity_score
+
+
 def _choose_save_from_stats(saves_reservoir: PatchReservoir, patches_stats: dict[PatchId, PatchStats], rng: Any) -> SaveInfo:
     valid_patch_ids = []
     valid_patch_stats = []
@@ -425,27 +450,21 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, patches_stats: dict
 
     assert chosen_patch not in patches_with_missing_reservoir, f"Shouldn't have picked a patch with no save states: {chosen_patch}"
 
-    # Pick reservoir by exponential weighting.
+    # Collect reservoirs in a patch.
     reservoir_id_list = [
         res_id
         for res_id in saves_reservoir._patch_to_reservoir_ids[chosen_patch]
         if saves_reservoir._reservoir_stats[res_id].num_visited > 0
     ]
 
-    reservoir_counts = np.fromiter((
-        saves_reservoir._reservoir_stats[res_id].num_visited
+    # Calculate reservoir scores.
+    res_scores = np.fromiter((
+        _score_reservoir(res_id, saves_reservoir._reservoir_stats[res_id])
         for res_id in reservoir_id_list
     ), dtype=np.float64)
 
-    # Subtract max for numerical stability.
-    reservoir_counts -= reservoir_counts.max()
-
-    beta = 1.0
-    res_weights = np.exp(beta * -reservoir_counts)
-    res_weights /= res_weights.sum()
-
-    # Pick reservoir.
-    chosen_res_index = rng.choice(len(reservoir_counts), p=res_weights)
+    # Pick patch based on score.  Deterministic.
+    chosen_res_index = np.argmax(res_scores)
     chosen_res = reservoir_id_list[chosen_res_index]
 
     # Pick the first item out of the reservoir.
@@ -803,6 +822,7 @@ def main():
     steps_since_load = 0
     patches_x_since_load = 0
     last_selected_patch_id = None
+    last_selected_res_id = None
 
     patch_id_and_weight_pairs = []
 
@@ -1031,7 +1051,7 @@ def main():
             natural_world_level = encode_world_level(world, level)
             reservoir_history_length = _history_length_for_level(args.reservoir_history_length, natural_world_level)
             saves = PatchReservoir(patch_size=patch_size, action_bucket_size=action_bucket_size, reservoir_history_length=reservoir_history_length)
-            saves.add(SaveInfo(
+            save_info = SaveInfo(
                 save_id=next_save_id,
                 x=x,
                 y=y,
@@ -1047,7 +1067,8 @@ def main():
                 visited_patches_x=visited_patches_x.copy(),
                 controller_state=controller.copy(),
                 controller_state_user=nes.controller1.is_pressed_user.copy(),
-            ))
+            )
+            saves.add(save_info)
             next_save_id += 1
 
             patches_stats = defaultdict(PatchStats)
@@ -1060,6 +1081,7 @@ def main():
             p_stats.last_visited_step = step
 
             last_selected_patch_id = patch_id
+            last_selected_res_id = saves.reservoir_id_from_save(save_info)
 
         # ---------------------------------------------------------------------
         # Handle patch transitions
@@ -1091,6 +1113,19 @@ def main():
             p_prev_stats = patches_stats[prev_patch_id]
             p_prev_stats.transitioned_to_patch[patch_id] += 1
 
+            # Update reservoir stats.
+            res_id = saves.reservoir_id_from_state(patch_history)
+            res_stats = saves._reservoir_stats[res_id]
+            res_stats.num_visited += 1
+            res_stats.last_visited_step = step
+
+            # NOTE: Using patch id to consider visit for reservoirs, not the full reservoir id.
+            if patch_id not in visited_patches_in_level:
+                res_stats.num_children += 1
+
+                res_last_selected_stats = saves._reservoir_stats[last_selected_res_id]
+                res_last_selected_stats.num_children += 1
+                res_last_selected_stats.num_children_since_last_selected += 1
 
         # Save state info on transition.  It's ok to save when we intentionally end a trajectory
         # early, but not when the termination is due to the environment (e.g. Mario dying).
@@ -1228,6 +1263,8 @@ def main():
             patch_history = save_info.patch_history.copy()
             patch_id = saves.patch_id_from_save(save_info)
 
+            res_id = saves.reservoir_id_from_save(save_info)
+
             assert patch_id == patch_history[-1], f"Mismatched patch history: history[-1]:{patch_history[-1]} != patch_id:{patch_id}"
 
             # assert len(patch_history) <= reservoir_history_length, f"Patch history is too large?: size={len(patch_history)}"
@@ -1242,10 +1279,10 @@ def main():
             patches_x_since_load = 0
             force_terminate = False
             last_selected_patch_id = patch_id
+            last_selected_res_id = res_id
 
             if True:
                 patch_visited = patches_stats[patch_id].num_visited
-                res_id = saves.reservoir_id_from_save(save_info)
                 res_visited = saves._reservoir_stats[res_id].num_visited
                 print(f"Loaded save: save_id={save_info.save_id} level={_str_level(world, level)}, x={x} y={y} lives={lives} saves={len(saves)} patch_visited={patch_visited} res_visited={res_visited}")
 
@@ -1259,6 +1296,12 @@ def main():
             p_stats.num_children_since_last_selected = 0
             p_stats.last_selected_step = step
             p_stats.last_visited_step = step
+
+            # Update reservoir stats
+            res_stats = saves._reservoir_stats[res_id]
+            res_stats.num_visited += 1
+            res_stats.num_selected += 1
+            p_stats.num_children_since_last_selected = 0
 
             assert patch_id in visited_patches_in_level, f"Missing patch_id in visited, even though chosen as start point: {patch_id}"
 
