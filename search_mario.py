@@ -80,6 +80,8 @@ class SaveInfo:
         # Convert value from list to np.uint8.
         assert self.controller_state.dtype == np.uint8, f"Unexpected controller state type: {self.controller_state.dtype} != np.uint8"
 
+        assert self.jump_count == self.patch_history[-1].jump_count, f"Mismatched patch jump_count on save: history[-1]:{self.patch_history[-1].jump_count} != jump_count:{self.jump_count}"
+
 
 @dataclass(frozen=True)
 class ReservoirId:
@@ -876,13 +878,14 @@ def main():
 
         # If we get teleported, or if the level boundary is discontinuous, the change in x position isn't meaningful.
         if abs(x - prev_x) > 50:
-            if level != prev_level:
+            if world != prev_world or level != prev_level:
                 # print(f"Discountinuous x position, level change: {prev_world},{prev_level} -> {world},{level}, x: {prev_x} -> {x}")
                 pass
             elif lives != prev_lives:
                 # print(f"Discontinuous x position, died, lives: {prev_lives} -> {lives}")
                 pass
             else:
+                assert world == prev_world and level == prev_level, f"Mismatched level change: {prev_world},{prev_level} -> {world},{level}, x: {prev_x} -> {x}"
                 print(f"Discountinuous x position: {prev_x} -> {x}, jump_count: {jump_count}")
                 jump_count += 1
 
@@ -984,6 +987,19 @@ def main():
             # Print before-level-end info.
             if True:
                 _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, ticks_used=ticks_used, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
+
+            # We're at the starting patch on a new level, but we may have arrived via a jump.
+            # Force the first patch of the new level to have a zero jump count.
+            #
+            # Observed new level via jump on the transition from 1-3 to 2-1.
+            #
+            if patch_id.jump_count != 0:
+                first_patch_id = PatchId(patch_id.patch_x, patch_id.y, jump_count=0)
+                print(f"Reached new level from patch with jump: {patch_id}, rewrite to have no jump: {first_patch_id}")
+                patch_id = first_patch_id
+
+                # TODO(millman): is this still happening?
+                raise AssertionError(f"Reached new level from patch with jump: {patch_id}, rewrite to have no jump: {first_patch_id}")
 
             # Set number of ticks in level to the current ticks.
             level_ticks = get_time_left(ram)
