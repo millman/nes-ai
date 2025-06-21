@@ -172,6 +172,10 @@ def flip_buttons_by_action_in_place(
     """
     controller_presses_hash = _hash_controller(controller_presses)
 
+    if controller_presses_hash not in controller_to_action_index:
+        # Don't change.  This should only happen if the user is pressing buttons.
+        return controller_presses
+
     # Map the controller presses to their action index.
     current_action_index = controller_to_action_index[controller_presses_hash]
 

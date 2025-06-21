@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import copy
 import os
 import random
 import time
@@ -10,9 +11,8 @@ from typing import Any, Literal
 
 import gymnasium as gym
 import numpy as np
-
+import pygame
 import tyro
-
 from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
 
@@ -781,6 +781,9 @@ def main():
 
     patch_id_and_weight_pairs = []
 
+    original_args = None
+    user_args = None
+
     while True:
         step += 1
         steps_since_load += 1
@@ -799,6 +802,31 @@ def main():
 
         # Execute action.
         _next_obs, reward, termination, truncation, info = envs.step((controller,))
+
+        # Handle user config changes.
+        if pygame.K_x in nes.keys_pressed:
+            # Switch to user args.
+            if user_args is None:
+                original_args = copy.deepcopy(args)
+
+                # Update args.
+                print("Changing to user config:")
+
+                # TODO(millman): show changed values from namespace.
+                args.max_trajectory_steps = -1
+                args.max_trajectory_patches_x = -1
+                args.max_trajectory_revisit_x = -1
+
+                user_args = args
+
+            # Restore original args.
+            else:
+                args = copy.deepcopy(original_args)
+
+                # Update args.
+                print("Changing to original config:")
+
+                user_args = None
 
         # Clear out user key presses.
         nes.keys_pressed = []
@@ -1268,6 +1296,10 @@ def main():
             screen.show()
 
             last_vis_time = now
+
+        # Delay frame for user control.
+        if user_args is not None:
+            time.sleep(1.0 / 60)
 
 
 if __name__ == "__main__":
