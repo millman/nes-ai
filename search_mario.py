@@ -794,41 +794,6 @@ def main():
             print(f"Lost a life: x={x} ticks_left={ticks_left}")
             force_terminate = True
 
-        # Stop if we've jumped backwards and already visited this state.  It indicates a
-        # backwards jump in the level, like in 7-4.  We should massively penalize the entire
-        # path that got here, since it's very for the algorithm to look back enough steps to
-        # realize that it should keep searching.
-        elif False and (
-            patch_history and
-            patch_id.patch_x - patch_history[-1].patch_x < -10 and
-            patch_id.patch_x in visited_patches_x and
-            world == prev_world and level == prev_level
-        ):
-            print(f"Ending trajectory, backward jump from {prev_x} -> {x}: x={x} ticks_left={ticks_left}")
-
-            PENALTY = 1000
-            pen = f"+{PENALTY}"
-
-            print(f"Penalizing patches and reservoirs:")
-            for j in range(len(patch_history)):
-                i = max(0, j - reservoir_history_length)
-                ph = patch_history[i:j+1]
-                try:
-                    p_id = ph[-1]
-                except IndexError:
-                    print(f"WHAT WENT WRONG?: i={i} j={j} res_hist_len={reservoir_history_length} ph={ph} ")
-                    raise
-
-                r_id = ReservoirId(tuple(ph[-reservoir_history_length:]))
-
-                print(f"  p:{p_id} r:{r_id}: {saves._patch_seen_counts[p_id]} -> {pen}, {saves._reservoir_seen_counts[r_id]} -> {pen}")
-                saves._patch_seen_counts[p_id] += PENALTY
-                saves._patch_count_since_refresh[p_id] += PENALTY
-                saves._reservoir_seen_counts[r_id] += PENALTY
-                saves._reservoir_count_since_refresh[r_id] += PENALTY
-
-            force_terminate = True
-
         # Stop if we double-back to the same x patch within a trajectory.
         #
         # Must check only the x patch, since we can't avoid visiting a state by changing y.
