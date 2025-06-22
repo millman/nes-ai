@@ -53,6 +53,16 @@ class PatchId:
 
 
 @dataclass(frozen=True)
+class PatchIdX:
+    patch_x: int
+    jump_count: int
+
+    @staticmethod
+    def from_patch(patch_id: PatchId) -> 'PatchIdX':
+        return PatchIdX(patch_id.patch_x, patch_id.jump_count)
+
+
+@dataclass(frozen=True)
 class SaveInfo:
     save_id: int
     x: int
@@ -66,7 +76,7 @@ class SaveInfo:
     action_history: list
     state_history: list
     patch_history: tuple[PatchId]
-    visited_patches_x: set[PatchId]
+    visited_patches_x: set[PatchIdX]
     controller_state: NdArrayUint8
     controller_state_user: NdArrayUint8
 
@@ -525,7 +535,7 @@ class Args:
 
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = 3
-    max_trajectory_revisit_x: int = -1
+    max_trajectory_revisit_x: int = 2
 
     flip_prob: float = 0.03
 
@@ -835,16 +845,15 @@ def main():
         #
         #   Related, level 2-2 has a jump backwards after entering the pipe.
         elif (
-            # TODO(millman): change to patch_x and patch_y for retrace? Either way MUST include jump_count.
             patch_history and
-            patch_id.patch_x != patch_history[-1].patch_x and
-            patch_id.patch_x in visited_patches_x and
+            PatchIdX.from_patch(patch_id) != PatchIdX.from_patch(patch_history[-1]) and
+            PatchIdX.from_patch(patch_id) in visited_patches_x and
             world == prev_world and level == prev_level
         ):
             revisited_x += 1
 
             if args.max_trajectory_revisit_x > 0 and revisited_x > args.max_trajectory_revisit_x:
-                print(f"Ending trajectory, revisited x patch: {patch_id.patch_x}: x={x} ticks_left={ticks_left}")
+                print(f"Ending trajectory, revisited x patch: {patch_id}: x={x} ticks_left={ticks_left}")
                 force_terminate = True
 
         # ---------------------------------------------------------------------
@@ -886,7 +895,7 @@ def main():
             reservoir_id = saves.reservoir_id_from_state(patch_history)
 
             visited_reservoirs_in_level.add(reservoir_id)
-            visited_patches_x.add(patch_id.patch_x)
+            visited_patches_x.add(PatchIdX.from_patch(patch_id))
 
             # assert len(patch_history) <= reservoir_history_length, f"Patch history is too large?: size={len(patch_history)}"
 
@@ -986,11 +995,13 @@ def main():
                 print(f"Something is wrong with the lives, don't save this state: level={_str_level(world, level)} x={x} y={y} ticks-left={ticks_left} lives={lives} steps_since_load={steps_since_load} patches_x_since_load={patches_x_since_load}")
                 raise AssertionError("STOP")
 
-            if patch_id.patch_x not in visited_patches_x:
-                visited_patches_x.add(patch_id.patch_x)
+            patch_id_x = PatchIdX.from_patch(patch_id)
+
+            if patch_id_x not in visited_patches_x:
+                visited_patches_x.add(patch_id_x)
 
             # NOTE: These are any patches since load, not *new* patches load.
-            if patch_id.patch_x != patch_history[-1].patch_x:
+            if patch_id_x != PatchIdX.from_patch(patch_history[-1]):
                 patches_x_since_load += 1
 
             patch_history.append(patch_id)
