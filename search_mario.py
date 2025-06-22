@@ -100,29 +100,6 @@ class ReservoirId:
 
 
 @dataclass
-class PatchStats:
-
-    # Number of times visited from any trajectories.
-    num_visited: int = 0
-
-    # Number of times selected as a start point.
-    num_selected: int = 0
-
-    # The total number of unique, previously unvisited cells discovered by exploring from this cell.
-    num_children: int = 0
-
-    # Number of new children found from this specific cell since last choosing this cell as a start point.
-    num_children_since_last_selected: int = 0
-
-    # Last time this cell was selected.  Useful for "recency" metrics.
-    last_selected_step: int = -1
-    last_visited_step: int = -1
-
-    transitioned_from_patch: Counter[PatchId] = field(default_factory=Counter)
-    transitioned_to_patch: Counter[PatchId] = field(default_factory=Counter)
-
-
-@dataclass
 class ReservoirStats:
 
     # Number of times visited from any trajectories.
@@ -137,6 +114,9 @@ class ReservoirStats:
     # Number of new children found from this specific cell since last choosing this cell as a start point.
     num_children_since_last_selected: int = 0
 
+    transitioned_from_reservoir: Counter[ReservoirId] = field(default_factory=Counter)
+    transitioned_to_reservoir: Counter[ReservoirId] = field(default_factory=Counter)
+
 
 class PatchReservoir:
 
@@ -147,41 +127,21 @@ class PatchReservoir:
         self.max_saves_per_reservoir = max_saves_per_reservoir
 
         self._reservoir_to_saves = defaultdict(list)
-        self._patch_to_reservoir_ids = defaultdict(set)
 
-        self._reservoir_stats = defaultdict(ReservoirStats)
-
-    def patch_id_from_save(self, save: SaveInfo) -> tuple:
-        patch_id = PatchId(save.x // self.patch_size, save.y // self.patch_size, save.jump_count)
-        return patch_id
-
-    def reservoir_id_from_state(self, patch_history: list[PatchId]) -> tuple:
+    def reservoir_id_from_state(self, patch_history: list[PatchId]) -> ReservoirId:
         return ReservoirId(tuple(patch_history[-self.reservoir_history_length:]))
 
-    def reservoir_id_from_save(self, save: SaveInfo) -> tuple:
+    def reservoir_id_from_save(self, save: SaveInfo) -> ReservoirId:
         return ReservoirId(tuple(save.patch_history[-self.reservoir_history_length:]))
 
     def add(self, save: SaveInfo):
-        patch_id = self.patch_id_from_save(save)
         reservoir_id = self.reservoir_id_from_save(save)
 
         if len(self._reservoir_to_saves[reservoir_id]) < self.max_saves_per_reservoir:
             # Reservoir is still small, add it.
             self._reservoir_to_saves[reservoir_id].append(save)
-            self._patch_to_reservoir_ids[patch_id].add(reservoir_id)
 
         else:
-            # Use traditional reservoir sampling.
-            if False:
-                seen_count = self._reservoir_stats[reservoir_id].num_visited
-
-                # Random chance of selecting an item in the reservoir.
-                k = random.randint(0, seen_count)
-
-                # Kick out the existing item in reservoir.
-                if k < self.max_saves_per_reservoir:
-                    self._saves_by_reservoir[reservoir_id][k] = save
-
             # Replace the save that took the longest to reach this patch.
             if True:
                 # Find the save state with the most action steps.  We assume that it's better to
@@ -196,88 +156,11 @@ class PatchReservoir:
                 # not just a second or 2 difference.
 
                 if len(save.action_history) // self.action_bucket_size < len(max_item.action_history) // self.action_bucket_size:
-                    kicked_save = saves_in_reservoir[max_index]
-                    kicked_res_id = self.reservoir_id_from_save(kicked_save)
-
                     # Replace item, remove from patch index.
                     saves_in_reservoir[max_index] = save
-
-                    # Update index.
-                    self._patch_to_reservoir_ids[patch_id].add(reservoir_id)
-
-                    if kicked_res_id != reservoir_id:
-                        self._patch_to_reservoir_ids[patch_id].remove(kicked_res_id)
-
                 else:
                     # Don't replace item, do nothing.
                     pass
-
-            # Prefer replacing the save state with more action steps.  Base it on a random chance
-            # so that we maintain some sample diversity.  Treat the difference in action history
-            # as a difference in log odds.  A delta of 1 should be less meaningful if the action
-            # history is very long, compared to very short.
-            if False:
-                saves_in_reservoir = self._reservoir_to_saves[reservoir_id]
-
-                assert len(saves_in_reservoir) == 1, f"Implement for non-single reservoir"
-
-                # Add the current save.
-                saves_in_reservoir.append(save)
-
-                # Choose a save to kick out.  Prefer to kick out the largest history.
-                action_counts = np.fromiter((len(s.action_history) for s in saves_in_reservoir), dtype=np.float64)
-                kick_weights = np.square(action_counts)
-                probs = kick_weights / kick_weights.sum()
-
-                # Pick one according to probabilities
-                choice_index = np.random.choice(len(saves_in_reservoir), p=probs)
-
-                did_kick_new_item = choice_index == len(saves_in_reservoir) - 1
-
-                # Remove from items in reservoir.
-                del saves_in_reservoir[choice_index]
-
-                if did_kick_new_item:
-                    # Nothing happens, don't consider this patch refreshed.
-                    pass
-                else:
-                    # TODO(millman): does refreshing make this too slow?
-                    if False:
-                        self._patch_count_since_refresh[patch_id] -= self._reservoir_count_since_refresh[reservoir_id]
-
-                        assert self._patch_count_since_refresh[patch_id] >= 0, f"How did we get a negative value?: {self._patch_count_since_refresh[patch_id]}"
-
-                        self._reservoir_count_since_refresh[reservoir_id] = 0
-
-                assert len(saves_in_reservoir) == 1, f"Implement for non-single reservoir"
-
-        # Update count.
-        self._reservoir_stats[reservoir_id].num_visited += 1
-
-        # Check that we don't have an ever-growing number of saves in a patch.
-        # The exact number isn't actually that important, as long as we're
-        # reasonably bounded.
-        #
-        # We can get:
-        #   - 8 from transitioning from each 1-neighbor into the patch
-        #   - 10 from transitioning from each 2-neighbor into the patch,
-        #     the 2-neighbor transition can happen because mario can move multiple
-        #     pixels sometimes
-        #   - 6 from transitioning from a jump point 1 or 2 away
-        #
-        # Haven't yet seen more than:
-        #   - 8 from transitioning from each 1-neighbor into the patch
-        #   - 3 from transitioning from each 1-neighbor jump point
-        #   - 2 more for some reason?
-        #
-        max_expected_in_patch = 13
-        res_ids_in_patch = self._patch_to_reservoir_ids[patch_id]
-
-        if False: # len(res_ids_in_patch) > max_expected_in_patch:
-            print(f"Should be no more than {max_expected_in_patch} items per patch, found: {len(res_ids_in_patch)}")
-            print(f"  patch_id={patch_id}")
-            for i, res_id in enumerate(res_ids_in_patch):
-                print(f"  [{i}] res_id: {res_id.patch_history}")
 
     def values(self) -> list[SaveInfo]:
         return (
@@ -293,13 +176,13 @@ class PatchReservoir:
 _DEBUG_SCORE_PATCH = False
 
 
-def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transitions: int) -> float:
+def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats, max_possible_transitions: int) -> float:
     # Score recommended by Go-Explore paper: https://arxiv.org/abs/1901.10995, an estimate of recent productivity.
     # If the patch has recently produced children, keep exploring.  As the patch gets selected more,
     # its productivity will drop.
     e = 1.0
     beta = 1.0
-    productivity_score = (p_stats.num_children_since_last_selected + e) / (p_stats.num_selected + beta)
+    productivity_score = (res_stats.num_children_since_last_selected + e) / (res_stats.num_selected + beta)
 
     # If the patch always transitions to the same next patch, that's an indicator that we can't explore from there.
     # For example, if Mario is falling in a pit, Mario can't really control where he will end up.
@@ -320,8 +203,8 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
     # So the probabilities are [2/5, 2/5, 1/5], and the entropy is:
     #
     # - (2/5) * log2(2/5) * 2 - (1/5) * log2(1/5) ≈ 1.5219 bits
-    total = p_stats.transitioned_to_patch.total()
-    counts = np.fromiter(p_stats.transitioned_to_patch.values(), dtype=np.float64)
+    total = res_stats.transitioned_to_reservoir.total()
+    counts = np.fromiter(res_stats.transitioned_to_reservoir.values(), dtype=np.float64)
 
     # The problem with using entropy directly is that it confuses productivity.  If we've taken only a single
     # transition from a patch, then it will have entropy of zero.  There are too few transitions to make a good
@@ -361,13 +244,13 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
     # entropy score is very high.
     e = 1.0
     beta = 1.0
-    transition_score = (transition_entropy + e) / (p_stats.num_selected + beta)
+    transition_score = (transition_entropy + e) / (res_stats.num_selected + beta)
 
     # Prefer states that have unexplored neighbors.  This makes it more likely that we pick patches
     # near the frontier of exploration.
     e = 1.0
     beta = 1.0
-    frontier_score = (max_possible_transitions - len(p_stats.transitioned_to_patch) + e) / (p_stats.num_selected + beta)
+    frontier_score = (max_possible_transitions - len(res_stats.transitioned_to_reservoir) + e) / (res_stats.num_selected + beta)
 
     # Some sample values for score parts:
     #   productivity_score=1.0 transition_entropy=0.7219 total=5 max_possible_transitions=4
@@ -379,7 +262,7 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
     #   productivity_score=1.0 transition_entropy=0.9852 total=7 max_possible_transitions=4
 
     if _DEBUG_SCORE_PATCH:
-        print(f"Scored patch: {patch_id}: productivity_score={productivity_score:.4f} transition_entropy={transition_entropy:.4f} transition_score={transition_score:.4f} frontier_score={frontier_score:.4f} {total=} {max_possible_transitions=}")
+        print(f"Scored reservoir: {res_id}: productivity_score={productivity_score:.4f} transition_entropy={transition_entropy:.4f} transition_score={transition_score:.4f} frontier_score={frontier_score:.4f} {total=} {max_possible_transitions=}")
 
     # TODO(millman): separate the frontier into x and y components, then weight them differently.  Vertical frontier is not
     #   really interesting.
@@ -392,36 +275,24 @@ def _score_patch(patch_id: PatchId, p_stats: PatchStats, max_possible_transition
     return score
 
 
-def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats) -> float:
-    # Score recommended by Go-Explore paper: https://arxiv.org/abs/1901.10995, an estimate of recent productivity.
-    # If the patch has recently produced children, keep exploring.  As the patch gets selected more,
-    # its productivity will drop.
-    e = 1.0
-    beta = 1.0
-    productivity_score = (res_stats.num_children_since_last_selected + e) / (res_stats.num_selected + beta)
-
-    if _DEBUG_SCORE_PATCH:
-        print(f"Scored reservoir: {res_id}: productivity_score={productivity_score:.4f}")
-
-    return productivity_score
-
-
-def _choose_save_from_stats(saves_reservoir: PatchReservoir, patches_stats: dict[PatchId, PatchStats], rng: Any) -> SaveInfo:
-    valid_patch_ids = []
-    valid_patch_stats = []
-    patches_with_missing_reservoir = {}
-    for patch_id, p_stats in patches_stats.items():
-        if saves_reservoir._patch_to_reservoir_ids[patch_id]:
-            valid_patch_ids.append(patch_id)
-            valid_patch_stats.append(p_stats)
+def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: ReservoirStats, rng: Any) -> SaveInfo:
+    valid_res_ids = []
+    valid_res_stats = []
+    reservoirs_with_missing_saves = {}
+    for res_id, res_stats in reservoirs_stats.items():
+        if res_id in saves_reservoir._reservoir_to_saves and saves_reservoir._reservoir_to_saves[res_id]:
+            valid_res_ids.append(res_id)
+            valid_res_stats.append(res_stats)
         else:
-            patches_with_missing_reservoir[patch_id] = p_stats
+            reservoirs_with_missing_saves[res_id] = res_stats
 
-    if _DEBUG_SCORE_PATCH and patches_with_missing_reservoir:
-        print("Missing reservoir for patches:")
-        for patch_id, p_stats in patches_with_missing_reservoir.items():
-            print(f"  {patch_id}: {p_stats}")
-        raise AssertionError(f"Missing reservoir for patches: #={len(patches_with_missing_reservoir)}")
+    # TODO(millman): I think we can end up with a reservoir without a save if we track stats for
+    #   terminate.  So I think this is ok.
+    if _DEBUG_SCORE_PATCH and reservoirs_with_missing_saves:
+        print("Missing saves for reservoirs:")
+        for res_id, res_stats in reservoirs_with_missing_saves.items():
+            print(f"  {res_id}: {res_stats}")
+        raise AssertionError(f"Missing saves for reservoirs: #={len(reservoirs_with_missing_saves)}")
 
     # For a given patch size and Mario movement speed, we can have different max possible transitions.
     # Since mario can jump a number of pixels at a time, he may transition from 1, 2, or even more
@@ -431,51 +302,34 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, patches_stats: dict
     # So, we'll just assume the max possible transitions is the max that we've seen so far, not the max
     # theoretical.  Note we want the number of unique transitions, not the count of transitions.
     max_possible_transitions = max((
-        len(p_stats.transitioned_to_patch)
-        for p_stats in valid_patch_stats
+        len(res_stats.transitioned_to_reservoir)
+        for res_stats in valid_res_stats
     ), default=1)
 
-    # Calculate patch scores.
+    # Calculate reservoir scores.
     scores = np.fromiter((
-        _score_patch(patch_id, p_stats, max_possible_transitions=max_possible_transitions)
-        for patch_id, p_stats in zip(valid_patch_ids, valid_patch_stats)
+        _score_reservoir(res_id, res_stats, max_possible_transitions=max_possible_transitions)
+        for res_id, res_stats in zip(valid_res_ids, valid_res_stats)
     ), dtype=np.float64)
 
-    # Pick patch based on score.  Deterministic.
-    chosen_patch_index = np.argmax(scores)
-    chosen_patch = valid_patch_ids[chosen_patch_index]
+    # Pick reservoir based on score.  Deterministic.
+    chosen_res_index = np.argmax(scores)
+    chosen_res = valid_res_ids[chosen_res_index]
 
     if _DEBUG_SCORE_PATCH:
-        print(f"Picked patch: {chosen_patch} score={scores[chosen_patch_index]} {saves_reservoir._patch_to_reservoir_ids[chosen_patch]=}")
-
-    assert chosen_patch not in patches_with_missing_reservoir, f"Shouldn't have picked a patch with no save states: {chosen_patch}"
-
-    # Collect reservoirs in a patch.
-    reservoir_id_list = [
-        res_id
-        for res_id in saves_reservoir._patch_to_reservoir_ids[chosen_patch]
-        if saves_reservoir._reservoir_stats[res_id].num_visited > 0
-    ]
-
-    # Calculate reservoir scores.
-    res_scores = np.fromiter((
-        _score_reservoir(res_id, saves_reservoir._reservoir_stats[res_id])
-        for res_id in reservoir_id_list
-    ), dtype=np.float64)
-
-    # Pick patch based on score.  Deterministic.
-    chosen_res_index = np.argmax(res_scores)
-    chosen_res = reservoir_id_list[chosen_res_index]
+        print(f"Picked reservoir: {chosen_res} score={scores[chosen_res_index]} {chosen_res=}")
 
     # Pick the first item out of the reservoir.
     saves_list = saves_reservoir._reservoir_to_saves[chosen_res]
-    assert len(saves_list) == 1, f"Implement sampling within the reservoir"
+    assert len(saves_list) == 1, f"Implement sampling within the reservoir, found: {len(saves_list)}"
 
     sample = saves_list[0]
 
-    patch_id_and_weight_pairs = list(zip(valid_patch_ids, scores))
+    patch_id_and_weight_pairs = Counter()
+    for res_id, score in zip(valid_res_ids, scores):
+        patch_id_and_weight_pairs[res_id.patch_history[-1]] += score
 
-    return sample, patch_id_and_weight_pairs
+    return sample, list(patch_id_and_weight_pairs.items())
 
 
 def _validate_save_state(save_info: SaveInfo, ram: NdArrayUint8):
@@ -805,7 +659,7 @@ def main():
 
     level_ticks = -1
 
-    visited_patches_in_level = set()
+    visited_reservoirs_in_level = set()
     patch_history = []
     visited_patches_x = set()
 
@@ -817,11 +671,10 @@ def main():
     action_bucket_size = args.action_bucket_size
 
     saves = PatchReservoir(patch_size=patch_size, action_bucket_size=action_bucket_size, reservoir_history_length=reservoir_history_length)
-    patches_stats = defaultdict(PatchStats)
+    reservoirs_stats = defaultdict(ReservoirStats)
     force_terminate = False
     steps_since_load = 0
     patches_x_since_load = 0
-    last_selected_patch_id = None
     last_selected_res_id = None
 
     patch_id_and_weight_pairs = []
@@ -1021,17 +874,20 @@ def main():
             # Clear state.
             action_history = []
             state_history = []
-            visited_patches_in_level = set()
+            visited_reservoirs_in_level = set()
             visited_patches_x = set()
 
             revisited_x = 0
             jump_count = 0
 
-            visited_patches_in_level.add(patch_id)
-            visited_patches_x.add(patch_id.patch_x)
-
             patch_history = []
             patch_history.append(patch_id)
+
+            reservoir_id = saves.reservoir_id_from_state(patch_history)
+
+            visited_reservoirs_in_level.add(reservoir_id)
+            visited_patches_x.add(patch_id.patch_x)
+
             # assert len(patch_history) <= reservoir_history_length, f"Patch history is too large?: size={len(patch_history)}"
 
             print(f"Starting level: {_str_level(world, level)}")
@@ -1068,16 +924,15 @@ def main():
             saves.add(save_info)
             next_save_id += 1
 
-            patches_stats = defaultdict(PatchStats)
+            reservoirs_stats = defaultdict(ReservoirStats)
 
             # Fill out stats for current patch.  Do not include transitions.
-            p_stats = patches_stats[patch_id]
-            p_stats.num_visited += 1
-            p_stats.num_selected += 1
-            p_stats.last_selected_step = step
-            p_stats.last_visited_step = step
+            r_stats = reservoirs_stats[reservoir_id]
+            r_stats.num_visited += 1
+            r_stats.num_selected += 1
+            r_stats.last_selected_step = step
+            r_stats.last_visited_step = step
 
-            last_selected_patch_id = patch_id
             last_selected_res_id = saves.reservoir_id_from_save(save_info)
 
         # ---------------------------------------------------------------------
@@ -1090,39 +945,26 @@ def main():
             if _DEBUG_SCORE_PATCH and (termination or force_terminate):
                 print(f"Updating patch stats on terminate: {patch_id}")
 
-            prev_patch_id = patch_history[-1]
-
-            # Update patch stats.
-            p_stats = patches_stats[patch_id]
-            p_stats.num_visited += 1
-            p_stats.last_visited_step = step
-            p_stats.transitioned_from_patch[prev_patch_id] += 1
-
-            if patch_id not in visited_patches_in_level:
-                p_stats.num_children += 1
-
-                p_last_selected_stats = patches_stats[last_selected_patch_id]
-                p_last_selected_stats.num_children += 1
-                p_last_selected_stats.num_children_since_last_selected += 1
-
-                visited_patches_in_level.add(patch_id)
-
-            p_prev_stats = patches_stats[prev_patch_id]
-            p_prev_stats.transitioned_to_patch[patch_id] += 1
+            prev_res_id = saves.reservoir_id_from_state(patch_history)
+            res_id = saves.reservoir_id_from_state(patch_history + [patch_id])
 
             # Update reservoir stats.
-            res_id = saves.reservoir_id_from_state(patch_history)
-            res_stats = saves._reservoir_stats[res_id]
-            res_stats.num_visited += 1
-            res_stats.last_visited_step = step
+            r_stats = reservoirs_stats[res_id]
+            r_stats.num_visited += 1
+            r_stats.last_visited_step = step
+            r_stats.transitioned_from_reservoir[prev_res_id] += 1
 
-            # NOTE: Using patch id to consider visit for reservoirs, not the full reservoir id.
-            if patch_id not in visited_patches_in_level:
-                res_stats.num_children += 1
+            if res_id not in visited_reservoirs_in_level:
+                r_stats.num_children += 1
 
-                res_last_selected_stats = saves._reservoir_stats[last_selected_res_id]
+                res_last_selected_stats = reservoirs_stats[last_selected_res_id]
                 res_last_selected_stats.num_children += 1
                 res_last_selected_stats.num_children_since_last_selected += 1
+
+                visited_reservoirs_in_level.add(res_id)
+
+            r_prev_stats = reservoirs_stats[prev_res_id]
+            r_prev_stats.transitioned_to_reservoir[res_id] += 1
 
         # Save state info on transition.  It's ok to save when we intentionally end a trajectory
         # early, but not when the termination is due to the environment (e.g. Mario dying).
@@ -1212,7 +1054,7 @@ def main():
             # Start reload process.
 
             # Choose save.
-            save_info, patch_id_and_weight_pairs = _choose_save_from_stats(saves, patches_stats, rng=rng)
+            save_info, patch_id_and_weight_pairs = _choose_save_from_stats(saves, reservoirs_stats, rng=rng)
 
             # Reload and re-initialize.
             nes.load(save_info.save_state)
@@ -1258,13 +1100,11 @@ def main():
             prev_x = x
             prev_lives = lives
             patch_history = save_info.patch_history.copy()
-            patch_id = saves.patch_id_from_save(save_info)
 
-            res_id = saves.reservoir_id_from_save(save_info)
+            reservoir_id = saves.reservoir_id_from_save(save_info)
+            patch_id = reservoir_id.patch_history[-1]
 
             assert patch_id == patch_history[-1], f"Mismatched patch history: history[-1]:{patch_history[-1]} != patch_id:{patch_id}"
-
-            # assert len(patch_history) <= reservoir_history_length, f"Patch history is too large?: size={len(patch_history)}"
 
             level_ticks = save_info.level_ticks
 
@@ -1275,32 +1115,24 @@ def main():
             steps_since_load = 0
             patches_x_since_load = 0
             force_terminate = False
-            last_selected_patch_id = patch_id
-            last_selected_res_id = res_id
+            last_selected_res_id = reservoir_id
 
             if True:
-                patch_visited = patches_stats[patch_id].num_visited
-                res_visited = saves._reservoir_stats[res_id].num_visited
-                print(f"Loaded save: save_id={save_info.save_id} level={_str_level(world, level)}, x={x} y={y} lives={lives} saves={len(saves)} patch_visited={patch_visited} res_visited={res_visited}")
+                res_visited = reservoirs_stats[reservoir_id].num_visited
+                print(f"Loaded save: save_id={save_info.save_id} level={_str_level(world, level)}, x={x} y={y} lives={lives} saves={len(saves)} res_visited={res_visited}")
 
                 if False:
                     _print_saves_list(saves.values())
 
-            # Update patch stats.
-            p_stats = patches_stats[patch_id]
-            p_stats.num_selected += 1
-            p_stats.num_visited += 1
-            p_stats.num_children_since_last_selected = 0
-            p_stats.last_selected_step = step
-            p_stats.last_visited_step = step
-
-            # Update reservoir stats
-            res_stats = saves._reservoir_stats[res_id]
-            res_stats.num_visited += 1
+            # Update reservoir stats.
+            res_stats = reservoirs_stats[reservoir_id]
             res_stats.num_selected += 1
-            p_stats.num_children_since_last_selected = 0
+            res_stats.num_visited += 1
+            res_stats.num_children_since_last_selected = 0
+            res_stats.last_selected_step = step
+            res_stats.last_visited_step = step
 
-            assert patch_id in visited_patches_in_level, f"Missing patch_id in visited, even though chosen as start point: {patch_id}"
+            assert reservoir_id in visited_reservoirs_in_level, f"Missing reservoir_id in visited, even though chosen as start point: {reservoir_id}"
 
         # ---------------------------------------------------------------------
         # Loop updates
@@ -1330,10 +1162,12 @@ def main():
 
             # Histogram of number of saves in each patch reservoir.
             # Collect reservoirs into patches.
-            patch_id_and_num_saves_pairs = [
-                (p_id, len(res_ids))
-                for p_id, res_ids in saves._patch_to_reservoir_ids.items()
-            ]
+            patch_id_to_num_saves = Counter()
+            for res_id, saves_in_reservoir in saves._reservoir_to_saves.items():
+                patch_id_to_num_saves[res_id.patch_history[-1]] += len(saves_in_reservoir)
+
+            patch_id_and_num_saves_pairs = list(patch_id_to_num_saves.items())
+
             img_rgb_240 = build_patch_histogram_rgb(
                 patch_id_and_num_saves_pairs,
                 current_patch=patch_id,
@@ -1346,11 +1180,13 @@ def main():
             )
             screen.blit_image(img_rgb_240, screen_index=1)
 
-            # Histogram of patch visits.
-            patch_id_and_seen_count_pairs = [
-                (p_id, p_stats.num_visited)
-                for p_id, p_stats in patches_stats.items()
-            ]
+            # Histogram of reservoir visits.
+            patch_id_to_num_visits = Counter()
+            for res_id, r_stats in reservoirs_stats.items():
+                patch_id_to_num_visits[res_id.patch_history[-1]] += r_stats.num_visited
+
+            patch_id_and_seen_count_pairs = list(patch_id_to_num_visits.items())
+
             img_rgb_240 = build_patch_histogram_rgb(
                 patch_id_and_seen_count_pairs,
                 current_patch=patch_id,
