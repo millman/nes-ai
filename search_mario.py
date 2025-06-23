@@ -9,7 +9,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -185,6 +185,39 @@ class PatchReservoir:
 
     def __len__(self) -> int:
         return len(self._reservoir_to_saves)
+
+
+@dataclass
+class ActionHistory:
+
+    parent_history: Optional['ActionHistory']
+
+    # The size of the parent history and all of its parents.  Does not include this node's action history.
+    # Store to avoid needing a recursive call to find out the current total action history size.
+    ancestors_history_size: int
+
+    action_history: list[NdArrayUint8]
+
+    def append(self, action: NdArrayUint8):
+        self.action_history.append(action)
+
+    def __len__(self) -> int:
+        return self.ancestors_history_size + len(self.action_history)
+
+    @staticmethod
+    def continue_from_parent(parent: 'ActionHistory') -> 'ActionHistory':
+        return ActionHistory(
+            parent_history=parent,
+            ancestors_history_size=len(parent),
+            action_history=[],
+        )
+
+    def copy(self) -> 'ActionHistory':
+        return ActionHistory(
+            parent_history=self.parent_history,
+            ancestors_history_size=self.__len__(),
+            action_history=self.action_history.copy(),
+        )
 
 
 _DEBUG_SCORE_PATCH = False
@@ -821,7 +854,7 @@ def main():
     last_vis_time = time.time()
 
     # Per-trajectory state.  Resets after every death/level.
-    action_history = []
+    action_history = ActionHistory(ancestors_history_size=0, parent_history=None, action_history=[])
     controller = _to_controller_presses([])
 
     # Histogram visualization.
@@ -1060,7 +1093,7 @@ def main():
             level_ticks = get_time_left(ram)
 
             # Clear state.
-            action_history = []
+            action_history = ActionHistory(ancestors_history_size=0, parent_history=None, action_history=[])
             xy_transitions_in_level = Counter()
             visited_reservoirs_in_level = set()
             visited_patches_x = set()
@@ -1263,7 +1296,9 @@ def main():
                 # We flip buttons here with much higher probability than during a trajectory.
                 controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
 
-            action_history = save_info.action_history.copy()
+            # Create a new action history with the save as an ancestor.
+            action_history = ActionHistory.continue_from_parent(save_info.action_history)
+
             visited_patches_x = save_info.visited_patches_x.copy()
 
             revisited_x = 0
