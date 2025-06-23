@@ -1082,18 +1082,9 @@ def main():
                 _print_info(time_since_start=now-start_time, time_since_load=now-load_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
 
             # Save end-of-level info.
-            if True:
+            if prev_level != -1:
                 _dump_xy_transitions(path_xy_transitions, world, level, xy_transitions_in_level, desc="end")
 
-            # We're at the starting patch on a new level, but we may have arrived via a jump.
-            # Force the first patch of the new level to have a zero jump count.
-            #
-            # Observed new level via jump on the transition from 1-3 to 2-1.
-            #
-            if patch_id.jump_count != 0:
-                first_patch_id_in_level = PatchId(patch_id.patch_x, patch_id.patch_y, patch_id.action_bucket, jump_count=0)
-                print(f"Reached new level from patch with jump: {patch_id}, rewrite to have no jump: {first_patch_id_in_level}")
-                patch_id = first_patch_id_in_level
 
             # Set number of ticks in level to the current ticks.
             level_ticks = get_time_left(ram)
@@ -1106,6 +1097,18 @@ def main():
 
             revisited_x = 0
             jump_count = 0
+
+            # We're at the starting patch on a new level, but we may have arrived via a jump.
+            # Force the first patch of the new level to have a zero jump count.
+            #
+            # Observed new level via jump on the transition from 1-3 to 2-1.
+            #
+            first_patch_id_in_level = patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, jump_count)
+            if patch_id != first_patch_id_in_level:
+                # NOTE: We actually expect to have an incorrect patch when reaching a new level, because the
+                #   patch was created with the action_history and jump_count at the end of the last level.
+                print(f"Reached new level from patch, rewrite patch: {patch_id} -> {first_patch_id_in_level}")
+                patch_id = first_patch_id_in_level
 
             # Update history length for this level.  Note that we must get the history length before setting the
             # deque size, since the deque size may change between levels.
@@ -1279,6 +1282,12 @@ def main():
 
             # Start reload process.
 
+             # Reset variables that change on load.
+            steps_since_load = 0
+            load_time = time.time()
+            patches_x_since_load = 0
+            force_terminate = False
+
             # Choose save.
             save_info, patch_id_and_weight_pairs = _choose_save_from_stats(saves, reservoirs_stats, rng=rng)
 
@@ -1336,11 +1345,6 @@ def main():
 
             level_ticks = save_info.level_ticks
 
-            # Reset variables that change on load.
-            steps_since_load = 0
-            load_time = time.time()
-            patches_x_since_load = 0
-            force_terminate = False
             last_selected_res_id = reservoir_id
 
             if True:
