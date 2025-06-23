@@ -418,7 +418,7 @@ def _print_info(
         f"level={_str_level(world, level)} "
         f"x={x} y={y} ticks_left={ticks_left} "
         f"ticks_used={ticks_used} "
-        f"states={len(saves)} "
+        f"saves={len(saves)} "
         f"steps/sec={steps_per_sec:.4f} "
         f"steps_since_load={steps_since_load} "
         f"patches_x_since_load={patches_x_since_load} "
@@ -982,7 +982,7 @@ def main():
             if not valid_x:
                 # TODO(millman): how did we get into a weird x state?  Happens on 4-4.
                 print(f"RAM values: ram[0x006D]={ram[0x006D]=} * 256 + ram[0x0086]={ram[0x0086]=}")
-                print(f"Something is wrong with the x position, don't save this state: level={_str_level(world, level)} x={x} y={y} lives={lives} ticks-left={ticks_left} states={len(saves)} actions={len(action_history)}")
+                print(f"Something is wrong with the x position, don't save this state: level={_str_level(world, level)} x={x} y={y} lives={lives} ticks-left={ticks_left} saves={len(saves)} actions={len(action_history)}")
                 raise AssertionError("STOP")
 
             if not valid_lives:
