@@ -284,7 +284,7 @@ def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats, max_possibl
 
     p_coef = 1.0
     t_coef = 0.2
-    f_coef = 0.2
+    f_coef = 0.1
     score = p_coef * productivity_score + t_coef * transition_score + f_coef * frontier_score
 
     return score
@@ -533,7 +533,7 @@ class Args:
     patch_size: int = 20
 
      # About 30 frames/tick
-    action_bucket_size: int = 150
+    action_bucket_size: int = 300
 
     # NOTE: Need enough history to distinguish between paths for 7-4 and 8-4; works with len=20.
     #   All other levels are much faster with history of length 3, or even 1.  This value may be
