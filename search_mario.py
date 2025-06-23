@@ -5,7 +5,7 @@ import os
 import pickle
 import random
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -78,7 +78,7 @@ class SaveInfo:
     jump_count: int
     save_state: Any
     action_history: list
-    patch_history: tuple[PatchId]
+    patch_history: deque[PatchId]
     visited_patches_x: set[PatchIdX]
     controller_state: NdArrayUint8
     controller_state_user: NdArrayUint8
@@ -142,10 +142,11 @@ class PatchReservoir:
         self._reservoir_to_saves = defaultdict(list)
 
     def reservoir_id_from_state(self, patch_history: list[PatchId]) -> ReservoirId:
-        return ReservoirId(tuple(patch_history[-self.reservoir_history_length:]))
+        assert len(patch_history) <= self.reservoir_history_length
+        return ReservoirId(tuple(patch_history))
 
     def reservoir_id_from_save(self, save: SaveInfo) -> ReservoirId:
-        return ReservoirId(tuple(save.patch_history[-self.reservoir_history_length:]))
+        return self.reservoir_id_from_state(save.patch_history)
 
     def add(self, save: SaveInfo):
         reservoir_id = self.reservoir_id_from_save(save)
@@ -676,6 +677,8 @@ def main():
 
     ram = nes.ram()
 
+    reservoir_history_length = _history_length_for_level(args.reservoir_history_length, args.start_level)
+
     # Initialize to invalid values.  The first step of the loop should act as a new level.
     world = -1
     level = -1
@@ -688,13 +691,12 @@ def main():
 
     xy_transitions_in_level = Counter()
     visited_reservoirs_in_level = set()
-    patch_history = []
+    patch_history = deque(maxlen=reservoir_history_length)
     visited_patches_x = set()
 
     jump_count = 0
     revisited_x = 0
 
-    reservoir_history_length = _history_length_for_level(args.reservoir_history_length, args.start_level)
 
     action_bucket_size = args.action_bucket_size
 
@@ -887,15 +889,13 @@ def main():
             revisited_x = 0
             jump_count = 0
 
-            patch_history = []
+            patch_history = deque(maxlen=reservoir_history_length)
             patch_history.append(patch_id)
 
             reservoir_id = saves.reservoir_id_from_state(patch_history)
 
             visited_reservoirs_in_level.add(reservoir_id)
             visited_patches_x.add(PatchIdX.from_patch(patch_id))
-
-            # assert len(patch_history) <= reservoir_history_length, f"Patch history is too large?: size={len(patch_history)}"
 
             print(f"Starting level: {_str_level(world, level)}")
 
@@ -949,7 +949,11 @@ def main():
                 print(f"Updating patch stats on terminate: {patch_id}")
 
             prev_res_id = saves.reservoir_id_from_state(patch_history)
-            res_id = saves.reservoir_id_from_state(patch_history + [patch_id])
+
+            next_patch_history = patch_history.copy()
+            next_patch_history.append(patch_id)
+
+            res_id = saves.reservoir_id_from_state(next_patch_history)
 
             # Update reservoir stats.
             r_stats = reservoirs_stats[res_id]
