@@ -531,6 +531,31 @@ def _print_info(
     )
 
 
+def _print_histogram(patch_id_and_weight_pairs: list[tuple[PatchId], float], n_bins: int = 10):
+    min_patch_and_weight = min(patch_id_and_weight_pairs, key=lambda p_id_and_w: p_id_and_w[1])
+    max_patch_and_weight = max(patch_id_and_weight_pairs, key=lambda p_id_and_w: p_id_and_w[1])
+
+    b_min = min_patch_and_weight[1]
+    b_max = max_patch_and_weight[1]
+
+    # Quick and dirty histogram.
+    bin_width = (b_max - b_min) / n_bins
+    bins = np.zeros(n_bins + 1, dtype=np.int64)
+
+    for p_id, w in patch_id_and_weight_pairs:
+        bin = int((w  - b_min) / bin_width)
+        bins[bin] += 1
+
+    print("patch_id_and_weight_pairs")
+    print(f"  min: {min_patch_and_weight[0]}, {min_patch_and_weight[1]:.4f}")
+    print(f"  max: {max_patch_and_weight[0]}, {max_patch_and_weight[1]:.4f}")
+    print()
+    for i, count in enumerate(bins):
+        b0 = b_min + i*bin_width
+        b1 = b_min + (i+1)*bin_width
+        print(f"  [{b0:.2f} -> {b1:.2f}]: {count}")
+
+
 _MAX_LEVEL_DIST = 6400
 
 
@@ -1318,29 +1343,7 @@ def main():
             screen.blit_image(img_rgb_240, screen_index=3)
 
             if False and patch_id_and_weight_pairs:
-                min_patch_and_weight = min(patch_id_and_weight_pairs, key=lambda p_id_and_w: p_id_and_w[1])
-                max_patch_and_weight = max(patch_id_and_weight_pairs, key=lambda p_id_and_w: p_id_and_w[1])
-
-                b_min = min_patch_and_weight[1]
-                b_max = max_patch_and_weight[1]
-
-                # Quick and dirty histogram.
-                n_bins = 10
-                bin_width = (b_max - b_min) / n_bins
-                bins = np.zeros(n_bins + 1, dtype=np.int64)
-
-                for p_id, w in patch_id_and_weight_pairs:
-                    bin = int((w  - b_min) / bin_width)
-                    bins[bin] += 1
-
-                print("patch_id_and_weight_pairs")
-                print(f"  min: {min_patch_and_weight[0]}, {min_patch_and_weight[1]:.4f}")
-                print(f"  max: {max_patch_and_weight[0]}, {max_patch_and_weight[1]:.4f}")
-                print()
-                for i, count in enumerate(bins):
-                    b0 = b_min + i*bin_width
-                    b1 = b_min + (i+1)*bin_width
-                    print(f"  [{b0:.2f} -> {b1:.2f}]: {count}")
+                _print_histogram(patch_id_and_weight_pairs)
 
             # Histogram of sampling weight.
             img_rgb_240 = build_patch_histogram_rgb(
