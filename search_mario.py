@@ -680,6 +680,36 @@ def _save_xy_transitions(filepath: Path, world_ram: int, level_ram: int, xy_tran
     print(f"Wrote xy transitions to: {path_xy_transitions}")
 
 
+def _save_action_history(filepath: Path, world_ram: int, level_ram: int, start_save_state: Any, action_history: ActionHistory, desc: str = None):
+    action_history_size = len(action_history)
+    desc_with_sep = "_" + desc if desc else ""
+
+    filepath_action_history = filepath / f"level_{_str_level(world_ram, level_ram)}_{action_history_size}{desc_with_sep}.pkl"
+    filepath_action_history.parent.mkdir(parents=True, exist_ok=True)
+
+    current_node = action_history
+
+    # Convert action history into a list.
+    segments_newest_to_oldest = []
+    while current_node.parent_history:
+        segments_newest_to_oldest.append(current_node.action_history)
+        current_node = current_node.parent_history
+
+    flattened_action_history = [
+        action
+        for segment in reversed(segments_newest_to_oldest)
+        for action in segment
+    ]
+
+    with open(filepath_action_history, "wb") as out:
+        pickle.dump({
+            'action_history': flattened_action_history,
+            'start_save_state': start_save_state,
+        }, out)
+
+    print(f"Wrote action history to: {filepath_action_history}")
+
+
 @dataclass
 class Args:
     r"""
@@ -825,6 +855,7 @@ def main():
         run_dir = f"runs/{run_name}"
 
     filepath_xy_transitions = Path(f"{run_dir}/xy_transitions")
+    filepath_action_history = Path(f"{run_dir}/action_history")
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -899,6 +930,7 @@ def main():
 
     level_ticks = -1
 
+    first_save_in_level = nes.save()
     xy_transitions_in_level = Counter()
     visited_reservoirs_in_level = set()
     patch_history = deque(maxlen=reservoir_history_length)
@@ -976,6 +1008,7 @@ def main():
 
         if pygame.K_v in nes.keys_pressed:
             _save_xy_transitions(filepath_xy_transitions, world, level, xy_transitions_in_level)
+            _save_action_history(filepath_action_history, world, level, first_save_in_level, action_history)
 
         # Clear out user key presses.
         nes.keys_pressed = []
@@ -1084,7 +1117,7 @@ def main():
             # Save end-of-level info.
             if prev_level != -1:
                 _save_xy_transitions(filepath_xy_transitions, world, level, xy_transitions_in_level, desc="end")
-
+                _save_action_history(filepath_action_history, world, level, first_save_in_level, action_history)
 
             # Set number of ticks in level to the current ticks.
             level_ticks = get_time_left(ram)
