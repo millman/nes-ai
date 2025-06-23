@@ -415,7 +415,7 @@ def _score_reservoir(
     return score
 
 
-def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: ReservoirStats, rng: Any) -> SaveInfo:
+def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: ReservoirStats, calculate_patch_id_weight_pairs: bool) -> SaveInfo:
     valid_res_ids = []
     valid_res_stats = []
     valid_res_depths = []
@@ -477,12 +477,16 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: R
 
     sample = saves_list[0]
 
-    patch_id_and_weight_pairs = Counter()
-    for res_id, score in zip(valid_res_ids, scores):
-        current_score = patch_id_and_weight_pairs[res_id.patch_history[-1]]
-        patch_id_and_weight_pairs[res_id.patch_history[-1]] = max(current_score, score)
+    if calculate_patch_id_weight_pairs:
+        patch_id_to_weight = {}
+        for res_id, score in zip(valid_res_ids, scores):
+            current_score = patch_id_to_weight.get(res_id.patch_history[-1], 0)
+            patch_id_to_weight[res_id.patch_history[-1]] = max(current_score, score)
+        patch_id_and_weight_pairs = list(patch_id_to_weight.items())
+    else:
+        patch_id_and_weight_pairs = None
 
-    return sample, list(patch_id_and_weight_pairs.items())
+    return sample, patch_id_and_weight_pairs
 
 
 def _validate_save_state(save_info: SaveInfo, ram: NdArrayUint8):
@@ -1322,7 +1326,7 @@ def main():
             force_terminate = False
 
             # Choose save.
-            save_info, patch_id_and_weight_pairs = _choose_save_from_stats(saves, reservoirs_stats, rng=rng)
+            save_info, patch_id_and_weight_pairs = _choose_save_from_stats(saves, reservoirs_stats, calculate_patch_id_weight_pairs=not args.headless)
 
             # Reload and re-initialize.
             nes.load(save_info.save_state)
