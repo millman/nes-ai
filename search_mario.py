@@ -40,6 +40,7 @@ NdArrayRGB8 = np.ndarray[tuple[Literal[3]], np.dtype[np.uint8]]
 class PatchId:
     patch_x: int
     patch_y: int
+    action_bucket: int
     jump_count: int
 
     def __post_init__(self):
@@ -48,8 +49,8 @@ class PatchId:
         object.__setattr__(self, 'patch_y', int(self.patch_y))
 
     def __repr__(self) -> str:
-        jump_str = f",{self.jump_count}" if self.jump_count else ""
-        return f"PatchId({self.patch_x},{self.patch_y}{jump_str})"
+        jump_str = f",j:{self.jump_count}" if self.jump_count else ""
+        return f"PatchId({self.patch_x},{self.patch_y},a:{self.action_bucket}{jump_str})"
 
     __str__ = __repr__
 
@@ -57,11 +58,12 @@ class PatchId:
 @dataclass(frozen=True)
 class PatchIdX:
     patch_x: int
+    action_bucket: int
     jump_count: int
 
     @staticmethod
     def from_patch(patch_id: PatchId) -> 'PatchIdX':
-        return PatchIdX(patch_id.patch_x, patch_id.jump_count)
+        return PatchIdX(patch_id.patch_x, patch_id.action_bucket, patch_id.jump_count)
 
 
 @dataclass(frozen=True)
@@ -167,12 +169,13 @@ class PatchReservoir:
                 # Bucket the action history size, since we only want to consider meaningfully better histories,
                 # not just a second or 2 difference.
 
-                if len(save.action_history) // self.action_bucket_size < len(max_item.action_history) // self.action_bucket_size:
+                if len(save.action_history) < len(max_item.action_history):
                     # Replace item, remove from patch index.
                     saves_in_reservoir[max_index] = save
                 else:
                     # Don't replace item, do nothing.
                     pass
+
 
     def values(self) -> list[SaveInfo]:
         return (
@@ -791,7 +794,7 @@ def main():
                 print(f"Discountinuous x position: {prev_x} -> {x}, jump_count: {jump_count}")
                 jump_count += 1
 
-        patch_id = PatchId(x // patch_size, y // patch_size, jump_count)
+        patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, jump_count)
 
         # Update histogram counts every frame.
         xy_transitions_in_level[((prev_x, prev_y), (x, y))] += 1
@@ -867,7 +870,7 @@ def main():
             # Observed new level via jump on the transition from 1-3 to 2-1.
             #
             if patch_id.jump_count != 0:
-                first_patch_id_in_level = PatchId(patch_id.patch_x, patch_id.patch_y, jump_count=0)
+                first_patch_id_in_level = PatchId(patch_id.patch_x, patch_id.patch_y, patch_id.action_bucket, jump_count=0)
                 print(f"Reached new level from patch with jump: {patch_id}, rewrite to have no jump: {first_patch_id_in_level}")
                 patch_id = first_patch_id_in_level
 
