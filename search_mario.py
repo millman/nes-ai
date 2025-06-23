@@ -228,6 +228,7 @@ def _score_reservoir(
     res_stats: ReservoirStats,
     depth: int,
     max_possible_transitions: int,
+    max_transition_entropy: float,
     max_num_children_since_last_selected: int,
 ) -> float:
     # Score recommended by Go-Explore paper: https://arxiv.org/abs/1901.10995, an estimate of recent productivity.
@@ -360,11 +361,9 @@ def _score_reservoir(
     if True:
         threshold = max_possible_transitions / 2.0
 
-        max_entropy = np.log2(max_possible_transitions)
-
         if total < threshold:
             # Max possible entropy is a single count for every possible transition.
-            transition_entropy = max_entropy
+            transition_entropy = max_transition_entropy
         else:
             probs = counts / total
             # Reminder: entropy is positive, because it's a negative times a negative from the log.
@@ -374,7 +373,7 @@ def _score_reservoir(
     # possible that Mario is about to die, in which case we want to reduce the probability
     # that this cell gets selected.  Otherwise, Mario can get stuck on this cell if it's
     # entropy score is very high.
-    transition_score = transition_entropy / (max_entropy + 1)
+    transition_score = transition_entropy / (max_transition_entropy + 1)
 
     # Prefer states that have unexplored neighbors.  This makes it more likely that we pick patches
     # near the frontier of exploration.
@@ -452,6 +451,8 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: R
     # So, we'll just assume the max possible transitions is the max that we've seen so far, not the max
     # theoretical.  Note we want the number of unique transitions, not the count of transitions.
 
+    max_transition_entropy = np.log2(max_possible_transitions)
+
     # Calculate reservoir scores.
     scores = np.fromiter((
         _score_reservoir(
@@ -459,6 +460,7 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: R
             res_stats,
             depth=res_depth,
             max_possible_transitions=max_possible_transitions,
+            max_transition_entropy=max_transition_entropy,
             max_num_children_since_last_selected=max_num_children_since_last_selected,
         )
         for res_id, res_stats, res_depth in zip(valid_res_ids, valid_res_stats, valid_res_depths)
