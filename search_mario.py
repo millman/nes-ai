@@ -242,15 +242,16 @@ def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats, max_possibl
     # Threshold entropy.  When we have fewer than the max possible transitions, just assume we have max entropy.
     if True:
         threshold = max_possible_transitions / 2.0
+
+        max_entropy = np.log2(max_possible_transitions)
+
         if total < threshold:
             # Max possible entropy is a single count for every possible transition.
-            max_probs = np.full(max_possible_transitions, fill_value=1.0 / max_possible_transitions, dtype=np.float64)
-            probs = max_probs
+            transition_entropy = max_entropy
         else:
             probs = counts / total
-
-        # Reminder: entropy is positive, because it's a negative times a negative from the log.
-        transition_entropy = -np.sum(probs * np.log2(probs))
+            # Reminder: entropy is positive, because it's a negative times a negative from the log.
+            transition_entropy = -np.sum(probs * np.log2(probs))
 
     # Ensure the transition score includes the number of times the state is selected.  It's
     # possible that Mario is about to die, in which case we want to reduce the probability
