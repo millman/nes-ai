@@ -2,11 +2,13 @@
 
 import copy
 import os
+import pickle
 import random
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import gymnasium as gym
@@ -454,6 +456,19 @@ def _save_ram_snapshot(ram: NdArrayUint8, filename: str):
     print(f"Wrote ram snapshot to: {filename}")
 
 
+def _dump_xy_transitions(filepath: Path, world_ram: int, level_ram: int, xy_transitions: Counter, desc: str = None):
+    transitions_count = xy_transitions.total()
+    desc_with_sep = "_" + desc if desc else ""
+
+    path_xy_transitions = filepath / f"level_{_str_level(world_ram, level_ram)}_{transitions_count}{desc_with_sep}.pkl"
+    path_xy_transitions.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path_xy_transitions, "wb") as out:
+        pickle.dump(xy_transitions, out)
+
+    print(f"Wrote xy transitions to: {path_xy_transitions}")
+
+
 @dataclass
 class Args:
     r"""
@@ -597,6 +612,8 @@ def main():
     else:
         run_dir = f"runs/{run_name}"
 
+    path_xy_transitions = Path(f"{run_dir}/xy_transitions")
+
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
@@ -669,6 +686,7 @@ def main():
 
     level_ticks = -1
 
+    xy_transitions_in_level = Counter()
     visited_reservoirs_in_level = set()
     patch_history = []
     visited_patches_x = set()
@@ -701,6 +719,7 @@ def main():
         prev_world = world
         prev_level = level
         prev_x = x
+        prev_y = y
         prev_lives = lives
 
         # Update action every frame.
@@ -742,6 +761,9 @@ def main():
         if pygame.K_2 in nes.keys_pressed:
             _save_ram_snapshot(ram, '/tmp/b.txt')
 
+        if pygame.K_v in nes.keys_pressed:
+            _dump_xy_transitions(path_xy_transitions, world, level, xy_transitions_in_level)
+
         # Clear out user key presses.
         nes.keys_pressed = []
 
@@ -770,6 +792,9 @@ def main():
                 jump_count += 1
 
         patch_id = PatchId(x // patch_size, y // patch_size, jump_count)
+
+        # Update histogram counts every frame.
+        xy_transitions_in_level[((prev_x, prev_y), (x, y))] += 1
 
         # ---------------------------------------------------------------------
         # Trajectory ending criteria
@@ -832,6 +857,10 @@ def main():
             if True:
                 _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, ticks_used=ticks_used, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
 
+            # Save end-of-level info.
+            if True:
+                _dump_xy_transitions(path_xy_transitions, world, level, xy_transitions_in_level, desc="end")
+
             # We're at the starting patch on a new level, but we may have arrived via a jump.
             # Force the first patch of the new level to have a zero jump count.
             #
@@ -848,6 +877,7 @@ def main():
             # Clear state.
             action_history = []
             state_history = []
+            xy_transitions_in_level = Counter()
             visited_reservoirs_in_level = set()
             visited_patches_x = set()
 
@@ -1074,6 +1104,7 @@ def main():
             prev_world = world
             prev_level = level
             prev_x = x
+            prev_y = y
             prev_lives = lives
             patch_history = save_info.patch_history.copy()
 
