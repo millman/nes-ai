@@ -445,7 +445,8 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: R
 
     patch_id_and_weight_pairs = Counter()
     for res_id, score in zip(valid_res_ids, scores):
-        patch_id_and_weight_pairs[res_id.patch_history[-1]] += score
+        current_score = patch_id_and_weight_pairs[res_id.patch_history[-1]]
+        patch_id_and_weight_pairs[res_id.patch_history[-1]] = max(current_score, score)
 
     return sample, list(patch_id_and_weight_pairs.items())
 
