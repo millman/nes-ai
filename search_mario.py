@@ -667,7 +667,7 @@ def _save_ram_snapshot(ram: NdArrayUint8, filename: str):
     print(f"Wrote ram snapshot to: {filename}")
 
 
-def _dump_xy_transitions(filepath: Path, world_ram: int, level_ram: int, xy_transitions: Counter, desc: str = None):
+def _save_xy_transitions(filepath: Path, world_ram: int, level_ram: int, xy_transitions: Counter, desc: str = None):
     transitions_count = xy_transitions.total()
     desc_with_sep = "_" + desc if desc else ""
 
@@ -824,7 +824,7 @@ def main():
     else:
         run_dir = f"runs/{run_name}"
 
-    path_xy_transitions = Path(f"{run_dir}/xy_transitions")
+    filepath_xy_transitions = Path(f"{run_dir}/xy_transitions")
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -975,7 +975,7 @@ def main():
             _save_ram_snapshot(ram, '/tmp/b.txt')
 
         if pygame.K_v in nes.keys_pressed:
-            _dump_xy_transitions(path_xy_transitions, world, level, xy_transitions_in_level)
+            _save_xy_transitions(filepath_xy_transitions, world, level, xy_transitions_in_level)
 
         # Clear out user key presses.
         nes.keys_pressed = []
@@ -1083,7 +1083,7 @@ def main():
 
             # Save end-of-level info.
             if prev_level != -1:
-                _dump_xy_transitions(path_xy_transitions, world, level, xy_transitions_in_level, desc="end")
+                _save_xy_transitions(filepath_xy_transitions, world, level, xy_transitions_in_level, desc="end")
 
 
             # Set number of ticks in level to the current ticks.
