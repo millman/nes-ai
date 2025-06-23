@@ -399,7 +399,6 @@ def _print_info(
     x: int,
     y: int,
     ticks_left: int,
-    ticks_used: int,
     saves: PatchReservoir,
     step: int,
     steps_since_load: int,
@@ -420,7 +419,6 @@ def _print_info(
         f"{_seconds_to_hms(dt)} "
         f"level={_str_level(world, level)} "
         f"x={x} y={y} ticks_left={ticks_left} "
-        f"ticks_used={ticks_used} "
         f"saves={len(saves)} "
         f"steps/sec={steps_per_sec:.4f} "
         f"steps_since_load={steps_since_load} "
@@ -778,9 +776,6 @@ def main():
         lives = life(ram)
         ticks_left = get_time_left(ram)
 
-        # Calculate derived states.
-        ticks_used = max(1, level_ticks - ticks_left)
-
         # If we get teleported, or if the level boundary is discontinuous, the change in x position isn't meaningful.
         if abs(x - prev_x) > 50:
             if world != prev_world or level != prev_level:
@@ -858,7 +853,7 @@ def main():
         if world != prev_world or level != prev_level:
             # Print before-level-end info.
             if True:
-                _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, ticks_used=ticks_used, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
+                _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
 
             # Save end-of-level info.
             if True:
@@ -899,12 +894,9 @@ def main():
 
             print(f"Starting level: {_str_level(world, level)}")
 
-            # Update derived state.
-            ticks_used = max(1, level_ticks - ticks_left)
-
             # Print after-level-start info.
             if True:
-                _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, ticks_used=ticks_used, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
+                _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
 
             assert lives > 1 and lives < 100, f"How did we end up with lives?: {lives}"
 
@@ -1118,9 +1110,6 @@ def main():
 
             level_ticks = save_info.level_ticks
 
-            # Update derived state.
-            ticks_used = max(1, level_ticks - ticks_left)
-
             # Reset variables that change on load.
             steps_since_load = 0
             patches_x_since_load = 0
@@ -1155,7 +1144,7 @@ def main():
         #   * Novel states found (across all trajectories)
         #   * Novel states/sec
         if args.print_freq_sec > 0 and now - last_print_time > args.print_freq_sec:
-            _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, ticks_used=ticks_used, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
+            _print_info(dt=now-start_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
             last_print_time = now
 
         # Visualize the distribution of save states.
