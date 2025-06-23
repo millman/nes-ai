@@ -403,7 +403,7 @@ def _print_info(
     steps_since_load: int,
     patches_x_since_load: int,
 ):
-    steps_per_sec = step / dt
+    steps_per_sec = steps_since_load / dt
 
     approx_max_actions = max((
         len(saves_in_res[-1].action_history)
@@ -786,7 +786,9 @@ def main():
                 pass
             else:
                 assert world == prev_world and level == prev_level, f"Mismatched level change: {prev_world},{prev_level} -> {world},{level}, x: {prev_x} -> {x}"
-                print(f"Discountinuous x position: {prev_x} -> {x}, jump_count: {jump_count}")
+
+                if not args.headless:
+                    print(f"Discountinuous x position: {prev_x} -> {x}, jump_count: {jump_count}")
 
                 # Consider jumps a problem only if jumping backwards.  Forward jumps are ok.
                 if x - prev_x < 0:
@@ -808,20 +810,24 @@ def main():
         # Stop after some fixed number of steps.  This will force the sampling logic to run more often,
         # which means we won't waste as much time running through old states.
         if args.max_trajectory_steps > 0 and steps_since_load >= args.max_trajectory_steps:
-            print(f"Ending trajectory, max steps for trajectory: {steps_since_load}: x={x} ticks_left={ticks_left}")
+            if not args.headless:
+                print(f"Ending trajectory, max steps for trajectory: {steps_since_load}: x={x} ticks_left={ticks_left}")
             force_terminate = True
 
         elif args.max_trajectory_patches_x > 0 and patches_x_since_load >= args.max_trajectory_patches_x:
-            print(f"Ending trajectory, max patches x for trajectory: {patches_x_since_load}: x={x} ticks_left={ticks_left}")
+            if not args.headless:
+                print(f"Ending trajectory, max patches x for trajectory: {patches_x_since_load}: x={x} ticks_left={ticks_left}")
             force_terminate = True
 
         elif args.max_trajectory_jump_count >= 0 and jump_count > args.max_trajectory_jump_count:
-            print(f"Ending trajectory, max jump count for trajectory: jump_count={jump_count} x={x} ticks_left={ticks_left}")
+            if not args.headless:
+                print(f"Ending trajectory, max jump count for trajectory: jump_count={jump_count} x={x} ticks_left={ticks_left}")
             force_terminate = True
 
         # If we died, skip.
         elif lives < prev_lives:
-            print(f"Lost a life: x={x} ticks_left={ticks_left}")
+            if not args.headless:
+                print(f"Lost a life: x={x} ticks_left={ticks_left}")
             force_terminate = True
 
         # Stop if we double-back to the same x patch within a trajectory.
@@ -848,7 +854,8 @@ def main():
             revisited_x += 1
 
             if args.max_trajectory_revisit_x > 0 and revisited_x > args.max_trajectory_revisit_x:
-                print(f"Ending trajectory, revisited x patch: {patch_id}: x={x} ticks_left={ticks_left}")
+                if not args.headless:
+                    print(f"Ending trajectory, revisited x patch: {patch_id}: x={x} ticks_left={ticks_left}")
                 force_terminate = True
 
         # ---------------------------------------------------------------------
@@ -1123,7 +1130,9 @@ def main():
 
             if True:
                 res_visited = reservoirs_stats[reservoir_id].num_visited
-                print(f"Loaded save: save_id={save_info.save_id} level={_str_level(world, level)}, x={x} y={y} lives={lives} saves={len(saves)} res_visited={res_visited}")
+
+                if not args.headless:
+                    print(f"Loaded save: save_id={save_info.save_id} level={_str_level(world, level)}, x={x} y={y} lives={lives} saves={len(saves)} res_visited={res_visited}")
 
                 if False:
                     _print_saves_list(saves.values())
