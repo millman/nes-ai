@@ -78,7 +78,6 @@ class SaveInfo:
     jump_count: int
     save_state: Any
     action_history: list
-    state_history: list
     patch_history: tuple[PatchId]
     visited_patches_x: set[PatchIdX]
     controller_state: NdArrayUint8
@@ -650,7 +649,6 @@ def main():
 
     # Per-trajectory state.  Resets after every death/level.
     action_history = []
-    state_history = []
     controller = _to_controller_presses([])
 
     # Histogram visualization.
@@ -882,7 +880,6 @@ def main():
 
             # Clear state.
             action_history = []
-            state_history = []
             xy_transitions_in_level = Counter()
             visited_reservoirs_in_level = set()
             visited_patches_x = set()
@@ -922,7 +919,6 @@ def main():
                 jump_count=jump_count,
                 save_state=nes.save(),
                 action_history=action_history.copy(),
-                state_history=state_history.copy(),
                 patch_history=patch_history.copy(),
                 visited_patches_x=visited_patches_x.copy(),
                 controller_state=controller.copy(),
@@ -1017,7 +1013,6 @@ def main():
                 jump_count=jump_count,
                 save_state=nes.save(),
                 action_history=action_history.copy(),
-                state_history=state_history.copy(),
                 patch_history=patch_history.copy(),
                 visited_patches_x=visited_patches_x.copy(),
                 controller_state=controller.copy(),
@@ -1025,8 +1020,6 @@ def main():
             )
             saves.add(save_info)
             next_save_id += 1
-
-            state_history.append(save_info)
 
         # ---------------------------------------------------------------------
         # Handle trajectory end
@@ -1086,7 +1079,6 @@ def main():
                 controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
 
             action_history = save_info.action_history.copy()
-            state_history = save_info.state_history.copy()
             visited_patches_x = save_info.visited_patches_x.copy()
 
             revisited_x = 0
