@@ -190,13 +190,97 @@ class PatchReservoir:
 _DEBUG_SCORE_PATCH = False
 
 
-def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats, max_possible_transitions: int) -> float:
+def _score_reservoir(
+    res_id: ReservoirId,
+    res_stats: ReservoirStats,
+    depth: int,
+    max_possible_transitions: int,
+    max_num_children_since_last_selected: int,
+) -> float:
     # Score recommended by Go-Explore paper: https://arxiv.org/abs/1901.10995, an estimate of recent productivity.
     # If the patch has recently produced children, keep exploring.  As the patch gets selected more,
     # its productivity will drop.
-    e = 1.0
-    beta = 1.0
-    productivity_score = (res_stats.num_children_since_last_selected + e) / (res_stats.num_selected + beta)
+    #
+    # Here are the metrics we're considering.  Some metrics are "higher the better" and some are "lower the better".
+    # We need to transform each metric in a way such that it's range is in line with other scores, and all scores
+    # are "higher the better".
+    #
+    #     num_selected: (lower is better)
+    #       Number of times selected from the archive, lower means less explored, which is more desirable.
+    #
+    #     num_visited: (lower is better)
+    #       Number of times we've ever visited this state, lower means less explored, which is more desirable.
+    #
+    #     num_children_since_last_selected: (higher is better)
+    #       Number of children produced since this cell was last selected.
+    #       Higher indicates a productive cell, so continue selecting until it's not productive
+    #
+    #     [Not implemented] num_selected_since_new_children: (lower is better)
+    #       Number of times selected since this cell produced anything.  Lower means we haven't explored it since
+    #       we've found new children elsewhere.
+    #
+    #     [Not implemented] number of unique actions we've tried: (lower is better)
+    #       Lower means we haven't tried all of the possible actions from this cell.  There is still more to be
+    #       explored here.  (Is this approx equivalent to number of times selected + visited?)
+    #
+    #     number of unexplored neighbors: (lower is better)
+    #       More unexplored neighbors means there's more to be potentially be found searching from this cell.
+    #
+    #     entropy of transitions to neighbors: (higher is better)
+    #       Entropy is higher when we have more reachable states from a cell.  Entropy is 0 when all transitions
+    #       lead to the same cell.  For example, when falling in a pit, we can only fall to the state below the
+    #       current cell.
+    #
+    #       Note that this is different from number of unexplored neighbors because entropy considers the *count*
+    #       of transitions, not just unique transitions.
+    #
+    #     action history length / depth of trajectory: higher the better
+    #       The longer the action history goes, the more likely we've made progress through the level.
+    #
+    #       Note that this is a pretty coarse proxy for progress, because if we take a whole lot of noop actions,
+    #       we'll still have a long action history, but have not gone anywhere.
+    #
+    #
+    # One possible method of combining all metrics.  Higher-is-better metrics on top, lower-is-better values on bottom:
+    #
+    #   a*num_children_since_last_selected + b*entropy to neighbors + c*depth
+    #   ------------------------------------------------------------
+    #   d*num_selected + e*num_visited + f*num_selected_since_new_children
+    #
+    #
+    # Another method, more like what's in the Go-Explore paper, convert each metric to a higher-is-better score independently:
+    #
+    #   a*(1/(num_selected+1)) +                      (0 -> 1)
+    #   b*(1/(num_visited+1)) +                       (0 -> 1)
+    #   c*(1/num_selected_since_new_children) +       (0 -> 1)
+    #   d*num_children_since_last_selected +          (0 -> inf)?
+    #   e*entropy_to_neighbors +                      (0 -> max_entropy)
+    #   f*depth                                       (0 -> depth)
+    #
+    # For scores that have a large range (i.e. not 0->1), we need to further transform:
+    #
+    # Convert depth to a reasonable range, but must be a penalty for shorter, not reward for longer.
+    #   - 1/(depth / 256 + 1)                         (-1 -> 0)
+    #
+    #
+    # There is a max number of children based on how much we let a trajectory advance at once.
+    # We can make this a relative measure, by comparing to the maximum number of children since last
+    # selected by any cell.
+    #   num_children_since_last_selected / (max_num_children_since_last_selected+1)  (0 -> 1)
+    #
+
+    productivity_score = res_stats.num_children_since_last_selected / (max_num_children_since_last_selected + 1)
+
+    # Less selection means higher score.  We want to prefer exploring unselected cells.
+    selected_score = 1 / (res_stats.num_selected + 1)
+
+    # Less visits means higher score.  We want to prefer exploring unvisited cells.
+    visited_score = 1 / (res_stats.num_visited + 1)
+
+    # Higher depth means higher score.  Note that the range is (-1 -> 0), -1 for 0 depth, and 0 for infinite depth.
+    # Realistically, depth will range to about 6000.
+    depth_score = - 1 / (depth + 1)
+
 
     # If the patch always transitions to the same next patch, that's an indicator that we can't explore from there.
     # For example, if Mario is falling in a pit, Mario can't really control where he will end up.
@@ -251,21 +335,19 @@ def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats, max_possibl
         else:
             probs = counts / total
             # Reminder: entropy is positive, because it's a negative times a negative from the log.
-            transition_entropy = -np.sum(probs * np.log2(probs))
+            transition_entropy = -np.sum(probs * np.log2(probs))        # TODO(millman): this is slow
 
     # Ensure the transition score includes the number of times the state is selected.  It's
     # possible that Mario is about to die, in which case we want to reduce the probability
     # that this cell gets selected.  Otherwise, Mario can get stuck on this cell if it's
     # entropy score is very high.
-    e = 1.0
-    beta = 1.0
-    transition_score = (transition_entropy + e) / (res_stats.num_selected + beta)
+    transition_score = transition_entropy / (max_entropy + 1)
 
     # Prefer states that have unexplored neighbors.  This makes it more likely that we pick patches
     # near the frontier of exploration.
-    e = 1.0
-    beta = 1.0
-    frontier_score = (max_possible_transitions - len(res_stats.transitioned_to_reservoir) + e) / (res_stats.num_selected + beta)
+    #
+    # Range is (-1 -> 0), -1 for cells with all transitions, 0 for cells with no transitions.
+    frontier_score = - len(res_stats.transitioned_to_reservoir) / max_possible_transitions
 
     # Some sample values for score parts:
     #   productivity_score=1.0 transition_entropy=0.7219 total=5 max_possible_transitions=4
@@ -284,8 +366,18 @@ def _score_reservoir(res_id: ReservoirId, res_stats: ReservoirStats, max_possibl
 
     p_coef = 1.0
     t_coef = 0.2
-    f_coef = 0.1
-    score = p_coef * productivity_score + t_coef * transition_score + f_coef * frontier_score
+    f_coef = 0.2
+    s_coef = 1.0
+    v_coef = 1.0
+    d_coef = 0.1
+    score = (
+        p_coef * productivity_score +
+        t_coef * transition_score +
+        f_coef * frontier_score +
+        s_coef * selected_score +
+        v_coef * visited_score +
+        d_coef * depth_score
+    )
 
     return score
 
@@ -321,9 +413,20 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: R
         for res_stats in valid_res_stats
     ), default=1)
 
+    max_num_children_since_last_selected = max((
+        res_stats.num_children_since_last_selected
+        for res_stats in valid_res_stats
+    ), default=1)
+
     # Calculate reservoir scores.
     scores = np.fromiter((
-        _score_reservoir(res_id, res_stats, max_possible_transitions=max_possible_transitions)
+        _score_reservoir(
+            res_id,
+            res_stats,
+            depth=len(saves_reservoir._reservoir_to_saves[res_id][0].action_history),   # TODO(millman): this hash lookup is slow
+            max_possible_transitions=max_possible_transitions,
+            max_num_children_since_last_selected=max_num_children_since_last_selected,
+        )
         for res_id, res_stats in zip(valid_res_ids, valid_res_stats)
     ), dtype=np.float64)
 
@@ -432,8 +535,8 @@ _MAX_LEVEL_DIST = 6400
 
 def _history_length_for_level(default_history_length: int, natural_world_level: tuple[int, int]) -> int:
     WORLD_LEVEL_TO_LEN = {
-        (7, 4): 20,
-        (8, 4): 3,
+        # (7, 4): 20,
+        # (8, 4): 3,
     }
 
     world, level = natural_world_level
@@ -531,7 +634,7 @@ class Args:
     patch_size: int = 20
 
      # About 30 frames/tick
-    action_bucket_size: int = 300
+    action_bucket_size: int = 1500
 
     # NOTE: Need enough history to distinguish between paths for 7-4 and 8-4; works with len=20.
     #   All other levels are much faster with history of length 3, or even 1.  This value may be
@@ -550,7 +653,7 @@ class Args:
     #   Otherwise, we won't know to expand jumps.
 
     max_trajectory_steps: int = 150
-    max_trajectory_patches_x: int = 3
+    max_trajectory_patches_x: int = -1
     max_trajectory_revisit_x: int = 2
     max_trajectory_jump_count: int = 1
 
