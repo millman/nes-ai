@@ -294,7 +294,7 @@ class SuperMarioEnv(gym.Env):
         reward = 0
 
         lives = life(self.nes.ram())
-        delta_lives = lives - prev_lives
+        delta_lives = int(lives) - int(prev_lives)
 
         terminated = delta_lives < 0 or delta_lives > 1
         truncated = False
