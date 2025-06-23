@@ -888,6 +888,11 @@ def main():
             revisited_x = 0
             jump_count = 0
 
+            # Update history length for this level.  Note that we must get the history length before setting the
+            # deque size, since the deque size may change between levels.
+            natural_world_level = encode_world_level(world, level)
+            reservoir_history_length = _history_length_for_level(args.reservoir_history_length, natural_world_level)
+
             patch_history = deque(maxlen=reservoir_history_length)
             patch_history.append(patch_id)
 
@@ -904,8 +909,6 @@ def main():
 
             assert lives > 1 and lives < 100, f"How did we end up with lives?: {lives}"
 
-            natural_world_level = encode_world_level(world, level)
-            reservoir_history_length = _history_length_for_level(args.reservoir_history_length, natural_world_level)
             saves = PatchReservoir(patch_size=patch_size, action_bucket_size=action_bucket_size, reservoir_history_length=reservoir_history_length)
             save_info = SaveInfo(
                 save_id=next_save_id,
