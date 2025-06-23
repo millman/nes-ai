@@ -556,6 +556,49 @@ def _print_histogram(patch_id_and_weight_pairs: list[tuple[PatchId], float], n_b
         print(f"  [{b0:.2f} -> {b1:.2f}]: {count}")
 
 
+def _print_ram_debug(ram: NdArrayUint8):
+    # Debug printouts for level pos
+    print(f"DEBUG POS:")
+    print(f"  world:      ram[0x75f]: {ram[0x75f]}")
+    print(f"  stage:      ram[0x75c]: {ram[0x75f]}")
+    print(f"  area:       ram[0x760]: {ram[0x760]}")
+    print(f"  screen_x:   ram[0x 6d]: {ram[0x6d]}")
+    print(f"  offset_x:   ram[0x 86]: {ram[0x86]}")
+    print(f"  y_pixel:    ram[0x3b8]: {ram[0x3b8]}")
+    print(f"  y_pos:      ram[0x ce]: {ram[0xce]}")
+    print(f"  y_viewport: ram[0x b5]: {ram[0xb5]}")
+    print(f"  screen:     ram[0x71a]: {ram[0x71a]}")
+    print(f"  next scrn:  ram[0x71b]: {ram[0x71b]}")
+
+    # Nothing seems like a problem?
+
+    # Before pipe:
+    #     DEBUG POS:
+    #     world:      ram[0x75f]: 1
+    #     stage:      ram[0x75c]: 1
+    #     area:       ram[0x760]: 2
+    #     screen_x:   ram[0x 6d]: 11
+    #     offset_x:   ram[0x 86]: 56
+    #     y_pixel:    ram[0x3b8]: 144
+    #     y_pos:      ram[0x ce]: 144
+    #     y_pixel:    ram[0x b5]: 1
+    #     screen:     ram[0x71a]: 11
+    #     next scrn:  ram[0x71b]: 11
+
+    # After pipe:
+    #     DEBUG POS:
+    #     world:      ram[0x75f]: 1
+    #     stage:      ram[0x75c]: 1
+    #     area:       ram[0x760]: 2
+    #     screen_x:   ram[0x 6d]: 11
+    #     offset_x:   ram[0x 86]: 82
+    #     y_pixel:    ram[0x3b8]: 160
+    #     y_pos:      ram[0x ce]: 160
+    #     y_viewport: ram[0x b5]: 1
+    #     screen:     ram[0x71a]: 11
+    #     next scrn:  ram[0x71b]: 12
+
+
 _MAX_LEVEL_DIST = 6400
 
 
@@ -1379,46 +1422,8 @@ def main():
             time.sleep(1.0 / 60)
 
             if False:
-                # Debug printouts for level pos
-                print(f"DEBUG POS:")
-                print(f"  world:      ram[0x75f]: {ram[0x75f]}")
-                print(f"  stage:      ram[0x75c]: {ram[0x75f]}")
-                print(f"  area:       ram[0x760]: {ram[0x760]}")
-                print(f"  screen_x:   ram[0x 6d]: {ram[0x6d]}")
-                print(f"  offset_x:   ram[0x 86]: {ram[0x86]}")
-                print(f"  y_pixel:    ram[0x3b8]: {ram[0x3b8]}")
-                print(f"  y_pos:      ram[0x ce]: {ram[0xce]}")
-                print(f"  y_viewport: ram[0x b5]: {ram[0xb5]}")
-                print(f"  screen:     ram[0x71a]: {ram[0x71a]}")
-                print(f"  next scrn:  ram[0x71b]: {ram[0x71b]}")
+                _print_ram_debug(ram)
 
-                # Nothing seems like a problem?
-
-                # Before pipe:
-                #     DEBUG POS:
-                #     world:      ram[0x75f]: 1
-                #     stage:      ram[0x75c]: 1
-                #     area:       ram[0x760]: 2
-                #     screen_x:   ram[0x 6d]: 11
-                #     offset_x:   ram[0x 86]: 56
-                #     y_pixel:    ram[0x3b8]: 144
-                #     y_pos:      ram[0x ce]: 144
-                #     y_pixel:    ram[0x b5]: 1
-                #     screen:     ram[0x71a]: 11
-                #     next scrn:  ram[0x71b]: 11
-
-                # After pipe:
-                #     DEBUG POS:
-                #     world:      ram[0x75f]: 1
-                #     stage:      ram[0x75c]: 1
-                #     area:       ram[0x760]: 2
-                #     screen_x:   ram[0x 6d]: 11
-                #     offset_x:   ram[0x 86]: 82
-                #     y_pixel:    ram[0x3b8]: 160
-                #     y_pos:      ram[0x ce]: 160
-                #     y_viewport: ram[0x b5]: 1
-                #     screen:     ram[0x71a]: 11
-                #     next scrn:  ram[0x71b]: 12
 
 if __name__ == "__main__":
     main()
