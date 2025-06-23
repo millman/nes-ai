@@ -138,7 +138,7 @@ class PatchReservoir:
         self.reservoir_history_length = reservoir_history_length
         self.max_saves_per_reservoir = max_saves_per_reservoir
 
-        self._reservoir_to_saves = defaultdict(list)
+        self._reservoir_to_saves = {}
 
     def reservoir_id_from_state(self, patch_history: list[PatchId]) -> ReservoirId:
         assert len(patch_history) <= self.reservoir_history_length
@@ -150,16 +150,16 @@ class PatchReservoir:
     def add(self, save: SaveInfo):
         reservoir_id = self.reservoir_id_from_save(save)
 
-        if len(self._reservoir_to_saves[reservoir_id]) < self.max_saves_per_reservoir:
-            # Reservoir is still small, add it.
-            self._reservoir_to_saves[reservoir_id].append(save)
+        saves_in_reservoir = self._reservoir_to_saves.setdefault(reservoir_id, [])
 
+        if len(saves_in_reservoir) < self.max_saves_per_reservoir:
+            # Reservoir is still small, add it.
+            saves_in_reservoir.append(save)
         else:
             # Replace the save that took the longest to reach this patch.
             if True:
                 # Find the save state with the most action steps.  We assume that it's better to
                 # get to a state with fewer action steps.
-                saves_in_reservoir = self._reservoir_to_saves[reservoir_id]
                 max_index, max_item = max(enumerate(saves_in_reservoir), key=lambda i_and_save: len(i_and_save[1].action_history))
 
                 # Replace the save state with the most action steps.  We assume that it's better to
@@ -418,11 +418,21 @@ def _score_reservoir(
 def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: ReservoirStats, rng: Any) -> SaveInfo:
     valid_res_ids = []
     valid_res_stats = []
+    valid_res_depths = []
+
+    max_possible_transitions = 1
+    max_num_children_since_last_selected = 1
+
     reservoirs_with_missing_saves = {}
     for res_id, res_stats in reservoirs_stats.items():
-        if res_id in saves_reservoir._reservoir_to_saves and saves_reservoir._reservoir_to_saves[res_id]:
+        saves_in_res = saves_reservoir._reservoir_to_saves.get(res_id, [])
+        if saves_in_res:
             valid_res_ids.append(res_id)
             valid_res_stats.append(res_stats)
+            valid_res_depths.append(len(saves_in_res[0].action_history))
+
+            max_possible_transitions = max(max_possible_transitions, len(res_stats.transitioned_to_reservoir))
+            max_num_children_since_last_selected = max(max_num_children_since_last_selected, res_stats.num_children_since_last_selected)
         else:
             reservoirs_with_missing_saves[res_id] = res_stats
 
@@ -441,26 +451,17 @@ def _choose_save_from_stats(saves_reservoir: PatchReservoir, reservoirs_stats: R
     #
     # So, we'll just assume the max possible transitions is the max that we've seen so far, not the max
     # theoretical.  Note we want the number of unique transitions, not the count of transitions.
-    max_possible_transitions = max((
-        len(res_stats.transitioned_to_reservoir)
-        for res_stats in valid_res_stats
-    ), default=1)
-
-    max_num_children_since_last_selected = max((
-        res_stats.num_children_since_last_selected
-        for res_stats in valid_res_stats
-    ), default=1)
 
     # Calculate reservoir scores.
     scores = np.fromiter((
         _score_reservoir(
             res_id,
             res_stats,
-            depth=len(saves_reservoir._reservoir_to_saves[res_id][0].action_history),   # TODO(millman): this hash lookup is slow
+            depth=res_depth,
             max_possible_transitions=max_possible_transitions,
             max_num_children_since_last_selected=max_num_children_since_last_selected,
         )
-        for res_id, res_stats in zip(valid_res_ids, valid_res_stats)
+        for res_id, res_stats, res_depth in zip(valid_res_ids, valid_res_stats, valid_res_depths)
     ), dtype=np.float64)
 
     # Pick reservoir based on score.  Deterministic.
