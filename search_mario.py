@@ -552,6 +552,7 @@ class Args:
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = 3
     max_trajectory_revisit_x: int = 2
+    max_trajectory_jump_count: int = 1
 
     flip_prob: float = 0.03
 
@@ -787,7 +788,10 @@ def main():
             else:
                 assert world == prev_world and level == prev_level, f"Mismatched level change: {prev_world},{prev_level} -> {world},{level}, x: {prev_x} -> {x}"
                 print(f"Discountinuous x position: {prev_x} -> {x}, jump_count: {jump_count}")
-                jump_count += 1
+
+                # Consider jumps a problem only if jumping backwards.  Forward jumps are ok.
+                if x - prev_x < 0:
+                    jump_count += 1
 
         patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, jump_count)
 
@@ -810,6 +814,10 @@ def main():
 
         elif args.max_trajectory_patches_x > 0 and patches_x_since_load >= args.max_trajectory_patches_x:
             print(f"Ending trajectory, max patches x for trajectory: {patches_x_since_load}: x={x} ticks_left={ticks_left}")
+            force_terminate = True
+
+        elif args.max_trajectory_jump_count >= 0 and jump_count > args.max_trajectory_jump_count:
+            print(f"Ending trajectory, max jump count for trajectory: jump_count={jump_count} x={x} ticks_left={ticks_left}")
             force_terminate = True
 
         # If we died, skip.
