@@ -127,7 +127,6 @@ class ReservoirStats:
     # Number of new children found from this specific cell since last choosing this cell as a start point.
     num_children_since_last_selected: int = 0
 
-    transitioned_from_reservoir: Counter[ReservoirId] = field(default_factory=Counter)
     transitioned_to_reservoir: Counter[ReservoirId] = field(default_factory=Counter)
 
 
@@ -959,7 +958,6 @@ def main():
             r_stats = reservoirs_stats[res_id]
             r_stats.num_visited += 1
             r_stats.last_visited_step = step
-            r_stats.transitioned_from_reservoir[prev_res_id] += 1
 
             if res_id not in visited_reservoirs_in_level:
                 r_stats.num_children += 1
