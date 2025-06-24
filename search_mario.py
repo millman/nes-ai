@@ -86,6 +86,7 @@ class SaveInfo:
     action_history: list
     patch_history: deque[PatchId]
     visited_patches_x: set[PatchIdX]
+    visited_reservoirs: set['ReservoirId']
     controller_state: NdArrayUint8
     controller_state_user: NdArrayUint8
 
@@ -869,6 +870,7 @@ class Args:
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = -1
     max_trajectory_revisit_x: int = 2
+    max_trajectory_revisit_res: int = -1
     max_trajectory_area_type_changes: int = -1
 
     flip_prob: float = 0.03
@@ -1013,10 +1015,11 @@ def main():
     visited_reservoirs_in_level = set()
     patch_history = deque(maxlen=reservoir_history_length)
     visited_patches_x = set()
+    visited_reservoirs = set()
 
     area_type_changes = ()
     revisited_x = 0
-
+    revisited_res = 0
 
     action_bucket_size = args.action_bucket_size
 
@@ -1069,6 +1072,7 @@ def main():
                 args.max_trajectory_steps = -1
                 args.max_trajectory_patches_x = -1
                 args.max_trajectory_revisit_x = -1
+                args.max_trajectory_revisit_res = -1
                 args.max_trajectory_area_type_changes = -1
 
                 user_args = args
@@ -1121,6 +1125,8 @@ def main():
                     print(f"Discountinuous x position: {prev_x} -> {x}, area type changes (before): {area_type_changes}")
 
         if prev_area_type != -1 and area_type != prev_area_type:
+            if area_type_changes:
+                assert area_type_changes[-1] != area_type, f"How are we adding the same type?: {area_type_changes}, area_type={area_type}"
             area_type_changes += (area_type,)
 
         patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, area_type_changes)
@@ -1191,6 +1197,26 @@ def main():
                     print(f"Ending trajectory, revisited x patch: {patch_id}: x={x} ticks_left={ticks_left}")
                 force_terminate = True
 
+        elif (
+            patch_history and
+            patch_id != patch_history[-1] and
+            world == prev_world and level == prev_level
+        ):
+            prev_res_id = saves.reservoir_id_from_state(patch_history)
+
+            next_patch_history = patch_history.copy()
+            next_patch_history.append(patch_id)
+
+            res_id = saves.reservoir_id_from_state(next_patch_history)
+
+            if res_id != prev_res_id and res_id in visited_reservoirs:
+                revisited_res += 1
+
+                if args.max_trajectory_revisit_res > 0 and revisited_res > args.max_trajectory_revisit_res:
+                    if not args.headless:
+                        print(f"Ending trajectory, revisited reservoir: {res_id}: x={x} ticks_left={ticks_left}")
+                    force_terminate = True
+
         # ---------------------------------------------------------------------
         # Handle new level reached
         # ---------------------------------------------------------------------
@@ -1217,8 +1243,10 @@ def main():
             xy_transitions_in_level = Counter()
             visited_reservoirs_in_level = set()
             visited_patches_x = set()
+            visited_reservoirs = set()
 
             revisited_x = 0
+            revisited_res = 0
             area_type_changes = ()
 
             # We're at the starting patch on a new level, but we may have arrived via a jump.
@@ -1245,6 +1273,7 @@ def main():
 
             visited_reservoirs_in_level.add(reservoir_id)
             visited_patches_x.add(PatchIdX.from_patch(patch_id))
+            visited_reservoirs.add(reservoir_id)
 
             print(f"Starting level: {_str_level(world, level)}")
 
@@ -1270,6 +1299,7 @@ def main():
                 action_history=action_history.copy(),
                 patch_history=patch_history.copy(),
                 visited_patches_x=visited_patches_x.copy(),
+                visited_reservoirs=visited_reservoirs.copy(),
                 controller_state=controller.copy(),
                 controller_state_user=nes.controller1.is_pressed_user.copy(),
             )
@@ -1342,13 +1372,16 @@ def main():
                 raise AssertionError("STOP")
 
             patch_id_x = PatchIdX.from_patch(patch_id)
-
-            if patch_id_x not in visited_patches_x:
-                visited_patches_x.add(patch_id_x)
+            visited_patches_x.add(patch_id_x)
 
             # NOTE: These are any patches since load, not *new* patches load.
             if patch_id_x != PatchIdX.from_patch(patch_history[-1]):
                 patches_x_since_load += 1
+
+            next_patch_history = patch_history.copy()
+            next_patch_history.append(patch_id)
+            res_id = saves.reservoir_id_from_state(next_patch_history)
+            visited_reservoirs.add(res_id)
 
             patch_history.append(patch_id)
 
@@ -1369,6 +1402,7 @@ def main():
                 action_history=action_history.copy(),
                 patch_history=patch_history.copy(),
                 visited_patches_x=visited_patches_x.copy(),
+                visited_reservoirs=visited_reservoirs.copy(),
                 controller_state=controller.copy(),
                 controller_state_user=nes.controller1.is_pressed_user.copy(),
             )
@@ -1409,7 +1443,7 @@ def main():
 
             # Start reload process.
 
-             # Reset variables that change on load.
+            # Reset variables that change on load.
             steps_since_load = 0
             load_time = time.time()
             patches_x_since_load = 0
@@ -1442,8 +1476,10 @@ def main():
             action_history = ActionHistory.continue_from_parent(save_info.action_history)
 
             visited_patches_x = save_info.visited_patches_x.copy()
+            visited_reservoirs = save_info.visited_reservoirs.copy()
 
             revisited_x = 0
+            revisited_res = 0
             area_type_changes = save_info.area_type_changes
 
             # Read current state.
