@@ -1453,6 +1453,7 @@ def main():
             y = get_y_pos(ram)
             lives = life(ram)
             ticks_left = get_time_left(ram)
+            area_type = get_area_type(ram)
 
             if save_info.world != world or save_info.level != level or save_info.x != x or save_info.y != y:
                 _validate_save_state(save_info, ram)
@@ -1464,6 +1465,7 @@ def main():
             prev_y = save_info.prev_y
             prev_lives = lives
             patch_history = save_info.patch_history.copy()
+            prev_area_type = area_type
 
             reservoir_id = saves.reservoir_id_from_save(save_info)
             patch_id = reservoir_id.patch_history[-1]
