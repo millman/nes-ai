@@ -889,7 +889,7 @@ def make_env(env_id: str, idx: int, capture_video: bool, run_name: str, headless
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
             raise RuntimeError("STOP")
         else:
-            render_mode = "rgb" if headless else "human"
+            render_mode = "rgb_array" if headless else "human"
             env = gym.make(env_id, render_mode=render_mode, world_level=world_level, screen_rc=(2,2))
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
