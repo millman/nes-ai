@@ -610,10 +610,18 @@ def _print_histogram(patch_id_and_weight_pairs: list[tuple[PatchId], float], n_b
 
 
 def _print_ram_debug(ram: NdArrayUint8):
+    ram_750_msb_2 = ram[0x750] & 0b11000000
+
     # Debug printouts for level pos
     print(f"DEBUG POS:")
+    print(f"  area timer: ram[0x6de]: {ram[0x6de]}")
+    print(f"  area type:  ram[0x74e]: {ram[0x74e]}")
+    print(f"  area data:  ram[0x750]: {ram[0x750]}")
+    print(f"  area msb:   ram[0x750]: {bin(ram[0x750])}")
+    print(f"  area page:  ram[0x751]: {ram[0x751]}")
+    print(f"  area mode:  ram[0x752]: {ram[0x752]}")
     print(f"  world:      ram[0x75f]: {ram[0x75f]}")
-    print(f"  stage:      ram[0x75c]: {ram[0x75f]}")
+    print(f"  stage:      ram[0x75c]: {ram[0x75c]}")
     print(f"  area:       ram[0x760]: {ram[0x760]}")
     print(f"  screen_x:   ram[0x 6d]: {ram[0x6d]}")
     print(f"  offset_x:   ram[0x 86]: {ram[0x86]}")
@@ -622,6 +630,8 @@ def _print_ram_debug(ram: NdArrayUint8):
     print(f"  y_viewport: ram[0x b5]: {ram[0xb5]}")
     print(f"  screen:     ram[0x71a]: {ram[0x71a]}")
     print(f"  next scrn:  ram[0x71b]: {ram[0x71b]}")
+    print(f"  prog good:  ram[0x6d9]: {ram[0x6d9]}")
+    print(f"  prog all:   ram[0x6da]: {ram[0x6da]}")
 
     # Nothing seems like a problem?
 
