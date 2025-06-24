@@ -4,9 +4,10 @@ import copy
 import os
 import pickle
 import random
+import subprocess
 import time
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -16,7 +17,6 @@ import numpy as np
 import pygame
 import tyro
 from PIL import Image
-from torch.utils.tensorboard import SummaryWriter
 
 from search_mario_actions import ACTION_INDEX_TO_CONTROLLER, CONTROLLER_TO_ACTION_INDEX, build_controller_transition_matrix, flip_buttons_by_action_in_place
 from search_mario_viz import build_patch_histogram_rgb, draw_patch_grid, draw_patch_path, optimal_patch_layout
@@ -663,6 +663,46 @@ def _print_ram_debug(ram: NdArrayUint8):
     #     next scrn:  ram[0x71b]: 12
 
 
+def _run_git(cmd: list[str]) -> str:
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert result.returncode == 0, f"Git command failed: result={result}: {' '.join(cmd)}\n{result.stderr}"
+    return result.stdout.strip()
+
+
+def _print_git_info():
+    # Get commit and branch info in one go
+    log_info = _run_git([
+        "git", "log", "-1",
+        "--pretty=format:%h%n%H%n%s%n%an%n%ad", "--date=iso"
+    ])
+    short_hash, full_hash, message, author, date = log_info.split("\n", 4)
+
+    # Get diffs (staged and unstaged)
+    unstaged_diff = _run_git(["git", "diff"])
+    staged_diff = _run_git(["git", "diff", "--cached"])
+
+    # Print commit and status summary
+    print(f"Commit:     {short_hash} ({full_hash})")
+    print(f"Message:    {message}")
+    print(f"Author:     {author}")
+    print(f"Date:       {date}\n")
+
+    if staged_diff:
+        print("Staged changes (index):\n")
+        print(staged_diff)
+
+    if unstaged_diff:
+        print("Unstaged changes (working directory):\n")
+        print(unstaged_diff)
+
+
+def _print_config(obj: Any, desc: str = "Args"):
+    print(f"{desc}:")
+    for f in fields(obj):
+        value = getattr(obj, f.name)
+        print(f"  {f.name}: {value}")
+
+
 _MAX_LEVEL_DIST = 6400
 
 
@@ -790,55 +830,12 @@ def _save_action_history(filepath: Path, world_ram: int, level_ram: int, start_s
 
 @dataclass
 class Args:
-    r"""
-    Run example:
-        > WANDB_API_KEY=<key> python3 ppo_nes.py --wandb-project-name mariorl --track
-
-        ...
-        wandb: Tracking run with wandb version 0.19.9
-        wandb: Run data is saved locally in /Users/dave/rl/nes-ai/wandb/run-20250418_130130-SuperMarioBros-v0__ppo_nes__1__2025-04-18_13-01-30
-        wandb: Run `wandb offline` to turn off syncing.
-        wandb: Syncing run SuperMarioBros-v0__ppo_nes__1__2025-04-18_13-01-30
-        wandb: ⭐️ View project at https://wandb.ai/millman-none/mariorl
-        wandb: 🚀 View run at https://wandb.ai/millman-none/mariorl/runs/SuperMarioBros-v0__ppo_nes__1__2025-04-18_13-01-30
-
-    Resume example:
-        > WANDB_API_KEY=<key> WANDB_RUN_ID=SuperMarioBros-v0__ppo_nes__1__2025-04-18_13-01-30 WANDB_RESUME=must python3 ppo_nes.py --wandb-project-name mariorl --track
-
-        ...
-        wandb: Tracking run with wandb version 0.19.9
-        wandb: Run data is saved locally in /Users/dave/rl/nes-ai/wandb/run-20250418_133317-SuperMarioBros-v0__ppo_nes__1__2025-04-18_13-01-30
-        wandb: Run `wandb offline` to turn off syncing.
-    --> wandb: Resuming run SuperMarioBros-v0__ppo_nes__1__2025-04-18_13-01-30
-        wandb: ⭐️ View project at https://wandb.ai/millman-none/mariorl
-        wandb: 🚀 View run at https://wandb.ai/millman-none/mariorl/runs/SuperMarioBros-v0__ppo_nes__1__2025-04-18_13-01-30
-        ...
-    --> resumed at update 9
-        ...
-    """
-
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    track: bool = False
-    """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "MarioRL"
-    """the wandb's project name"""
-    wandb_entity: str | None = None
-    """the entity (team) of wandb's project"""
-    wandb_run_id: str | None = None
-    """the id of a wandb run to resume"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    checkpoint_frequency: float = 30
-    """create a checkpoint every N seconds"""
-    train_agent: bool = True
-    """enable or disable training of the agent"""
 
     # Configuration.
     headless: bool = False
@@ -908,39 +905,19 @@ def main():
     # In particular, we don't include the date because the date does not affect the results.
     # Date prefixes are handled by wandb automatically.
 
-    if not args.wandb_run_id:
-        run_prefix = f"{args.env_id}__{args.exp_name}__{args.seed}"
-        run_name = f"{run_prefix}__{date_str}"
-        args.wandb_run_id = run_name
-
-    run_name = args.wandb_run_id
-
-    if args.track:
-        import wandb
-
-        run = wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
-            #name=run_name,
-            monitor_gym=True,
-            save_code=True,
-            id=run_name,
-        )
-        assert run.dir == f"runs/{run_name}"
-        run_dir = run.dir
-    else:
-        run_dir = f"runs/{run_name}"
+    run_prefix = f"{args.env_id}__{args.exp_name}__{args.seed}"
+    run_name = f"{run_prefix}__{date_str}"
+    run_dir = f"runs/{run_name}"
 
     filepath_xy_transitions = Path(f"{run_dir}/xy_transitions")
     filepath_action_history = Path(f"{run_dir}/action_history")
 
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    # Print launch info.
+    _print_git_info()
+    print()
+    _print_config(args)
+    print()
+    print(f"Run dir: {run_dir}")
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
