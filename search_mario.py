@@ -558,13 +558,14 @@ def _print_info(
     step: int,
     steps_since_load: int,
     patches_x_since_load: int,
+    new_res: int,
 ):
     if time_since_load == 0:
         steps_per_sec = float('inf')
     else:
         steps_per_sec = steps_since_load / time_since_load
 
-    approx_max_actions = max((
+    approx_depth = max((
         len(saves_in_res[-1].action_history)
         for _r_id, saves_in_res in saves._reservoir_to_saves.items()
     ), default=0)
@@ -579,9 +580,8 @@ def _print_info(
         f"x={x} y={y} ticks_left={ticks_left} "
         f"saves={len(saves)} "
         f"steps/sec={steps_per_sec:.4f} "
-        f"steps_since_load={steps_since_load} "
-        f"patches_x_since_load={patches_x_since_load} "
-        f"max_actions={approx_max_actions}"
+        f"new_res={new_res} "
+        f"depth={approx_depth}"
     )
 
 
@@ -1010,6 +1010,8 @@ def main():
 
     patch_id_and_weight_pairs = []
 
+    new_res_since_print = 0
+
     original_args = None
     user_args = None
 
@@ -1203,7 +1205,7 @@ def main():
         if world != prev_world or level != prev_level:
             # Print before-level-end info.
             if True:
-                _print_info(time_since_start=now-start_time, time_since_load=now-load_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
+                _print_info(time_since_start=now-start_time, time_since_load=now-load_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load, new_res=new_res_since_print)
 
             # Save end-of-level info.
             if prev_level != -1:
@@ -1256,7 +1258,7 @@ def main():
 
             # Print after-level-start info.
             if True:
-                _print_info(time_since_start=now-start_time, time_since_load=now-load_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
+                _print_info(time_since_start=now-start_time, time_since_load=now-load_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load, new_res=new_res_since_print)
 
             assert lives > 1 and lives < 100, f"How did we end up with lives?: {lives}"
 
@@ -1324,6 +1326,8 @@ def main():
                 res_last_selected_stats.num_children_since_last_selected += 1
 
                 visited_reservoirs_in_level.add(res_id)
+
+                new_res_since_print += 1
 
             r_prev_stats = reservoirs_stats[prev_res_id]
             r_prev_stats.transitioned_to_reservoir[res_id] += 1
@@ -1519,7 +1523,8 @@ def main():
         #   * Novel states found (across all trajectories)
         #   * Novel states/sec
         if args.print_freq_sec > 0 and now - last_print_time > args.print_freq_sec:
-            _print_info(time_since_start=now-start_time, time_since_load=now-load_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load)
+            _print_info(time_since_start=now-start_time, time_since_load=now-load_time, world=world, level=level, x=x, y=y, ticks_left=ticks_left, saves=saves, step=step, steps_since_load=steps_since_load, patches_x_since_load=patches_x_since_load, new_res=new_res_since_print)
+            new_res_since_print = 0
             last_print_time = now
 
         # Visualize the distribution of save states.
