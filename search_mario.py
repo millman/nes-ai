@@ -1122,8 +1122,8 @@ def main():
 
             # Save end-of-level info.
             if prev_level != -1:
-                _save_xy_transitions(filepath_xy_transitions, world, level, xy_transitions_in_level, desc="end")
-                _save_action_history(filepath_action_history, world, level, first_save_in_level, action_history)
+                _save_xy_transitions(filepath_xy_transitions, prev_world, prev_level, xy_transitions_in_level, desc="end")
+                _save_action_history(filepath_action_history, prev_world, prev_level, first_save_in_level, action_history, desc="end")
 
             # Set number of ticks in level to the current ticks.
             level_ticks = get_time_left(ram)
