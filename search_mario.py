@@ -693,11 +693,50 @@ def _save_action_history(filepath: Path, world_ram: int, level_ram: int, start_s
     filepath_action_history = filepath / f"level_{_str_level(world_ram, level_ram)}_{action_history_size}{desc_with_sep}.pkl"
     filepath_action_history.parent.mkdir(parents=True, exist_ok=True)
 
-    current_node = action_history
+    # Validate action history.
+    if False:
+        nodes_leaf_to_root = []
+        current_node = action_history
+        while current_node:
+            nodes_leaf_to_root.append(current_node)
+            current_node = current_node.parent_history
+
+        nodes = list(reversed(nodes_leaf_to_root))
+
+        # Print action history.
+        print("Action history nodes:")
+        for i, n in enumerate(nodes):
+            if n.parent_history is not None:
+                len_parent_history = len(n.parent_history)
+            else:
+                len_parent_history = 0
+
+            print(f"  [{i}] len(n)={len(n)} len(parent)={len_parent_history} ancestor_size={n.ancestors_history_size} len(action_history)={len(n.action_history)}")
+
+        # Debug assertions.
+        running_list_length = 0
+        for i, n in enumerate(nodes):
+            running_list_length += len(n.action_history)
+            if n.parent_history is not None:
+                assert len(n.parent_history) == n.ancestors_history_size, f"Mismatched node len and total: {len(n)} != {n.ancestors_history_size}"
+            assert len(n) == running_list_length, f"Mismatched node len and running list len: {len(n)} != {running_list_length}"
+
+        i = 0
+        action_history_flat_check = []
+        print("Action history:")
+        for n in nodes:
+            for action in n.action_history:
+                action_history_flat_check.append(action)
+                print(f"  [{i}] {action}")
+
+                assert action.shape == (8,), f"Unexpected action shape: {action.shape} != (8,)"
+
+                i += 1
 
     # Convert action history into a list.
+    current_node = action_history
     segments_newest_to_oldest = []
-    while current_node.parent_history:
+    while current_node:
         segments_newest_to_oldest.append(current_node.action_history)
         current_node = current_node.parent_history
 
@@ -707,10 +746,23 @@ def _save_action_history(filepath: Path, world_ram: int, level_ram: int, start_s
         for action in segment
     ]
 
+    if False:
+        print(f"segments_newest_to_oldest={len(segments_newest_to_oldest)}")
+        print(f"flattened_action_history={len(flattened_action_history)}")
+
+        if action_history_flat_check != flattened_action_history:
+            print(f"Mismatched history???  check={len(action_history_flat_check)} flattened={len(flattened_action_history)}")
+            for i in range(max(len(action_history_flat_check), len(flattened_action_history))):
+                a = action_history_flat_check[i] if i < len(action_history_flat_check) else None
+                b = flattened_action_history[i] if i < len(flattened_action_history) else None
+                mismatched = 'x' if (a != b).all() else ''
+                print(f"{mismatched} [{i}]  {a} {b}")
+
     with open(filepath_action_history, "wb") as out:
         pickle.dump({
             'action_history': flattened_action_history,
             'start_save_state': start_save_state,
+            'start_world_level': encode_world_level(world_ram, level_ram),
         }, out)
 
     print(f"Wrote action history to: {filepath_action_history}")
@@ -1124,6 +1176,8 @@ def main():
             if prev_level != -1:
                 _save_xy_transitions(filepath_xy_transitions, prev_world, prev_level, xy_transitions_in_level, desc="end")
                 _save_action_history(filepath_action_history, prev_world, prev_level, first_save_in_level, action_history, desc="end")
+
+                first_save_in_level = nes.save()
 
             # Set number of ticks in level to the current ticks.
             level_ticks = get_time_left(ram)
