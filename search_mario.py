@@ -869,7 +869,7 @@ class Args:
 
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = -1
-    max_trajectory_revisit_x: int = 2
+    max_trajectory_revisit_x: int = -1
     max_trajectory_revisit_res: int = -1
     max_trajectory_area_type_changes: int = -1
 
