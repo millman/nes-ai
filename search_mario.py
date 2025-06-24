@@ -215,7 +215,7 @@ class ActionHistory:
     def copy(self) -> 'ActionHistory':
         return ActionHistory(
             parent_history=self.parent_history,
-            ancestors_history_size=self.__len__(),
+            ancestors_history_size=self.ancestors_history_size,
             action_history=self.action_history.copy(),
         )
 
