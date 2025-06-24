@@ -280,6 +280,8 @@ class SuperMarioEnv(gym.Env):
                 controller_desc = _describe_controller_vector(action)
                 print(f"Controller (input action): {controller_desc}")
 
+        assert action.shape == (8,), f"Unexpected action shape: {action.shape} != (8,)"
+
         # Update the controller state, either from user or input to function.
         self.nes.controller1.set_state(action)
 
@@ -300,6 +302,7 @@ class SuperMarioEnv(gym.Env):
         truncated = False
         observation = self._get_obs()
         info = self._get_info()
+        info['controller'] = action
 
         self.last_observation = observation
 

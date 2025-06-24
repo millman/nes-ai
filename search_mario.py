@@ -199,6 +199,9 @@ class ActionHistory:
     action_history: list[NdArrayUint8]
 
     def append(self, action: NdArrayUint8):
+        assert action.shape == (8,), f"Unexpected action shape: {action.shape} != (8,)"
+        if self.parent_history:
+            assert len(self.parent_history) == self.ancestors_history_size, f"Mismatched parent history and stored size: {len(self.parent_history)} != {self.ancestors_history_size}"
         self.action_history.append(action)
 
     def __len__(self) -> int:
@@ -1028,10 +1031,12 @@ def main():
         # Update action every frame.
         controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
 
-        action_history.append(controller)
-
         # Execute action.
         _next_obs, reward, termination, truncation, info = envs.step((controller,))
+
+        # Record the execution action, which may be from the agent or the user.
+        executed_action, = info['controller']
+        action_history.append(executed_action.copy())
 
         # Handle user config changes.
         if pygame.K_x in nes.keys_pressed:
