@@ -10,7 +10,7 @@ import torch
 
 from PIL import Image
 from nes import NES, SYNC_NONE, SYNC_PYGAME
-from nes_ai.ai.base import RewardIndex, RewardMap, compute_reward_map, get_level, get_time_left, get_world
+from nes_ai.ai.base import RewardIndex, RewardMap, compute_reward_map, get_level, get_time_left, get_world, get_multi_part_progression, get_area_type
 
 from super_mario_env import _skip_start_screen, _describe_controller_vector, _to_controller_presses
 from super_mario_env_ram_hacks import _skip_change_area, _skip_occupied_states, skip_after_step, life

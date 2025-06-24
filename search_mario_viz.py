@@ -155,7 +155,8 @@ def build_patch_histogram_rgb(
         patch_r = hr - max_patch_y + current_patch.patch_y
         patch_c = _calc_c_for_special_section(current_patch, hr=hr, hc=hc)
 
-    color = _MATLAB_COLORS_RGB[current_patch.jump_count % len(_MATLAB_COLORS_RGB)]
+    area_type_change_count = len(current_patch.area_type_changes)
+    color = _MATLAB_COLORS_RGB[area_type_change_count % len(_MATLAB_COLORS_RGB)]
 
     try:
         grid_rgb[patch_r][patch_c] = color
@@ -261,7 +262,8 @@ def draw_patch_path(
         y = (r + 0.5) * pixel_size * scale_y
         x = (c + 0.5) * pixel_size * scale_x
 
-        color = _MATLAB_COLORS_RGB[p.jump_count % len(_MATLAB_COLORS_RGB)]
+        area_type_change_count = len(p.area_type_changes)
+        color = _MATLAB_COLORS_RGB[area_type_change_count % len(_MATLAB_COLORS_RGB)]
 
         if prev_xy is None or prev_special != is_special:
             draw.line([(x,y), (x,y)], fill=color, width=1)

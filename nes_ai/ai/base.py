@@ -352,6 +352,35 @@ def get_world(ram) -> int:
     return ram[0x75F]
 
 
+def get_multi_part_progression(ram) -> tuple[int, int]:
+    """
+    Counters for multi-part progression levels, e.g. 4-4 and 7-4.
+
+    The game keeps track of whether Mario is progressing through the correct path in the level.
+    Sometimes, like in 7-4, there are 2 parts that Mario must go through before he can progress
+    to the next section.  If 1 of the parts is correct, we'll see good=1 all=2.  When both are
+    correct, we'll see good=2, all=2, and Mario continues to the next correct part of the level.
+    """
+
+    good = ram[0x6d9]
+    all = ram[0x6da]
+
+    return good, all
+
+
+def get_area_type(ram) -> int:
+    """
+    Area type (water, ground, underground, castle).
+
+    Some levels (e.g. 2-2, 8-4) have progressions from underwater to above ground or back.
+    In many cases, when the area type changes, the player position jumps to a new location, but
+    within the same screen.  The area type change can be used to identify player progression
+    separate from jumping around a level due to pipes or mazes.
+    """
+
+    return ram[0x074e]
+
+
 def compute_reward_map(last_reward_map: RewardMap | None, ram):
 
     # From: https://datacrystal.tcrf.net/wiki/Super_Mario_Bros./RAM_map

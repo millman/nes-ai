@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from search_mario_actions import ACTION_INDEX_TO_CONTROLLER, CONTROLLER_TO_ACTION_INDEX, build_controller_transition_matrix, flip_buttons_by_action_in_place
 from search_mario_viz import build_patch_histogram_rgb, draw_patch_grid, draw_patch_path, optimal_patch_layout
-from super_mario_env_search import SuperMarioEnv, SCREEN_H, SCREEN_W, get_x_pos, get_y_pos, get_level, get_world, _to_controller_presses, get_time_left, life
+from super_mario_env_search import SuperMarioEnv, SCREEN_H, SCREEN_W, get_x_pos, get_y_pos, get_level, get_world, _to_controller_presses, get_time_left, life, get_multi_part_progression, get_area_type
 from super_mario_env_ram_hacks import encode_world_level
 
 from gymnasium.envs.registration import register
@@ -41,16 +41,20 @@ class PatchId:
     patch_x: int
     patch_y: int
     action_bucket: int
-    jump_count: int
+    area_type_changes: tuple[int, ...]
 
     def __post_init__(self):
         # Convert value from np.uint8 to int.
         object.__setattr__(self, 'patch_x', int(self.patch_x))
         object.__setattr__(self, 'patch_y', int(self.patch_y))
 
+        assert type(self.area_type_changes) is tuple, f"Unexpected area_type_changes type: {self.area_type_changes}"
+
     def __repr__(self) -> str:
-        jump_str = f",j:{self.jump_count}" if self.jump_count else ""
-        return f"PatchId({self.patch_x},{self.patch_y},a:{self.action_bucket}{jump_str})"
+        area_type_str = ",".join((str(a) for a in self.area_type_changes))
+        area_sep = ",at:" if self.area_type_changes else ""
+
+        return f"PatchId({self.patch_x},{self.patch_y},a:{self.action_bucket}{area_sep}{area_type_str})"
 
     __str__ = __repr__
 
@@ -59,11 +63,11 @@ class PatchId:
 class PatchIdX:
     patch_x: int
     action_bucket: int
-    jump_count: int
+    area_type_changes: tuple[int, ...]
 
     @staticmethod
     def from_patch(patch_id: PatchId) -> 'PatchIdX':
-        return PatchIdX(patch_id.patch_x, patch_id.action_bucket, patch_id.jump_count)
+        return PatchIdX(patch_id.patch_x, patch_id.action_bucket, patch_id.area_type_changes)
 
 
 @dataclass(frozen=True)
@@ -71,11 +75,13 @@ class SaveInfo:
     save_id: int
     x: int
     y: int
+    prev_x: int
+    prev_y: int
     level: int
     world: int
     level_ticks: int
     ticks_left: int
-    jump_count: int
+    area_type_changes: tuple[int, ...]
     save_state: Any
     action_history: list
     patch_history: deque[PatchId]
@@ -93,7 +99,7 @@ class SaveInfo:
         # Convert value from list to np.uint8.
         assert self.controller_state.dtype == np.uint8, f"Unexpected controller state type: {self.controller_state.dtype} != np.uint8"
 
-        assert self.jump_count == self.patch_history[-1].jump_count, f"Mismatched patch jump_count on save: history[-1]:{self.patch_history[-1].jump_count} != jump_count:{self.jump_count}"
+        assert self.area_type_changes == self.patch_history[-1].area_type_changes, f"Mismatched patch area_type_changes on save: history[-1]:{self.patch_history[-1].area_type_changes} != jump_from:{self.jump_from}"
 
 
 @dataclass(frozen=True)
@@ -853,7 +859,7 @@ class Args:
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = -1
     max_trajectory_revisit_x: int = 2
-    max_trajectory_jump_count: int = 1
+    max_trajectory_area_type_changes: int = -1
 
     flip_prob: float = 0.03
 
@@ -987,6 +993,7 @@ def main():
     x = -1
     y = -1
     lives = -1
+    area_type = -1
     ticks_left = -1
 
     level_ticks = -1
@@ -997,7 +1004,7 @@ def main():
     patch_history = deque(maxlen=reservoir_history_length)
     visited_patches_x = set()
 
-    jump_count = 0
+    area_type_changes = ()
     revisited_x = 0
 
 
@@ -1027,6 +1034,7 @@ def main():
         prev_x = x
         prev_y = y
         prev_lives = lives
+        prev_area_type = area_type
 
         # Update action every frame.
         controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
@@ -1051,6 +1059,7 @@ def main():
                 args.max_trajectory_steps = -1
                 args.max_trajectory_patches_x = -1
                 args.max_trajectory_revisit_x = -1
+                args.max_trajectory_area_type_changes = -1
 
                 user_args = args
 
@@ -1083,6 +1092,9 @@ def main():
         y = get_y_pos(ram)
         lives = life(ram)
         ticks_left = get_time_left(ram)
+        area_type = get_area_type(ram)
+
+        multi_part_progression_good, multi_part_progression_all = get_multi_part_progression(ram)
 
         # If we get teleported, or if the level boundary is discontinuous, the change in x position isn't meaningful.
         if abs(x - prev_x) > 50:
@@ -1096,13 +1108,12 @@ def main():
                 assert world == prev_world and level == prev_level, f"Mismatched level change: {prev_world},{prev_level} -> {world},{level}, x: {prev_x} -> {x}"
 
                 if not args.headless:
-                    print(f"Discountinuous x position: {prev_x} -> {x}, jump_count: {jump_count}")
+                    print(f"Discountinuous x position: {prev_x} -> {x}, area type changes (before): {area_type_changes}")
 
-                # Consider jumps a problem only if jumping backwards.  Forward jumps are ok.
-                if x - prev_x < 0:
-                    jump_count += 1
+        if prev_area_type != -1 and area_type != prev_area_type:
+            area_type_changes += (area_type,)
 
-        patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, jump_count)
+        patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, area_type_changes)
 
         # Update histogram counts every frame.
         xy_transitions_in_level[((prev_x, prev_y), (x, y))] += 1
@@ -1127,9 +1138,13 @@ def main():
                 print(f"Ending trajectory, max patches x for trajectory: {patches_x_since_load}: x={x} ticks_left={ticks_left}")
             force_terminate = True
 
-        elif args.max_trajectory_jump_count >= 0 and jump_count > args.max_trajectory_jump_count:
+        elif args.max_trajectory_area_type_changes >= 0 and len(area_type_changes) > args.max_trajectory_area_type_changes:
             if not args.headless:
-                print(f"Ending trajectory, max jump count for trajectory: jump_count={jump_count} x={x} ticks_left={ticks_left}")
+                print(f"Ending trajectory, max area type changes for trajectory: area_type_changes={area_type_changes} x={x} ticks_left={ticks_left}")
+
+        elif multi_part_progression_good != multi_part_progression_all:
+            if not args.headless:
+                print(f"Ending trajectory, wrong way in maze: progression counters good={multi_part_progression_good} all={multi_part_progression_all}")
             force_terminate = True
 
         # If we died, skip.
@@ -1194,17 +1209,17 @@ def main():
             visited_patches_x = set()
 
             revisited_x = 0
-            jump_count = 0
+            area_type_changes = ()
 
             # We're at the starting patch on a new level, but we may have arrived via a jump.
             # Force the first patch of the new level to have a zero jump count.
             #
             # Observed new level via jump on the transition from 1-3 to 2-1.
             #
-            first_patch_id_in_level = patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, jump_count)
+            first_patch_id_in_level = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, area_type_changes)
             if patch_id != first_patch_id_in_level:
                 # NOTE: We actually expect to have an incorrect patch when reaching a new level, because the
-                #   patch was created with the action_history and jump_count at the end of the last level.
+                #   patch was created with the action_history and area_type_changes at the end of the last level.
                 print(f"Reached new level from patch, rewrite patch: {patch_id} -> {first_patch_id_in_level}")
                 patch_id = first_patch_id_in_level
 
@@ -1234,11 +1249,13 @@ def main():
                 save_id=next_save_id,
                 x=x,
                 y=y,
+                prev_x=prev_x,
+                prev_y=prev_y,
                 level=level,
                 world=world,
                 level_ticks=level_ticks,
                 ticks_left=ticks_left,
-                jump_count=jump_count,
+                area_type_changes=area_type_changes,
                 save_state=nes.save(),
                 action_history=action_history.copy(),
                 patch_history=patch_history.copy(),
@@ -1325,17 +1342,19 @@ def main():
 
             patch_history.append(patch_id)
 
-            assert patch_id.jump_count == jump_count
+            assert patch_id.area_type_changes == area_type_changes
 
             save_info = SaveInfo(
                 save_id=next_save_id,
                 x=x,
                 y=y,
+                prev_x=prev_x,
+                prev_y=prev_y,
                 level=level,
                 world=world,
                 level_ticks=level_ticks,
                 ticks_left=ticks_left,
-                jump_count=jump_count,
+                area_type_changes=area_type_changes,
                 save_state=nes.save(),
                 action_history=action_history.copy(),
                 patch_history=patch_history.copy(),
@@ -1415,7 +1434,7 @@ def main():
             visited_patches_x = save_info.visited_patches_x.copy()
 
             revisited_x = 0
-            jump_count = save_info.jump_count
+            area_type_changes = save_info.area_type_changes
 
             # Read current state.
             world = get_world(ram)
@@ -1431,8 +1450,8 @@ def main():
             # Set prior frame values to current.  There is no difference at load.
             prev_world = world
             prev_level = level
-            prev_x = x
-            prev_y = y
+            prev_x = save_info.prev_x
+            prev_y = save_info.prev_y
             prev_lives = lives
             patch_history = save_info.patch_history.copy()
 
