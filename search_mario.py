@@ -322,7 +322,7 @@ def _score_reservoir(
 
     # Higher depth means higher score.  Note that the range is (-1 -> 0), -1 for 0 depth, and 0 for infinite depth.
     # Realistically, depth will range to about 6000.
-    depth_score = - 1 / (depth + 1)
+    depth_score = - 1 / (depth // 256 + 1)
 
 
     # If the patch always transitions to the same next patch, that's an indicator that we can't explore from there.
@@ -408,8 +408,8 @@ def _score_reservoir(
     p_coef = 1.0
     t_coef = 0.2
     f_coef = 0.2
-    s_coef = 1.0
-    v_coef = 1.0
+    s_coef = 0.5
+    v_coef = 0.5
     d_coef = 0.1
     score = (
         p_coef * productivity_score +
@@ -668,7 +668,7 @@ _MAX_LEVEL_DIST = 6400
 def _history_length_for_level(default_history_length: int, natural_world_level: tuple[int, int]) -> int:
     WORLD_LEVEL_TO_LEN = {
         # (7, 4): 20,
-        # (8, 4): 3,
+        (8, 4): 3,
     }
 
     world, level = natural_world_level
@@ -847,8 +847,8 @@ class Args:
     # Specific experiments
     patch_size: int = 20
 
-     # About 30 frames/tick
-    action_bucket_size: int = 1500
+    # About 30 frames/tick.  For 400 ticks, 12000 size.
+    action_bucket_size: int = 12000
 
     # NOTE: Need enough history to distinguish between paths for 7-4 and 8-4; works with len=20.
     #   All other levels are much faster with history of length 3, or even 1.  This value may be
