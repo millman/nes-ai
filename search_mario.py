@@ -71,6 +71,17 @@ class PatchIdX:
 
 
 @dataclass(frozen=True)
+class ScreenIdX:
+    screen_x: int
+    action_bucket: int
+    area_type_changes: tuple[int, ...]
+
+    @staticmethod
+    def from_state(x: int, patch_id: PatchId) -> 'PatchIdX':
+        return ScreenIdX(x // 256, patch_id.action_bucket, patch_id.area_type_changes)
+
+
+@dataclass(frozen=True)
 class SaveInfo:
     save_id: int
     x: int
@@ -86,6 +97,7 @@ class SaveInfo:
     action_history: list
     patch_history: deque[PatchId]
     visited_patches_x: set[PatchIdX]
+    visited_screens_x: set[ScreenIdX]
     visited_reservoirs: set['ReservoirId']
     controller_state: NdArrayUint8
     controller_state_user: NdArrayUint8
@@ -867,6 +879,7 @@ class Args:
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = -1
     max_trajectory_revisit_x: int = -1
+    max_trajectory_revisit_screen: int = 0
     max_trajectory_revisit_res: int = -1
     max_trajectory_area_type_changes: int = -1
 
@@ -984,6 +997,7 @@ def main():
     lives = -1
     area_type = -1
     ticks_left = -1
+    screen_x = -1
 
     level_ticks = -1
 
@@ -992,10 +1006,12 @@ def main():
     visited_reservoirs_in_level = set()
     patch_history = deque(maxlen=reservoir_history_length)
     visited_patches_x = set()
+    visited_screens_x = set()
     visited_reservoirs = set()
 
     area_type_changes = ()
     revisited_x = 0
+    revisited_screen_x = 0
     revisited_res = 0
 
     action_bucket_size = args.action_bucket_size
@@ -1027,6 +1043,7 @@ def main():
         prev_y = y
         prev_lives = lives
         prev_area_type = area_type
+        prev_screen_x = screen_x
 
         # Update action every frame.
         controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
@@ -1051,6 +1068,7 @@ def main():
                 args.max_trajectory_steps = -1
                 args.max_trajectory_patches_x = -1
                 args.max_trajectory_revisit_x = -1
+                args.max_trajectory_revisit_screen = -1
                 args.max_trajectory_revisit_res = -1
                 args.max_trajectory_area_type_changes = -1
 
@@ -1108,7 +1126,10 @@ def main():
                 assert area_type_changes[-1] != area_type, f"How are we adding the same type?: {area_type_changes}, area_type={area_type}"
             area_type_changes += (area_type,)
 
-        patch_id = PatchId(x // patch_size, y // patch_size, len(action_history) // action_bucket_size, area_type_changes)
+        action_bucket = len(action_history) // action_bucket_size
+        patch_id = PatchId(x // patch_size, y // patch_size, action_bucket, area_type_changes)
+        patch_id_x = PatchIdX.from_patch(patch_id)
+        screen_x = ScreenIdX.from_state(x, patch_id)
 
         # Update histogram counts every frame.
         xy_transitions_in_level[((prev_x, prev_y), (x, y))] += 1
@@ -1165,15 +1186,29 @@ def main():
         #   Related, level 2-2 has a jump backwards after entering the pipe.
         elif (
             patch_history and
-            PatchIdX.from_patch(patch_id) != PatchIdX.from_patch(patch_history[-1]) and
-            PatchIdX.from_patch(patch_id) in visited_patches_x and
+            patch_id_x != PatchIdX.from_patch(patch_history[-1]) and
+            patch_id_x in visited_patches_x and
             world == prev_world and level == prev_level
         ):
             revisited_x += 1
 
-            if args.max_trajectory_revisit_x > 0 and revisited_x > args.max_trajectory_revisit_x:
+            if args.max_trajectory_revisit_x >= 0 and revisited_x > args.max_trajectory_revisit_x:
                 if not args.headless:
                     print(f"Ending trajectory, revisited x patch: {patch_id}: x={x} ticks_left={ticks_left}")
+                force_terminate = True
+
+        elif (
+            screen_x != prev_screen_x and
+            world == prev_world and level == prev_level
+        ):
+            if screen_x in visited_screens_x:
+                revisited_screen_x += 1
+
+            visited_screens_x.add(screen_x)
+
+            if args.max_trajectory_revisit_screen >= 0 and revisited_screen_x > args.max_trajectory_revisit_screen:
+                if not args.headless:
+                    print(f"Ending trajectory, revisited screen: screen={screen_x.screen_x}: x={x} ticks_left={ticks_left}")
                 force_terminate = True
 
         elif (
@@ -1222,9 +1257,11 @@ def main():
             xy_transitions_in_level = Counter()
             visited_reservoirs_in_level = set()
             visited_patches_x = set()
+            visited_screens_x = set()
             visited_reservoirs = set()
 
             revisited_x = 0
+            revisited_screen_x = 0
             revisited_res = 0
             area_type_changes = ()
 
@@ -1252,6 +1289,7 @@ def main():
 
             visited_reservoirs_in_level.add(reservoir_id)
             visited_patches_x.add(PatchIdX.from_patch(patch_id))
+            visited_screens_x.add(ScreenIdX.from_state(x, patch_id))
             visited_reservoirs.add(reservoir_id)
 
             print(f"Starting level: {_str_level(world, level)}")
@@ -1278,6 +1316,7 @@ def main():
                 action_history=action_history.copy(),
                 patch_history=patch_history.copy(),
                 visited_patches_x=visited_patches_x.copy(),
+                visited_screens_x=visited_screens_x.copy(),
                 visited_reservoirs=visited_reservoirs.copy(),
                 controller_state=controller.copy(),
                 controller_state_user=nes.controller1.is_pressed_user.copy(),
@@ -1383,6 +1422,7 @@ def main():
                 action_history=action_history.copy(),
                 patch_history=patch_history.copy(),
                 visited_patches_x=visited_patches_x.copy(),
+                visited_screens_x=visited_screens_x.copy(),
                 visited_reservoirs=visited_reservoirs.copy(),
                 controller_state=controller.copy(),
                 controller_state_user=nes.controller1.is_pressed_user.copy(),
@@ -1457,9 +1497,11 @@ def main():
             action_history = ActionHistory.continue_from_parent(save_info.action_history)
 
             visited_patches_x = save_info.visited_patches_x.copy()
+            visited_screens_x = save_info.visited_screens_x.copy()
             visited_reservoirs = save_info.visited_reservoirs.copy()
 
             revisited_x = 0
+            revisited_screen_x = 0
             revisited_res = 0
             area_type_changes = save_info.area_type_changes
 
