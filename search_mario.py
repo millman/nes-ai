@@ -1339,7 +1339,7 @@ def main():
         #
         # Track patch stats even if we terminate on this patch.
 
-        if patch_id != patch_history[-1]:
+        if patch_id != patch_history[-1] or termination:
             if _DEBUG_SCORE_PATCH and (termination or force_terminate):
                 print(f"Updating patch stats on terminate: {patch_id}")
 
