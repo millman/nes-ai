@@ -77,7 +77,8 @@ class ScreenIdX:
     area_type_changes: tuple[int, ...]
 
     @staticmethod
-    def from_state(x: int, patch_id: PatchId) -> 'PatchIdX':
+    def from_patch(patch_id: PatchId, patch_size: int) -> 'PatchIdX':
+        x = patch_id.patch_x * patch_size
         return ScreenIdX(x // 256, patch_id.action_bucket, patch_id.area_type_changes)
 
 
@@ -1129,7 +1130,7 @@ def main():
         action_bucket = len(action_history) // action_bucket_size
         patch_id = PatchId(x // patch_size, y // patch_size, action_bucket, area_type_changes)
         patch_id_x = PatchIdX.from_patch(patch_id)
-        screen_x = ScreenIdX.from_state(x, patch_id)
+        screen_x = ScreenIdX.from_patch(patch_id, patch_size)
 
         # Update histogram counts every frame.
         xy_transitions_in_level[((prev_x, prev_y), (x, y))] += 1
@@ -1197,19 +1198,15 @@ def main():
                     print(f"Ending trajectory, revisited x patch: {patch_id}: x={x} ticks_left={ticks_left}")
                 force_terminate = True
 
-        elif (
-            screen_x != prev_screen_x and
-            world == prev_world and level == prev_level
-        ):
-            if screen_x in visited_screens_x:
+            # NOTE: Track screens only when patches change too, so that we align screens to patches.
+            #   We want to make sure that whenever we end early due to screen, we still track patch stats.
+            if screen_x != prev_screen_x and screen_x in visited_screens_x:
                 revisited_screen_x += 1
 
-            visited_screens_x.add(screen_x)
-
-            if args.max_trajectory_revisit_screen >= 0 and revisited_screen_x > args.max_trajectory_revisit_screen:
-                if not args.headless:
-                    print(f"Ending trajectory, revisited screen: screen={screen_x.screen_x}: x={x} ticks_left={ticks_left}")
-                force_terminate = True
+                if args.max_trajectory_revisit_screen >= 0 and revisited_screen_x > args.max_trajectory_revisit_screen:
+                    if not args.headless:
+                        print(f"Ending trajectory, revisited screen: screen={screen_x.screen_x}: x={x} ticks_left={ticks_left}")
+                    force_terminate = True
 
         elif (
             patch_history and
@@ -1289,7 +1286,7 @@ def main():
 
             visited_reservoirs_in_level.add(reservoir_id)
             visited_patches_x.add(PatchIdX.from_patch(patch_id))
-            visited_screens_x.add(ScreenIdX.from_state(x, patch_id))
+            visited_screens_x.add(ScreenIdX.from_patch(patch_id, patch_size))
             visited_reservoirs.add(reservoir_id)
 
             print(f"Starting level: {_str_level(world, level)}")
@@ -1334,6 +1331,7 @@ def main():
             r_stats.last_visited_step = step
 
             last_selected_res_id = saves.reservoir_id_from_save(save_info)
+
 
         # ---------------------------------------------------------------------
         # Handle patch transitions
