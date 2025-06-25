@@ -721,7 +721,7 @@ _MAX_LEVEL_DIST = 6400
 def _history_length_for_level(default_history_length: int, natural_world_level: tuple[int, int]) -> int:
     WORLD_LEVEL_TO_LEN = {
         # (7, 4): 20,
-        (8, 4): 3,
+        (8, 4): 2,
     }
 
     world, level = natural_world_level
@@ -883,7 +883,7 @@ class Args:
     max_trajectory_revisit_res: int = -1
     max_trajectory_area_type_changes: int = -1
 
-    flip_prob: float = 0.03
+    flip_prob: float = 0.05
 
     # Visualization
     vis_freq_sec: float = 0.15
