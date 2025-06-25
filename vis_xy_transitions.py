@@ -26,7 +26,9 @@ runs_dir = Path("~/rl/nes-ai/runs").expanduser()
 #load_path = runs_dir / "smb-search-v0__search_mario__1__2025-06-22_13-15-00/xy_transitions/level_1-1_30156.pkl"
 #load_path = runs_dir / "smb-search-v0__search_mario__1__2025-06-23_00-12-20/xy_transitions/level_1-2_129941_end.pkl"
 #load_path = runs_dir / "smb-search-v0__search_mario__1__2025-06-22_13-15-00/xy_transitions/"
-load_path = runs_dir / "smb-search-v0__search_mario__1__2025-06-23_09-24-37/xy_transitions/level_8-4_616299.pkl"
+#load_path = runs_dir / "smb-search-v0__search_mario__1__2025-06-23_09-24-37/xy_transitions/level_8-4_616299.pkl"
+#load_path = runs_dir / "smb-search-v0__search_mario__1__2025-06-24_10-57-03/xy_transitions/level_7-4_48156_end.pkl"
+load_path = runs_dir / "smb-search-v0__search_mario__1__2025-06-24_15-07-17/xy_transitions/level_8-4_460618.pkl"
 
 if load_path.is_dir():
     # Find most recent path in transition directory.

@@ -22,6 +22,38 @@ register(
     max_episode_steps=None,
 )
 
+class FrameRecordingWrapper(gym.Wrapper):
+    """Copy numpy output frames and transpose for recording"""
+
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+
+        obs_space = self.observation_space
+
+        new_shape = (obs_space.shape[1], obs_space.shape[0]) + obs_space.shape[2:]
+        axes = (1, 0, 2)
+
+        self.axes = axes
+
+        self.observation_space = gym.spaces.Box(
+            low=np.transpose(obs_space.low, axes),
+            high=np.transpose(obs_space.high, axes),
+            shape=new_shape,
+            dtype=obs_space.dtype,
+        )
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return np.transpose(obs, self.axes).copy(), info
+
+    def step(self, action):
+        obs, reward, done, truncated, info = self.env.step(action)
+        return np.transpose(obs, self.axes).copy(), reward, done, truncated, info
+
+    def render(self, *args, **kwargs):
+        frame = self.env.render(*args, **kwargs)
+        return np.transpose(frame, self.axes).copy()
+
 
 @dataclass
 class Args:
@@ -31,7 +63,7 @@ class Args:
     """seed of the experiment"""
 
     # Configuration.
-    action_history_filename: str = "runs/smb-search-v0__search_mario__1__2025-06-23_19-31-20/action_history/level_1-1_3008_end.pkl"
+    action_history_filename: str = "runs/smb-search-v0__search_mario__1__2025-06-24_21-08-23/action_history/level_8-4_9209_end.pkl"
 
     # Algorithm specific arguments
     env_id: str = "smb-search-v0"
@@ -40,11 +72,11 @@ class Args:
 def make_env(env_id: str, idx: int, capture_video: bool, run_name: str, headless: bool, world_level: tuple[int, int]):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id, render_mode="rgb_array", world_level=world_level, screen_rc=(1,1))
+            env = FrameRecordingWrapper(env)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-            raise RuntimeError("STOP")
         else:
-            render_mode = "rgb" if headless else "human"
+            render_mode = "rgb_array" if headless else "human"
             env = gym.make(env_id, render_mode=render_mode, world_level=world_level, screen_rc=(1,1))
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -78,12 +110,15 @@ def main():
     print(f"  action history: #={len(action_history)}")
 
     # env setup
-    capture_video = False
+    capture_video = True
     headless = False
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, 0, capture_video, run_name, headless, start_world_level)],
         autoreset_mode=gym.vector.AutoresetMode.DISABLED,
     )
+
+    if capture_video:
+        print(f"Writing video to: {run_name}")
 
     first_env = envs.envs[0].unwrapped
     nes = first_env.nes
