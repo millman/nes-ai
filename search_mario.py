@@ -721,7 +721,6 @@ _MAX_LEVEL_DIST = 6400
 
 def _history_length_for_level(default_history_length: int, natural_world_level: tuple[int, int]) -> int:
     WORLD_LEVEL_TO_LEN = {
-        # (7, 4): 20,
         (8, 4): 2,
     }
 
@@ -871,7 +870,7 @@ class Args:
     #   Mario is in the level.  Until then, we can use a history>1 to make the x,y position unique.
     #   The jump into the x,y patch will be discontinuous, from the right side of the screen.
     #
-    reservoir_history_length: int = 2
+    reservoir_history_length: int = 1
 
 
     # TODO(millman): We should consider the visitation counts based on a patch that includes some amount of history.
