@@ -954,9 +954,9 @@ def main():
     patch_size = args.patch_size
     step = 0
     next_save_id = 0
-    start_time = time.time()
-    last_print_time = time.time()
-    last_vis_time = time.time()
+    start_time = time.monotonic()
+    last_print_time = time.monotonic()
+    last_vis_time = time.monotonic()
 
     # Per-trajectory state.  Resets after every death/level.
     action_history = ActionHistory(ancestors_history_size=0, parent_history=None, action_history=[])
@@ -1020,7 +1020,7 @@ def main():
     reservoirs_stats = defaultdict(ReservoirStats)
     force_terminate = False
     steps_since_load = 0
-    load_time = time.time()
+    load_time = time.monotonic()
     patches_x_since_load = 0
     last_selected_res_id = None
 
@@ -1034,7 +1034,7 @@ def main():
     while True:
         step += 1
         steps_since_load += 1
-        now = time.time()
+        now = time.monotonic()
 
         # Remember previous states.
         prev_world = world
@@ -1463,7 +1463,7 @@ def main():
 
             # Reset variables that change on load.
             steps_since_load = 0
-            load_time = time.time()
+            load_time = time.monotonic()
             patches_x_since_load = 0
             force_terminate = False
 
