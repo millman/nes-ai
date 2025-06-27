@@ -21,7 +21,7 @@ from PIL import Image
 from search_mario_actions import ACTION_INDEX_TO_CONTROLLER, CONTROLLER_TO_ACTION_INDEX, build_controller_transition_matrix, flip_buttons_by_action_in_place
 from search_mario_viz import build_patch_histogram_rgb, draw_patch_grid, draw_patch_path, optimal_patch_layout
 from super_mario_env_search import SuperMarioEnv, SCREEN_H, SCREEN_W, get_x_pos, get_y_pos, get_level, get_world, _to_controller_presses, get_time_left, life, get_multi_part_progression, get_area_type
-from super_mario_env_ram_hacks import encode_world_level
+from super_mario_env_ram_hacks import encode_world_level, _is_dying, _get_player_state, _get_y_viewport
 
 from gymnasium.envs.registration import register
 
@@ -853,6 +853,7 @@ class Args:
     headless: bool = False
     print_freq_sec: float = 1.0
     start_level: tuple[int,int] = (7,4)
+    skip_animation: bool = True
 
     # Specific experiments
     patch_size: int = 20
@@ -872,10 +873,6 @@ class Args:
     #
     reservoir_history_length: int = 1
 
-
-    # TODO(millman): We should consider the visitation counts based on a patch that includes some amount of history.
-    #   Otherwise, we won't know to expand jumps.
-
     max_trajectory_steps: int = 150
     max_trajectory_patches_x: int = -1
     max_trajectory_revisit_x: int = -1
@@ -892,7 +889,7 @@ class Args:
     env_id: str = "smb-search-v0"
 
 
-def make_env(env_id: str, idx: int, capture_video: bool, run_name: str, headless: bool, world_level: tuple[int, int]):
+def make_env(env_id: str, idx: int, capture_video: bool, run_name: str, headless: bool, world_level: tuple[int, int], skip_animation: bool):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
@@ -900,7 +897,7 @@ def make_env(env_id: str, idx: int, capture_video: bool, run_name: str, headless
             raise RuntimeError("STOP")
         else:
             render_mode = "rgb_array" if headless else "human"
-            env = gym.make(env_id, render_mode=render_mode, world_level=world_level, screen_rc=(2,2))
+            env = gym.make(env_id, render_mode=render_mode, world_level=world_level, screen_rc=(2,2), skip_animation=skip_animation)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
@@ -939,7 +936,7 @@ def main():
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, 0, args.capture_video, run_name, args.headless, args.start_level)],
+        [make_env(args.env_id, 0, args.capture_video, run_name, args.headless, args.start_level, args.skip_animation)],
         autoreset_mode=gym.vector.AutoresetMode.DISABLED,
     )
 
@@ -1104,6 +1101,14 @@ def main():
         lives = life(ram)
         ticks_left = get_time_left(ram)
         area_type = get_area_type(ram)
+        is_dying = _is_dying(ram)
+
+        valid_transition = not termination and not is_dying
+
+        if False: # (lives == prev_lives) and is_dying:
+            player_state = _get_player_state(ram)
+            y_viewport = _get_y_viewport(ram)
+            print(f"DYING, but lives are the same: lives:{lives} == prev_lives:{prev_lives} player_state={player_state:x} y_viewport={y_viewport}")
 
         multi_part_progression_good, multi_part_progression_all = get_multi_part_progression(ram)
 
@@ -1140,7 +1145,7 @@ def main():
 
         if lives < prev_lives and not termination:
             print(f"Lost a life: x={x} ticks_left={ticks_left}")
-            raise AssertionError("Missing termination flag for lost life")
+            raise AssertionError(f"Missing termination flag for lost life: lives={lives} prev_lives={prev_lives}")
 
         # Stop after some fixed number of steps.  This will force the sampling logic to run more often,
         # which means we won't waste as much time running through old states.
@@ -1188,7 +1193,8 @@ def main():
             patch_history and
             patch_id_x != PatchIdX.from_patch(patch_history[-1]) and
             patch_id_x in visited_patches_x and
-            world == prev_world and level == prev_level
+            world == prev_world and level == prev_level and
+            valid_transition
         ):
             revisited_x += 1
 
@@ -1210,7 +1216,8 @@ def main():
         elif (
             patch_history and
             patch_id != patch_history[-1] and
-            world == prev_world and level == prev_level
+            world == prev_world and level == prev_level and
+            valid_transition
         ):
             prev_res_id = saves.reservoir_id_from_state(patch_history)
 
@@ -1371,8 +1378,7 @@ def main():
         # Save state info on transition.  It's ok to save when we intentionally end a trajectory
         # early, but not when the termination is due to the environment (e.g. Mario dying).
         #
-        if patch_id != patch_history[-1] and not termination:
-
+        if patch_id != patch_history[-1] and valid_transition:
             valid_lives = lives > 1 and lives < 100
             valid_x = True  # x < 65500
 

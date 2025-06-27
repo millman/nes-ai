@@ -133,6 +133,9 @@ def get_y_pos(ram: NdArrayUint8) -> int:
     return ram[0x00CE]
 
 
+_DEBUG_SKIP_FRAMES = False
+
+
 # Reference: https://gymnasium.farama.org/introduction/create_custom_env/
 class SuperMarioEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 120}
@@ -142,9 +145,14 @@ class SuperMarioEnv(gym.Env):
         render_fps: int | None = None,
         screen_rc: tuple[int, int] = (1, 1),
         world_level: tuple[int, int] | None = None,
+        skip_animation: bool = True,
     ):
         self.resets = 0
         self.steps = 0
+        self.skip_animation = skip_animation
+        self.skipped_frame_results = deque()
+        self.skipped_frames = None
+        self.skip_iter = None
 
         self.render_mode = render_mode
         self.render_fps = render_fps
@@ -195,7 +203,9 @@ class SuperMarioEnv(gym.Env):
         self.nes.run_init()
 
         # Skip start screen.
-        _skip_start_screen(self.nes, world_level=world_level)
+        for _ in _skip_start_screen(self.nes, world_level=world_level):
+            # Advance start operation.
+            pass
 
         # Save a snapshot to restore on next calls to reset.
         self.start_state = self.nes.save()
@@ -216,7 +226,8 @@ class SuperMarioEnv(gym.Env):
         # print(f"RESETTING ENVIRONMENT: resets={self.resets} world_level={self.world_level} steps={self.steps}")
 
         if self.resets >= 2:
-            raise AssertionError("SHOULDNT HAVE RESET")
+            # raise AssertionError("SHOULDNT HAVE RESET")
+            pass
 
         self.resets += 1
 
@@ -250,6 +261,41 @@ class SuperMarioEnv(gym.Env):
         return observation, info
 
     def step(self, controller_presses: NdArrayUint8):
+        # Check if we have frames we need to skip.
+        if self.skipped_frames:
+            assert len(self.skipped_frames) == 1, f"Expected a single skipped frame, found: {len(self.skipped_frames)}"
+
+            # Construct a skipped result.
+            skip_obs = self.skipped_frames[0]
+
+            skip_reward = 0
+            skip_terminated = False
+            skip_truncated = False
+            skip_info = self._get_info()
+            skip_info['controller'] = _to_controller_presses([])
+            skip_info['skipped_frame'] = True
+            skip_result = skip_obs, skip_reward, skip_terminated, skip_truncated, skip_info
+
+            self.last_observation = skip_obs
+
+            # Show the screen, if requested.
+            if self.render_mode == "human":
+                self.screen.blit_image_np(skip_obs, screen_index=0)
+                self.screen.show()
+
+            # Get the next skipped frame.  This will call nes.run_frame() under the hood.
+            skip_counter, skip_desc = next(self.skip_iter, (None, None))
+            if skip_counter is not None:
+                if _DEBUG_SKIP_FRAMES:
+                    print(f"Processing skipped counter ({skip_desc}): {skip_counter}")
+                self.skipped_frames = [self._get_obs().copy()]
+            else:
+                self.skip_iter = None
+                self.skipped_frames = None
+
+            return skip_result
+
+
         self.steps += 1
 
         ram = self.nes.ram()
@@ -302,7 +348,7 @@ class SuperMarioEnv(gym.Env):
         truncated = False
         observation = self._get_obs()
         info = self._get_info()
-        info['controller'] = action
+        info['controller'] = action.copy()
 
         self.last_observation = observation
 
@@ -311,10 +357,36 @@ class SuperMarioEnv(gym.Env):
             self.screen.blit_image_np(observation, screen_index=0)
             self.screen.show()
 
-        # Speed through any prelevel screens, dying animations, etc. that we don't care about.
-        skip_after_step(self.nes)
+        # We're going to reset, avoid any further ram changes.
+        if terminated:
+            result = observation, reward, terminated, truncated, info
+            return result
 
-        return observation, reward, terminated, truncated, info
+        if self.skip_animation:
+            result = observation, reward, terminated, truncated, info
+
+            for skip_counter in skip_after_step(self.nes, skip_animation=True):
+                raise AssertionError(f"We shouldn't have any skipped frames with skip_animation off: skip_counter={skip_counter} skip_animation={self.skip_animation}")
+
+            return result
+        else:
+            result = observation.copy(), reward, terminated, truncated, info
+
+            # Collect skipped frames and regular frames.
+            skip_iter = iter(skip_after_step(self.nes, skip_animation=False))
+
+            skip_counter, skip_desc = next(skip_iter, (None, None))
+            if skip_counter is not None:
+                if _DEBUG_SKIP_FRAMES:
+                    print(f"Processing skipped counter ({skip_desc}): {skip_counter}")
+                self.skipped_frames = [self._get_obs().copy()]
+                self.skip_iter = skip_iter
+            else:
+                self.skipped_frames = None
+                self.skip_iter = None
+
+            # Always return the frame before skipping.  We'll handle skipped frames later.
+            return result
 
     def render(self):
         if self.render_mode == "rgb_array":

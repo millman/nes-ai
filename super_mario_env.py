@@ -328,6 +328,10 @@ def _set_prelevel_timer(ram: NdArrayUint8, time_left: int):
     ram[0x07A0] = np.uint8(time_left)
 
 
+def _get_prelevel_timer(ram: NdArrayUint8) -> np.uint8:
+    return ram[0x07A0]
+
+
 def _set_world_level(ram: NdArrayUint8, world: int, level: int):
     target_world, target_stage, target_level = decode_world_level(world, level, lost_levels=False)
 
@@ -339,7 +343,8 @@ def _set_world_level(ram: NdArrayUint8, world: int, level: int):
 _DEBUG_WORLD_LEVEL_DECODING = False
 
 
-def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None):
+def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None, skip_animation: bool = True):
+
     if _DEBUG_WORLD_LEVEL_DECODING:
         print("World level decoding:")
 
@@ -350,6 +355,7 @@ def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None):
                 print(f"  {w}-{l} decoded -> {target_world}, {target_stage}, {target_level}")
 
     ram = nes.ram()
+    skip_counter = 0
 
     # Save controller state.
     controller_state = nes.controller1.save()
@@ -361,8 +367,15 @@ def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None):
     # Press and release the start button.
     nes.controller1.set_state(_to_controller_presses(['start']))
     nes.run_frame()
+    if not skip_animation:
+        yield (skip_counter, 'skip_start')
+        skip_counter += 1
+
     nes.controller1.set_state(_to_controller_presses([]))
     nes.run_frame()
+    if not skip_animation:
+        yield (skip_counter, 'skip_start')
+        skip_counter += 1
 
     _debug_level_from_ram(ram, frame_num=nes.get_frame_num(), desc="AFTER START PRESSED ONCE".ljust(LJUST))
 
@@ -373,8 +386,15 @@ def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None):
         # Press and release start button.
         nes.controller1.set_state(_to_controller_presses(['start']))
         nes.run_frame()
+        if not skip_animation:
+            yield (skip_counter, 'skip_start')
+            skip_counter += 1
+
         nes.controller1.set_state(_to_controller_presses([]))
         nes.run_frame()
+        if not skip_animation:
+            yield (skip_counter, 'skip_start')
+            skip_counter += 1
 
         # Set target level here.
         if world_level:
@@ -384,7 +404,21 @@ def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None):
         _debug_level_from_ram(ram, frame_num=nes.get_frame_num(), desc="LOOPING BEFORE PRELEVEL RUNOUT".ljust(LJUST))
 
         # Run out pre-level timer.
-        _set_prelevel_timer(ram, 0)
+        if skip_animation:
+            _set_prelevel_timer(ram, 0)
+        else:
+            pre_level_timer = _get_prelevel_timer(ram)
+            while pre_level_timer != 0:
+                print(f"running out pre-level timer: {pre_level_timer}")
+                nes.run_frame()
+                yield (skip_counter, 'skip_start_prelevel')
+                skip_counter += 1
+
+                pre_level_timer = _get_prelevel_timer(ram)
+
+                if skip_counter > 255 * 60:
+                    # This is almost certainly too long.  Did we stuck in a loop somehow?
+                    raise AssertionError(f"Prelevel timer is running too long: skip_counter={skip_counter}")
 
         _debug_level_from_ram(ram, frame_num=nes.get_frame_num(), desc="LOOPING AFTER PRELEVEL RUNOUT".ljust(LJUST))
 
@@ -405,8 +439,8 @@ def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None):
     nes.controller1.set_state(_to_controller_presses([]))
 
     # Skip pre-level stuff.
-    _skip_change_area(ram)
-    _skip_occupied_states(nes)
+    yield from _skip_change_area(nes, skip_animation=skip_animation)
+    yield from _skip_occupied_states(nes, skip_animation=skip_animation)
 
     _debug_level_from_ram(ram, frame_num=nes.get_frame_num(), desc="AFTER SKIPPED CHANGE AREA".ljust(LJUST))
 
@@ -415,6 +449,8 @@ def _skip_start_screen(nes: Any, world_level: tuple[int, int] | None):
 
     # Restore original controller state.
     nes.controller1.load(controller_state)
+
+    return None
 
 
 def _left_pos(ram: NdArrayUint8) -> int:

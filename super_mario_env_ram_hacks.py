@@ -8,11 +8,70 @@ NdArrayUint8 = np.ndarray[np.dtype[np.uint8]]
 #   https://github.com/Kautenja/gym-super-mario-bros/blob/master/gym_super_mario_bros/smb_env.py
 
 
-def _skip_change_area(ram: NdArrayUint8):
+_DEBUG_SKIP_CHANGE_AREA = False
+
+def _skip_change_area(nes: Any, skip_animation: bool):
     """Skip change area animations by by running down timers."""
+    ram = nes.ram()
     change_area_timer = ram[0x06DE]
-    if change_area_timer > 1 and change_area_timer < 255:
-        ram[0x06DE] = 1
+
+    if skip_animation:
+        if change_area_timer > 1 and change_area_timer < 255:
+            print(f"Setting change area timer: {change_area_timer} -> 1")
+            ram[0x06DE] = 1
+
+    else:
+        if change_area_timer > 1 and change_area_timer < 255:
+            _HACK = True
+
+            # HACK: We're saving the ram before we advance any frames.  We need to do this because
+            #   we get a slightly different result if we directly set the timer and then run a frame
+            #   compared to advancing the timer to the same point.  I think this is because doing
+            #   the frame advance actually changes other timers in the system too.  The effect we
+            #   see is that replaying steps doing a regular frame advance causes pirhanna's to
+            #   appear at different times after exiting a pipe.
+            #
+            #   So, we'll advance frames normally for animation, but when we're at the end of the
+            #   timer, reset the ram to before we advanced frames and set the timer like we would do
+            #   if we were skipping animations.
+            if _HACK:
+                ram_before = ram.copy()
+
+            # NOTE: We're running the change_area_timer down to 0, instead of to 1 like in the
+            #   skip_animation=True case.  Since we're only using this for display, it's ok, and
+            #   looks better.  When Mario goes in and out of pipes, this helps prevent (but doesn't
+            #   completely eliminate) Mario from flashing on top of the pipe for a frame.
+            skip_counter = 0
+            while change_area_timer > 0 and change_area_timer < 255:
+                if _DEBUG_SKIP_CHANGE_AREA:
+                    print(f"Change area timer: {change_area_timer}")
+
+                nes.run_frame()
+
+                yield (skip_counter, 'change_area')
+                skip_counter += 1
+
+                change_area_timer = ram[0x06DE]
+
+            # HACK: Restore ram to before we advanced frames.  Keep Mario's position the same so it
+            #   doesn't look weird.
+            if _HACK:
+                x_after = ram[0x0086]
+                x_screen_after = ram[0x006D]
+                y_after = ram[0x00CE]
+                y_viewport_after = ram[0x00b5]
+
+                ram[:] = ram_before
+                ram[0x0086] = x_after
+                ram[0x006D] = x_screen_after
+                ram[0x00CE] = y_after
+                ram[0x00b5] = y_viewport_after
+
+                ram[0x06DE] = 1
+
+            # assert change_area_timer == 1, f"Expected area change timer to be 1, found: {change_area_timer}"
+
+    return None
 
 
 def _is_world_over(ram: NdArrayUint8):
@@ -52,17 +111,25 @@ def _time(ram: NdArrayUint8) -> int:
     return _read_mem_range(ram, 0x07f8, 3)
 
 
-def _skip_end_of_world(nes: Any):
+def _skip_end_of_world(nes: Any, skip_animation: bool):
     """Skip the cutscene that plays at the end of a world."""
     ram = nes.ram()
 
     if _is_world_over(ram):
         # get the current game time to reference
         time = _time(ram)
+
         # loop until the time is different
+        skip_counter = 0
         while _time(ram) == time:
             # frame advance with NOP
             nes.run_frame()
+
+            if not skip_animation:
+                yield (skip_counter, 'end_of_world')
+                skip_counter += 1
+
+    return None
 
 
 def _get_player_state(ram: NdArrayUint8) -> np.uint8:
@@ -128,27 +195,76 @@ def _is_busy(ram: NdArrayUint8) -> bool:
     return _get_player_state(ram) in _BUSY_STATES
 
 
-def _skip_change_area(ram: NdArrayUint8):
-    """Skip change area animations by by running down timers."""
-    change_area_timer = ram[0x06DE]
-    if change_area_timer > 1 and change_area_timer < 255:
-        ram[0x06DE] = 1
-
-
 def _runout_prelevel_timer(ram: NdArrayUint8):
     """Force the pre-level timer to 0 to skip frames during a death."""
     ram[0x07A0] = 0
 
 
-def _skip_occupied_states(nes: Any):
+def _get_prelevel_timer(ram: NdArrayUint8) -> int:
+    """Force the pre-level timer to 0 to skip frames during a death."""
+    return ram[0x07A0]
+
+
+_DEBUG_OCCUPIED_STATES = False
+
+
+def _skip_occupied_states(nes: Any, skip_animation: bool):
     """Skip occupied states by running out a timer and skipping frames."""
     ram = nes.ram()
+
+    skip_counter = 0
+    frames_advanced = 0
+
     while _is_busy(ram) or _is_world_over(ram):
-        _runout_prelevel_timer(ram)
-        nes.run_frame()
+        frames_advanced += 1
+
+        if _DEBUG_OCCUPIED_STATES:
+            print(f"Occupied state: player_state={_get_player_state(ram)} world_over={_is_world_over(ram)}")
+
+        # Run down the prelevel timer, either by setting directly or advancing frames.
+        if skip_animation:
+            # Set the prelevel timer directly to zero.
+            _runout_prelevel_timer(ram)
+
+            # Always advance the frame while _is_busy() or _is_world_over().
+            nes.run_frame()
+
+        else:
+            prelevel_timer = _get_prelevel_timer(ram)
+            if prelevel_timer == 0:
+                # Even when not skipping animation, this frame should be skipped.  Don't yield.
+                nes.run_frame()
+                yield (skip_counter, 'occupied_state')
+                skip_counter += 1
+            else:
+                # Run down the prelevel timer instead of setting it directly to 0.
+                before = prelevel_timer
+                while prelevel_timer != 0:
+                    if _DEBUG_OCCUPIED_STATES:
+                        print(f"Prelevel timer: {prelevel_timer} player_state={_get_player_state(ram)}")
+
+                    nes.run_frame()
+                    yield (skip_counter, 'occupied_state')
+                    skip_counter += 1
+
+                    prelevel_timer = _get_prelevel_timer(ram)
+
+                if _DEBUG_OCCUPIED_STATES and before != 0:
+                    print(f"Advanced prelevel timer: {before} -> {prelevel_timer}")
+                assert prelevel_timer == 0, f"Expected prelevel timer to be 0, found: {prelevel_timer}"
+
+                # Advance after prelevel timer is zero.
+                nes.run_frame()
+                yield (skip_counter, 'occupied_state')
+                skip_counter += 1
+
+    if _DEBUG_OCCUPIED_STATES and frames_advanced > 0:
+        print(f"Skipped occupied states, frames: {skip_counter}, now: player_state={_get_player_state(ram)} world_over={_is_world_over(ram)}")
+
+    return None
 
 
-def skip_after_step(nes: Any):
+def skip_after_step(nes: Any, skip_animation: bool):
     """
     Handle any RAM hacking after a step occurs.
 
@@ -161,19 +277,23 @@ def skip_after_step(nes: Any):
 
     ram = nes.ram()
 
-    # if mario is dying, then cut to the chase and kill hi,
-    if _is_dying(ram):
+    # print(f"Position before _kill_mario: x={_get_x_pos(nes.ram())} y={_get_y_pos(nes.ram())} controller={nes.controller1.is_pressed}")
+
+    # if mario is dying, then cut to the chase and kill him
+    if skip_animation and _is_dying(ram):
         _kill_mario(ram)
 
     # skip world change scenes (must call before other skip methods)
-    _skip_end_of_world(nes)
+    yield from _skip_end_of_world(nes, skip_animation=skip_animation)
 
     # skip area change (i.e. enter pipe, flag get, etc.)
-    _skip_change_area(ram)
+    yield from _skip_change_area(nes, skip_animation=skip_animation)
 
     # skip occupied states like the black screen between lives that shows
     # how many lives the player has left
-    _skip_occupied_states(nes)
+    yield from _skip_occupied_states(nes, skip_animation=skip_animation)
+
+    return None
 
 
 def life(ram: NdArrayUint8):
