@@ -31,31 +31,17 @@ class FrameRecordingWrapper(gym.Wrapper):
     def __init__(self, env):
         gym.Wrapper.__init__(self, env)
 
-        obs_space = self.observation_space
-
-        new_shape = (obs_space.shape[1], obs_space.shape[0]) + obs_space.shape[2:]
-        axes = (1, 0, 2)
-
-        self.axes = axes
-
-        self.observation_space = gym.spaces.Box(
-            low=np.transpose(obs_space.low, axes),
-            high=np.transpose(obs_space.high, axes),
-            shape=new_shape,
-            dtype=obs_space.dtype,
-        )
-
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        return np.transpose(obs, self.axes).copy(), info
+        return obs.copy(), info
 
     def step(self, action):
         obs, reward, done, truncated, info = self.env.step(action)
-        return np.transpose(obs, self.axes).copy(), reward, done, truncated, info
+        return obs.copy(), reward, done, truncated, info
 
     def render(self, *args, **kwargs):
         frame = self.env.render(*args, **kwargs)
-        return np.transpose(frame, self.axes).copy()
+        return frame.copy()
 
 
 _EXAMPLE_RUNS = {

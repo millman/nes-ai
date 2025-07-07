@@ -1579,7 +1579,7 @@ def main():
             if False:
                 obs_hwc = _next_obs[0]
                 img_rgb_240 = Image.fromarray(obs_hwc.swapaxes(0, 1), mode='RGB')
-                expected_size = (SCREEN_W, SCREEN_H)
+                expected_size = (SCREEN_H, SCREEN_W)
                 assert img_rgb_240.size == expected_size, f"Unexpected img_rgb_240 size: {img_rgb_240.size} != {expected_size}"
                 draw_patch_grid(img_rgb_240, patch_size=patch_size, ram=ram, x=x, y=y)
                 screen.blit_image(img_rgb_240, screen_index=4)

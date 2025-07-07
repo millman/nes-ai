@@ -506,7 +506,7 @@ class SuperMarioEnv(gym.Env):
         # From: nes/ai_handler.py:34
         # self.screen_buffer = torch.zeros((4, 3, 224, 224), dtype=torch.float)
 
-        self.observation_space = gym.spaces.Box(low=0, high=255, shape=(SCREEN_W, SCREEN_H, 3), dtype=np.uint8)
+        self.observation_space = gym.spaces.Box(low=0, high=255, shape=(SCREEN_H, SCREEN_W, 3), dtype=np.uint8)
 
         self.ale = NesAle()
 
@@ -559,7 +559,7 @@ class SuperMarioEnv(gym.Env):
         screen_view = self.nes.get_screen_view()
         screen_view_np = self._screen_view_to_np(screen_view)
 
-        assert screen_view_np.shape == (SCREEN_W, SCREEN_H, 3), f"Unexpected screen_view_np.shape: {screen_view_np.shape} != {(SCREEN_W, SCREEN_H, 3)}"
+        assert screen_view_np.shape == (SCREEN_H, SCREEN_W, 3), f"Unexpected screen_view_np.shape: {screen_view_np.shape} != {(SCREEN_H, SCREEN_W, 3)}"
         assert screen_view_np.dtype == np.uint8, f"Unexpected screen_view_np.dtype: {screen_view_np.dtype} != {np.uint8}"
 
         return screen_view_np
@@ -780,19 +780,22 @@ class SuperMarioEnv(gym.Env):
             return None
 
     @staticmethod
-    def _screen_view_to_np(screen_view: Any) -> NdArrayRGB8:
+    def _screen_view_to_np(screen_view: memoryview) -> NdArrayRGB8:
+        # Screen buffer is stored in column major (screen[x][y]), but numpy uses row major (screen[y][x]).
         assert screen_view.shape == (240, 224), f"Unexpected screen_view shape: {screen_view.shape} != {(240, 224)}"
 
         # NOTE: These operations are carefully constructed to avoid memory copies, they are all views.
         #   Starting type is: (240, 224) uint32 as BGRA.
-        #   Ending type is: (240, 224, 3) uint8 as RGB.
+        #   Ending type is: (224, 240, 3) uint8 as RGB.
 
         screen_view_np = np.asarray(screen_view, copy=False)
         screen_view_bgra = screen_view_np.view(np.uint8).reshape((240, 224, 4))
         screen_view_bgr = screen_view_bgra[:, :, :3]
         screen_view_rgb = screen_view_bgr[:, :, ::-1]
+        screen_view_rgb_hw = np.transpose(screen_view_rgb, (1, 0, 2))
 
-        if False:
+        # Ensure all of the operations are views, not copies.
+        if _DEBUG_SCREEN_COPY := False:
             def _is_copy(arr):
                 return 'view' if arr.base is not None else 'new'
 
@@ -802,8 +805,15 @@ class SuperMarioEnv(gym.Env):
             print(f"SCREEN VIEW BGRA: shape={screen_view_bgra.shape} size={screen_view_bgra.size} cont={screen_view_bgra.flags['C_CONTIGUOUS']} base={_is_copy(screen_view_bgra)}")
             print(f"SCREEN VIEW BGR: shape={screen_view_bgr.shape} size={screen_view_bgr.size} cont={screen_view_bgr.flags['C_CONTIGUOUS']} base={_is_copy(screen_view_bgr)}")
             print(f"SCREEN VIEW RGB: shape={screen_view_rgb.shape} size={screen_view_rgb.size} cont={screen_view_rgb.flags['C_CONTIGUOUS']} base={_is_copy(screen_view_rgb)}")
+            print(f"SCREEN VIEW RGB HW: shape={screen_view_rgb_hw.shape} size={screen_view_rgb_hw.size} cont={screen_view_rgb_hw.flags['C_CONTIGUOUS']} base={_is_copy(screen_view_rgb_hw)}")
 
-        return screen_view_rgb
+            # All of the dervied views should have a base equal to the first numpy array.
+            assert screen_view_bgra.base is screen_view_np, f"Mismatched base: screen_view_bgra.base:{id(screen_view_bgra.base) != screen_view_np:{id(screen_view_np)}}"
+            assert screen_view_bgr.base is screen_view_np, f"Mismatched base: screen_view_bgr.base:{id(screen_view_bgr.base)} != screen_view_np:{id(screen_view_np)}"
+            assert screen_view_rgb.base is screen_view_np, f"Mismatched base: screen_view_rgb.base:{id(screen_view_rgb.base)} != screen_view_np:{id(screen_view_np)}"
+            assert screen_view_rgb_hw.base is screen_view_np, f"Mismatched base: screen_view_rgb_hw:{id(screen_view_rgb_hw.base)} != screen_view_np:{id(screen_view_np)}"
+
+        return screen_view_rgb_hw
 
     def close(self):
         self.screen.close()
