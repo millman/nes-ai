@@ -6,11 +6,13 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
 import pygame
 import tyro
+from PIL import Image
 
 from search_mario import _str_level
 from super_mario_env_search import SuperMarioEnv, _to_controller_presses, get_x_pos, get_y_pos, get_level, get_world
@@ -100,6 +102,7 @@ class Args:
 
     # Configuration.
     headless: bool = False
+    dump_trajectories: bool = False
 
     action_history_filename: str = _EXAMPLE_RUNS['8-4']
 
@@ -171,6 +174,25 @@ def main():
         for i, action in enumerate(action_history):
             print(f"  [{i}] {action}")
 
+    # Trajectory dumps.
+    if args.dump_trajectories:
+        # Make a dump dir named the same as the input directory.  Input example:
+        #   runs/smb-search-v0__search_mario__1__2025-06-25_18-03-35/action_history/level_1-1_2563_end.pkl
+        action_history_path = Path(args.action_history_filename)
+        parts = action_history_path.parts
+        assert parts[0] == "runs", f"Expected input file starting with 'runs', found: {parts}"
+        assert parts[2] == "action_history", f"Expected input file part[2] == 'action_history', found: {parts[2]}"
+        assert parts[3].endswith('.pkl'), f"Expected input file part[3] suffix .pkl, found: {parts[3]}"
+        input_run_id = parts[1]
+        traj_id = action_history_path.stem
+
+        dump_dir = Path("traj_dumps") / input_run_id / traj_id
+        dump_states_dir = dump_dir / 'states'
+        dump_actions_path = dump_dir / 'actions.npz'
+
+        dump_states = []
+        dump_actions = []
+
     i = 0
     num_resets = 0
     frames = 0
@@ -205,6 +227,17 @@ def main():
             print(f"Stopping after level change: {_str_level(*stop_after_world_level)} -> {_str_level(world, level)}")
             break
 
+        # Get the state before we apply an action.
+        if args.dump_trajectories:
+            # Dump state (observation).
+            dump_states_path = dump_states_dir / f'state_{frames}.png'
+            dump_states_path.parent.mkdir(parents=True, exist_ok=True)
+            obs_img = Image.fromarray(first_env._get_obs(), mode='RGB')
+            obs_img.save(dump_states_path)
+
+            # Dump action (controller).
+            dump_actions.append(action)
+
         # Execute action.
         _next_obs, reward, termination, truncation, info = envs.step((action,))
 
@@ -236,7 +269,15 @@ def main():
 
 
     if args.capture_video:
-        print(f"Writing frames={frames} actions={len(action_history)} to: {run_name}")
+        print(f"Writing video (frames={frames} actions={len(action_history)}) to: {run_name}")
+
+    if args.dump_trajectories:
+        print(f"Writing trajectory (#={len(dump_actions)}) to: {dump_dir}")
+        print(f"  {dump_states_dir}")
+        print(f"  {dump_actions_path}")
+
+        np.savez(dump_actions_path, dump_actions)
+
 
 if __name__ == "__main__":
     main()
