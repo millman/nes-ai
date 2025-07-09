@@ -18,7 +18,7 @@ from PIL import Image
 from pydantic import BaseModel
 from torch.utils.tensorboard import SummaryWriter
 
-from nes_ai.ai.vlm import GptVisionLanguageModel
+from nes_ai.ai.vlm import QwenMlxVisionLanguageModel as VLM
 from super_mario_env_ram_hacks import encode_world_level
 from super_mario_env_search import (
     SuperMarioEnv,
@@ -367,7 +367,7 @@ def main():
 
     ucb_states = {}
 
-    vlm = GptVisionLanguageModel("smb")
+    vlm = VLM("smb")
     instructions = None
     instruction_image = None
 
@@ -466,7 +466,13 @@ def main():
                     images=[instruction_image, obs_image, obs_image_2],
                     prompt="Sequence: <|image_1|>\n\n<|image_2|>\n\n<|image_3|>\n\n"
                     + instructions,
-                    system_prompt="Given a before screenshot and an after screenshot, and a set of instructions, determine if the instructions were followed.  For each instruction, output 'yes' if the instruction was followed and 'no' if it wasn't.",
+                    system_prompt="""Given a before screenshot and an after screenshot, and a set of instructions, determine if the instructions were followed.  For each instruction, output 'yes' if the instruction was followed and 'no' if it wasn't.
+
+EXAMPLE:
+1. Jump over the gap: no
+2. Collect the coin: yes
+3. Avoid the enemy: no
+""",
                 )
                 print(results)
                 yes_count = results.lower().count("yes")

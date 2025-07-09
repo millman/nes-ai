@@ -149,7 +149,7 @@ class Phi3VisionLanguageModel(VisionLanguageModel):
         self.processor = None
 
     def model_name(self) -> str:
-        return "microsoft/Phi-3-vision-128k-instruct"
+        return "microsoft/Phi-3.5-vision-instruct"
 
     def vlm(self, image: Image.Image, prompt: str, system_prompt: str) -> str:
         if self.model is None:
@@ -175,10 +175,12 @@ class Phi3VisionLanguageModel(VisionLanguageModel):
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        inputs = self.processor(prompt, [image], return_tensors="pt")
+        inputs = self.processor(prompt, [image], return_tensors="pt").to(
+            self.model.device
+        )
 
         generation_args = {
-            "max_new_tokens": 50000,
+            "max_new_tokens": 5000,
             # "temperature": 0.0,
             # "do_sample": False,
         }
@@ -202,8 +204,83 @@ class Phi3VisionLanguageModel(VisionLanguageModel):
         return response
 
 
+class QwenMlxVisionLanguageModel(VisionLanguageModel):
+    def __init__(self, db_name: str):
+        super().__init__(db_name + "_" + self.model_name())
+        self.model = None
+        self.processor = None
+
+    def model_name(self) -> str:
+        return "mlx-community/Qwen2.5-VL-7B-Instruct-bf16"
+
+    def vlm(self, image: Image.Image, prompt: str, system_prompt: str) -> str:
+        from mlx_vlm import generate, load
+        from mlx_vlm.prompt_utils import apply_chat_template
+        from mlx_vlm.utils import load_config
+
+        if self.model is None:
+            self.model, self.processor = load(self.model_name())
+            self.config = load_config(self.model_name())
+
+        # Prepare input
+        images = [image]
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        # Apply chat template
+        formatted_prompt = apply_chat_template(
+            self.processor, self.config, messages, num_images=len(images)
+        )
+
+        # Generate output
+        output = generate(
+            self.model, self.processor, formatted_prompt, images, verbose=False
+        )
+        print(output)
+
+        response = output[0]
+
+        print("VLM", prompt, " -> ", response)
+        return response
+
+    def vlm_multi(
+        self, images: list[Image.Image], prompt: str, system_prompt: str
+    ) -> str:
+        from mlx_vlm import generate, load
+        from mlx_vlm.prompt_utils import apply_chat_template
+        from mlx_vlm.utils import load_config
+
+        if self.model is None:
+            self.model, self.processor = load(self.model_name())
+            self.config = load_config(self.model_name())
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        # Apply chat template
+        formatted_prompt = apply_chat_template(
+            self.processor, self.config, messages, num_images=len(images)
+        )
+
+        # Generate output
+        output = generate(
+            self.model, self.processor, formatted_prompt, images, verbose=False
+        )
+        print(output)
+
+        response = output[0]
+
+        print("VLM", prompt, " -> ", response)
+        return response
+
+
 if __name__ == "__main__":
-    vlm = GptVisionLanguageModel("test")
+    vlm = QwenMlxVisionLanguageModel("test_ph3")
     image = Image.open("test.jpg")
     csv = vlm.vlm(
         image,
