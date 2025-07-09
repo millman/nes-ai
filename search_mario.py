@@ -18,7 +18,7 @@ from PIL import Image
 from pydantic import BaseModel
 from torch.utils.tensorboard import SummaryWriter
 
-from nes_ai.ai.vlm import QwenMlxVisionLanguageModel as VLM
+from nes_ai.ai.vlm import GptVisionLanguageModel as VLM
 from super_mario_env_ram_hacks import encode_world_level
 from super_mario_env_search import (
     SuperMarioEnv,

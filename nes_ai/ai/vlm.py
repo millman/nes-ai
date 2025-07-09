@@ -12,9 +12,16 @@ import shelve
 import shutil
 
 import imagehash
+import opik
 from PIL import Image
 from PIL.Image import Image as ImageType
 from transformers import AutoModelForCausalLM, AutoProcessor
+
+os.environ["OPIK_URL_OVERRIDE"] = "http://localhost:5173/api"
+os.environ["OPIK_PROJECT_NAME"] = "Mario"
+
+
+# opik.configure()
 
 
 class VisionLanguageModel:
@@ -63,8 +70,9 @@ class GptVisionLanguageModel(VisionLanguageModel):
     def __init__(self, db_name: str):
         super().__init__("vlm_" + db_name + "_" + self.model_name())
         from openai import OpenAI
+        from opik.integrations.openai import track_openai
 
-        self.client = OpenAI()
+        self.client = track_openai(OpenAI())
 
     def model_name(self) -> str:
         # return "gpt-4o"
@@ -73,7 +81,9 @@ class GptVisionLanguageModel(VisionLanguageModel):
         # return "gpt-4.1-mini"
         return "gpt-4.1"
 
+    @opik.track
     def vlm(self, image: Image.Image, prompt: str, system_prompt: str) -> str:
+        return self.vlm_multi([image], prompt, system_prompt)
         buffered = io.BytesIO()
         image.save(buffered, format="PNG")
         img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -102,15 +112,16 @@ class GptVisionLanguageModel(VisionLanguageModel):
         # print("GPT VLM", prompt, "->", response.choices[0].message.content)
         return response.choices[0].message.content
 
+    @opik.track
     def vlm_multi(
         self, images: list[Image.Image], prompt: str, system_prompt: str
     ) -> str:
-        images = []
+        image_strings = []
         for image in images:
             buffered = io.BytesIO()
             image.save(buffered, format="PNG")
             img_str = base64.b64encode(buffered.getvalue()).decode()
-            images.append(img_str)
+            image_strings.append(img_str)
 
         image_messages = [
             {
@@ -120,7 +131,7 @@ class GptVisionLanguageModel(VisionLanguageModel):
                     "detail": "high",
                 },
             }
-            for img_str in images
+            for img_str in image_strings
         ]
 
         response = self.client.chat.completions.create(
@@ -213,6 +224,7 @@ class QwenMlxVisionLanguageModel(VisionLanguageModel):
     def model_name(self) -> str:
         return "mlx-community/Qwen2.5-VL-7B-Instruct-bf16"
 
+    @opik.track
     def vlm(self, image: Image.Image, prompt: str, system_prompt: str) -> str:
         from mlx_vlm import generate, load
         from mlx_vlm.prompt_utils import apply_chat_template
