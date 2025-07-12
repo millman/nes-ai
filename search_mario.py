@@ -840,6 +840,47 @@ def _save_action_history(filepath: Path, world_ram: int, level_ram: int, start_s
     print(f"Wrote action history to: {filepath_action_history}")
 
 
+class TrajectoryStore:
+
+    def __init__(self, dump_dir: Path):
+        self.dump_dir = dump_dir
+
+        self.traj_id = 0
+        self.states = []
+        self.actions = []
+
+    def record_state_action(self, state: NdArrayRGB8, action: NdArrayUint8):
+        expected_shape = (224, 240, 3)
+        assert state.shape == expected_shape, f"Unexpected state shape: {state.shape} != {expected_shape}"
+        self.states.append(state.copy())
+        self.actions.append(action)
+
+    def save(self):
+        dump_states_dir = self.dump_dir / f"traj_{self.traj_id}" / 'states'
+        dump_actions_path = self.dump_dir / f"traj_{self.traj_id}" / 'actions.npz'
+
+        print(f"Writing trajectory[{self.traj_id}] (#={len(self.actions)}) to: {self.dump_dir}")
+        print(f"  {dump_states_dir}")
+        print(f"  {dump_actions_path}")
+
+        # Create a new directory for each trajectory.
+        dump_states_dir.mkdir(parents=True, exist_ok=True)
+
+        # Dump states (observation).
+        for i, state in enumerate(self.states):
+            dump_states_path = dump_states_dir / f'state_{i}.png'
+            obs_img = Image.fromarray(state, mode='RGB')
+            obs_img.save(dump_states_path)
+
+        # Dump action (controller).
+        np.savez(dump_actions_path, self.actions)
+
+        # Clear states, but leave frame counter in-tact.
+        self.states = []
+        self.actions = []
+        self.traj_id += 1
+
+
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -854,6 +895,7 @@ class Args:
     print_freq_sec: float = 1.0
     start_level: tuple[int,int] = (7,4)
     skip_animation: bool = True
+    dump_trajectories: bool = False
 
     # Specific experiments
     patch_size: int = 20
@@ -917,7 +959,7 @@ def main():
 
     run_prefix = f"{args.env_id}__{args.exp_name}__{args.seed}"
     run_name = f"{run_prefix}__{date_str}"
-    run_dir = f"runs/{run_name}"
+    run_dir = Path(f"runs/{run_name}")
 
     filepath_xy_transitions = Path(f"{run_dir}/xy_transitions")
     filepath_action_history = Path(f"{run_dir}/action_history")
@@ -958,6 +1000,9 @@ def main():
     # Per-trajectory state.  Resets after every death/level.
     action_history = ActionHistory(ancestors_history_size=0, parent_history=None, action_history=[])
     controller = _to_controller_presses([])
+
+    # Trajectory dump setup.
+    traj_dump_dir = run_dir / "traj_dumps"
 
     # Histogram visualization.
 
@@ -1028,6 +1073,11 @@ def main():
     original_args = None
     user_args = None
 
+    # Initialize the first observation.  Make sure we have one observation for each environment.
+    next_obs = (first_env._get_obs(),)
+
+    trajectory_store = TrajectoryStore(traj_dump_dir)
+
     while True:
         step += 1
         steps_since_load += 1
@@ -1045,8 +1095,13 @@ def main():
         # Update action every frame.
         controller = flip_buttons_by_action_in_place(controller, transition_matrix=transition_matrix, action_index_to_controller=ACTION_INDEX_TO_CONTROLLER, controller_to_action_index=CONTROLLER_TO_ACTION_INDEX)
 
+        # Save current state and action that will be applied (i.e. state-action pair).
+        if args.dump_trajectories:
+            first_env_next_obs = next_obs[0]
+            trajectory_store.record_state_action(first_env_next_obs, controller)
+
         # Execute action.
-        _next_obs, reward, termination, truncation, info = envs.step((controller,))
+        next_obs, reward, termination, truncation, info = envs.step((controller,))
 
         # Record the execution action, which may be from the agent or the user.
         executed_action, = info['controller']
@@ -1444,9 +1499,12 @@ def main():
 
         # If we died, reload from a game state based on heuristic.
         if termination or force_terminate:
-
             # If we reached a new level, serialize all of the states to disk, then clear the save state buffer.
             # Also dump state histogram.
+            if args.dump_trajectories:
+                trajectory_store.save()
+
+            # Ensure that we don't have a termination flag when reaching a new level.
             if (world != prev_world or level != prev_level) and termination:
                 raise AssertionError(f"Reached a new world ({prev_world}-{prev_level} -> {world}-{level}), but also terminated?")
 
