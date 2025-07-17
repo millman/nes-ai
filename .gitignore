@@ -144,6 +144,10 @@ dmypy.json
 /build
 /.idea
 
+/predict_outputs
+/runs
+/videos
+
 # Cython objects
 /nes/cycore/*.c
 /nes/cycore/*.so
