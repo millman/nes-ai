@@ -12,9 +12,8 @@ import gymnasium as gym
 import numpy as np
 import pygame
 import tyro
-from PIL import Image
 
-from search_mario import _str_level
+from search_mario import _str_level, TrajectoryStore
 from super_mario_env_search import SuperMarioEnv, _to_controller_presses, get_x_pos, get_y_pos, get_level, get_world
 
 from gymnasium.envs.registration import register
@@ -170,14 +169,10 @@ def main():
         assert parts[2] == "action_history", f"Expected input file part[2] == 'action_history', found: {parts[2]}"
         assert parts[3].endswith('.pkl'), f"Expected input file part[3] suffix .pkl, found: {parts[3]}"
         input_run_id = parts[1]
-        traj_id = action_history_path.stem
 
-        dump_dir = Path("traj_dumps") / input_run_id / traj_id
-        dump_states_dir = dump_dir / 'states'
-        dump_actions_path = dump_dir / 'actions.npz'
-
-        dump_states = []
-        dump_actions = []
+        dump_dir = Path("traj_dumps") / input_run_id
+        trajectory_store = TrajectoryStore(dump_dir)
+        traj_subdir = action_history_path.stem
 
     i = 0
     num_resets = 0
@@ -215,14 +210,8 @@ def main():
 
         # Get the state before we apply an action.
         if args.dump_trajectories:
-            # Dump state (observation).
-            dump_states_path = dump_states_dir / f'state_{frames}.png'
-            dump_states_path.parent.mkdir(parents=True, exist_ok=True)
-            obs_img = Image.fromarray(first_env._get_obs(), mode='RGB')
-            obs_img.save(dump_states_path)
-
-            # Dump action (controller).
-            dump_actions.append(action)
+            obs = first_env._get_obs()
+            trajectory_store.record_state_action(obs, action)
 
         # Execute action.
         _next_obs, reward, termination, truncation, info = envs.step((action,))
@@ -258,11 +247,7 @@ def main():
         print(f"Writing video (frames={frames} actions={len(action_history)}) to: {run_name}")
 
     if args.dump_trajectories:
-        print(f"Writing trajectory (#={len(dump_actions)}) to: {dump_dir}")
-        print(f"  {dump_states_dir}")
-        print(f"  {dump_actions_path}")
-
-        np.savez(dump_actions_path, dump_actions)
+        trajectory_store.save(traj_subdir=traj_subdir)
 
 
 if __name__ == "__main__":

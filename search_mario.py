@@ -855,9 +855,12 @@ class TrajectoryStore:
         self.states.append(state.copy())
         self.actions.append(action)
 
-    def save(self):
-        dump_states_dir = self.dump_dir / f"traj_{self.traj_id}" / 'states'
-        dump_actions_path = self.dump_dir / f"traj_{self.traj_id}" / 'actions.npz'
+    def save(self, traj_subdir: str | None = None):
+        if not traj_subdir:
+            traj_subdir = f"traj_{self.traj_id}"
+
+        dump_states_dir = self.dump_dir / traj_subdir / 'states'
+        dump_actions_path = self.dump_dir / traj_subdir / 'actions.npz'
 
         print(f"Writing trajectory[{self.traj_id}] (#={len(self.actions)}) to: {self.dump_dir}")
         print(f"  {dump_states_dir}")
