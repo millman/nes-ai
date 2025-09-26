@@ -355,6 +355,7 @@ def train(
     loss_type: str = "smoothl1",
     debug_every: int = 1000,
     debug_samples: int = 8,
+    save_every_images: int = 0,
 ):
     set_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -398,11 +399,18 @@ def train(
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type in ["cuda"]))
     best_val = float("inf")
 
+    processed_images = 0  # counts images seen by the network (2 per pair)
+    next_ckpt_at = save_every_images if save_every_images and save_every_images > 0 else None
+
     global_step = 0
     for ep in range(1, epochs + 1):
         model.train()
         running = {"mse": 0.0, "mae": 0.0, "n": 0, "acc@5": 0, "acc@10": 0}
         for img1, img2, dist, infos in dl_train:
+            # count images processed (each pair contributes two images)
+            images_this_step = int(img1.shape[0]) * 2
+            processed_images += images_this_step
+
             img1 = img1.to(device, non_blocking=True)
             img2 = img2.to(device, non_blocking=True)
             dist = dist.to(device, non_blocking=True)
@@ -446,6 +454,27 @@ def train(
                     save_debug_pairs(img1.cpu(), img2.cpu(), pred.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples)
                 except Exception as e:
                     print(f"[debug] failed to save pair grid: {e}")
+            # periodic checkpoint by images processed
+            if next_ckpt_at is not None and processed_images >= next_ckpt_at:
+                try:
+                    ckpt = {
+                        "epoch": ep,
+                        "global_step": global_step,
+                        "images_seen": processed_images,
+                        "model": model.state_dict(),
+                        "opt": opt.state_dict(),
+                        "val_mse": None,
+                        "val_mae": None,
+                        "args": {"data_root": str(data_root), "seed": seed},
+                    }
+                    out_path = out_dir / f"ckpt_imgs_{next_ckpt_at:012d}.pt"
+                    torch.save(ckpt, out_path)
+                    print(f"[ckpt] saved {out_path} (images_seen={processed_images})")
+                except Exception as e:
+                    print(f"[ckpt] failed to save periodic checkpoint: {e}")
+                finally:
+                    next_ckpt_at += save_every_images
+
             global_step += 1
 
         # epoch summary
@@ -504,6 +533,7 @@ def parse_args():
     ap.add_argument("--loss", type=str, default="smoothl1", choices=["mse", "smoothl1"], help="regression loss")
     ap.add_argument("--debug_every", type=int, default=1000, help="save a grid of training pairs every N steps")
     ap.add_argument("--debug_samples", type=int, default=8, help="rows in the debug grid")
+    ap.add_argument("--save_every_images", type=int, default=1000, help="save a checkpoint every N images seen (0 disables)")
     return ap.parse_args()
 
 
@@ -522,4 +552,5 @@ if __name__ == "__main__":
         loss_type=args.loss,
         debug_every=args.debug_every,
         debug_samples=args.debug_samples,
+        save_every_images=args.save_every_images,
     )
