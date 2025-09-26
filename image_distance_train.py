@@ -397,6 +397,8 @@ def train(
 ):
     set_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # device
     if device_str:
@@ -532,7 +534,7 @@ def train(
                         "val_mae": None,
                         "args": {"data_root": str(data_root), "seed": seed},
                     }
-                    out_path = out_dir / f"ckpt_imgs_{next_ckpt_at:012d}.pt"
+                    out_path = ckpt_dir / f"imgs_\{next_ckpt_at:012d\}\.ckpt"
                     torch.save(ckpt, out_path)
                     print(f"[ckpt] saved {out_path} (images_seen={processed_images})")
                 except Exception as e:
@@ -576,10 +578,10 @@ def train(
                 "seed": seed,
             },
         }
-        torch.save(ckpt, out_dir / "last.pt")
+        torch.save(ckpt, out_dir / "last.ckpt")
         if val_mse < best_val:
             best_val = val_mse
-            torch.save(ckpt, out_dir / "best.pt")
+            torch.save(ckpt, out_dir / "best.ckpt")
             print(f"[ep {ep:02d}] saved best checkpoint (val MSE={best_val:.3f})")
 
     print("[done]")
