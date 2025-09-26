@@ -323,8 +323,7 @@ def save_debug_pairs(img1: torch.Tensor,
                       *,
                       model: Optional[DistanceRegressor] = None,
                       device: Optional[torch.device] = None,
-                      vis_max_shift: int = 16,
-                      vis_step: int = 2) -> None:
+                      ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rows = min(max_rows, img1.shape[0])
     canvas = Image.new("RGB", (W * 2, H * rows), (0, 0, 0))
@@ -373,8 +372,6 @@ def save_debug_pairs(img1: torch.Tensor,
                 draw.text((W + cx + 4, r * H + cy + 4), f"→ ({dx_ba:.1f},{dy_ba:.1f}) d={d_ba:.1f}", fill=(255, 0, 0), font=font)
             except Exception as e:
                 draw.text((4, r * H + 18), f"vec est failed: {e}", fill=(255, 80, 80), font=font)
-            except Exception as e:
-                draw.text((4, r * H + 18), f"vec est failed: {e}", fill=(255, 80, 80), font=font)
 
     canvas.save(out_path)
 
@@ -395,10 +392,8 @@ def train(
     debug_every: int = 1000,
     debug_samples: int = 8,
     save_every_images: int = 0,
-    vis_max_shift: int = 16,
-    vis_step: int = 2,
     lambda_comp: float = 1.0,
-    lambda_mag: float = 1.0,")] }
+    lambda_mag: float = 1.0,
 ):
     set_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -521,7 +516,7 @@ def train(
             if (global_step % debug_every) == 0:
                 try:
                     out_path = out_dir / "debug_pairs" / f"step_{global_step:06d}.png"
-                    save_debug_pairs(img1.cpu(), img2.cpu(), pred_mag.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples, model=model, device=device, vis_max_shift=vis_max_shift, vis_step=vis_step)
+                    save_debug_pairs(img1.cpu(), img2.cpu(), pred_mag.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples, model=model, device=device)
                 except Exception as e:
                     print(f"[debug] failed to save pair grid: {e}")
             # periodic checkpoint by images processed
@@ -604,9 +599,7 @@ def parse_args():
     ap.add_argument("--loss", type=str, default="smoothl1", choices=["mse", "smoothl1"], help="regression loss")
     ap.add_argument("--debug_every", type=int, default=1000, help="save a grid of training pairs every N steps")
     ap.add_argument("--debug_samples", type=int, default=8, help="rows in the debug grid")
-    ap.add_argument("--save_every_images", type=int, default=0, help="save a checkpoint every N images seen (0 disables)")
-    ap.add_argument("--vis_max_shift", type=int, default=16, help="max |dx|,|dy| explored when drawing motion vectors")
-    ap.add_argument("--vis_step", type=int, default=2, help="grid step in pixels for motion vector search (used only if you keep the old search utility)")
+    ap.add_argument("--save_every_images", type=int, default=10000, help="save a checkpoint every N images seen (0 disables)")
     ap.add_argument("--lambda_comp", type=float, default=1.0, help="weight of vector component loss on (dx,dy) for translate/noise")
     ap.add_argument("--lambda_mag", type=float, default=1.0, help="weight of magnitude loss so ‖(dx,dy)‖ matches pixel distance")
     return ap.parse_args()
@@ -628,8 +621,6 @@ if __name__ == "__main__":
         debug_every=args.debug_every,
         debug_samples=args.debug_samples,
         save_every_images=args.save_every_images,
-        vis_max_shift=args.vis_max_shift,
-        vis_step=args.vis_step,
         # loss weights
         lambda_comp=args.lambda_comp,
         lambda_mag=args.lambda_mag,
