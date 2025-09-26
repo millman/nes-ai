@@ -23,7 +23,6 @@ import random
 import argparse
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
-from functools import partial
 
 import numpy as np
 from PIL import Image
@@ -32,6 +31,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from functools import partial
 
 H, W = 240, 224  # (height, width) of input frames
 
@@ -87,26 +87,32 @@ def pad_with_noise(canvas: torch.Tensor, seed: Optional[int] = None) -> torch.Te
 
 def affine_translate(img: torch.Tensor, dx: float, dy: float) -> torch.Tensor:
     """
-    Translate img by (dx,dy) pixels (x=right, y=down). Pad with noise.
+    Translate img by integer (dx, dy) pixels (x=right, y=down).
+    Newly exposed regions are filled with random noise in [0,1].
+    This uses torch.roll for speed and then overwrites the wrapped edges
+    with fresh noise so there's no wraparound artifact.
     """
     c, h, w = img.shape
-    base = torch.empty_like(img)
-    pad_with_noise(base)
-    # integer grid copy (simple, fast). For subpixel, we could grid_sample; here keep simple.
-    ix = torch.arange(w, device=img.device).view(1, w).expand(h, w)
-    iy = torch.arange(h, device=img.device).view(h, 1).expand(h, w)
-    src_x = ix - int(round(dx))
-    src_y = iy - int(round(dy))
-    valid = (src_x >= 0) & (src_x < w) & (src_y >= 0) & (src_y < h)
+    ix = int(round(dx))
+    iy = int(round(dy))
 
-    # Get valid coordinates
-    valid_y, valid_x = torch.where(valid)
-    src_y_valid = src_y[valid]
-    src_x_valid = src_x[valid]
+    # Roll the image; this wraps around, which we'll fix by replacing
+    # the wrapped strips with noise so the output is a true translate+pad.
+    out = torch.roll(img, shifts=(iy, ix), dims=(1, 2))
 
-    # Copy valid pixels
-    base[:, valid_y, valid_x] = img[:, src_y_valid, src_x_valid]
-    return base
+    # Vertical exposed bands
+    if iy > 0:  # shifted down -> expose a band at the top
+        out[:, :iy, :] = torch.rand((c, iy, w), device=img.device, dtype=img.dtype)
+    elif iy < 0:  # shifted up -> expose a band at the bottom
+        out[:, h+iy:, :] = torch.rand((c, -iy, w), device=img.device, dtype=img.dtype)
+
+    # Horizontal exposed bands
+    if ix > 0:  # shifted right -> expose a band on the left
+        out[:, :, :ix] = torch.rand((c, h, ix), device=img.device, dtype=img.dtype)
+    elif ix < 0:  # shifted left -> expose a band on the right
+        out[:, :, w+ix:] = torch.rand((c, h, -ix), device=img.device, dtype=img.dtype)
+
+    return out
 
 
 def scale_around_center(img: torch.Tensor, scale: float) -> torch.Tensor:
@@ -202,6 +208,20 @@ class PairAugmentor:
         return img1, img2, float(dist), info
 
 
+def collate_with_aug(batch_imgs, aug):
+    """Top-level, picklable collate that applies PairAugmentor on-the-fly."""
+    imgs = torch.stack(batch_imgs, dim=0)
+    img1s, img2s, dists, infos = [], [], [], []
+    for i in range(imgs.shape[0]):
+        a, b, dist, info = aug(imgs[i])
+        img1s.append(a); img2s.append(b); dists.append(dist); infos.append(info)
+    return (
+        torch.stack(img1s, 0),
+        torch.stack(img2s, 0),
+        torch.tensor(dists, dtype=torch.float32),
+        infos,
+    )
+
 # -------------------------
 # Dataset
 # -------------------------
@@ -232,26 +252,6 @@ class FramesDataset(Dataset):
         img = img.resize((W, H), resample=Image.BICUBIC)  # guard
         t = pil_to_tensor(img)
         return t
-
-
-def collate_fn(batch_imgs, aug):
-    """
-    Collate function for DataLoader that applies augmentations.
-
-    Args:
-        batch_imgs: List[Tensor CxHxW]
-        aug: PairAugmentor instance
-
-    Returns:
-        Tuple of (img1_batch, img2_batch, distances, infos)
-    """
-    imgs = torch.stack(batch_imgs, dim=0)
-    img1s, img2s, dists = [], [], []
-    infos = []
-    for i in range(imgs.shape[0]):
-        a, b, dist, info = aug(imgs[i])
-        img1s.append(a); img2s.append(b); dists.append(dist); infos.append(info)
-    return torch.stack(img1s, 0), torch.stack(img2s, 0), torch.tensor(dists, dtype=torch.float32), infos
 
 
 # -------------------------
@@ -335,12 +335,20 @@ def train(
     aug = PairAugmentor()
     print(f"[Data] train={len(ds_train)}  val={len(ds_val)}")
 
-    collate = partial(collate_fn, aug=aug)
+    def collate(batch_imgs):
+        # batch_imgs: List[Tensor CxHxW]
+        imgs = torch.stack(batch_imgs, dim=0)
+        img1s, img2s, dists = [], [], []
+        infos = []
+        for i in range(imgs.shape[0]):
+            a, b, dist, info = aug(imgs[i])
+            img1s.append(a); img2s.append(b); dists.append(dist); infos.append(info)
+        return torch.stack(img1s, 0), torch.stack(img2s, 0), torch.tensor(dists, dtype=torch.float32), infos
 
     dl_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True,
-                          num_workers=num_workers, pin_memory=True, collate_fn=collate, drop_last=True)
+                          num_workers=num_workers, pin_memory=True, collate_fn=partial(collate_with_aug, aug=aug), drop_last=True)
     dl_val   = DataLoader(ds_val, batch_size=batch_size, shuffle=False,
-                          num_workers=num_workers, pin_memory=True, collate_fn=collate, drop_last=False)
+                          num_workers=num_workers, pin_memory=True, collate_fn=partial(collate_with_aug, aug=aug), drop_last=False)
 
     # model/opt
     model = DistanceRegressor().to(device)
@@ -427,7 +435,7 @@ def train(
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", type=Path, required=True, help="Path to traj_dumps")
-    ap.add_argument("--out_dir", type=Path, default=Path("runs/image_distance"))
+    ap.add_argument("--out_dir", type=Path, default=Path("out/image_distance"))
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)

@@ -160,7 +160,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", type=Path, required=True)
     ap.add_argument("--ckpt", type=Path, required=True)
-    ap.add_argument("--out_dir", type=Path, default=Path("eval_out"))
+    ap.add_argument("--out_dir", type=Path, default=Path("out/image_distance_eval"))
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--aug_pairs", type=int, default=5000)
     ap.add_argument("--traj_pairs_per_traj", type=int, default=2000)
