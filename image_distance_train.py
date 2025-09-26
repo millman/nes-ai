@@ -11,8 +11,8 @@ Train a self-supervised "image distance" regressor on 240x224 frames.
   * scale around center  -> distance contributes ≈ |s-1| * scale_coeff
       where scale_coeff defaults to 0.5 * image_diagonal
 - Slight Gaussian noise is added to (almost) all variants.
-- Model: Siamese encoder (shared CNN) -> embeddings -> small head predicts scalar distance.
-- Loss: MSE; also report MAE and % within tolerance.
+- Model: Siamese encoder (shared CNN) → embeddings → small MLP predicts a **motion vector** (dx, dy). The **vector magnitude** ‖(dx,dy)‖ is the image-distance signal.
+- Loss: vector-component loss on (dx,dy) where defined (translate/noise), plus a magnitude loss so ‖(dx,dy)‖ matches the ground-truth pixel-equivalent distance (including scale). We report MAE/MSE on the magnitude and vector MAE on supervised subsets.
 
 Usage:
   python train_image_distance.py --data_root traj_dumps --epochs 10
@@ -281,24 +281,25 @@ class ConvEncoder(nn.Module):
 
 class DistanceRegressor(nn.Module):
     """
-    Siamese: shared encoder -> combine -> MLP -> scalar distance (>=0).
+    Siamese: shared encoder -> combine -> MLP -> motion vector (dx, dy).
+    The image-distance is defined as the vector magnitude ‖(dx,dy)‖.
     """
     def __init__(self, emb_dim: int = 256):
         super().__init__()
         self.encoder = ConvEncoder(out_dim=emb_dim)
-        self.head = nn.Sequential(
+        self.head_vec = nn.Sequential(
             nn.Linear(emb_dim * 3, 256), nn.ReLU(inplace=True),
             nn.Linear(256, 128), nn.ReLU(inplace=True),
-            nn.Linear(128, 1),
+            nn.Linear(128, 2),
         )
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+        """Return motion vector (dx, dy)."""
         z1 = self.encoder(x1)
         z2 = self.encoder(x2)
         feat = torch.cat([z1, z2, torch.abs(z1 - z2)], dim=1)
-        y = self.head(feat).squeeze(1)
-        # keep outputs non-negative but with smooth gradients
-        return F.softplus(y, beta=1.0)
+        v = self.head_vec(feat)
+        return v
 
 
 # -------------------------
@@ -311,13 +312,19 @@ def _tensor_to_pil(t: torch.Tensor) -> Image.Image:
     return Image.fromarray(arr)
 
 
+
 def save_debug_pairs(img1: torch.Tensor,
                       img2: torch.Tensor,
                       pred: torch.Tensor,
                       gt: torch.Tensor,
                       infos: list,
                       out_path: Path,
-                      max_rows: int = 8) -> None:
+                      max_rows: int = 8,
+                      *,
+                      model: Optional[DistanceRegressor] = None,
+                      device: Optional[torch.device] = None,
+                      vis_max_shift: int = 16,
+                      vis_step: int = 2) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rows = min(max_rows, img1.shape[0])
     canvas = Image.new("RGB", (W * 2, H * rows), (0, 0, 0))
@@ -326,17 +333,49 @@ def save_debug_pairs(img1: torch.Tensor,
         font = ImageFont.load_default()
     except Exception:
         font = None
+
+    cx, cy = W // 2, H // 2
+
     for r in range(rows):
         a = _tensor_to_pil(img1[r])
         b = _tensor_to_pil(img2[r])
         canvas.paste(a, (0, r * H))
         canvas.paste(b, (W, r * H))
+
+        # text overlay
         txt = f"gt={gt[r]:.1f} pred={pred[r]:.1f} mode={infos[r].get('mode','?')}"
         if 'dx' in infos[r] and 'dy' in infos[r]:
             txt += f" dx={infos[r]['dx']} dy={infos[r]['dy']}"
         if 'scale' in infos[r]:
             txt += f" s={infos[r]['scale']:.3f}"
         draw.text((4, r * H + 4), txt, fill=(255, 255, 255), font=font)
+
+        # optional: show model-estimated motion vectors A->B and B->A (direct model output)
+        if model is not None and device is not None:
+            try:
+                # Predict vectors directly from the vector head
+                # Predict vectors directly from the vector head
+                v_ab = model(img1[r].unsqueeze(0).to(device))
+                v_ba = model(img2[r].unsqueeze(0).to(device))
+                dx_ab, dy_ab = float(v_ab[0,0].item()), float(v_ab[0,1].item())
+                dx_ba, dy_ba = float(v_ba[0,0].item()), float(v_ba[0,1].item())
+                d_ab = math.sqrt(dx_ab*dx_ab + dy_ab*dy_ab)
+                d_ba = math.sqrt(dx_ba*dx_ba + dy_ba*dy_ba)
+
+                # A panel (left): draw from center to center+(dx_ab, dy_ab)
+                draw.line([(cx, r * H + cy), (cx + int(round(dx_ab)), r * H + cy + int(round(dy_ab)))], fill=(0, 255, 0), width=2)
+                draw.ellipse([(cx + int(round(dx_ab)) - 2, r * H + cy + int(round(dy_ab)) - 2), (cx + int(round(dx_ab)) + 2, r * H + cy + int(round(dy_ab)) + 2)], outline=(0, 255, 0))
+                draw.text((cx + 4, r * H + cy + 4), f"→ ({dx_ab:.1f},{dy_ab:.1f}) d={d_ab:.1f}", fill=(0, 255, 0), font=font)
+
+                # B panel (right): draw from center to center+(dx_ba, dy_ba)
+                draw.line([(W + cx, r * H + cy), (W + cx + int(round(dx_ba)), r * H + cy + int(round(dy_ba)))], fill=(255, 0, 0), width=2)
+                draw.ellipse([(W + cx + int(round(dx_ba)) - 2, r * H + cy + int(round(dy_ba)) - 2), (W + cx + int(round(dx_ba)) + 2, r * H + cy + int(round(dy_ba)) + 2)], outline=(255, 0, 0))
+                draw.text((W + cx + 4, r * H + cy + 4), f"→ ({dx_ba:.1f},{dy_ba:.1f}) d={d_ba:.1f}", fill=(255, 0, 0), font=font)
+            except Exception as e:
+                draw.text((4, r * H + 18), f"vec est failed: {e}", fill=(255, 80, 80), font=font)
+            except Exception as e:
+                draw.text((4, r * H + 18), f"vec est failed: {e}", fill=(255, 80, 80), font=font)
+
     canvas.save(out_path)
 
 # -------------------------
@@ -356,6 +395,10 @@ def train(
     debug_every: int = 1000,
     debug_samples: int = 8,
     save_every_images: int = 0,
+    vis_max_shift: int = 16,
+    vis_step: int = 2,
+    lambda_comp: float = 1.0,
+    lambda_mag: float = 1.0,")] }
 ):
     set_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -416,12 +459,34 @@ def train(
             dist = dist.to(device, non_blocking=True)
 
             with torch.cuda.amp.autocast(enabled=(device.type in ["cuda"])):
-                pred = model(img1, img2)
+                pred_v = model(img1, img2)
+                pred_mag = torch.linalg.norm(pred_v, dim=1)
                 # choose loss
+                # magnitude supervision for all modes (translate/scale/noise)
                 if loss_type == "mse":
-                    loss = F.mse_loss(pred, dist)
+                    loss_mag = F.mse_loss(pred_mag, dist)
                 else:
-                    loss = F.smooth_l1_loss(pred, dist)
+                    loss_mag = F.smooth_l1_loss(pred_mag, dist)
+
+                # vector supervision: only on translate + noise_only (scale direction is ambiguous)
+                B = dist.shape[0]
+                gt_vec = torch.zeros((B, 2), device=device, dtype=pred_v.dtype)
+                vec_mask = torch.zeros((B,), device=device, dtype=torch.bool)
+                for i, info in enumerate(infos):
+                    m = info.get("mode", "?")
+                    if m == "translate":
+                        gt_vec[i, 0] = float(info.get("dx", 0))
+                        gt_vec[i, 1] = float(info.get("dy", 0))
+                        vec_mask[i] = True
+                    elif m == "noise_only":
+                        vec_mask[i] = True
+                if vec_mask.any():
+                    loss_vec = F.smooth_l1_loss(pred_v[vec_mask], gt_vec[vec_mask])
+                else:
+                    loss_vec = torch.zeros((), device=device)
+
+                # total loss: vector components (when defined) + magnitude always
+                loss = lambda_comp * loss_vec + lambda_mag * loss_mag
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -429,10 +494,15 @@ def train(
             scaler.update()
 
             with torch.no_grad():
-                mae = torch.mean(torch.abs(pred - dist)).item()
-                mse = torch.mean((pred - dist)**2).item()
-                acc5 = torch.mean((torch.abs(pred - dist) <= 5.0).float()).item()
-                acc10 = torch.mean((torch.abs(pred - dist) <= 10.0).float()).item()
+                mae = torch.mean(torch.abs(pred_mag - dist)).item()
+                mse = torch.mean((pred_mag - dist)**2).item()
+                acc5 = torch.mean((torch.abs(pred_mag - dist) <= 5.0).float()).item()
+                acc10 = torch.mean((torch.abs(pred_mag - dist) <= 10.0).float()).item()
+                # vector MAE on supervised subset
+                if 'vec_mask' in locals() and vec_mask.any():
+                    vmae = torch.mean(torch.linalg.norm(pred_v[vec_mask] - gt_vec[vec_mask], dim=1)).item()
+                else:
+                    vmae = float('nan')
             running["mse"] += mse * dist.numel()
             running["mae"] += mae * dist.numel()
             running["acc@5"] += acc5 * dist.numel()
@@ -446,12 +516,12 @@ def train(
                 for m in modes:
                     _counts[m] = _counts.get(m, 0) + 1
                 mode_str = " ".join([f"{k}:{v}" for k, v in _counts.items()])
-                print(f"[ep {ep:02d} | step {global_step:06d}] train MSE={mse:.3f} MAE={mae:.3f} acc@5={acc5*100:.1f}% acc@10={acc10*100:.1f}% | modes {mode_str}")
+                print(f"[ep {ep:02d} | step {global_step:06d}] train MSE={mse:.3f} MAE={mae:.3f} vMAE={vmae:.3f} acc@5={acc5*100:.1f}% acc@10={acc10*100:.1f}% | modes {mode_str}")
             # periodic debug image grid (independent of log_every)
             if (global_step % debug_every) == 0:
                 try:
                     out_path = out_dir / "debug_pairs" / f"step_{global_step:06d}.png"
-                    save_debug_pairs(img1.cpu(), img2.cpu(), pred.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples)
+                    save_debug_pairs(img1.cpu(), img2.cpu(), pred_mag.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples, model=model, device=device, vis_max_shift=vis_max_shift, vis_step=vis_step)
                 except Exception as e:
                     print(f"[debug] failed to save pair grid: {e}")
             # periodic checkpoint by images processed
@@ -490,9 +560,10 @@ def train(
                 img1 = img1.to(device, non_blocking=True)
                 img2 = img2.to(device, non_blocking=True)
                 dist = dist.to(device, non_blocking=True)
-                pred = model(img1, img2)
-                val_mse += torch.sum((pred - dist) ** 2).item()
-                val_mae += torch.sum(torch.abs(pred - dist)).item()
+                pred_v = model(img1, img2)
+                pred_mag = torch.linalg.norm(pred_v, dim=1)
+                val_mse += torch.sum((pred_mag - dist) ** 2).item()
+                val_mae += torch.sum(torch.abs(pred_mag - dist)).item()
                 val_n += dist.numel()
         val_mse /= max(1, val_n)
         val_mae /= max(1, val_n)
@@ -533,7 +604,11 @@ def parse_args():
     ap.add_argument("--loss", type=str, default="smoothl1", choices=["mse", "smoothl1"], help="regression loss")
     ap.add_argument("--debug_every", type=int, default=1000, help="save a grid of training pairs every N steps")
     ap.add_argument("--debug_samples", type=int, default=8, help="rows in the debug grid")
-    ap.add_argument("--save_every_images", type=int, default=1000, help="save a checkpoint every N images seen (0 disables)")
+    ap.add_argument("--save_every_images", type=int, default=0, help="save a checkpoint every N images seen (0 disables)")
+    ap.add_argument("--vis_max_shift", type=int, default=16, help="max |dx|,|dy| explored when drawing motion vectors")
+    ap.add_argument("--vis_step", type=int, default=2, help="grid step in pixels for motion vector search (used only if you keep the old search utility)")
+    ap.add_argument("--lambda_comp", type=float, default=1.0, help="weight of vector component loss on (dx,dy) for translate/noise")
+    ap.add_argument("--lambda_mag", type=float, default=1.0, help="weight of magnitude loss so ‖(dx,dy)‖ matches pixel distance")
     return ap.parse_args()
 
 
@@ -553,4 +628,9 @@ if __name__ == "__main__":
         debug_every=args.debug_every,
         debug_samples=args.debug_samples,
         save_every_images=args.save_every_images,
+        vis_max_shift=args.vis_max_shift,
+        vis_step=args.vis_step,
+        # loss weights
+        lambda_comp=args.lambda_comp,
+        lambda_mag=args.lambda_mag,
     )
