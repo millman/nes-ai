@@ -341,37 +341,43 @@ def save_debug_pairs(img1: torch.Tensor,
         canvas.paste(a, (0, r * H))
         canvas.paste(b, (W, r * H))
 
-        # text overlay
+        # text overlay at bottom of each row
         txt = f"gt={gt[r]:.1f} pred={pred[r]:.1f} mode={infos[r].get('mode','?')}"
         if 'dx' in infos[r] and 'dy' in infos[r]:
             txt += f" dx={infos[r]['dx']} dy={infos[r]['dy']}"
         if 'scale' in infos[r]:
             txt += f" s={infos[r]['scale']:.3f}"
-        draw.text((4, r * H + 4), txt, fill=(255, 255, 255), font=font)
+        # compute text size
+        try:
+            bbox = draw.textbbox((0, 0), txt, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        except Exception:
+            tw, th = draw.textsize(txt, font=font) if font is not None else (len(txt) * 6, 10)
+        x = 4
+        y = r * H + H - th - 4
+        # background for readability
+        draw.rectangle([x - 2, y - 2, x + tw + 2, y + th + 2], fill=(0, 0, 0))
+        draw.text((x, y), txt, fill=(255, 255, 255), font=font)
 
         # optional: show model-estimated motion vectors A->B and B->A (direct model output)
         if model is not None and device is not None:
-            try:
-                # Predict vectors directly from the vector head
-                # Predict vectors directly from the vector head
-                v_ab = model(img1[r].unsqueeze(0).to(device))
-                v_ba = model(img2[r].unsqueeze(0).to(device))
-                dx_ab, dy_ab = float(v_ab[0,0].item()), float(v_ab[0,1].item())
-                dx_ba, dy_ba = float(v_ba[0,0].item()), float(v_ba[0,1].item())
-                d_ab = math.sqrt(dx_ab*dx_ab + dy_ab*dy_ab)
-                d_ba = math.sqrt(dx_ba*dx_ba + dy_ba*dy_ba)
+            # Predict vectors directly from the vector head using (A,B) and (B,A)
+            v_ab = model(img1[r].unsqueeze(0).to(device), img2[r].unsqueeze(0).to(device))
+            v_ba = model(img2[r].unsqueeze(0).to(device), img1[r].unsqueeze(0).to(device))
+            dx_ab, dy_ab = float(v_ab[0,0].item()), float(v_ab[0,1].item())
+            dx_ba, dy_ba = float(v_ba[0,0].item()), float(v_ba[0,1].item())
+            d_ab = math.sqrt(dx_ab*dx_ab + dy_ab*dy_ab)
+            d_ba = math.sqrt(dx_ba*dx_ba + dy_ba*dy_ba)
 
-                # A panel (left): draw from center to center+(dx_ab, dy_ab)
-                draw.line([(cx, r * H + cy), (cx + int(round(dx_ab)), r * H + cy + int(round(dy_ab)))], fill=(0, 255, 0), width=2)
-                draw.ellipse([(cx + int(round(dx_ab)) - 2, r * H + cy + int(round(dy_ab)) - 2), (cx + int(round(dx_ab)) + 2, r * H + cy + int(round(dy_ab)) + 2)], outline=(0, 255, 0))
-                draw.text((cx + 4, r * H + cy + 4), f"→ ({dx_ab:.1f},{dy_ab:.1f}) d={d_ab:.1f}", fill=(0, 255, 0), font=font)
+            # A panel (left): draw from center to center+(dx_ab, dy_ab)
+            draw.line([(cx, r * H + cy), (cx + int(round(dx_ab)), r * H + cy + int(round(dy_ab)))], fill=(0, 255, 0), width=2)
+            draw.ellipse([(cx + int(round(dx_ab)) - 2, r * H + cy + int(round(dy_ab)) - 2), (cx + int(round(dx_ab)) + 2, r * H + cy + int(round(dy_ab)) + 2)], outline=(0, 255, 0))
+            draw.text((cx + 4, r * H + cy + 4), f"→ ({dx_ab:.1f},{dy_ab:.1f}) d={d_ab:.1f}", fill=(0, 255, 0), font=font)
 
-                # B panel (right): draw from center to center+(dx_ba, dy_ba)
-                draw.line([(W + cx, r * H + cy), (W + cx + int(round(dx_ba)), r * H + cy + int(round(dy_ba)))], fill=(255, 0, 0), width=2)
-                draw.ellipse([(W + cx + int(round(dx_ba)) - 2, r * H + cy + int(round(dy_ba)) - 2), (W + cx + int(round(dx_ba)) + 2, r * H + cy + int(round(dy_ba)) + 2)], outline=(255, 0, 0))
-                draw.text((W + cx + 4, r * H + cy + 4), f"→ ({dx_ba:.1f},{dy_ba:.1f}) d={d_ba:.1f}", fill=(255, 0, 0), font=font)
-            except Exception as e:
-                draw.text((4, r * H + 18), f"vec est failed: {e}", fill=(255, 80, 80), font=font)
+            # B panel (right): draw from center to center+(dx_ba, dy_ba)
+            draw.line([(W + cx, r * H + cy), (W + cx + int(round(dx_ba)), r * H + cy + int(round(dy_ba)))], fill=(255, 0, 0), width=2)
+            draw.ellipse([(W + cx + int(round(dx_ba)) - 2, r * H + cy + int(round(dy_ba)) - 2), (W + cx + int(round(dx_ba)) + 2, r * H + cy + int(round(dy_ba)) + 2)], outline=(255, 0, 0))
+            draw.text((W + cx + 4, r * H + cy + 4), f"→ ({dx_ba:.1f},{dy_ba:.1f}) d={d_ba:.1f}", fill=(255, 0, 0), font=font)
 
     canvas.save(out_path)
 
@@ -516,31 +522,24 @@ def train(
                 print(f"[ep {ep:02d} | step {global_step:06d}] train MSE={mse:.3f} MAE={mae:.3f} vMAE={vmae:.3f} acc@5={acc5*100:.1f}% acc@10={acc10*100:.1f}% | modes {mode_str}")
             # periodic debug image grid (independent of log_every)
             if (global_step % debug_every) == 0:
-                try:
-                    out_path = out_dir / "debug_pairs" / f"step_{global_step:06d}.png"
-                    save_debug_pairs(img1.cpu(), img2.cpu(), pred_mag.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples, model=model, device=device)
-                except Exception as e:
-                    print(f"[debug] failed to save pair grid: {e}")
+                out_path = out_dir / "debug_pairs" / f"step_{global_step:06d}.png"
+                save_debug_pairs(img1.cpu(), img2.cpu(), pred_mag.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples, model=model, device=device)
             # periodic checkpoint by images processed
             if next_ckpt_at is not None and processed_images >= next_ckpt_at:
-                try:
-                    ckpt = {
-                        "epoch": ep,
-                        "global_step": global_step,
-                        "images_seen": processed_images,
-                        "model": model.state_dict(),
-                        "opt": opt.state_dict(),
-                        "val_mse": None,
-                        "val_mae": None,
-                        "args": {"data_root": str(data_root), "seed": seed},
-                    }
-                    out_path = ckpt_dir / f"imgs_{str(int(next_ckpt_at)).zfill(12)}.ckpt"
-                    torch.save(ckpt, out_path)
-                    print(f"[ckpt] saved {out_path} (images_seen={processed_images})")
-                except Exception as e:
-                    print(f"[ckpt] failed to save periodic checkpoint: {e}")
-                finally:
-                    next_ckpt_at += save_every_images
+                ckpt = {
+                    "epoch": ep,
+                    "global_step": global_step,
+                    "images_seen": processed_images,
+                    "model": model.state_dict(),
+                    "opt": opt.state_dict(),
+                    "val_mse": None,
+                    "val_mae": None,
+                    "args": {"data_root": str(data_root), "seed": seed},
+                }
+                out_path = ckpt_dir / f"imgs_{str(int(next_ckpt_at)).zfill(12)}.ckpt"
+                torch.save(ckpt, out_path)
+                print(f"[ckpt] saved {out_path} (images_seen={processed_images})")
+                next_ckpt_at += save_every_images
 
             global_step += 1
 
