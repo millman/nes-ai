@@ -534,7 +534,7 @@ def train(
                         "val_mae": None,
                         "args": {"data_root": str(data_root), "seed": seed},
                     }
-                    out_path = ckpt_dir / f"imgs_\{next_ckpt_at:012d\}\.ckpt"
+                    out_path = ckpt_dir / f"imgs_{str(int(next_ckpt_at)).zfill(12)}.ckpt"
                     torch.save(ckpt, out_path)
                     print(f"[ckpt] saved {out_path} (images_seen={processed_images})")
                 except Exception as e:
