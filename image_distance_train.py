@@ -156,6 +156,9 @@ class PairAugmentor:
       - translate (dx,dy)
       - crop+shift (implemented as translate; cropping is implicit when we translate and pad)
       - scale +- up to 20%
+    Optionally applies the chosen transform to **both** views with independent
+    parameters (two-sided), so the ground-truth distance is the *relative* motion
+    between the two transforms.
     """
     def __init__(
         self,
@@ -166,6 +169,7 @@ class PairAugmentor:
         p_translate: float = 0.50,
         p_scale: float = 0.30,
         scale_coeff: float = 0.5,
+        two_sided: bool = True,
     ):
         total = p_noise_only + p_translate + p_scale
         self.p_noise_only = p_noise_only / total
@@ -176,35 +180,61 @@ class PairAugmentor:
         self.max_shift = max_shift
         self.max_scale_delta = max_scale_delta
         self.scale_coeff = scale_coeff
+        self.two_sided = two_sided
 
     def __call__(self, img: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, float, Dict]:
         """
         Returns: img1, img2, gt_distance, info
+        If two_sided=True, both views undergo the same transform family with
+        independent parameters; the GT vector for translate is the *relative*
+        shift (dx2-dx1, dy2-dy1). For scale, magnitude uses |s2-s1|.
         """
-        # base noise on both views
-        img1 = add_gaussian_noise(img, self.noise_sigma)
+        # start from two independently noised bases
+        base1 = add_gaussian_noise(img, self.noise_sigma)
+        base2 = add_gaussian_noise(img, self.noise_sigma)
 
         r = random.random()
         if r < self.p_noise_only:
-            # Same image + noise -> 0 distance
-            img2 = add_gaussian_noise(img, self.noise_sigma)
+            # noise-only on both
+            img1 = base1
+            img2 = base2
             dist = 0.0
-            info = {"mode": "noise_only"}
+            info = {"mode": "noise_only", "dx": 0, "dy": 0}
         elif r < self.p_noise_only + self.p_translate:
-            # Translate (dx,dy)
-            dx = random.randint(-self.max_shift, self.max_shift)
-            dy = random.randint(-self.max_shift, self.max_shift)
-            img2 = affine_translate(img1, dx=dx, dy=dy)
-            img2 = add_gaussian_noise(img2, self.noise_sigma)
-            dist = math.sqrt(dx * dx + dy * dy)
-            info = {"mode": "translate", "dx": dx, "dy": dy}
+            # Translate
+            if self.two_sided:
+                dx1 = random.randint(-self.max_shift, self.max_shift)
+                dy1 = random.randint(-self.max_shift, self.max_shift)
+                dx2 = random.randint(-self.max_shift, self.max_shift)
+                dy2 = random.randint(-self.max_shift, self.max_shift)
+                img1 = affine_translate(base1, dx=dx1, dy=dy1)
+                img2 = affine_translate(base2, dx=dx2, dy=dy2)
+                rdx = dx2 - dx1
+                rdy = dy2 - dy1
+                dist = math.sqrt(rdx * rdx + rdy * rdy)
+                info = {"mode": "translate", "dx": rdx, "dy": rdy, "dx1": dx1, "dy1": dy1, "dx2": dx2, "dy2": dy2}
+            else:
+                dx = random.randint(-self.max_shift, self.max_shift)
+                dy = random.randint(-self.max_shift, self.max_shift)
+                img1 = base1
+                img2 = affine_translate(base2, dx=dx, dy=dy)
+                dist = math.sqrt(dx * dx + dy * dy)
+                info = {"mode": "translate", "dx": dx, "dy": dy}
         else:
             # Scale around center
-            s = 1.0 + random.uniform(-self.max_scale_delta, self.max_scale_delta)
-            img2 = scale_around_center(img1, s)
-            img2 = add_gaussian_noise(img2, self.noise_sigma)
-            dist = approx_scale_to_pixel_distance(s, H, W, coeff=self.scale_coeff)
-            info = {"mode": "scale", "scale": s}
+            if self.two_sided:
+                s1 = 1.0 + random.uniform(-self.max_scale_delta, self.max_scale_delta)
+                s2 = 1.0 + random.uniform(-self.max_scale_delta, self.max_scale_delta)
+                img1 = scale_around_center(base1, s1)
+                img2 = scale_around_center(base2, s2)
+                dist = approx_scale_to_pixel_distance(s2 - (s1 - 1.0), H, W, coeff=self.scale_coeff) if False else abs(s2 - s1) * self.scale_coeff * math.sqrt(H*H + W*W)
+                info = {"mode": "scale", "scale1": s1, "scale2": s2}
+            else:
+                s = 1.0 + random.uniform(-self.max_scale_delta, self.max_scale_delta)
+                img1 = base1
+                img2 = scale_around_center(base2, s)
+                dist = approx_scale_to_pixel_distance(s, H, W, coeff=self.scale_coeff)
+                info = {"mode": "scale", "scale": s}
         return img1, img2, float(dist), info
 
 
@@ -345,7 +375,9 @@ def save_debug_pairs(img1: torch.Tensor,
         txt = f"gt={gt[r]:.1f} pred={pred[r]:.1f} mode={infos[r].get('mode','?')}"
         if 'dx' in infos[r] and 'dy' in infos[r]:
             txt += f" dx={infos[r]['dx']} dy={infos[r]['dy']}"
-        if 'scale' in infos[r]:
+        if 'scale1' in infos[r] and 'scale2' in infos[r]:
+            txt += f" s1={infos[r]['scale1']:.3f} s2={infos[r]['scale2']:.3f}"
+        elif 'scale' in infos[r]:
             txt += f" s={infos[r]['scale']:.3f}"
         # compute text size
         try:
@@ -400,6 +432,8 @@ def train(
     save_every_images: int = 0,
     lambda_comp: float = 1.0,
     lambda_mag: float = 1.0,
+    two_sided: bool = True,
+    bidirectional: bool = True,
 ):
     set_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -421,7 +455,7 @@ def train(
     # data
     ds_train = FramesDataset(data_root, split="train", train_frac=0.95, seed=seed)
     ds_val   = FramesDataset(data_root, split="val",   train_frac=0.95, seed=seed)
-    aug = PairAugmentor()
+    aug = PairAugmentor(two_sided=two_sided)
     print(f"[Data] train={len(ds_train)}  val={len(ds_val)}")
 
     def collate(batch_imgs):
@@ -490,6 +524,20 @@ def train(
 
                 # total loss: vector components (when defined) + magnitude always
                 loss = lambda_comp * loss_vec + lambda_mag * loss_mag
+
+                if bidirectional:
+                    # B->A direction: magnitude should match dist; vector should be negative of A->B
+                    pred_v_ba = model(img2, img1)
+                    pred_mag_ba = torch.linalg.norm(pred_v_ba, dim=1)
+                    if loss_type == "mse":
+                        loss_mag_ba = F.mse_loss(pred_mag_ba, dist)
+                    else:
+                        loss_mag_ba = F.smooth_l1_loss(pred_mag_ba, dist)
+                    if vec_mask.any():
+                        loss_vec_ba = F.smooth_l1_loss(pred_v_ba[vec_mask], -gt_vec[vec_mask])
+                    else:
+                        loss_vec_ba = torch.zeros((), device=device)
+                    loss = 0.5 * (loss + (lambda_comp * loss_vec_ba + lambda_mag * loss_mag_ba))
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -603,6 +651,17 @@ def parse_args():
     ap.add_argument("--save_every_images", type=int, default=10000, help="save a checkpoint every N images seen (0 disables)")
     ap.add_argument("--lambda_comp", type=float, default=1.0, help="weight of vector component loss on (dx,dy) for translate/noise")
     ap.add_argument("--lambda_mag", type=float, default=1.0, help="weight of magnitude loss so ‖(dx,dy)‖ matches pixel distance")
+    # augmentation pairing + training directionality
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--two_sided", dest="two_sided", action="store_true", help="apply random transform to BOTH A and B views (default)")
+    g.add_argument("--one_sided", dest="two_sided", action="store_false", help="apply transform to B only; A is identity + noise")
+    ap.set_defaults(two_sided=True)
+
+    g2 = ap.add_mutually_exclusive_group()
+    g2.add_argument("--bidirectional", dest="bidirectional", action="store_true", help="train on both A→B and B→A per pair (default)")
+    g2.add_argument("--no-bidirectional", dest="bidirectional", action="store_false", help="train only on A→B")
+    ap.set_defaults(bidirectional=True)
+
     return ap.parse_args()
 
 
@@ -625,4 +684,6 @@ if __name__ == "__main__":
         # loss weights
         lambda_comp=args.lambda_comp,
         lambda_mag=args.lambda_mag,
+        two_sided=args.two_sided,
+        bidirectional=args.bidirectional,
     )
