@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import torch
 import torch.nn as nn
@@ -297,8 +297,47 @@ class DistanceRegressor(nn.Module):
         z2 = self.encoder(x2)
         feat = torch.cat([z1, z2, torch.abs(z1 - z2)], dim=1)
         y = self.head(feat).squeeze(1)
-        return F.relu(y)  # clamp negatives to 0
+        # keep outputs non-negative but with smooth gradients
+        return F.softplus(y, beta=1.0)
 
+
+# -------------------------
+# Debug utilities
+# -------------------------
+
+def _tensor_to_pil(t: torch.Tensor) -> Image.Image:
+    t = t.detach().clamp(0, 1)
+    arr = (t.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
+def save_debug_pairs(img1: torch.Tensor,
+                      img2: torch.Tensor,
+                      pred: torch.Tensor,
+                      gt: torch.Tensor,
+                      infos: list,
+                      out_path: Path,
+                      max_rows: int = 8) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = min(max_rows, img1.shape[0])
+    canvas = Image.new("RGB", (W * 2, H * rows), (0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+    for r in range(rows):
+        a = _tensor_to_pil(img1[r])
+        b = _tensor_to_pil(img2[r])
+        canvas.paste(a, (0, r * H))
+        canvas.paste(b, (W, r * H))
+        txt = f"gt={gt[r]:.1f} pred={pred[r]:.1f} mode={infos[r].get('mode','?')}"
+        if 'dx' in infos[r] and 'dy' in infos[r]:
+            txt += f" dx={infos[r]['dx']} dy={infos[r]['dy']}"
+        if 'scale' in infos[r]:
+            txt += f" s={infos[r]['scale']:.3f}"
+        draw.text((4, r * H + 4), txt, fill=(255, 255, 255), font=font)
+    canvas.save(out_path)
 
 # -------------------------
 # Training
@@ -313,6 +352,9 @@ def train(
     log_every: int = 100,
     num_workers: int = 4,
     device_str: Optional[str] = None,
+    loss_type: str = "smoothl1",
+    debug_every: int = 1000,
+    debug_samples: int = 8,
 ):
     set_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -360,14 +402,18 @@ def train(
     for ep in range(1, epochs + 1):
         model.train()
         running = {"mse": 0.0, "mae": 0.0, "n": 0, "acc@5": 0, "acc@10": 0}
-        for img1, img2, dist, _ in dl_train:
+        for img1, img2, dist, infos in dl_train:
             img1 = img1.to(device, non_blocking=True)
             img2 = img2.to(device, non_blocking=True)
             dist = dist.to(device, non_blocking=True)
 
             with torch.cuda.amp.autocast(enabled=(device.type in ["cuda"])):
                 pred = model(img1, img2)
-                loss = F.mse_loss(pred, dist)
+                # choose loss
+                if loss_type == "mse":
+                    loss = F.mse_loss(pred, dist)
+                else:
+                    loss = F.smooth_l1_loss(pred, dist)
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -386,8 +432,20 @@ def train(
             running["n"] += dist.numel()
 
             if (global_step % log_every) == 0:
-                print(f"[ep {ep:02d} | step {global_step:06d}] "
-                      f"train MSE={mse:.3f} MAE={mae:.3f} acc@5={acc5*100:.1f}% acc@10={acc10*100:.1f}%")
+                # per-mode diagnostics
+                modes = [x.get("mode", "?") for x in infos]
+                _counts = {}
+                for m in modes:
+                    _counts[m] = _counts.get(m, 0) + 1
+                mode_str = " ".join([f"{k}:{v}" for k, v in _counts.items()])
+                print(f"[ep {ep:02d} | step {global_step:06d}] train MSE={mse:.3f} MAE={mae:.3f} acc@5={acc5*100:.1f}% acc@10={acc10*100:.1f}% | modes {mode_str}")
+            # periodic debug image grid (independent of log_every)
+            if (global_step % debug_every) == 0:
+                try:
+                    out_path = out_dir / "debug_pairs" / f"step_{global_step:06d}.png"
+                    save_debug_pairs(img1.cpu(), img2.cpu(), pred.detach().cpu(), dist.detach().cpu(), infos, out_path, max_rows=debug_samples)
+                except Exception as e:
+                    print(f"[debug] failed to save pair grid: {e}")
             global_step += 1
 
         # epoch summary
@@ -435,7 +493,7 @@ def train(
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", type=Path, required=True, help="Path to traj_dumps")
-    ap.add_argument("--out_dir", type=Path, default=Path("out/image_distance"))
+    ap.add_argument("--out_dir", type=Path, default=Path("out.image_distance"))
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -443,6 +501,9 @@ def parse_args():
     ap.add_argument("--log_every", type=int, default=100)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--device", type=str, default=None, help="cpu|cuda|mps (auto if None)")
+    ap.add_argument("--loss", type=str, default="smoothl1", choices=["mse", "smoothl1"], help="regression loss")
+    ap.add_argument("--debug_every", type=int, default=1000, help="save a grid of training pairs every N steps")
+    ap.add_argument("--debug_samples", type=int, default=8, help="rows in the debug grid")
     return ap.parse_args()
 
 
@@ -458,4 +519,7 @@ if __name__ == "__main__":
         log_every=args.log_every,
         num_workers=args.num_workers,
         device_str=args.device,
+        loss_type=args.loss,
+        debug_every=args.debug_every,
+        debug_samples=args.debug_samples,
     )
