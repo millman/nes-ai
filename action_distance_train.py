@@ -332,13 +332,10 @@ def draw_arrow_on_pil(pil_img: Image.Image, vec: np.ndarray, text: str) -> Image
     draw.line((cx, cy, ex, ey), width=2, fill=(0, 255, 0))
 
     # Bottom-left text
-    try:
-        font = ImageFont.load_default()
-        text_w, text_h = draw.textsize(text, font=font)
-        tx, ty = 6, H - text_h - 6
-        draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
-    except Exception:
-        pass
+    font = ImageFont.load_default()
+    text_w, text_h = draw.textsize(text, font=font)
+    tx, ty = 6, H - text_h - 6
+    draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
 
     return img
 
