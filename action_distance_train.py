@@ -6,8 +6,14 @@ Simplifications:
 - Objective: regress d̂(A,B) to the observed gap |j - i| with MSE.
 - Appearance augmentations: noise only (Gaussian + shot). No blur/jitter/geom.
 - Always use Conditional Flow Matching (CFM) auxiliary velocity loss.
+- Add a decoder and reconstruction auxiliary loss so we can decode latent interpolations.
 - Fail fast: no conservative exception handling.
-- Debug: draw latent vector from center, 1 step = 10 pixels, text at bottom.
+
+Debug:
+- Column layout: left column = all A images, right column = all B images (pairs read left->right).
+- More frequent debug grids (default --debug_every 50).
+- Latent interpolation visualization: interpolate zA->zB and decode each interpolated embedding to an image.
+  Saved as a grid (rows=pairs, cols=interp steps).
 
 Default output directory: out.action_distance
 Device preference: MPS (Apple) > CUDA > CPU
@@ -138,7 +144,7 @@ def sample_pairs(ds: TrajectorySet, batch_size: int, max_gap: Optional[int] = No
     return pairs
 
 # -------------------------
-# Model with CFM
+# Model with CFM + Decoder
 # -------------------------
 class ConvEncoder(nn.Module):
     def __init__(self, out_dim=128):
@@ -187,6 +193,31 @@ class CFMHead(nn.Module):
         x = torch.cat([z_t, zA, zB, t], dim=-1)
         return self.mlp(x)
 
+class ConvDecoder(nn.Module):
+    """Lightweight decoder: z -> 256x15x14 -> upsample x2 x4 -> 240x224 -> tanh-ish via sigmoid."""
+    def __init__(self, dim_z=128):
+        super().__init__()
+        self.fc = nn.Linear(dim_z, 256 * 15 * 14)
+        self.net = nn.Sequential(
+            nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode="nearest"),  # 30x28
+            nn.Conv2d(256, 128, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode="nearest"),  # 60x56
+            nn.Conv2d(128, 64, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode="nearest"),  # 120x112
+            nn.Conv2d(64, 32, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode="nearest"),  # 240x224
+            nn.Conv2d(32, 16, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(16, 3, 3, 1, 1),
+        )
+
+    def forward(self, z):
+        B = z.size(0)
+        x = self.fc(z).view(B, 256, 15, 14)
+        x = self.net(x)
+        x = torch.sigmoid(x)  # map to [0,1]
+        return x
+
 class ActionDistanceModel(nn.Module):
     def __init__(self, dim_z=128, vec_dim=8):
         super().__init__()
@@ -198,6 +229,7 @@ class ActionDistanceModel(nn.Module):
                 nn.init.normal_(last.weight, mean=0.0, std=1e-3)
                 nn.init.constant_(last.bias, 0.0)
         self.cfm = CFMHead(dim_z=dim_z)
+        self.decoder = ConvDecoder(dim_z=dim_z)
 
     def forward(self, imgA, imgB, t_for_cfm: torch.Tensor):
         zA = self.encoder(imgA)
@@ -208,6 +240,9 @@ class ActionDistanceModel(nn.Module):
         z_t = (1 - t) * zA + t * zB
         v_hat = self.cfm(z_t, t, zA, zB)
         return {"zA": zA, "zB": zB, "delta_AB": delta_AB, "cfm_v": v_hat}
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return self.decoder(z)
 
 # -------------------------
 # Distances & Losses
@@ -252,27 +287,69 @@ def draw_vec_panel(pil_img: Image.Image, vec2: np.ndarray, text: str) -> Image.I
     draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
     return img
 
-def save_debug_grid(pairs, preds, deltas, out_path: Path):
-    panels = []
+def save_debug_columns(pairs, preds, deltas, out_path: Path):
+    """
+    Two-column debug: left column all A panels, right column all B panels.
+    Each row is a pair (read left->right).
+    """
+    if not pairs:
+        return
+    # Build panels with arrows/text
+    A_panels, B_panels = [], []
     for (A, B, gap), d_hat, dvec in zip(pairs, preds, deltas):
         A_pil = to_pil(A.cpu())
         B_pil = to_pil(B.cpu())
         textA = f"gap={gap}  d̂(A→B)={d_hat:.2f}"
         textB = f"gap={gap}  d̂(B→A)≈{d_hat:.2f}"
         vec2 = dvec[:2]
-        A_p = draw_vec_panel(A_pil, vec2, textA)
-        B_p = draw_vec_panel(B_pil, (-vec2), textB)
-        panels.append((A_p, B_p))
+        A_panels.append(draw_vec_panel(A_pil, vec2, textA))
+        B_panels.append(draw_vec_panel(B_pil, (-vec2), textB))
 
-    if not panels:
-        return
-    W, H = panels[0][0].size
-    cols = len(panels)
-    grid = Image.new("RGB", (cols * W, 2 * H), (0, 0, 0))
-    for c, (A_p, B_p) in enumerate(panels):
-        grid.paste(A_p, (c * W, 0))
-        grid.paste(B_p, (c * W, H))
+    W, H = A_panels[0].size
+    rows = len(A_panels)
+    grid = Image.new("RGB", (2 * W, rows * H), (0, 0, 0))
+    for r in range(rows):
+        grid.paste(A_panels[r], (0, r * H))     # left column
+        grid.paste(B_panels[r], (W, r * H))     # right column
     grid.save(out_path)
+
+def save_latent_interpolations(model, pairs, out_path: Path, device, steps: int = 6):
+    """
+    For each pair (A, B), interpolate zA->zB with 'steps' samples (including endpoints),
+    decode each latent to an image, and save as a grid: rows=pairs, cols=steps.
+    """
+    if not pairs:
+        return
+    model.eval()
+    with torch.no_grad():
+        # compute zA, zB
+        zA_list, zB_list = [], []
+        for (A, B, _) in pairs:
+            A1 = A.unsqueeze(0).to(device)
+            B1 = B.unsqueeze(0).to(device)
+            zA = model.encoder(A1)
+            zB = model.encoder(B1)
+            zA_list.append(zA.squeeze(0))
+            zB_list.append(zB.squeeze(0))
+
+        # build grid images
+        all_rows = []
+        for zA, zB in zip(zA_list, zB_list):
+            row_imgs = []
+            for t in torch.linspace(0, 1, steps, device=device):
+                z_t = (1 - t) * zA + t * zB
+                img_t = model.decode(z_t.unsqueeze(0)).squeeze(0).cpu()
+                row_imgs.append(to_pil(img_t))
+            all_rows.append(row_imgs)
+
+        # compose into a single image
+        W, H = all_rows[0][0].size
+        rows, cols = len(all_rows), steps
+        canvas = Image.new("RGB", (cols * W, rows * H), (0, 0, 0))
+        for r in range(rows):
+            for c in range(cols):
+                canvas.paste(all_rows[r][c], (c * W, r * H))
+        canvas.save(out_path)
 
 # -------------------------
 # CLI
@@ -285,7 +362,7 @@ def default_device_str() -> str:
     return "cpu"
 
 def make_argparser():
-    ap = argparse.ArgumentParser(description="Train action-distance model by regressing observed step gaps (with CFM).")
+    ap = argparse.ArgumentParser(description="Train action-distance model by regressing observed step gaps (with CFM + decoder).")
     ap.add_argument("--data_root", type=str, required=True,
                     help="Root directory containing traj_*/states/state_*.png (required).")
     ap.add_argument("--out_dir", type=str, default="out.action_distance",
@@ -308,10 +385,16 @@ def make_argparser():
                     help="Displacement vector dimensionality (default: %(default)s)")
     ap.add_argument("--max_gap", type=int, default=None,
                     help="Max step gap when sampling pairs (None means unbounded) (default: %(default)s)")
-    ap.add_argument("--debug_every", type=int, default=200,
-                    help="Steps between saving a debug pair grid (default: %(default)s)")
-    ap.add_argument("--save_every", type=int, default=1000,
-                    help="Steps between saving a checkpoint (default: %(default)s)")
+    ap.add_argument("--debug_every", type=int, default=50,
+                    help="Steps between saving a two-column A/B debug grid (default: %(default)s)")
+    ap.add_argument("--interp_every", type=int, default=200,
+                    help="Steps between saving latent interpolation grids (default: %(default)s)")
+    ap.add_argument("--interp_steps", type=int, default=6,
+                    help="Number of columns (interpolation steps) per row in latent interp grids (default: %(default)s)")
+    ap.add_argument("--w_rec", type=float, default=0.1,
+                    help="Weight for image reconstruction (decoder) loss (default: %(default)s)")
+    ap.add_argument("--w_cfm", type=float, default=0.5,
+                    help="Weight for CFM auxiliary loss (default: %(default)s)")
     return ap
 
 # -------------------------
@@ -358,11 +441,17 @@ def main():
             t_for_cfm = torch.rand(A_t.size(0), device=device)
             out = model(A_t, B_t, t_for_cfm)
 
+            # losses
             d_hat = distance_from_delta(out["delta_AB"])
-            L_reg = F.mse_loss(d_hat, gap_t)              # main objective
-            L_cfm = cfm_loss(out["cfm_v"], out["zA"], out["zB"])  # auxiliary
+            L_reg = F.mse_loss(d_hat, gap_t)                     # main objective
+            L_cfm = cfm_loss(out["cfm_v"], out["zA"], out["zB"]) # auxiliary CFM
 
-            loss = L_reg + 0.5 * L_cfm
+            # decoder recon loss on both A and B
+            decA = model.decode(out["zA"])
+            decB = model.decode(out["zB"])
+            L_rec = (F.l1_loss(decA, A_t) + F.l1_loss(decB, B_t)) * 0.5
+
+            loss = L_reg + args.w_cfm * L_cfm + args.w_rec * L_rec
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -376,20 +465,29 @@ def main():
             if (global_step % 50) == 0:
                 print(
                     f"ep {epoch} step {step} | loss {loss.item():.4f} | "
-                    f"Lreg {L_reg.item():.3f} Lcfm {L_cfm.item():.3f} | "
+                    f"Lreg {L_reg.item():.3f} Lcfm {L_cfm.item():.3f} Lrec {L_rec.item():.3f} | "
                     f"d̂ mean {d_hat.mean().item():.3f}±{d_hat.std().item():.3f} | "
                     f"∥g_enc∥ {gn_enc:.3e} ∥g_head∥ {gn_head:.3e}"
                 )
 
+            # Two-column A/B debug grid (more frequent)
             if (global_step % args.debug_every) == 0:
-                k = min(4, A_t.size(0))
-                sample_pairs_list = [(A_t[i].cpu(), B_t[i].cpu(), int(gap_t[i].item())) for i in range(k)]
+                k = min(6, A_t.size(0))
+                dbg_pairs = [(A_t[i].cpu(), B_t[i].cpu(), int(gap_t[i].item())) for i in range(k)]
                 preds = [float(d_hat[i].item()) for i in range(k)]
                 deltas = [out["delta_AB"][i].detach().cpu().numpy() for i in range(k)]
-                dbg_path = out_dir / f"debug_step_{global_step}.jpg"
-                save_debug_grid(sample_pairs_list, preds, deltas, dbg_path)
+                dbg_path = out_dir / f"debug_cols_step_{global_step}.jpg"
+                save_debug_columns(dbg_pairs, preds, deltas, dbg_path)
 
-            if (global_step % args.save_every) == 0 and global_step > 0:
+            # Latent interpolation grid (rows=pairs, cols=interp steps)
+            if (global_step % args.interp_every) == 0:
+                k = min(4, A_t.size(0))
+                interp_pairs = [(A_t[i].cpu(), B_t[i].cpu(), int(gap_t[i].item())) for i in range(k)]
+                interp_path = out_dir / f"interp_step_{global_step}.jpg"
+                save_latent_interpolations(model, interp_pairs, interp_path, device, steps=args.interp_steps)
+
+            # Periodic checkpoints
+            if (global_step % 1000) == 0 and global_step > 0:
                 ckpt = {"model": model.state_dict(), "opt": opt.state_dict(), "args": vars(args),
                         "step": global_step, "epoch": epoch}
                 torch.save(ckpt, out_dir / f"ckpt_step_{global_step}.pt")
