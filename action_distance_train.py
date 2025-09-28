@@ -683,7 +683,7 @@ def make_argparser():
                     help="Directory for checkpoints, debug, and visuals (default: %(default)s)")
     ap.add_argument("--batch_size", type=int, default=8,
                     help="Mini-batch size (default: %(default)s)")
-    ap.add_argument("--epochs", type=int, default=5,
+    ap.add_argument("--epochs", type=int, default=1000,
                     help="Number of training epochs (default: %(default)s)")
     ap.add_argument("--steps_per_epoch", type=int, default=500,
                     help="Optimization steps per epoch (default: %(default)s)")
