@@ -298,32 +298,50 @@ def cfm_loss(v_hat: torch.Tensor, zA: torch.Tensor, zB: torch.Tensor) -> torch.T
 # -------------------------
 # Debug visualization
 # -------------------------
-def draw_arrow_on_pil(pil_img: Image.Image, vec: np.ndarray, text: str, arrow_scale: float = 12.0) -> Image.Image:
+def draw_arrow_on_pil(pil_img: Image.Image, vec: np.ndarray, text: str) -> Image.Image:
+    """
+    Draw a straight line from the image center in the direction of the latent vector.
+    Visualization scale: 1 action step (‖vec‖=1) -> 10 pixels.
+    Text annotation is placed at the bottom of the image.
+    """
+    from PIL import ImageDraw, ImageFont
     img = pil_img.copy()
     draw = ImageDraw.Draw(img)
     W, H = img.size
     cx, cy = W // 2, H // 2
 
-    vx, vy = float(vec[0]), float(vec[1]) if len(vec) > 1 else (float(vec[0]), 0.0)
-    norm = math.sqrt(vx * vx + vy * vy) + 1e-8
-    scale = min(60.0, arrow_scale * norm)
-    ux, uy = vx / norm, vy / norm
-    ex, ey = cx + ux * scale, cy - uy * scale
+    # Vector components (use first 2 dims if higher dimensional)
+    vx = float(vec[0])
+    vy = float(vec[1]) if len(vec) > 1 else 0.0
+    norm = math.sqrt(vx * vx + vy * vy)
 
+    # Scale: 1 action step -> 10 pixels
+    pixels_per_step = 10.0
+    length_px = pixels_per_step * norm
+
+    # Unit direction (avoid div-by-zero)
+    if norm < 1e-8:
+        ux, uy = 0.0, 0.0
+    else:
+        ux, uy = vx / norm, vy / norm
+
+    # Note: image y-axis grows down, so invert vy
+    ex, ey = cx + ux * length_px, cy - uy * length_px
+
+    # Draw line body only
     draw.line((cx, cy, ex, ey), width=2, fill=(0, 255, 0))
-    ah = 6
-    angle = math.atan2(cy - ey, ex - cx)
-    left = (ex - ah * math.cos(angle + math.pi / 6), ey + ah * math.sin(angle + math.pi / 6))
-    right = (ex - ah * math.cos(angle - math.pi / 6), ey + ah * math.sin(angle - math.pi / 6))
-    draw.line((ex, ey, left[0], left[1]), width=2, fill=(0, 255, 0))
-    draw.line((ex, ey, right[0], right[1]), width=2, fill=(0, 255, 0))
 
+    # Bottom-left text
     try:
         font = ImageFont.load_default()
-        draw.text((6, 6), text, fill=(255, 255, 255), font=font)
+        text_w, text_h = draw.textsize(text, font=font)
+        tx, ty = 6, H - text_h - 6
+        draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
     except Exception:
         pass
+
     return img
+
 
 def save_debug_grid(pairs, preds, deltas, out_path: Path):
     panels = []
