@@ -2,21 +2,28 @@
 """
 Train a model to predict the observed action distance (step gap) between two frames.
 
-Simplifications:
-- Objective: regress d̂(A,B) to the observed gap |j - i| with MSE.
-- Appearance augmentations: noise only (Gaussian + shot). No blur/jitter/geom.
-- Always use Conditional Flow Matching (CFM) auxiliary velocity loss.
-- Add a decoder and reconstruction auxiliary loss so we can decode latent interpolations.
-- Fail fast: no conservative exception handling.
+Training:
+- Direct regression: MSE(d_hat(A,B), gap)
+- Noise-only augmentations (Gaussian + shot)
+- Always-on Conditional Flow Matching (CFM) auxiliary loss
+- Lightweight decoder for visualization + a small L1 recon loss
 
-Debug:
-- Column layout: left column = all A images, right column = all B images (pairs read left->right).
-- More frequent debug grids (default --debug_every 50).
-- Latent interpolation visualization: interpolate zA->zB and decode each interpolated embedding to an image.
-  Saved as a grid (rows=pairs, cols=interp steps).
+Visualizations (saved to <out_dir>/vis/ at end of each epoch):
+  1) Tiny push along Δ-hat (decoded frames + |·-A| heatmaps)
+  2) Counterfactual line search along Δ-hat (best λ*, decoded, |·-B| heatmap)
+  3) Orthogonal directions control (Δ vs two orthogonals; decoded + diffs)
+  4) PCA on many Δ’s (2D scatter colored by gap)
+  5) Feature-space correspondence (cosine-sim heatmap A->B features)
+  6) Occlusion sensitivity (masking heatmap for d_hat on A and B)
+  7) Gradient attribution (|∂d_hat/∂pixels| heatmaps on A and B)
+  8) Decoder Jacobian probes (decode zA ± ε e_k; difference maps)
+  9) Δ-length calibration (gap vs d̂ scatter + binned mean & bands)
+ 10) Neighborhood morphs along Δ (decode z_n and z_n + βΔ-hat for K-NN of A)
 
-Default output directory: out.action_distance
-Device preference: MPS (Apple) > CUDA > CPU
+Defaults:
+- Output: out.action_distance (checkpoints, debug) and out.action_distance/vis (visuals)
+- Device preference: MPS > CUDA > CPU
+- Fail fast: minimal exception handling by design
 """
 
 import argparse
@@ -34,6 +41,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 # -------------------------
 # Repro
 # -------------------------
@@ -47,12 +58,11 @@ def set_seed(seed: int):
 # IO
 # -------------------------
 def load_frame(path: Path) -> torch.Tensor:
-    """Load an RGB frame (H=240, W=224) -> float tensor [3,H,W] in [0,1]."""
     img = Image.open(path).convert("RGB")
     if img.size != (224, 240):
         img = img.resize((224, 240), Image.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
-    arr = np.transpose(arr, (2, 0, 1))  # CHW
+    arr = np.transpose(arr, (2, 0, 1))
     return torch.from_numpy(arr)
 
 def discover_trajectories(root: Path) -> List[List[Path]]:
@@ -67,7 +77,7 @@ def discover_trajectories(root: Path) -> List[List[Path]]:
     return trajs
 
 def to_pil(img_t: torch.Tensor) -> Image.Image:
-    arr = (img_t.clamp(0, 1).numpy() * 255).astype(np.uint8)
+    arr = (img_t.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
     arr = np.transpose(arr, (1, 2, 0))
     return Image.fromarray(arr)
 
@@ -140,7 +150,7 @@ def sample_pairs(ds: TrajectorySet, batch_size: int, max_gap: Optional[int] = No
                 tries += 1
         img_i = load_image_from_index(ds, tid, i)
         img_j = load_image_from_index(ds, tid, j)
-        pairs.append((img_i, img_j, j - i))
+        pairs.append((img_i, img_j, j - i, tid, i, j))
     return pairs
 
 # -------------------------
@@ -194,7 +204,6 @@ class CFMHead(nn.Module):
         return self.mlp(x)
 
 class ConvDecoder(nn.Module):
-    """Lightweight decoder: z -> 256x15x14 -> upsample x2 x4 -> 240x224 -> tanh-ish via sigmoid."""
     def __init__(self, dim_z=128):
         super().__init__()
         self.fc = nn.Linear(dim_z, 256 * 15 * 14)
@@ -215,7 +224,7 @@ class ConvDecoder(nn.Module):
         B = z.size(0)
         x = self.fc(z).view(B, 256, 15, 14)
         x = self.net(x)
-        x = torch.sigmoid(x)  # map to [0,1]
+        x = torch.sigmoid(x)
         return x
 
 class ActionDistanceModel(nn.Module):
@@ -253,103 +262,355 @@ def distance_from_delta(delta: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(torch.clamp((delta * delta).sum(dim=-1), min=EPS))
 
 def cfm_loss(v_hat: torch.Tensor, zA: torch.Tensor, zB: torch.Tensor) -> torch.Tensor:
-    v_target = zB - zA  # constant target field
+    v_target = zB - zA
     return F.mse_loss(v_hat, v_target)
 
 # -------------------------
-# Debug viz
+# Debug helpers (columns A/B)
 # -------------------------
 def draw_vec_panel(pil_img: Image.Image, vec2: np.ndarray, text: str) -> Image.Image:
     img = pil_img.copy()
     draw = ImageDraw.Draw(img)
     W, H = img.size
     cx, cy = W // 2, H // 2
-
     vx = float(vec2[0])
     vy = float(vec2[1]) if len(vec2) > 1 else 0.0
     norm = math.sqrt(vx * vx + vy * vy)
-
     pixels_per_step = 10.0
     length_px = pixels_per_step * norm
-
-    if norm < 1e-8:
-        ux, uy = 0.0, 0.0
-    else:
-        ux, uy = vx / norm, vy / norm
-
+    ux, uy = (0.0, 0.0) if norm < 1e-8 else (vx / norm, vy / norm)
     ex, ey = cx + ux * length_px, cy - uy * length_px
     draw.line((cx, cy, ex, ey), width=2, fill=(0, 255, 0))
-
     font = ImageFont.load_default()
     bbox = draw.textbbox((0, 0), text, font=font)
-    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    text_h = bbox[3] - bbox[1]
     tx, ty = 6, H - text_h - 6
     draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
     return img
 
 def save_debug_columns(pairs, preds, deltas, out_path: Path):
-    """
-    Two-column debug: left column all A panels, right column all B panels.
-    Each row is a pair (read left->right).
-    """
     if not pairs:
         return
-    # Build panels with arrows/text
     A_panels, B_panels = [], []
-    for (A, B, gap), d_hat, dvec in zip(pairs, preds, deltas):
-        A_pil = to_pil(A.cpu())
-        B_pil = to_pil(B.cpu())
+    for (A, B, gap, *_), d_hat, dvec in zip(pairs, preds, deltas):
+        A_pil = to_pil(A)
+        B_pil = to_pil(B)
         textA = f"gap={gap}  d̂(A→B)={d_hat:.2f}"
         textB = f"gap={gap}  d̂(B→A)≈{d_hat:.2f}"
         vec2 = dvec[:2]
         A_panels.append(draw_vec_panel(A_pil, vec2, textA))
         B_panels.append(draw_vec_panel(B_pil, (-vec2), textB))
-
     W, H = A_panels[0].size
     rows = len(A_panels)
     grid = Image.new("RGB", (2 * W, rows * H), (0, 0, 0))
     for r in range(rows):
-        grid.paste(A_panels[r], (0, r * H))     # left column
-        grid.paste(B_panels[r], (W, r * H))     # right column
+        grid.paste(A_panels[r], (0, r * H))
+        grid.paste(B_panels[r], (W, r * H))
     grid.save(out_path)
 
-def save_latent_interpolations(model, pairs, out_path: Path, device, steps: int = 6):
-    """
-    For each pair (A, B), interpolate zA->zB with 'steps' samples (including endpoints),
-    decode each latent to an image, and save as a grid: rows=pairs, cols=steps.
-    """
-    if not pairs:
-        return
-    model.eval()
+# -------------------------
+# Visualization utilities
+# -------------------------
+def ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+
+def im_to_heat(arr: np.ndarray) -> Image.Image:
+    """arr in [0, +] -> heatmap PIL."""
+    plt.figure(figsize=(2.24, 2.40), dpi=100)
+    plt.axis("off")
+    plt.imshow(arr, cmap="magma")
+    plt.tight_layout(pad=0.0)
+    from io import BytesIO
+    buf = BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
+    plt.close()
+    buf.seek(0)
+    return Image.open(buf).convert("RGB").resize((224, 240), Image.BILINEAR)
+
+def stack_horiz(pils: List[Image.Image]) -> Image.Image:
+    H = max(im.size[1] for im in pils)
+    W = sum(im.size[0] for im in pils)
+    canvas = Image.new("RGB", (W, H), (0, 0, 0))
+    x = 0
+    for im in pils:
+        canvas.paste(im, (x, 0))
+        x += im.size[0]
+    return canvas
+
+def stack_vert(pils: List[Image.Image]) -> Image.Image:
+    W = max(im.size[0] for im in pils)
+    H = sum(im.size[1] for im in pils)
+    canvas = Image.new("RGB", (W, H), (0, 0, 0))
+    y = 0
+    for im in pils:
+        canvas.paste(im, (0, y))
+        y += im.size[1]
+    return canvas
+
+# 1) Tiny push movies & diffs
+def vis_tiny_push(model, device, pairs, out_path: Path, alphas=(0.1, 0.2, 0.3, 0.4)):
+    rows = []
     with torch.no_grad():
-        # compute zA, zB
-        zA_list, zB_list = [], []
-        for (A, B, _) in pairs:
+        for (A, B, gap, *_) in pairs:
             A1 = A.unsqueeze(0).to(device)
             B1 = B.unsqueeze(0).to(device)
-            zA = model.encoder(A1)
-            zB = model.encoder(B1)
-            zA_list.append(zA.squeeze(0))
-            zB_list.append(zB.squeeze(0))
-
-        # build grid images
-        all_rows = []
-        for zA, zB in zip(zA_list, zB_list):
+            out = model(A1, B1, torch.rand(1, device=device))
+            zA, delta = out["zA"].squeeze(0), out["delta_AB"].squeeze(0)
+            d = torch.linalg.norm(delta) + 1e-8
+            d_hat = delta / d
             row_imgs = []
-            for t in torch.linspace(0, 1, steps, device=device):
-                z_t = (1 - t) * zA + t * zB
-                img_t = model.decode(z_t.unsqueeze(0)).squeeze(0).cpu()
-                row_imgs.append(to_pil(img_t))
-            all_rows.append(row_imgs)
+            A_pil = to_pil(A)
+            row_imgs.append(A_pil)
+            for a in alphas:
+                z_t = zA + a * d_hat
+                dec = model.decode(z_t.unsqueeze(0)).squeeze(0).cpu()
+                dec_p = to_pil(dec)
+                diff = torch.abs(dec - A).mean(0).numpy()
+                diff_p = im_to_heat(diff)
+                row_imgs.append(stack_vert([dec_p, diff_p]))
+            rows.append(stack_horiz(row_imgs))
+    canvas = stack_vert(rows)
+    canvas.save(out_path)
 
-        # compose into a single image
-        W, H = all_rows[0][0].size
-        rows, cols = len(all_rows), steps
-        canvas = Image.new("RGB", (cols * W, rows * H), (0, 0, 0))
-        for r in range(rows):
-            for c in range(cols):
-                canvas.paste(all_rows[r][c], (c * W, r * H))
-        canvas.save(out_path)
+# 2) Counterfactual line search along Δ-hat
+def vis_line_search(model, device, pairs, out_path: Path, num_lambdas=16, max_lambda=6.0):
+    rows = []
+    lambdas = torch.linspace(0, max_lambda, num_lambdas)
+    with torch.no_grad():
+        for (A, B, gap, *_) in pairs:
+            A1 = A.unsqueeze(0).to(device)
+            B1 = B.unsqueeze(0).to(device)
+            out = model(A1, B1, torch.rand(1, device=device))
+            zA, zB, delta = out["zA"].squeeze(0), out["zB"].squeeze(0), out["delta_AB"].squeeze(0)
+            d = torch.linalg.norm(delta) + 1e-8
+            d_hat = delta / d
+            best_loss = 1e9
+            best_dec = None
+            for lam in lambdas:
+                z_t = zA + lam.item() * d_hat
+                dec = model.decode(z_t.unsqueeze(0)).squeeze(0).cpu()
+                loss = torch.mean(torch.abs(dec - B)).item()
+                if loss < best_loss:
+                    best_loss = loss
+                    best_dec = dec
+            dec_p = to_pil(best_dec)
+            err_map = torch.abs(best_dec - B).mean(0).numpy()
+            err_p = im_to_heat(err_map)
+            rows.append(stack_horiz([to_pil(A), to_pil(B), dec_p, err_p]))
+    canvas = stack_vert(rows)
+    canvas.save(out_path)
+
+# 3) Orthogonal directions control
+def gram_schmidt(u, basis: List[torch.Tensor]):
+    v = u.clone()
+    for b in basis:
+        v -= (v @ b) * b
+    n = torch.linalg.norm(v) + 1e-8
+    return v / n
+
+def vis_orthogonals(model, device, pairs, out_path: Path, step=0.5):
+    rows = []
+    with torch.no_grad():
+        for (A, B, gap, *_) in pairs:
+            A1 = A.unsqueeze(0).to(device)
+            B1 = B.unsqueeze(0).to(device)
+            out = model(A1, B1, torch.rand(1, device=device))
+            zA, zB, delta = out["zA"].squeeze(0), out["zB"].squeeze(0), out["delta_AB"].squeeze(0)
+            e1 = delta / (torch.linalg.norm(delta) + 1e-8)
+            rand2 = torch.randn_like(e1)
+            e2 = gram_schmidt(rand2, [e1])
+            rand3 = torch.randn_like(e1)
+            e3 = gram_schmidt(rand3, [e1, e2])
+
+            dec_e1 = model.decode((zA + step * e1).unsqueeze(0)).squeeze(0).cpu()
+            dec_e2 = model.decode((zA + step * e2).unsqueeze(0)).squeeze(0).cpu()
+            dec_e3 = model.decode((zA + step * e3).unsqueeze(0)).squeeze(0).cpu()
+
+            row = stack_horiz([
+                to_pil(A),
+                stack_vert([to_pil(dec_e1), im_to_heat(torch.abs(dec_e1 - A).mean(0).numpy())]),
+                stack_vert([to_pil(dec_e2), im_to_heat(torch.abs(dec_e2 - A).mean(0).numpy())]),
+                stack_vert([to_pil(dec_e3), im_to_heat(torch.abs(dec_e3 - A).mean(0).numpy())]),
+            ])
+            rows.append(row)
+    stack_vert(rows).save(out_path)
+
+# 4) PCA on many Δ’s
+def vis_pca_deltas(delta_cache: List[Tuple[np.ndarray, int]], out_path: Path):
+    if len(delta_cache) < 10:
+        return
+    X = np.stack([d for d, _ in delta_cache], 0)
+    gaps = np.array([g for _, g in delta_cache])
+    X = X - X.mean(0, keepdims=True)
+    U, S, Vt = np.linalg.svd(X, full_matrices=False)
+    Z = X @ Vt[:2].T  # [N,2]
+    plt.figure(figsize=(5, 4))
+    sc = plt.scatter(Z[:,0], Z[:,1], c=gaps, s=10, cmap="viridis")
+    plt.colorbar(sc, label="gap")
+    plt.title("PCA of Δ vectors")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+# 5) Feature-space correspondence heatmap (A->B)
+def extract_conv_feat(model: ActionDistanceModel, x: torch.Tensor):
+    feats = []
+    def hook(_, __, output):
+        feats.append(output.detach())
+    h = model.encoder.net[-2].register_forward_hook(hook)  # last conv layer output before GAP
+    _ = model.encoder(x)
+    h.remove()
+    fmap = feats[0]  # [B,C,H',W']
+    return fmap
+
+def vis_feature_corr(model, device, pairs, out_path: Path):
+    rows = []
+    with torch.no_grad():
+        for (A, B, gap, *_) in pairs:
+            A1, B1 = A.unsqueeze(0).to(device), B.unsqueeze(0).to(device)
+            fA = extract_conv_feat(model, A1)  # [1,C,H,W]
+            fB = extract_conv_feat(model, B1)
+            # L2-normalize over channel
+            fA_n = F.normalize(fA, dim=1)
+            fB_n = F.normalize(fB, dim=1)
+            C, Ha, Wa = fA_n.shape[1:]
+            Hb, Wb = fB_n.shape[2], fB_n.shape[3]
+            # For each (ha,wa), find max cosine over all (hb,wb)
+            fA_flat = fA_n.view(1, C, Ha * Wa)          # [1,C,N]
+            fB_flat = fB_n.view(1, C, Hb * Wb)          # [1,C,M]
+            sim = torch.einsum("bcn,bcm->bnm", fA_flat, fB_flat).squeeze(0)  # [N,M]
+            sim_max, _ = torch.max(sim, dim=1)          # [N]
+            sim_map = sim_max.view(Ha, Wa).cpu().numpy()
+            # upsample to image size
+            sim_map = np.clip((sim_map - sim_map.min()) / (sim_map.ptp() + 1e-8), 0, 1)
+            sim_p = im_to_heat(sim_map)
+            rows.append(stack_horiz([to_pil(A), to_pil(B), sim_p]))
+    stack_vert(rows).save(out_path)
+
+# 6) Occlusion sensitivity
+def vis_occlusion(model, device, pairs, out_path: Path, patch=24, stride=12):
+    rows = []
+    for (A, B, gap, *_) in pairs:
+        A1 = A.unsqueeze(0).to(device).clone().requires_grad_(False)
+        B1 = B.unsqueeze(0).to(device).clone().requires_grad_(False)
+        with torch.no_grad():
+            out = model(A1, B1, torch.rand(1, device=device))
+            base = distance_from_delta(out["delta_AB"]).item()
+        # A-occlusion
+        H, W = A.shape[1], A.shape[2]
+        A_occ = np.zeros((H, W), dtype=np.float32)
+        for y in range(0, H - patch + 1, stride):
+            for x in range(0, W - patch + 1, stride):
+                Ao = A.clone()
+                Ao[:, y:y+patch, x:x+patch] = Ao.mean()
+                Ao1 = Ao.unsqueeze(0).to(device)
+                with torch.no_grad():
+                    d = distance_from_delta(model(Ao1, B1, torch.rand(1, device=device))["delta_AB"]).item()
+                A_occ[y:y+patch, x:x+patch] = max(A_occ[y:y+patch, x:x+patch].max(), base - d)
+        # B-occlusion
+        B_occ = np.zeros((H, W), dtype=np.float32)
+        for y in range(0, H - patch + 1, stride):
+            for x in range(0, W - patch + 1, stride):
+                Bo = B.clone()
+                Bo[:, y:y+patch, x:x+patch] = Bo.mean()
+                Bo1 = Bo.unsqueeze(0).to(device)
+                with torch.no_grad():
+                    d = distance_from_delta(model(A1, Bo1, torch.rand(1, device=device))["delta_AB"]).item()
+                B_occ[y:y+patch, x:x+patch] = max(B_occ[y:y+patch, x:x+patch].max(), base - d)
+        rows.append(stack_horiz([to_pil(A), im_to_heat(A_occ), to_pil(B), im_to_heat(B_occ)]))
+    stack_vert(rows).save(out_path)
+
+# 7) Gradient attribution
+def vis_grad_attr(model, device, pairs, out_path: Path):
+    rows = []
+    for (A, B, gap, *_) in pairs:
+        A1 = A.unsqueeze(0).to(device).clone().requires_grad_(True)
+        B1 = B.unsqueeze(0).to(device).clone().requires_grad_(True)
+        out = model(A1, B1, torch.rand(1, device=device))
+        d = distance_from_delta(out["delta_AB"])
+        d.backward()
+        gA = A1.grad.detach().abs().mean(1).squeeze(0).cpu().numpy()
+        gB = B1.grad.detach().abs().mean(1).squeeze(0).cpu().numpy()
+        rows.append(stack_horiz([to_pil(A), im_to_heat(gA), to_pil(B), im_to_heat(gB)]))
+    stack_vert(rows).save(out_path)
+
+# 8) Decoder Jacobian probes
+def vis_jacobian_probes(model, device, pairs, out_path: Path, dims=4, eps=0.15):
+    rows = []
+    with torch.no_grad():
+        for (A, B, gap, *_) in pairs:
+            A1 = A.unsqueeze(0).to(device)
+            zA = model.encoder(A1).squeeze(0)
+            # choose dims by largest |zA| entries to be stable
+            idx = torch.topk(torch.abs(zA), k=min(dims, zA.numel())).indices.cpu().numpy().tolist()
+            tiles = [to_pil(A)]
+            for k in idx:
+                e = torch.zeros_like(zA); e[k] = 1.0
+                dec_p = model.decode((zA + eps * e).unsqueeze(0)).squeeze(0).cpu()
+                dec_m = model.decode((zA - eps * e).unsqueeze(0)).squeeze(0).cpu()
+                diff = torch.abs(dec_p - dec_m).mean(0).numpy()
+                tiles.append(stack_vert([to_pil(dec_p), to_pil(dec_m), im_to_heat(diff)]))
+            rows.append(stack_horiz(tiles))
+    stack_vert(rows).save(out_path)
+
+# 9) Δ-length calibration (uses cached pairs)
+def vis_length_calibration(delta_cache: List[Tuple[np.ndarray, int]], out_path: Path):
+    if len(delta_cache) == 0:
+        return
+    dhat = np.array([np.linalg.norm(d) for d, _ in delta_cache])
+    gaps = np.array([g for _, g in delta_cache])
+    plt.figure(figsize=(6,4))
+    plt.scatter(gaps, dhat, s=8, alpha=0.4)
+    # binned means
+    bins = np.unique(np.linspace(gaps.min(), gaps.max(), num=12, dtype=int))
+    centers, means, stds = [], [], []
+    for b in range(len(bins)-1):
+        m = (gaps >= bins[b]) & (gaps < bins[b+1])
+        if m.sum() < 5: continue
+        centers.append(0.5*(bins[b]+bins[b+1]))
+        means.append(dhat[m].mean())
+        stds.append(dhat[m].std())
+    if centers:
+        centers = np.array(centers); means = np.array(means); stds = np.array(stds)
+        plt.plot(centers, means, lw=2)
+        plt.fill_between(centers, means-stds, means+stds, alpha=0.2)
+    plt.xlabel("gap"); plt.ylabel("d̂")
+    plt.title("Δ-length calibration")
+    plt.tight_layout(); plt.savefig(out_path); plt.close()
+
+# 10) Neighborhood morphs along Δ
+def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path, K=3, beta=0.7, pool_samples=400):
+    # Build a small pool of latents
+    all_paths = []
+    for tid, frames in enumerate(ds.trajs):
+        for i, p in enumerate(frames):
+            all_paths.append(p)
+            if len(all_paths) >= pool_samples: break
+        if len(all_paths) >= pool_samples: break
+    imgs = [load_frame(p) for p in all_paths]
+    X = torch.stack(imgs, 0).to(device)
+    with torch.no_grad():
+        Z = model.encoder(X)  # [N,D]
+    rows = []
+    with torch.no_grad():
+        for (A, B, gap, *_) in pairs:
+            zA = model.encoder(A.unsqueeze(0).to(device)).squeeze(0)
+            zB = model.encoder(B.unsqueeze(0).to(device)).squeeze(0)
+            delta = model.vec_head(zA.unsqueeze(0), zB.unsqueeze(0)).squeeze(0)
+            d = torch.linalg.norm(delta) + 1e-8
+            u = delta / d
+            # NN in latent
+            sims = (Z @ zA)
+            idx = torch.topk(sims, k=min(K, Z.size(0))).indices
+            tiles = [to_pil(A)]
+            for ix in idx.tolist():
+                zn = Z[ix]
+                dec_n = model.decode(zn.unsqueeze(0)).squeeze(0).cpu()
+                dec_n_plus = model.decode((zn + beta * u).unsqueeze(0)).squeeze(0).cpu()
+                tiles.append(stack_vert([to_pil(dec_n), to_pil(dec_n_plus),
+                                         im_to_heat(torch.abs(dec_n_plus - dec_n).mean(0).numpy())]))
+            rows.append(stack_horiz(tiles))
+    stack_vert(rows).save(out_path)
 
 # -------------------------
 # CLI
@@ -385,16 +646,18 @@ def make_argparser():
                     help="Displacement vector dimensionality (default: %(default)s)")
     ap.add_argument("--max_gap", type=int, default=None,
                     help="Max step gap when sampling pairs (None means unbounded) (default: %(default)s)")
-    ap.add_argument("--debug_every", type=int, default=100,
+    ap.add_argument("--debug_every", type=int, default=50,
                     help="Steps between saving a two-column A/B debug grid (default: %(default)s)")
-    ap.add_argument("--interp_every", type=int, default=100,
-                    help="Steps between saving latent interpolation grids (default: %(default)s)")
-    ap.add_argument("--interp_steps", type=int, default=6,
-                    help="Number of columns (interpolation steps) per row in latent interp grids (default: %(default)s)")
-    ap.add_argument("--w_rec", type=float, default=0.1,
-                    help="Weight for image reconstruction (decoder) loss (default: %(default)s)")
-    ap.add_argument("--w_cfm", type=float, default=0.5,
-                    help="Weight for CFM auxiliary loss (default: %(default)s)")
+    ap.add_argument("--save_every", type=int, default=1000,
+                    help="Steps between saving a checkpoint (default: %(default)s)")
+
+    # Visualization controls
+    ap.add_argument("--vis_every_epoch", type=int, default=1,
+                    help="Epoch interval for producing visualization suite (default: %(default)s)")
+    ap.add_argument("--vis_pairs", type=int, default=4,
+                    help="Number of random pairs to visualize per view (default: %(default)s)")
+    ap.add_argument("--pca_cache_pairs", type=int, default=2000,
+                    help="How many Δ samples to cache across training for PCA/calibration (default: %(default)s)")
     return ap
 
 # -------------------------
@@ -412,6 +675,8 @@ def main():
     set_seed(args.seed)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    vis_dir = out_dir / "vis"
+    ensure_dir(vis_dir)
 
     device = torch.device(args.device)
     ds = TrajectorySet(Path(args.data_root))
@@ -423,14 +688,14 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     global_step = 0
+    delta_cache: List[Tuple[np.ndarray, int]] = []  # (delta_vec, gap)
 
     for epoch in range(args.epochs):
         model.train()
         for step in range(args.steps_per_epoch):
             pairs = sample_pairs(ds, args.batch_size, args.max_gap)
-
             imgsA, imgsB, gaps = [], [], []
-            for A, B, g in pairs:
+            for A, B, g, *_ in pairs:
                 imgsA.append(apply_noise_aug(A, aug_cfg))
                 imgsB.append(apply_noise_aug(B, aug_cfg))
                 gaps.append(g)
@@ -441,24 +706,19 @@ def main():
             t_for_cfm = torch.rand(A_t.size(0), device=device)
             out = model(A_t, B_t, t_for_cfm)
 
-            # losses
+            # Losses
             d_hat = distance_from_delta(out["delta_AB"])
-            L_reg = F.mse_loss(d_hat, gap_t)                     # main objective
-            L_cfm = cfm_loss(out["cfm_v"], out["zA"], out["zB"]) # auxiliary CFM
-
-            # decoder recon loss on both A and B
+            L_reg = F.mse_loss(d_hat, gap_t)
+            L_cfm = cfm_loss(out["cfm_v"], out["zA"], out["zB"])
             decA = model.decode(out["zA"])
             decB = model.decode(out["zB"])
             L_rec = (F.l1_loss(decA, A_t) + F.l1_loss(decB, B_t)) * 0.5
-
-            loss = L_reg + args.w_cfm * L_cfm + args.w_rec * L_rec
+            loss = L_reg + 0.5 * L_cfm + 0.1 * L_rec
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
-
             gn_enc  = grad_norm(model.encoder)
             gn_head = grad_norm(model.vec_head)
-
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
@@ -470,33 +730,72 @@ def main():
                     f"∥g_enc∥ {gn_enc:.3e} ∥g_head∥ {gn_head:.3e}"
                 )
 
-            # Two-column A/B debug grid (more frequent)
+            # Two-column debug grid more frequently
             if (global_step % args.debug_every) == 0:
                 k = min(6, A_t.size(0))
-                dbg_pairs = [(A_t[i].cpu(), B_t[i].cpu(), int(gap_t[i].item())) for i in range(k)]
+                dbg_pairs = [(A_t[i].cpu(), B_t[i].cpu(), int(gap_t[i].item()), None, None, None) for i in range(k)]
                 preds = [float(d_hat[i].item()) for i in range(k)]
                 deltas = [out["delta_AB"][i].detach().cpu().numpy() for i in range(k)]
-                dbg_path = out_dir / f"debug_cols_step_{global_step}.jpg"
-                save_debug_columns(dbg_pairs, preds, deltas, dbg_path)
+                save_debug_columns(dbg_pairs, preds, deltas, out_dir / f"debug_cols_step_{global_step}.jpg")
 
-            # Latent interpolation grid (rows=pairs, cols=interp steps)
-            if (global_step % args.interp_every) == 0:
-                k = min(6, A_t.size(0))
-                interp_pairs = [(A_t[i].cpu(), B_t[i].cpu(), int(gap_t[i].item())) for i in range(k)]
-                interp_path = out_dir / f"interp_step_{global_step}.jpg"
-                save_latent_interpolations(model, interp_pairs, interp_path, device, steps=args.interp_steps)
+            # Cache deltas for PCA & calibration
+            for i in range(A_t.size(0)):
+                if len(delta_cache) >= args.pca_cache_pairs:
+                    break
+                delta_cache.append((out["delta_AB"][i].detach().cpu().numpy(), int(gap_t[i].item())))
 
             # Periodic checkpoints
-            if (global_step % 1000) == 0 and global_step > 0:
+            if (global_step % args.save_every) == 0 and global_step > 0:
                 ckpt = {"model": model.state_dict(), "opt": opt.state_dict(), "args": vars(args),
                         "step": global_step, "epoch": epoch}
                 torch.save(ckpt, out_dir / f"ckpt_step_{global_step}.pt")
 
             global_step += 1
 
-        # save per-epoch
+        # --------- End-of-epoch visualization suite ---------
+        if ((epoch + 1) % args.vis_every_epoch) == 0:
+            model.eval()
+            # sample N pairs (without augmentation)
+            base_pairs = sample_pairs(ds, batch_size=args.vis_pairs, max_gap=args.max_gap)
+            base_pairs = [(load_image_from_index(ds, tid, i).cpu(),
+                           load_image_from_index(ds, tid, j).cpu(),
+                           gap, tid, i, j)
+                          for (_, _, gap, tid, i, j) in base_pairs]
+
+            # 1) Tiny push
+            vis_tiny_push(model, device, base_pairs, vis_dir / f"ep{epoch:02d}_1_tiny_push.jpg")
+
+            # 2) Counterfactual line search
+            vis_line_search(model, device, base_pairs, vis_dir / f"ep{epoch:02d}_2_line_search.jpg")
+
+            # 3) Orthogonals
+            vis_orthogonals(model, device, base_pairs, vis_dir / f"ep{epoch:02d}_3_orthogonals.jpg")
+
+            # 4) PCA on Δ cache
+            vis_pca_deltas(delta_cache, vis_dir / f"ep{epoch:02d}_4_pca_deltas.png")
+
+            # 5) Feature correspondence
+            vis_feature_corr(model, device, base_pairs, vis_dir / f"ep{epoch:02d}_5_feat_corr.jpg")
+
+            # 6) Occlusion sensitivity
+            vis_occlusion(model, device, base_pairs, vis_dir / f"ep{epoch:02d}_6_occlusion.jpg")
+
+            # 7) Gradient attribution
+            vis_grad_attr(model, device, base_pairs, vis_dir / f"ep{epoch:02d}_7_grad_attr.jpg")
+
+            # 8) Decoder Jacobian probes
+            vis_jacobian_probes(model, device, base_pairs, vis_dir / f"ep{epoch:02d}_8_jacobian.jpg")
+
+            # 9) Δ-length calibration
+            vis_length_calibration(delta_cache, vis_dir / f"ep{epoch:02d}_9_length_calib.png")
+
+            # 10) Neighborhood morphs
+            vis_neighbor_morphs(model, device, ds, base_pairs, vis_dir / f"ep{epoch:02d}_10_neighbor_morphs.jpg")
+
+        # save per-epoch model
         torch.save(model.state_dict(), out_dir / f"epoch_{epoch}_model.pt")
 
+    # final save
     torch.save(model.state_dict(), out_dir / "final.pt")
     print("Training complete.")
 
