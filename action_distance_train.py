@@ -414,12 +414,14 @@ def vis_tiny_push(model, device, pairs, out_path: Path, alphas=(0.1, 0.2, 0.3, 0
             A1 = A.unsqueeze(0).to(device)
             B1 = B.unsqueeze(0).to(device)
             out = model(A1, B1, torch.rand(1, device=device))
-            zA, delta = out["zA"].squeeze(0), out["delta_AB"].squeeze(0)
-            d = torch.linalg.norm(delta) + 1e-8
-            d_hat = delta / d
+            zA = out["zA"].squeeze(0)
+            zB = out["zB"].squeeze(0)
+            u = zB - zA
+            u = u / (torch.linalg.norm(u) + 1e-8)  # direction in z-space
+
             row_imgs = [to_pil(A)]
             for a in alphas:
-                z_t = zA + a * d_hat
+                z_t = zA + a * u
                 dec = model.decode(z_t.unsqueeze(0)).squeeze(0).cpu()
                 dec_p = to_pil(dec)
                 diff = torch.abs(dec - A).mean(0).numpy()
@@ -437,17 +439,25 @@ def vis_line_search(model, device, pairs, out_path: Path, num_lambdas=16, max_la
             A1 = A.unsqueeze(0).to(device)
             B1 = B.unsqueeze(0).to(device)
             out = model(A1, B1, torch.rand(1, device=device))
-            zA, delta = out["zA"].squeeze(0), out["delta_AB"].squeeze(0)
-            d = torch.linalg.norm(delta) + 1e-8
-            u = delta / d
-            best_loss = 1e9; best_dec = None
+            zA = out["zA"].squeeze(0)
+            zB = out["zB"].squeeze(0)
+            u = zB - zA
+            u = u / (torch.linalg.norm(u) + 1e-8)
+
+            best_loss = 1e9
+            best_dec = None
             for lam in lambdas:
                 z_t = zA + lam.item() * u
                 dec = model.decode(z_t.unsqueeze(0)).squeeze(0).cpu()
                 loss = torch.mean(torch.abs(dec - B)).item()
                 if loss < best_loss:
-                    best_loss = loss; best_dec = dec
-            rows.append(stack_horiz([to_pil(A), to_pil(B), to_pil(best_dec), im_to_heat(torch.abs(best_dec - B).mean(0).numpy())]))
+                    best_loss = loss
+                    best_dec = dec
+            rows.append(stack_horiz([
+                to_pil(A), to_pil(B),
+                to_pil(best_dec),
+                im_to_heat(torch.abs(best_dec - B).mean(0).numpy())
+            ]))
     stack_vert(rows).save(out_path)
 
 # 3) Orthogonal directions control
@@ -465,13 +475,18 @@ def vis_orthogonals(model, device, pairs, out_path: Path, step=0.5):
             A1 = A.unsqueeze(0).to(device)
             B1 = B.unsqueeze(0).to(device)
             out = model(A1, B1, torch.rand(1, device=device))
-            zA, delta = out["zA"].squeeze(0), out["delta_AB"].squeeze(0)
-            e1 = delta / (torch.linalg.norm(delta) + 1e-8)
+            zA = out["zA"].squeeze(0)
+            zB = out["zB"].squeeze(0)
+
+            e1 = zB - zA
+            e1 = e1 / (torch.linalg.norm(e1) + 1e-8)
             e2 = gram_schmidt(torch.randn_like(e1), [e1])
             e3 = gram_schmidt(torch.randn_like(e1), [e1, e2])
+
             dec_e1 = model.decode((zA + step * e1).unsqueeze(0)).squeeze(0).cpu()
             dec_e2 = model.decode((zA + step * e2).unsqueeze(0)).squeeze(0).cpu()
             dec_e3 = model.decode((zA + step * e3).unsqueeze(0)).squeeze(0).cpu()
+
             rows.append(stack_horiz([
                 to_pil(A),
                 stack_vert([to_pil(dec_e1), im_to_heat(torch.abs(dec_e1 - A).mean(0).numpy())]),
@@ -612,6 +627,7 @@ def vis_length_calibration(delta_cache: List[Tuple[np.ndarray, int]], out_path: 
 
 # 10) Neighborhood morphs along Δ
 def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path, K=3, beta=0.7, pool_samples=400):
+    # Build a small pool of latents
     all_paths = []
     for tid, frames in enumerate(ds.trajs):
         for i, p in enumerate(frames):
@@ -622,14 +638,16 @@ def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path,
     X = torch.stack(imgs, 0).to(device)
     with torch.no_grad():
         Z = model.encoder(X)  # [N,D]
+
     rows = []
     with torch.no_grad():
         for (A, B, gap, *_ ) in pairs:
             zA = model.encoder(A.unsqueeze(0).to(device)).squeeze(0)
             zB = model.encoder(B.unsqueeze(0).to(device)).squeeze(0)
-            delta = model.vec_head(zA.unsqueeze(0), zB.unsqueeze(0)).squeeze(0)
-            d = torch.linalg.norm(delta) + 1e-8
-            u = delta / d
+            u = zB - zA
+            u = u / (torch.linalg.norm(u) + 1e-8)
+
+            # nearest neighbors of A in z-space
             sims = (Z @ zA)
             idx = torch.topk(sims, k=min(K, Z.size(0))).indices
             tiles = [to_pil(A)]
@@ -637,8 +655,11 @@ def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path,
                 zn = Z[ix]
                 dec_n = model.decode(zn.unsqueeze(0)).squeeze(0).cpu()
                 dec_n_plus = model.decode((zn + beta * u).unsqueeze(0)).squeeze(0).cpu()
-                tiles.append(stack_vert([to_pil(dec_n), to_pil(dec_n_plus),
-                                         im_to_heat(torch.abs(dec_n_plus - dec_n).mean(0).numpy())]))
+                tiles.append(stack_vert([
+                    to_pil(dec_n),
+                    to_pil(dec_n_plus),
+                    im_to_heat(torch.abs(dec_n_plus - dec_n).mean(0).numpy())
+                ]))
             rows.append(stack_horiz(tiles))
     stack_vert(rows).save(out_path)
 
