@@ -535,7 +535,9 @@ def vis_feature_corr(model, device, pairs, out_path: Path):
             sim = torch.einsum("bcn,bcm->bnm", fA_flat, fB_flat).squeeze(0)  # [N,M]
             sim_max, _ = torch.max(sim, dim=1)
             sim_map = sim_max.view(Ha, Wa).cpu().numpy()
-            sim_map = np.clip((sim_map - sim_map.min()) / (sim_map.ptp() + 1e-8), 0, 1)
+            # 🔧 NumPy 2.0 fix: use np.ptp instead of sim_map.ptp()
+            rng = np.ptp(sim_map)
+            sim_map = np.clip((sim_map - sim_map.min()) / (rng + 1e-8), 0, 1)
             rows.append(stack_horiz([to_pil(A), to_pil(B), im_to_heat(sim_map)]))
     stack_vert(rows).save(out_path)
 
