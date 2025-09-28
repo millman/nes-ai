@@ -385,9 +385,9 @@ def make_argparser():
                     help="Displacement vector dimensionality (default: %(default)s)")
     ap.add_argument("--max_gap", type=int, default=None,
                     help="Max step gap when sampling pairs (None means unbounded) (default: %(default)s)")
-    ap.add_argument("--debug_every", type=int, default=50,
+    ap.add_argument("--debug_every", type=int, default=100,
                     help="Steps between saving a two-column A/B debug grid (default: %(default)s)")
-    ap.add_argument("--interp_every", type=int, default=200,
+    ap.add_argument("--interp_every", type=int, default=100,
                     help="Steps between saving latent interpolation grids (default: %(default)s)")
     ap.add_argument("--interp_steps", type=int, default=6,
                     help="Number of columns (interpolation steps) per row in latent interp grids (default: %(default)s)")
@@ -481,7 +481,7 @@ def main():
 
             # Latent interpolation grid (rows=pairs, cols=interp steps)
             if (global_step % args.interp_every) == 0:
-                k = min(4, A_t.size(0))
+                k = min(6, A_t.size(0))
                 interp_pairs = [(A_t[i].cpu(), B_t[i].cpu(), int(gap_t[i].item())) for i in range(k)]
                 interp_path = out_dir / f"interp_step_{global_step}.jpg"
                 save_latent_interpolations(model, interp_pairs, interp_path, device, steps=args.interp_steps)
