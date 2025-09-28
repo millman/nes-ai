@@ -331,10 +331,16 @@ def draw_arrow_on_pil(pil_img: Image.Image, vec: np.ndarray, text: str) -> Image
     # Draw line body only
     draw.line((cx, cy, ex, ey), width=2, fill=(0, 255, 0))
 
-    # Bottom-left text
+    # Draw text at bottom
     font = ImageFont.load_default()
-    text_w, text_h = draw.textsize(text, font=font)
-    tx, ty = 6, H - text_h - 6
+    # Text height detection (compatible with different Pillow versions)
+    if hasattr(draw, "textbbox"):
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    else:
+        text_w, text_h = font.getsize(text)
+    tx = 6
+    ty = H - text_h - 6   # bottom alignment
     draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
 
     return img
