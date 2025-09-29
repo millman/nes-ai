@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Action-distance (CFM) toy trainer with a tiny encoder/decoder for visualization.
+Action-distance (CFM) trainer with tiny encoder/decoder + full A→B latent interpolation viz.
 
-Debug visualization: full latent interpolation from A→B decoded as images:
-  [A] [dec(zA)] [t-samples ...] [dec(zB)] [B]
+Key choices:
+- CFM core uses a detached latent line and a scale-invariant objective to avoid trivial near-zero loss.
+- Latent scale calibration keeps z in a healthy range so ‖zB−zA‖ isn't ~0 at init.
+- Debug viz decodes a dense latent interpolation from A to B and annotates tiles with traj/state or t.
 
-CLI:
+Run:
   python action_distance_cfm.py --data_root traj_dumps --out_dir out.action_distance_cfm
 """
 
 from __future__ import annotations
-import argparse, math, random, contextlib
+import argparse, math, random, contextlib, os
 from dataclasses import dataclass
 from collections import deque
 from pathlib import Path
@@ -60,8 +62,24 @@ def load_frame_as_tensor(p: Path) -> torch.Tensor:
     img = Image.open(p).convert("RGB").resize((W, H), resample=Image.BICUBIC)
     return pil_to_tensor(img)
 
+def short_traj_state_label(path_str: str) -> str:
+    """
+    Turn an absolute path like .../traj_12/states/state_00034.png -> 'traj_12/state_00034'
+    """
+    base = os.path.normpath(path_str)
+    parts = base.split(os.sep)
+    if len(parts) >= 2:
+        # find 'traj_*' and following 'states/state_*.png'
+        traj = next((p for p in parts if p.startswith("traj_")), None)
+        fname = os.path.basename(base)
+        if traj and fname.startswith("state_"):
+            stem = os.path.splitext(fname)[0]
+            return f"{traj}/{stem}"
+    # fallback: basename without extension
+    return os.path.splitext(os.path.basename(base))[0]
+
 # --------------------------------------------------------------------------------------
-# Dataset that yields pairs (A,B) from (usually) the same trajectory
+# Dataset that yields pairs (A,B)
 # --------------------------------------------------------------------------------------
 class PairFromTrajDataset(Dataset):
     def __init__(self, data_root: Path, split: str = "train", train_frac: float = 0.95, seed: int = 0,
@@ -158,13 +176,11 @@ class Decoder(nn.Module):
 
 # --------------------------------------------------------------------------------------
 # Conditional Vector Field for CFM
-# vθ(z_t, t | cond(A,B)) -> R^{z_dim}
-# We'll condition using [z_t, (zB - zA), (zA + zB)/2, t].
 # --------------------------------------------------------------------------------------
 class VectorField(nn.Module):
     def __init__(self, z_dim: int = 128):
         super().__init__()
-        in_dim = z_dim * 3 + 1  # zt, delta, mid, and scalar t
+        in_dim = z_dim * 3 + 1  # zt, (zB-zA), (zA+zB)/2, t
         hidden = 512
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.ReLU(inplace=True),
@@ -190,7 +206,6 @@ def _to_pil(t: torch.Tensor) -> Image.Image:
     return Image.fromarray(arr)
 
 def _psnr(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    # assuming x,y in [0,1]
     mse = F.mse_loss(x, y, reduction="mean").clamp_min(eps)
     return 10.0 * torch.log10(1.0 / mse)
 
@@ -202,26 +217,30 @@ def _grad_norm(module: nn.Module) -> float:
     return math.sqrt(total) if total > 0 else 0.0
 
 # --------------------------------------------------------------------------------------
-# Visualization: FULL interpolation from A→B (decoded)
+# Visualization: FULL interpolation from A→B (decoded) with annotations
 # --------------------------------------------------------------------------------------
 @torch.no_grad()
 def save_full_interpolation_grid(
     enc: Encoder, dec: Decoder,
     A: torch.Tensor, B: torch.Tensor,
+    pathsA: List[str], pathsB: List[str],
     out_path: Path, device: torch.device,
     interp_steps: int = 12
 ):
     """
-    For the first up to 8 rows in batch:
-      Row shows: [A] [dec(zA)] [dec(z_t1)] ... [dec(z_tK)] [dec(zB)] [B]
-      where z_tk = (1 - t_k) * zA + t_k * zB,  t_k in (0,1), K = interp_steps
-      Endpoints (t=0, t=1) are shown as dec(zA), dec(zB) next to raw A, B.
+    For up to 8 rows in batch:
+      Row: [A] [dec(zA)] [dec(z_t1)] ... [dec(z_tK)] [dec(zB)] [B]
+      Annotations:
+        - A/B tiles: 'traj_X/state_YYYYY'
+        - dec(zA)/dec(zB): same + '(dec)'
+        - interps: t=...
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Bsz = min(A.shape[0], 8)
-    K = max(1, int(interp_steps))  # number of *internal* samples (excluding endpoints)
+    K = max(1, int(interp_steps))  # internal samples (exclude endpoints)
 
     A = A[:Bsz].to(device); B = B[:Bsz].to(device)
+    pA = pathsA[:Bsz];      pB = pathsB[:Bsz]
     zA = enc(A); zB = enc(B)
 
     # t values in (0,1), excluding endpoints; shape (K,)
@@ -244,42 +263,38 @@ def save_full_interpolation_grid(
     except Exception:
         font = None
 
+    def annotate(draw, x, y, txt, fill=(255,255,255)):
+        if font:
+            bbox = draw.textbbox((0, 0), txt, font=font)
+            tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+        else:
+            tw, th = len(txt)*6, 10
+        draw.rectangle([x+2, y+2, x+2+tw+2, y+2+th+2], fill=(0,0,0))
+        draw.text((x+4, y+4), txt, font=font, fill=fill)
+
     # Place rows
     for r in range(Bsz):
         x = 0; y = r * tile_h
+        labelA = short_traj_state_label(pA[r])
+        labelB = short_traj_state_label(pB[r])
+
         # Raw A
-        canvas.paste(_to_pil(A[r]), (x, y)); x += tile_w
+        canvas.paste(_to_pil(A[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
         # dec(zA)
-        canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); x += tile_w
+        canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelA + " (dec)", (220,220,255)); x += tile_w
         # K internal samples
         for k in range(K):
             canvas.paste(_to_pil(interp_decoded[k][r]), (x, y))
-            # annotate t on first row only to reduce clutter
-            if r == 0:
-                tt = float(t_vals[k].item())
-                txt = f"t={tt:.2f}"
-                if font:
-                    bbox = draw.textbbox((0, 0), txt, font=font)
-                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                else:
-                    tw, th = len(txt)*6, 10
-                draw.rectangle([x+2, y+2, x+2+tw+2, y+2+th+2], fill=(0,0,0))
-                draw.text((x+4, y+4), txt, font=font, fill=(220,220,255))
+            annotate(draw, x, y, f"t={float(t_vals[k]):.2f}", (200,255,200))
             x += tile_w
         # dec(zB)
-        canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); x += tile_w
+        canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
         # Raw B
-        canvas.paste(_to_pil(B[r]), (x, y)); x += tile_w
+        canvas.paste(_to_pil(B[r]), (x, y)); annotate(draw, x, y, labelB); x += tile_w
 
         # row annotation: ||zB-zA||
-        txt = f"||zB-zA||={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
-        if font:
-            bbox = draw.textbbox((0, 0), txt, font=font)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        else:
-            tw, th = len(txt)*6, 10
-        draw.rectangle([2, y+2, 2+tw+2, y+2+th+2], fill=(0,0,0))
-        draw.text((4, y+4), txt, font=font, fill=(255,255,255))
+        txt = f"‖zB−zA‖={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
+        annotate(draw, 2, y + tile_h - 16, txt, (255,255,0))
 
     canvas.save(out_path)
 
@@ -304,10 +319,11 @@ class TrainCfg:
     lambda_cfm: float = 1.0
     lambda_rec: float = 0.1
     lambda_latent_l2: float = 1e-4
+    lambda_zcal: float = 0.05  # latent scale calibration
 
     # viz/debug
     viz_every: int = 500
-    interp_steps: int = 12   # <--- controls density of the full interpolation
+    interp_steps: int = 12
     save_every_ep: bool = True
     log_every: int = 50
 
@@ -365,7 +381,7 @@ def train(cfg: TrainCfg):
         enc.train(); dec.train(); vf.train()
         run_loss_cfm = run_loss_rec = run_n = 0.0
 
-        for A, B, _, _ in dl_tr:
+        for A, B, pathsA, pathsB in dl_tr:
             A = A.to(device, non_blocking=True)
             B = B.to(device, non_blocking=True)
 
@@ -373,26 +389,36 @@ def train(cfg: TrainCfg):
                 zA = enc(A)
                 zB = enc(B)
 
-                # Sample t and construct z_t (line between zA and zB)
+                # --- CFM core with detach + scale-invariant objective ---
                 t = torch.rand(A.shape[0], device=device)
-                zt = (1.0 - t[:, None]) * zA + t[:, None] * zB
+                zA_d, zB_d = zA.detach(), zB.detach()
+                zt_d = (1.0 - t[:, None]) * zA_d + t[:, None] * zB_d
+                u_tgt = (zB_d - zA_d)  # target velocity on the line
 
-                # Target velocity for linear interpolation is constant: d/dt z_t = zB - zA
-                u = (zB - zA)
+                v = vf(zt_d, t, zA_d, zB_d)
 
-                # Predict vector field
-                v = vf(zt, t, zA, zB)
+                eps = 1e-6
+                cos_term = 1.0 - F.cosine_similarity(v, u_tgt, dim=1).mean()
+                mag_term = (torch.linalg.norm(v - u_tgt, dim=1) / (torch.linalg.norm(u_tgt, dim=1) + eps)).mean()
+                loss_cfm = cos_term + mag_term
 
-                # Losses
-                loss_cfm = F.mse_loss(v, u)  # core CFM objective
+                # Reconstruction (keeps encoder learning + provides viz)
                 xA_rec = dec(zA)
                 xB_rec = dec(zB)
                 loss_rec = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
 
-                # small latent l2 to stabilize scale
-                loss_lat = 0.5 * (zA.pow(2).mean() + zB.pow(2).mean())
+                # small latent penalties
+                loss_lat = 0.5 * (zA.pow(2).mean() + zB.pow(2).mean())  # can set 0 early if desired
 
-                loss = cfg.lambda_cfm * loss_cfm + cfg.lambda_rec * loss_rec + cfg.lambda_latent_l2 * loss_lat
+                # NEW: latent scale calibration (keep per-dim std near 1)
+                z_all = torch.cat([zA, zB], dim=0)
+                z_std = z_all.std(dim=0)
+                loss_zcal = (z_std - 1.0).abs().mean()
+
+                loss = (cfg.lambda_cfm * loss_cfm
+                        + cfg.lambda_rec * loss_rec
+                        + cfg.lambda_latent_l2 * loss_lat
+                        + cfg.lambda_zcal * loss_zcal)
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -410,10 +436,11 @@ def train(cfg: TrainCfg):
 
             # --------- Light-weight debug stats ----------
             with torch.no_grad():
-                d = (zB - zA)
+                d = (zB - zA)  # non-detached (for reporting)
                 dnorm = torch.linalg.norm(d, dim=1).mean().item()
                 vnorm = torch.linalg.norm(v, dim=1).mean().item()
-                cosvu = F.cosine_similarity(v, u, dim=1).mean().item()
+                # compare against detached target for consistency with loss
+                cosvu = F.cosine_similarity(v, u_tgt, dim=1).mean().item()
                 psnrA = _psnr(xA_rec, A).item()
                 psnrB = _psnr(xB_rec, B).item()
 
@@ -439,9 +466,11 @@ def train(cfg: TrainCfg):
 
             if (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0):
                 enc.eval(); dec.eval()
+                # pass path strings for annotation
                 save_full_interpolation_grid(
                     enc, dec,
                     A.cpu(), B.cpu(),
+                    list(pathsA), list(pathsB),
                     cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}.png",
                     device=device, interp_steps=cfg.interp_steps
                 )
@@ -459,10 +488,16 @@ def train(cfg: TrainCfg):
                 A = A.to(device); B = B.to(device)
                 zA = enc(A); zB = enc(B)
                 t = torch.rand(A.shape[0], device=device)
-                zt = (1.0 - t[:, None]) * zA + t[:, None] * zB
-                u  = (zB - zA)
-                v  = vf(zt, t, zA, zB)
-                loss_cfm = F.mse_loss(v, u, reduction="sum")
+                # eval CFM on detached line for consistency
+                zA_d, zB_d = zA.detach(), zB.detach()
+                zt_d = (1.0 - t[:, None]) * zA_d + t[:, None] * zB_d
+                u_tgt = (zB_d - zA_d)
+                v  = vf(zt_d, t, zA_d, zB_d)
+                eps = 1e-6
+                cos_term = 1.0 - F.cosine_similarity(v, u_tgt, dim=1).mean()
+                mag_term = (torch.linalg.norm(v - u_tgt, dim=1) / (torch.linalg.norm(u_tgt, dim=1) + eps)).mean()
+                loss_cfm = (cos_term + mag_term) * A.shape[0]  # sum-like for averaging below
+
                 loss_rec = F.l1_loss(dec(zA), A, reduction="sum") + F.l1_loss(dec(zB), B, reduction="sum")
                 va_cfm += loss_cfm.item()
                 va_rec += loss_rec.item()
@@ -531,7 +566,7 @@ def parse_args():
     ap.add_argument("--out_dir", type=Path, default=Path("out.action_distance_cfm"))
     ap.add_argument("--z_dim", type=int, default=128)
     ap.add_argument("--batch_size", type=int, default=32)
-    ap.add_argument("--epochs", type=int, default=1000)
+    ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -542,9 +577,10 @@ def parse_args():
     ap.add_argument("--lambda_cfm", type=float, default=1.0)
     ap.add_argument("--lambda_rec", type=float, default=0.1)
     ap.add_argument("--lambda_latent_l2", type=float, default=1e-4)
+    ap.add_argument("--lambda_zcal", type=float, default=0.05)
 
-    ap.add_argument("--viz_every", type=int, default=100)
-    ap.add_argument("--interp_steps", type=int, default=12, help="number of internal interpolation samples between dec(zA) and dec(zB)")
+    ap.add_argument("--viz_every", type=int, default=500)
+    ap.add_argument("--interp_steps", type=int, default=12, help="internal interpolation samples between dec(zA) and dec(zB)")
     ap.add_argument("--log_every", type=int, default=50, help="print running debug stats every N steps")
 
     # optional export
@@ -558,8 +594,8 @@ def main():
         batch_size=args.batch_size, epochs=args.epochs, lr=args.lr, seed=args.seed,
         num_workers=args.num_workers, device=args.device, max_step_gap=args.max_step_gap,
         p_cross_traj=args.p_cross_traj, lambda_cfm=args.lambda_cfm, lambda_rec=args.lambda_rec,
-        lambda_latent_l2=args.lambda_latent_l2, viz_every=args.viz_every,
-        interp_steps=args.interp_steps, log_every=args.log_every
+        lambda_latent_l2=args.lambda_latent_l2, lambda_zcal=args.lambda_zcal,
+        viz_every=args.viz_every, interp_steps=args.interp_steps, log_every=args.log_every
     )
     train(cfg)
 
