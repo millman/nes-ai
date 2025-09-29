@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, get_worker_info
 from torch.amp import autocast, GradScaler
 
 # --------------------------------------------------------------------------------------
@@ -87,11 +87,14 @@ class PairFromTrajDataset(Dataset):
         self.trajs = list_trajectories(data_root)
         self.traj_items = list(self.trajs.items())
         all_paths = [p for lst in self.trajs.values() for p in lst]
-        rng = random.Random(seed)
-        rng.shuffle(all_paths)
+
+        self._base_seed = seed
+        self._main_rng = random.Random(seed)
+        self._worker_rngs: Dict[int, random.Random] = {}
+
+        self._main_rng.shuffle(all_paths)
         n_train = int(round(len(all_paths) * train_frac))
         self.pool = all_paths[:n_train] if split == "train" else all_paths[n_train:]
-        self.rng = rng
         self.max_step_gap = max_step_gap
         self.allow_cross_traj = allow_cross_traj
         self.p_cross_traj = p_cross_traj if allow_cross_traj else 0.0
@@ -109,25 +112,41 @@ class PairFromTrajDataset(Dataset):
     def __len__(self):
         return sum(len(v) for v in self.split_trajs.values())
 
-    def _sample_same_traj_pair(self) -> Tuple[Path, Path]:
-        traj_name, paths = self.rng.choice(self.split_traj_items)
+    def _get_worker_rng(self) -> random.Random:
+        info = get_worker_info()
+        if info is None:
+            return self._main_rng
+        wid = info.id
+        rng = self._worker_rngs.get(wid)
+        if rng is None:
+            # use the DataLoader-provided seed so different workers diverge
+            rng = random.Random(info.seed)
+            self._worker_rngs[wid] = rng
+        return rng
+
+    def _sample_same_traj_pair(self, rng: random.Random) -> Tuple[Path, Path]:
+        traj_idx = rng.randrange(len(self.split_traj_items))
+        _, paths = self.split_traj_items[traj_idx]
         if len(paths) < 2:
             return paths[0], paths[-1]
-        i0 = self.rng.randrange(0, len(paths) - 1)
-        gap = self.rng.randint(1, min(max(1, self.max_step_gap), len(paths) - 1 - i0))
+        i0 = rng.randrange(0, len(paths) - 1)
+        gap = rng.randint(1, min(max(1, self.max_step_gap), len(paths) - 1 - i0))
         j0 = i0 + gap
         return paths[i0], paths[j0]
 
-    def _sample_cross_traj_pair(self) -> Tuple[Path, Path]:
-        (t1, p1s) = self.rng.choice(self.split_traj_items)
-        (t2, p2s) = self.rng.choice(self.split_traj_items)
-        return self.rng.choice(p1s), self.rng.choice(p2s)
+    def _sample_cross_traj_pair(self, rng: random.Random) -> Tuple[Path, Path]:
+        idx1 = rng.randrange(len(self.split_traj_items))
+        idx2 = rng.randrange(len(self.split_traj_items))
+        p1s = self.split_traj_items[idx1][1]
+        p2s = self.split_traj_items[idx2][1]
+        return p1s[rng.randrange(len(p1s))], p2s[rng.randrange(len(p2s))]
 
     def __getitem__(self, idx: int):
-        if self.allow_cross_traj and (self.rng.random() < self.p_cross_traj):
-            p1, p2 = self._sample_cross_traj_pair()
+        rng = self._get_worker_rng()
+        if self.allow_cross_traj and (rng.random() < self.p_cross_traj):
+            p1, p2 = self._sample_cross_traj_pair(rng)
         else:
-            p1, p2 = self._sample_same_traj_pair()
+            p1, p2 = self._sample_same_traj_pair(rng)
         a = load_frame_as_tensor(p1)
         b = load_frame_as_tensor(p2)
         return a, b, str(p1), str(p2)
@@ -656,7 +675,7 @@ def parse_args():
     ap.add_argument("--warmup_steps", type=int, default=2000)
     ap.add_argument("--vf_grad_clip", type=float, default=1.0)
 
-    ap.add_argument("--viz_every", type=int, default=500)
+    ap.add_argument("--viz_every", type=int, default=100)
     ap.add_argument("--interp_steps", type=int, default=12)
     ap.add_argument("--log_every", type=int, default=50)
 
