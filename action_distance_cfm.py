@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Action-distance (CFM) trainer with tiny encoder/decoder + full A→B latent interpolation viz.
-
-Key choices:
-- CFM core uses a detached latent line and a scale-invariant objective to avoid trivial near-zero loss.
-- Latent scale calibration keeps z in a healthy range so ‖zB−zA‖ isn't ~0 at init.
-- Debug viz decodes a dense latent interpolation from A to B and annotates tiles with traj/state or t.
+Action-distance (CFM) trainer with a ResNet-style autoencoder, AE warmup, and
+full A→B latent interpolation visualization with trajectory/state labels.
 
 Run:
   python action_distance_cfm.py --data_root traj_dumps --out_dir out.action_distance_cfm
@@ -29,12 +25,12 @@ from torch.utils.data import Dataset, DataLoader
 from torch.amp import autocast, GradScaler
 
 # --------------------------------------------------------------------------------------
-# Config
+# Global image size (NES frames resized to this)
 # --------------------------------------------------------------------------------------
 H, W = 240, 224  # (height, width)
 
 # --------------------------------------------------------------------------------------
-# IO Utils
+# IO utils
 # --------------------------------------------------------------------------------------
 def list_trajectories(data_root: Path) -> Dict[str, List[Path]]:
     out: Dict[str, List[Path]] = {}
@@ -56,6 +52,7 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     if arr.shape[2] == 4:
         arr = arr[:, :, :3]
     arr = arr.astype(np.float32) / 255.0
+    arr = arr * 2.0 - 1.0  # -> [-1, 1]
     return torch.from_numpy(arr).permute(2,0,1).contiguous()
 
 def load_frame_as_tensor(p: Path) -> torch.Tensor:
@@ -63,27 +60,29 @@ def load_frame_as_tensor(p: Path) -> torch.Tensor:
     return pil_to_tensor(img)
 
 def short_traj_state_label(path_str: str) -> str:
-    """
-    Turn an absolute path like .../traj_12/states/state_00034.png -> 'traj_12/state_00034'
-    """
     base = os.path.normpath(path_str)
     parts = base.split(os.sep)
+    traj_idx = next((i for i,p in enumerate(parts) if p.startswith("traj_")), None)
+    if traj_idx is not None and traj_idx+2 < len(parts) and parts[traj_idx+1] == "states" and parts[traj_idx+2].startswith("state_"):
+        return f"{parts[traj_idx]}/{os.path.splitext(parts[traj_idx+2])[0]}"
     if len(parts) >= 2:
-        # find 'traj_*' and following 'states/state_*.png'
-        traj = next((p for p in parts if p.startswith("traj_")), None)
-        fname = os.path.basename(base)
-        if traj and fname.startswith("state_"):
-            stem = os.path.splitext(fname)[0]
-            return f"{traj}/{stem}"
-    # fallback: basename without extension
+        return f"{parts[-2]}/{os.path.splitext(parts[-1])[0]}"
     return os.path.splitext(os.path.basename(base))[0]
 
 # --------------------------------------------------------------------------------------
-# Dataset that yields pairs (A,B)
+# Dataset: by default, sample A/B from the SAME trajectory
 # --------------------------------------------------------------------------------------
 class PairFromTrajDataset(Dataset):
-    def __init__(self, data_root: Path, split: str = "train", train_frac: float = 0.95, seed: int = 0,
-                 max_step_gap: int = 20, p_cross_traj: float = 0.1):
+    def __init__(
+        self,
+        data_root: Path,
+        split: str = "train",
+        train_frac: float = 0.95,
+        seed: int = 0,
+        max_step_gap: int = 20,
+        allow_cross_traj: bool = False,
+        p_cross_traj: float = 0.0,
+    ):
         super().__init__()
         self.trajs = list_trajectories(data_root)
         self.traj_items = list(self.trajs.items())
@@ -92,34 +91,40 @@ class PairFromTrajDataset(Dataset):
         rng.shuffle(all_paths)
         n_train = int(round(len(all_paths) * train_frac))
         self.pool = all_paths[:n_train] if split == "train" else all_paths[n_train:]
-        self.split = split
         self.rng = rng
         self.max_step_gap = max_step_gap
-        self.p_cross_traj = p_cross_traj
+        self.allow_cross_traj = allow_cross_traj
+        self.p_cross_traj = p_cross_traj if allow_cross_traj else 0.0
+
+        pool_set = set(map(str, self.pool))
+        self.split_trajs: Dict[str, List[Path]] = {}
+        for traj_name, paths in self.traj_items:
+            kept = [p for p in paths if str(p) in pool_set]
+            if len(kept) >= 2:
+                self.split_trajs[traj_name] = kept
+        if not self.split_trajs:
+            raise RuntimeError(f"No trajectories with >=2 frames in split='{split}'")
+        self.split_traj_items = list(self.split_trajs.items())
 
     def __len__(self):
-        return max(1, len(self.pool))
+        return sum(len(v) for v in self.split_trajs.values())
 
     def _sample_same_traj_pair(self) -> Tuple[Path, Path]:
-        traj_name, paths = self.rng.choice(self.traj_items)
+        traj_name, paths = self.rng.choice(self.split_traj_items)
         if len(paths) < 2:
             return paths[0], paths[-1]
-        i0 = self.rng.randrange(0, len(paths))
-        gap = self.rng.randint(1, min(max(1,self.max_step_gap), len(paths)-1))
-        j0 = min(len(paths)-1, i0 + gap)
-        if j0 == i0:
-            j0 = min(len(paths)-1, i0+1)
+        i0 = self.rng.randrange(0, len(paths) - 1)
+        gap = self.rng.randint(1, min(max(1, self.max_step_gap), len(paths) - 1 - i0))
+        j0 = i0 + gap
         return paths[i0], paths[j0]
 
     def _sample_cross_traj_pair(self) -> Tuple[Path, Path]:
-        (t1, p1s) = self.rng.choice(self.traj_items)
-        (t2, p2s) = self.rng.choice(self.traj_items)
-        p1 = self.rng.choice(p1s)
-        p2 = self.rng.choice(p2s)
-        return p1, p2
+        (t1, p1s) = self.rng.choice(self.split_traj_items)
+        (t2, p2s) = self.rng.choice(self.split_traj_items)
+        return self.rng.choice(p1s), self.rng.choice(p2s)
 
     def __getitem__(self, idx: int):
-        if self.rng.random() < self.p_cross_traj:
+        if self.allow_cross_traj and (self.rng.random() < self.p_cross_traj):
             p1, p2 = self._sample_cross_traj_pair()
         else:
             p1, p2 = self._sample_same_traj_pair()
@@ -128,59 +133,123 @@ class PairFromTrajDataset(Dataset):
         return a, b, str(p1), str(p2)
 
 # --------------------------------------------------------------------------------------
-# Small Encoder/Decoder
+# ResNet-style AE (no skips): Encoder/Decoder
 # --------------------------------------------------------------------------------------
+class ResBlock(nn.Module):
+    def __init__(self, c_in, c_out, norm_groups=16, up=False, down=False):
+        super().__init__()
+        self.up, self.down = up, down
+        self.need_skip = (c_in != c_out) or up or down
+
+        self.norm1 = nn.GroupNorm(norm_groups, c_in)
+        self.act1  = nn.SiLU(inplace=True)
+        self.conv1 = nn.Conv2d(c_in, c_out, 3, padding=1)
+
+        self.norm2 = nn.GroupNorm(norm_groups, c_out)
+        self.act2  = nn.SiLU(inplace=True)
+        self.conv2 = nn.Conv2d(c_out, c_out, 3, padding=1)
+
+        if up:
+            self.ups = nn.Upsample(scale_factor=2, mode="nearest")
+        if down:
+            self.downs = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        if self.need_skip:
+            if up:
+                self.skip = nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(c_in, c_out, 1)
+                )
+            elif down:
+                self.skip = nn.Sequential(
+                    nn.AvgPool2d(kernel_size=2, stride=2),
+                    nn.Conv2d(c_in, c_out, 1)
+                )
+            else:
+                self.skip = nn.Conv2d(c_in, c_out, 1)
+        else:
+            self.skip = nn.Identity()
+
+    def forward(self, x):
+        h = x
+        if self.up:
+            h = self.ups(h)
+            x = self.skip(x)  # upsampled in skip path as needed
+        if self.down:
+            h = self.downs(h)
+            x = self.skip(x)
+        h = self.conv1(self.act1(self.norm1(h)))
+        h = self.conv2(self.act2(self.norm2(h)))
+        if not (self.up or self.down) and self.need_skip:
+            x = self.skip(x)
+        return h + x
+
 class Encoder(nn.Module):
     def __init__(self, z_dim: int = 128):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, 5, stride=2, padding=2), nn.ReLU(inplace=True),   # 120x112
-            nn.Conv2d(32,64, 3, stride=2, padding=1), nn.ReLU(inplace=True),   # 60x56
-            nn.Conv2d(64,128,3, stride=2, padding=1), nn.ReLU(inplace=True),   # 30x28
-            nn.Conv2d(128,256,3,stride=2, padding=1), nn.ReLU(inplace=True),   # 15x14
-            nn.AdaptiveAvgPool2d((1,1)),
+        # 240x224 -> 120x112 -> 60x56 -> 30x28 -> 15x14
+        self.stem = nn.Conv2d(3, 64, 3, padding=1)
+        self.e1 = nn.Sequential(
+            ResBlock(64, 64),
+            ResBlock(64, 128, down=True),      # 120x112
+            ResBlock(128, 128),
         )
-        self.fc = nn.Linear(256, z_dim)
+        self.e2 = nn.Sequential(
+            ResBlock(128, 256, down=True),     # 60x56
+            ResBlock(256, 256),
+        )
+        self.e3 = nn.Sequential(
+            ResBlock(256, 256, down=True),     # 30x28
+            ResBlock(256, 256),
+        )
+        self.e4 = nn.Sequential(
+            ResBlock(256, 256, down=True),     # 15x14
+            ResBlock(256, 256),
+        )
+        self.pool = nn.AdaptiveAvgPool2d((1,1))
+        self.fc   = nn.Linear(256, z_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.conv(x).flatten(1)
-        z = self.fc(h)
-        return z  # keep scale (no normalization)
+        x = self.stem(x)
+        x = self.e1(x)
+        x = self.e2(x)
+        x = self.e3(x)
+        x = self.e4(x)               # (B,256,15,14)
+        h = self.pool(x).flatten(1)  # (B,256)
+        z = self.fc(h)               # (B,z_dim)
+        return z
 
 class Decoder(nn.Module):
     def __init__(self, z_dim: int = 128):
         super().__init__()
-        self.fc = nn.Linear(z_dim, 256)
-        self.up = nn.Sequential(
-            nn.ConvTranspose2d(256,128, kernel_size=4, stride=2, padding=1), nn.ReLU(inplace=True),  # 2x2
-            nn.ConvTranspose2d(128,64,  kernel_size=4, stride=2, padding=1), nn.ReLU(inplace=True),  # 4x4
-            nn.ConvTranspose2d(64, 64,  kernel_size=4, stride=2, padding=1), nn.ReLU(inplace=True),  # 8x8
-            nn.ConvTranspose2d(64, 32,  kernel_size=4, stride=2, padding=1), nn.ReLU(inplace=True),  # 16x16
-            nn.ConvTranspose2d(32, 16,  kernel_size=4, stride=2, padding=1), nn.ReLU(inplace=True),  # 32x32
+        self.h0 = (256, 15, 14)
+        self.fc = nn.Linear(z_dim, int(np.prod(self.h0)))
+        self.d4 = nn.Sequential(ResBlock(256, 256))
+        self.d3 = nn.Sequential(ResBlock(256, 256, up=True), ResBlock(256, 256))   # 30x28
+        self.d2 = nn.Sequential(ResBlock(256, 256, up=True), ResBlock(256, 128))   # 60x56
+        self.d1 = nn.Sequential(
+            ResBlock(128, 128, up=True), ResBlock(128, 64),                         # 120x112
+            ResBlock(64, 64, up=True),  ResBlock(64, 32),                           # 240x224
         )
-        self.final = nn.Sequential(
-            nn.Upsample(size=(60,56), mode="bilinear", align_corners=False),
-            nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(inplace=True),
-            nn.Upsample(size=(120,112), mode="bilinear", align_corners=False),
-            nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(inplace=True),
-            nn.Upsample(size=(240,224), mode="bilinear", align_corners=False),
-            nn.Conv2d(16, 3, 3, padding=1),
-            nn.Sigmoid(),
+        self.head = nn.Sequential(
+            nn.GroupNorm(16, 32), nn.SiLU(inplace=True),
+            nn.Conv2d(32, 3, 3, padding=1),
+            nn.Tanh(),  # output in [-1,1]
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.fc(z).view(-1,256,1,1)
-        h = self.up(h)
-        x = self.final(h)
+        h = self.fc(z).view(-1, *self.h0)
+        h = self.d4(h); h = self.d3(h); h = self.d2(h); h = self.d1(h)
+        x = self.head(h)
         return x
 
 # --------------------------------------------------------------------------------------
-# Conditional Vector Field for CFM
+# Conditional vector field for CFM
 # --------------------------------------------------------------------------------------
 class VectorField(nn.Module):
     def __init__(self, z_dim: int = 128):
         super().__init__()
-        in_dim = z_dim * 3 + 1  # zt, (zB-zA), (zA+zB)/2, t
+        in_dim = z_dim * 3 + 1  # [z_t, (zB-zA), (zA+zB)/2, t]
         hidden = 512
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.ReLU(inplace=True),
@@ -195,29 +264,31 @@ class VectorField(nn.Module):
         return self.net(feat)
 
 # --------------------------------------------------------------------------------------
-# Utilities & Debug helpers
+# Utilities & debug helpers
 # --------------------------------------------------------------------------------------
 def set_seed(seed: int):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
-    t = t.detach().clamp(0,1)
+    t = t.detach().clamp(-1,1) * 0.5 + 0.5  # [-1,1] -> [0,1]
     arr = (t.permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr)
 
-def _psnr(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    mse = F.mse_loss(x, y, reduction="mean").clamp_min(eps)
+def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    # compute PSNR in [0,1] space
+    def to01(a): return a.clamp(-1,1) * 0.5 + 0.5
+    mse = F.mse_loss(to01(x), to01(y), reduction="mean").clamp_min(eps)
     return 10.0 * torch.log10(1.0 / mse)
 
 def _grad_norm(module: nn.Module) -> float:
-    total = 0.0
+    s = 0.0
     for p in module.parameters():
         if p.grad is not None:
-            total += float(p.grad.detach().data.pow(2).sum().cpu())
-    return math.sqrt(total) if total > 0 else 0.0
+            s += float(p.grad.detach().data.pow(2).sum().cpu())
+    return math.sqrt(s) if s > 0 else 0.0
 
 # --------------------------------------------------------------------------------------
-# Visualization: FULL interpolation from A→B (decoded) with annotations
+# Debug visualization: FULL latent interpolation from A→B with labels
 # --------------------------------------------------------------------------------------
 @torch.no_grad()
 def save_full_interpolation_grid(
@@ -227,31 +298,20 @@ def save_full_interpolation_grid(
     out_path: Path, device: torch.device,
     interp_steps: int = 12
 ):
-    """
-    For up to 8 rows in batch:
-      Row: [A] [dec(zA)] [dec(z_t1)] ... [dec(z_tK)] [dec(zB)] [B]
-      Annotations:
-        - A/B tiles: 'traj_X/state_YYYYY'
-        - dec(zA)/dec(zB): same + '(dec)'
-        - interps: t=...
-    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Bsz = min(A.shape[0], 8)
-    K = max(1, int(interp_steps))  # internal samples (exclude endpoints)
+    K = max(1, int(interp_steps))
 
     A = A[:Bsz].to(device); B = B[:Bsz].to(device)
     pA = pathsA[:Bsz];      pB = pathsB[:Bsz]
     zA = enc(A); zB = enc(B)
 
-    # t values in (0,1), excluding endpoints; shape (K,)
     t_vals = torch.linspace(0, 1, K+2, device=device)[1:-1]
-    # Precompute decoded samples for efficiency: list of (B,3,H,W)
     interp_decoded = []
     for t in t_vals:
         zt = (1.0 - t) * zA + t * zB
         interp_decoded.append(dec(zt))  # (B,3,H,W)
 
-    # Compose canvas
     tiles_per_row = 2 + K + 2  # A | dec(zA) | K interps | dec(zB) | B
     tile_w, tile_h = W, H
     total_w = tile_w * tiles_per_row
@@ -259,9 +319,12 @@ def save_full_interpolation_grid(
     canvas = Image.new("RGB", (total_w, total_h), (0,0,0))
     draw = ImageDraw.Draw(canvas)
     try:
-        font = ImageFont.load_default()
+        font = ImageFont.truetype("DejaVuSans.ttf", size=18)
     except Exception:
-        font = None
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
 
     def annotate(draw, x, y, txt, fill=(255,255,255)):
         if font:
@@ -269,37 +332,33 @@ def save_full_interpolation_grid(
             tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
         else:
             tw, th = len(txt)*6, 10
-        draw.rectangle([x+2, y+2, x+2+tw+2, y+2+th+2], fill=(0,0,0))
-        draw.text((x+4, y+4), txt, font=font, fill=fill)
+        pad = 4
+        draw.rectangle([x+2, y+2, x+2+tw+pad*2, y+2+th+pad*2], fill=(0,0,0))
+        draw.text((x+2+pad, y+2+pad), txt, font=font, fill=fill)
 
-    # Place rows
     for r in range(Bsz):
         x = 0; y = r * tile_h
         labelA = short_traj_state_label(pA[r])
         labelB = short_traj_state_label(pB[r])
 
-        # Raw A
         canvas.paste(_to_pil(A[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
-        # dec(zA)
         canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelA + " (dec)", (220,220,255)); x += tile_w
-        # K internal samples
+
         for k in range(K):
             canvas.paste(_to_pil(interp_decoded[k][r]), (x, y))
             annotate(draw, x, y, f"t={float(t_vals[k]):.2f}", (200,255,200))
             x += tile_w
-        # dec(zB)
-        canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
-        # Raw B
-        canvas.paste(_to_pil(B[r]), (x, y)); annotate(draw, x, y, labelB); x += tile_w
 
-        # row annotation: ||zB-zA||
+        canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
+        canvas.paste(_to_pil(B[r]), (x, y)); annotate(draw, x, y, labelB)
+
         txt = f"‖zB−zA‖={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
-        annotate(draw, 2, y + tile_h - 16, txt, (255,255,0))
+        annotate(draw, 2, y + tile_h - 22, txt, (255,255,0))
 
     canvas.save(out_path)
 
 # --------------------------------------------------------------------------------------
-# Training
+# Training configuration
 # --------------------------------------------------------------------------------------
 @dataclass
 class TrainCfg:
@@ -308,25 +367,33 @@ class TrainCfg:
     z_dim: int = 128
     batch_size: int = 32
     epochs: int = 5
-    lr: float = 1e-3
+    lr: float = 3e-4
+    vf_lr_mult: float = 0.5
     seed: int = 0
     num_workers: int = 4
     device: Optional[str] = None
     max_step_gap: int = 20
-    p_cross_traj: float = 0.1
+    allow_cross_traj: bool = False
+    p_cross_traj: float = 0.0
 
-    # losses
-    lambda_cfm: float = 1.0
-    lambda_rec: float = 0.1
-    lambda_latent_l2: float = 1e-4
-    lambda_zcal: float = 0.05  # latent scale calibration
+    # Loss weights
+    lambda_cfm: float = 0.3
+    lambda_rec: float = 2.0
+    lambda_latent_l2: float = 0.0
+    lambda_zcal: float = 0.05
 
-    # viz/debug
+    # Schedules / stability
+    warmup_steps: int = 2000         # AE-only steps (CFM/lat/zcal off)
+    vf_grad_clip: float = 1.0        # clip VF grads
+
+    # Viz/debug
     viz_every: int = 500
     interp_steps: int = 12
-    save_every_ep: bool = True
     log_every: int = 50
 
+# --------------------------------------------------------------------------------------
+# Train
+# --------------------------------------------------------------------------------------
 def pick_device(pref: Optional[str]) -> torch.device:
     if pref:
         return torch.device(pref)
@@ -336,6 +403,13 @@ def pick_device(pref: Optional[str]) -> torch.device:
         return torch.device("cuda")
     return torch.device("cpu")
 
+def kaiming_init(m):
+    # Use ReLU gain for SiLU blocks (safe & standard).
+    if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
+        nn.init.kaiming_normal_(m.weight, nonlinearity="relu", mode="fan_in")
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
 def train(cfg: TrainCfg):
     set_seed(cfg.seed)
     device = pick_device(cfg.device)
@@ -343,10 +417,10 @@ def train(cfg: TrainCfg):
     (cfg.out_dir / "checkpoints").mkdir(exist_ok=True, parents=True)
     (cfg.out_dir / "viz").mkdir(exist_ok=True, parents=True)
 
-    ds_tr = PairFromTrajDataset(cfg.data_root, "train", 0.95, cfg.seed, cfg.max_step_gap, cfg.p_cross_traj)
-    ds_va = PairFromTrajDataset(cfg.data_root, "val",   0.95, cfg.seed, cfg.max_step_gap, cfg.p_cross_traj)
+    ds_tr = PairFromTrajDataset(cfg.data_root, "train", 0.95, cfg.seed, cfg.max_step_gap, cfg.allow_cross_traj, cfg.p_cross_traj)
+    ds_va = PairFromTrajDataset(cfg.data_root, "val",   0.95, cfg.seed, cfg.max_step_gap, cfg.allow_cross_traj, cfg.p_cross_traj)
 
-    use_pin = (device.type == "cuda")  # pinning not useful on CPU/MPS; avoids MPS warning
+    use_pin = (device.type == "cuda")
     dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True,  num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=True)
     dl_va = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=False)
 
@@ -355,11 +429,16 @@ def train(cfg: TrainCfg):
     enc = Encoder(cfg.z_dim).to(device)
     dec = Decoder(cfg.z_dim).to(device)
     vf  = VectorField(cfg.z_dim).to(device)
+    enc.apply(kaiming_init); dec.apply(kaiming_init); vf.apply(kaiming_init)
 
-    params = list(enc.parameters()) + list(dec.parameters()) + list(vf.parameters())
-    opt = torch.optim.AdamW(params, lr=cfg.lr)
+    # Per-module LRs (VF slower)
+    opt = torch.optim.AdamW([
+        {"params": enc.parameters(), "lr": cfg.lr},
+        {"params": dec.parameters(), "lr": cfg.lr},
+        {"params": vf.parameters(),  "lr": cfg.lr * cfg.vf_lr_mult},
+    ], lr=cfg.lr, weight_decay=1e-4)
 
-    # AMP setup: CUDA only
+    # AMP only on CUDA
     if device.type == "cuda":
         amp_autocast = lambda: autocast(device_type="cuda")
         scaler = GradScaler(enabled=True)
@@ -370,7 +449,7 @@ def train(cfg: TrainCfg):
     global_step = 0
     best_val = float("inf")
 
-    # running windows for pretty logs
+    # Running windows
     win = 50
     q_lcfm, q_lrec, q_llat, q_ltot = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
     q_dnorm, q_vnorm, q_cos = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
@@ -389,11 +468,11 @@ def train(cfg: TrainCfg):
                 zA = enc(A)
                 zB = enc(B)
 
-                # --- CFM core with detach + scale-invariant objective ---
+                # --- CFM core: detached + scale-invariant (cos + normalized magnitude) ---
                 t = torch.rand(A.shape[0], device=device)
                 zA_d, zB_d = zA.detach(), zB.detach()
                 zt_d = (1.0 - t[:, None]) * zA_d + t[:, None] * zB_d
-                u_tgt = (zB_d - zA_d)  # target velocity on the line
+                u_tgt = (zB_d - zA_d)
 
                 v = vf(zt_d, t, zA_d, zB_d)
 
@@ -402,30 +481,40 @@ def train(cfg: TrainCfg):
                 mag_term = (torch.linalg.norm(v - u_tgt, dim=1) / (torch.linalg.norm(u_tgt, dim=1) + eps)).mean()
                 loss_cfm = cos_term + mag_term
 
-                # Reconstruction (keeps encoder learning + provides viz)
+                # Reconstruction
                 xA_rec = dec(zA)
                 xB_rec = dec(zB)
                 loss_rec = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
 
                 # small latent penalties
-                loss_lat = 0.5 * (zA.pow(2).mean() + zB.pow(2).mean())  # can set 0 early if desired
+                loss_lat = 0.5 * (zA.pow(2).mean() + zB.pow(2).mean())  # can be 0 during warmup
 
-                # NEW: latent scale calibration (keep per-dim std near 1)
+                # latent scale calibration (keep per-dim std near 1)
                 z_all = torch.cat([zA, zB], dim=0)
                 z_std = z_all.std(dim=0)
                 loss_zcal = (z_std - 1.0).abs().mean()
 
-                loss = (cfg.lambda_cfm * loss_cfm
-                        + cfg.lambda_rec * loss_rec
-                        + cfg.lambda_latent_l2 * loss_lat
-                        + cfg.lambda_zcal * loss_zcal)
+                # Warmup gating
+                cfm_w = 0.0 if global_step < cfg.warmup_steps else cfg.lambda_cfm
+                lat_w = 0.0 if global_step < cfg.warmup_steps else cfg.lambda_latent_l2
+                zcl_w = 0.0 if global_step < cfg.warmup_steps else cfg.lambda_zcal
+
+                loss = cfm_w*loss_cfm + cfg.lambda_rec*loss_rec + lat_w*loss_lat + zcl_w*loss_zcal
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
-            # gradient norms (after backward, before step)
+
+            # Clip VF grads (after unscale)
+            if scaler.is_enabled():
+                scaler.unscale_(opt)
+            if cfg.vf_grad_clip and cfg.vf_grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(vf.parameters(), max_norm=cfg.vf_grad_clip)
+
+            # grad norms for logs
             g_enc = _grad_norm(enc)
             g_dec = _grad_norm(dec)
-            g_vf  = _grad_norm(vf)
+            g_vff = _grad_norm(vf)
+
             scaler.step(opt)
             scaler.update()
 
@@ -434,15 +523,13 @@ def train(cfg: TrainCfg):
             run_n += A.shape[0]
             global_step += 1
 
-            # --------- Light-weight debug stats ----------
             with torch.no_grad():
-                d = (zB - zA)  # non-detached (for reporting)
+                d = (zB - zA)
                 dnorm = torch.linalg.norm(d, dim=1).mean().item()
                 vnorm = torch.linalg.norm(v, dim=1).mean().item()
-                # compare against detached target for consistency with loss
                 cosvu = F.cosine_similarity(v, u_tgt, dim=1).mean().item()
-                psnrA = _psnr(xA_rec, A).item()
-                psnrB = _psnr(xB_rec, B).item()
+                psnrA = _psnr_01(xA_rec, A).item()
+                psnrB = _psnr_01(xB_rec, B).item()
 
                 q_lcfm.append(float(loss_cfm.item()))
                 q_lrec.append(float(loss_rec.item()))
@@ -450,11 +537,10 @@ def train(cfg: TrainCfg):
                 q_ltot.append(float(loss.item()))
                 q_dnorm.append(dnorm); q_vnorm.append(vnorm); q_cos.append(cosvu)
                 q_psnrA.append(psnrA); q_psnrB.append(psnrB)
-                q_genc.append(g_enc); q_gdec.append(g_dec); q_gvf.append(g_vf)
+                q_genc.append(g_enc); q_gdec.append(g_dec); q_gvf.append(g_vff)
 
             if (cfg.log_every > 0) and (global_step % cfg.log_every == 0):
-                def avg(q):
-                    return (sum(q) / len(q)) if len(q) else 0.0
+                avg = lambda q: (sum(q)/len(q)) if len(q) else 0.0
                 print(
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg(q_ltot):.4f} | "
@@ -466,7 +552,6 @@ def train(cfg: TrainCfg):
 
             if (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0):
                 enc.eval(); dec.eval()
-                # pass path strings for annotation
                 save_full_interpolation_grid(
                     enc, dec,
                     A.cpu(), B.cpu(),
@@ -480,7 +565,7 @@ def train(cfg: TrainCfg):
         tr_rec = run_loss_rec / max(1, run_n)
         print(f"[ep {ep:02d}] train: Lcfm={tr_cfm:.4f}  Lrec={tr_rec:.4f}")
 
-        # ---- Validation (CFM only + recon) ----
+        # ---- Validation ----
         enc.eval(); dec.eval(); vf.eval()
         va_cfm = va_rec = va_n = 0.0
         with torch.no_grad():
@@ -488,7 +573,7 @@ def train(cfg: TrainCfg):
                 A = A.to(device); B = B.to(device)
                 zA = enc(A); zB = enc(B)
                 t = torch.rand(A.shape[0], device=device)
-                # eval CFM on detached line for consistency
+
                 zA_d, zB_d = zA.detach(), zB.detach()
                 zt_d = (1.0 - t[:, None]) * zA_d + t[:, None] * zB_d
                 u_tgt = (zB_d - zA_d)
@@ -496,7 +581,7 @@ def train(cfg: TrainCfg):
                 eps = 1e-6
                 cos_term = 1.0 - F.cosine_similarity(v, u_tgt, dim=1).mean()
                 mag_term = (torch.linalg.norm(v - u_tgt, dim=1) / (torch.linalg.norm(u_tgt, dim=1) + eps)).mean()
-                loss_cfm = (cos_term + mag_term) * A.shape[0]  # sum-like for averaging below
+                loss_cfm = (cos_term + mag_term) * A.shape[0]
 
                 loss_rec = F.l1_loss(dec(zA), A, reduction="sum") + F.l1_loss(dec(zB), B, reduction="sum")
                 va_cfm += loss_cfm.item()
@@ -507,46 +592,34 @@ def train(cfg: TrainCfg):
         print(f"[ep {ep:02d}]   val: Lcfm={va_cfm:.4f}  Lrec={va_rec:.4f}")
 
         # Save checkpoint
-        ckpt = {
-            "epoch": ep,
-            "enc": enc.state_dict(),
-            "dec": dec.state_dict(),
-            "vf":  vf.state_dict(),
-            "val_cfm": va_cfm,
-            "val_rec": va_rec,
-            "cfg": vars(cfg),
-        }
+        ckpt = {"epoch": ep, "enc": enc.state_dict(), "dec": dec.state_dict(), "vf": vf.state_dict(),
+                "val_cfm": va_cfm, "val_rec": va_rec, "cfg": vars(cfg)}
         torch.save(ckpt, cfg.out_dir / "last.ckpt")
-        if cfg.save_every_ep or (va_cfm < best_val):
-            if va_cfm < best_val:
-                best_val = va_cfm
-                torch.save(ckpt, cfg.out_dir / "best.ckpt")
-                print(f"[ep {ep:02d}] saved best (val Lcfm={best_val:.4f})")
-            torch.save(ckpt, cfg.out_dir / "checkpoints" / f"ep{ep:02d}.ckpt")
+        if va_cfm < best_val:
+            best_val = va_cfm
+            torch.save(ckpt, cfg.out_dir / "best.ckpt")
+            print(f"[ep {ep:02d}] saved best (val Lcfm={best_val:.4f})")
+        torch.save(ckpt, cfg.out_dir / "checkpoints" / f"ep{ep:02d}.ckpt")
 
     print("[done]")
 
 # --------------------------------------------------------------------------------------
-# Simple “distance” export (optional): encode pairs and write ||zB - zA|| to CSV
+# Export (optional): encode pairs and write ||zB - zA|| to CSV
 # --------------------------------------------------------------------------------------
 @torch.no_grad()
 def export_latent_distances(ckpt_path: Path, data_root: Path, n_pairs: int, out_csv: Path, device_str: Optional[str] = None):
     device = pick_device(device_str)
     ckpt = torch.load(ckpt_path, map_location="cpu")
     z_dim = ckpt.get("cfg", {}).get("z_dim", 128)
-
     enc = Encoder(z_dim).to(device)
-    enc.load_state_dict(ckpt["enc"])
-    enc.eval()
-
-    ds = PairFromTrajDataset(data_root, "val", 0.95, 0, 20, 0.1)
+    enc.load_state_dict(ckpt["enc"]); enc.eval()
+    ds = PairFromTrajDataset(data_root, "val", 0.95, 0, 20, False, 0.0)
     rng = random.Random(0)
 
     rows = [("path_a","path_b","latent_l2")]
     for _ in range(n_pairs):
         a, b, pa, pb = ds[rng.randrange(0, len(ds))]
-        A = a.unsqueeze(0).to(device)
-        B = b.unsqueeze(0).to(device)
+        A = a.unsqueeze(0).to(device); B = b.unsqueeze(0).to(device)
         zA = enc(A); zB = enc(B)
         d = torch.linalg.norm(zB - zA, dim=1).item()
         rows.append((pa, pb, f"{d:.6f}"))
@@ -567,35 +640,39 @@ def parse_args():
     ap.add_argument("--z_dim", type=int, default=128)
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--epochs", type=int, default=5)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--vf_lr_mult", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--max_step_gap", type=int, default=20)
-    ap.add_argument("--p_cross_traj", type=float, default=0.10)
+    ap.add_argument("--allow_cross_traj", action="store_true")
+    ap.add_argument("--p_cross_traj", type=float, default=0.0)
 
-    ap.add_argument("--lambda_cfm", type=float, default=1.0)
-    ap.add_argument("--lambda_rec", type=float, default=0.1)
-    ap.add_argument("--lambda_latent_l2", type=float, default=1e-4)
+    ap.add_argument("--lambda_cfm", type=float, default=0.3)
+    ap.add_argument("--lambda_rec", type=float, default=2.0)
+    ap.add_argument("--lambda_latent_l2", type=float, default=0.0)
     ap.add_argument("--lambda_zcal", type=float, default=0.05)
+    ap.add_argument("--warmup_steps", type=int, default=2000)
+    ap.add_argument("--vf_grad_clip", type=float, default=1.0)
 
     ap.add_argument("--viz_every", type=int, default=500)
-    ap.add_argument("--interp_steps", type=int, default=12, help="internal interpolation samples between dec(zA) and dec(zB)")
-    ap.add_argument("--log_every", type=int, default=50, help="print running debug stats every N steps")
+    ap.add_argument("--interp_steps", type=int, default=12)
+    ap.add_argument("--log_every", type=int, default=50)
 
-    # optional export
-    ap.add_argument("--export_pairs", type=int, default=0, help="if >0, export N pairs’ ||zB-zA|| to CSV after training")
+    ap.add_argument("--export_pairs", type=int, default=0)
     return ap.parse_args()
 
 def main():
     args = parse_args()
     cfg = TrainCfg(
         data_root=args.data_root, out_dir=args.out_dir, z_dim=args.z_dim,
-        batch_size=args.batch_size, epochs=args.epochs, lr=args.lr, seed=args.seed,
-        num_workers=args.num_workers, device=args.device, max_step_gap=args.max_step_gap,
-        p_cross_traj=args.p_cross_traj, lambda_cfm=args.lambda_cfm, lambda_rec=args.lambda_rec,
-        lambda_latent_l2=args.lambda_latent_l2, lambda_zcal=args.lambda_zcal,
-        viz_every=args.viz_every, interp_steps=args.interp_steps, log_every=args.log_every
+        batch_size=args.batch_size, epochs=args.epochs, lr=args.lr, vf_lr_mult=args.vf_lr_mult,
+        seed=args.seed, num_workers=args.num_workers, device=args.device, max_step_gap=args.max_step_gap,
+        allow_cross_traj=args.allow_cross_traj, p_cross_traj=args.p_cross_traj,
+        lambda_cfm=args.lambda_cfm, lambda_rec=args.lambda_rec, lambda_latent_l2=args.lambda_latent_l2,
+        lambda_zcal=args.lambda_zcal, warmup_steps=args.warmup_steps, vf_grad_clip=args.vf_grad_clip,
+        viz_every=args.viz_every, interp_steps=args.interp_steps, log_every=args.log_every,
     )
     train(cfg)
 
