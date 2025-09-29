@@ -3,28 +3,29 @@
 Train a model to predict the observed action distance (step gap) between two frames.
 
 Stabilized training:
-- DistanceHead: regress scalar distance d̂(A,B) with Huber (Smooth L1).
-- Keep Δ (vector) for direction/vis; don't use ||Δ|| as the main target.
-- Gentle calibration tying ||Δ|| to steps via a learnable affine (light loss).
+- DistanceHead outputs ŷ = f(zA,zB) in log-space; target y = log1p(gap); loss = Smooth L1(ŷ,y).
+- Report d̂ = expm1(ŷ) for metrics/visuals.
+- Pairwise ranking loss (small hinge) to enforce monotonicity by gap.
+- Light calibration to tie ||zB - zA|| to y; tiny Δ-norm calibration kept (0.02×).
 - Noise-only augmentations (Gaussian + shot).
-- Always-on CFM auxiliary velocity loss.
-- Lightweight decoder + small reconstruction loss to support latent interpolation visuals.
-- Optional balanced-gap sampler to reduce target skew.
+- Conditional Flow Matching (CFM) auxiliary loss (velocity matching).
+- Lightweight decoder + small reconstruction loss (for latent interpolation visuals).
+- Balanced gap sampler by default with max_gap 6.
 
 Visualizations (saved to <out_dir>/vis/ at end of each epoch):
-  1) Tiny push along Δ-hat (decoded frames + |·-A| heatmaps)
-  2) Counterfactual line search along Δ-hat (best λ*, decoded, |·-B| heatmap)
-  3) Orthogonal directions control (Δ vs two orthogonals; decoded + diffs)
-  4) PCA on Δ (2D scatter colored by gap)
+  1) Tiny push along z-direction (decoded frames + |·-A| heatmaps)
+  2) Counterfactual line search along z-direction (best λ*, decoded, |·-B| heatmap)
+  3) Orthogonal directions (around zA; decoded + diffs)
+  4) PCA on Δ vectors (2D scatter colored by gap)
   5) Feature-space correspondence (cosine-sim heatmap A->B features)
-  6) Occlusion sensitivity (masking heatmap for d_hat on A and B)
-  7) Gradient attribution (|∂d_hat/∂pixels| heatmaps on A and B)
+  6) Occlusion sensitivity (masking heatmap for d̂ on A and B)
+  7) Gradient attribution (|∂d̂/∂pixels| heatmaps on A and B)
   8) Decoder Jacobian probes (decode zA ± ε e_k; difference maps)
-  9) Δ-length calibration (gap vs ||Δ|| with binned bands)
- 10) Neighborhood morphs along Δ (decode z_n and z_n + βΔ-hat for K-NN of A)
+  9) Δ-length calibration (gap vs ||Δ|| bands)
+ 10) Neighborhood morphs along z-direction (decode neighbors and neighbors+βu)
 
 Defaults:
-- Output: out.action_distance (checkpoints, debug) and out.action_distance/vis (visuals)
+- Output: out.action_distance (checkpoints/debug) and out.action_distance/vis (visuals)
 - Device preference: MPS > CUDA > CPU
 - Fail fast: minimal exception handling by design
 """
@@ -34,7 +35,7 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -87,14 +88,14 @@ def to_pil(img_t: torch.Tensor) -> Image.Image:
 # -------------------------
 # Noise-only augmentations
 # -------------------------
-def add_gaussian_noise(img: torch.Tensor, std_range=(0.0, 0.12)) -> torch.Tensor:
+def add_gaussian_noise(img: torch.Tensor, std_range=(0.0, 0.10)) -> torch.Tensor:
     std = random.uniform(*std_range)
     if std == 0.0:
         return img
     noise = torch.randn_like(img) * std
     return torch.clamp(img + noise, 0.0, 1.0)
 
-def add_shot_noise(img: torch.Tensor, scale_range=(0.0, 0.12)) -> torch.Tensor:
+def add_shot_noise(img: torch.Tensor, scale_range=(0.0, 0.10)) -> torch.Tensor:
     scale = random.uniform(*scale_range)
     if scale == 0.0:
         return img
@@ -138,37 +139,48 @@ class TrajectorySet(Dataset):
 def load_image_from_index(ds: TrajectorySet, tid: int, i: int) -> torch.Tensor:
     return load_frame(ds.trajs[tid][i])
 
-def sample_pairs(ds: TrajectorySet, batch_size: int, max_gap: Optional[int] = None, balanced: bool = False, gap_bins: Tuple[int, ...] = (1,2,3,4,5,6,8,12)):
+def sample_pairs(
+    ds: TrajectorySet,
+    batch_size: int,
+    max_gap: Optional[int] = None,
+    balanced: bool = True,
+    gap_bins: Tuple[int, ...] = (1,2,3,4,5,6,8)
+):
     """
     Return list of tuples: (img_i, img_j, gap, tid, i, j)
     If balanced=True, try to sample gaps roughly uniformly across bins.
     """
-    pairs = []
     if not balanced:
-        for _ in range(batch_size):
+        pairs = []
+        trials = 0
+        while len(pairs) < batch_size and trials < batch_size * 200:
+            trials += 1
             tid = random.randrange(len(ds.trajs))
             frames = ds.trajs[tid]; n = len(frames)
+            if n < 2:
+                continue
             i = random.randrange(0, n - 1)
             j = random.randrange(i + 1, n)
-            if max_gap is not None:
-                tries = 0
-                while (j - i) > max_gap and tries < 20:
-                    j = random.randrange(i + 1, n)
-                    tries += 1
+            gap = j - i
+            if max_gap is not None and gap > max_gap:
+                continue
             img_i = load_image_from_index(ds, tid, i)
             img_j = load_image_from_index(ds, tid, j)
-            pairs.append((img_i, img_j, j - i, tid, i, j))
-        return pairs
+            pairs.append((img_i, img_j, gap, tid, i, j))
+        return pairs[:batch_size]
 
-    # Balanced binning
+    # Balanced across bins
+    pairs = []
     bin_edges = list(gap_bins) + [10**9]
     targets_per_bin = max(1, batch_size // len(bin_edges))
     counts = [0] * len(bin_edges)
     trials = 0
-    while sum(counts) < targets_per_bin * len(bin_edges) and trials < batch_size * 100:
+    while sum(counts) < targets_per_bin * len(bin_edges) and trials < batch_size * 2000:
         trials += 1
         tid = random.randrange(len(ds.trajs))
         frames = ds.trajs[tid]; n = len(frames)
+        if n < 2:
+            continue
         i = random.randrange(0, n - 1)
         j = random.randrange(i + 1, n)
         gap = j - i
@@ -184,10 +196,15 @@ def sample_pairs(ds: TrajectorySet, batch_size: int, max_gap: Optional[int] = No
         img_j = load_image_from_index(ds, tid, j)
         pairs.append((img_i, img_j, gap, tid, i, j))
         counts[b] += 1
-    # if underfilled, top up randomly
-    while len(pairs) < batch_size:
+
+    # If underfilled, resample uniformly under constraints
+    safety_trials = 0
+    while len(pairs) < batch_size and safety_trials < batch_size * 200:
+        safety_trials += 1
         tid = random.randrange(len(ds.trajs))
         frames = ds.trajs[tid]; n = len(frames)
+        if n < 2:
+            continue
         i = random.randrange(0, n - 1)
         j = random.randrange(i + 1, n)
         gap = j - i
@@ -196,6 +213,7 @@ def sample_pairs(ds: TrajectorySet, batch_size: int, max_gap: Optional[int] = No
         img_i = load_image_from_index(ds, tid, i)
         img_j = load_image_from_index(ds, tid, j)
         pairs.append((img_i, img_j, gap, tid, i, j))
+
     return pairs[:batch_size]
 
 # -------------------------
@@ -245,7 +263,7 @@ class DistanceHead(nn.Module):
         )
     def forward(self, zA, zB):
         x = torch.cat([zA, zB, (zA - zB).abs()], dim=-1)
-        return F.softplus(self.mlp(x)).squeeze(-1)  # [B]
+        return self.mlp(x).squeeze(-1)  # ŷ (log-space), unbounded
 
 class CFMHead(nn.Module):
     def __init__(self, dim_z=128, hidden=256):
@@ -293,25 +311,26 @@ class ActionDistanceModel(nn.Module):
         self.dist_head = DistanceHead(dim_z=dim_z)
         self.cfm = CFMHead(dim_z=dim_z)
         self.decoder = ConvDecoder(dim_z=dim_z)
-        # light calibration for ||Δ||
-        self.calib = nn.Linear(1, 1)
+        # light calibrations
+        self.calib = nn.Linear(1, 1)   # for ||Δ||
+        self.zcalib = nn.Linear(1, 1)  # for ||zB - zA|| -> y
         with torch.no_grad():
             last = self.vec_head.mlp[-1]
             if isinstance(last, nn.Linear):
                 nn.init.normal_(last.weight, mean=0.0, std=1e-3)
                 nn.init.constant_(last.bias, 0.0)
-            self.calib.weight.fill_(1.0)
-            self.calib.bias.zero_()
+            self.calib.weight.fill_(1.0); self.calib.bias.zero_()
+            self.zcalib.weight.fill_(1.0); self.zcalib.bias.zero_()
 
     def forward(self, imgA, imgB, t_for_cfm: torch.Tensor):
         zA = self.encoder(imgA)
         zB = self.encoder(imgB)
         delta_AB = self.vec_head(zA, zB)
-        dist_hat = self.dist_head(zA, zB)
+        y_hat = self.dist_head(zA, zB)  # log-space scalar
         t = t_for_cfm.view(-1, 1)
         z_t = (1 - t) * zA + t * zB
         v_hat = self.cfm(z_t, t, zA, zB)
-        return {"zA": zA, "zB": zB, "delta_AB": delta_AB, "dist_hat": dist_hat, "cfm_v": v_hat}
+        return {"zA": zA, "zB": zB, "delta_AB": delta_AB, "dist_hat": y_hat, "cfm_v": v_hat}
 
     def decode(self, z):
         return self.decoder(z)
@@ -406,7 +425,7 @@ def stack_vert(pils: List[Image.Image]) -> Image.Image:
         canvas.paste(im, (0, y)); y += im.size[1]
     return canvas
 
-# 1) Tiny push movies & diffs
+# 1) Tiny push (along z-direction)
 def vis_tiny_push(model, device, pairs, out_path: Path, alphas=(0.1, 0.2, 0.3, 0.4)):
     rows = []
     with torch.no_grad():
@@ -417,7 +436,7 @@ def vis_tiny_push(model, device, pairs, out_path: Path, alphas=(0.1, 0.2, 0.3, 0
             zA = out["zA"].squeeze(0)
             zB = out["zB"].squeeze(0)
             u = zB - zA
-            u = u / (torch.linalg.norm(u) + 1e-8)  # direction in z-space
+            u = u / (torch.linalg.norm(u) + 1e-8)
 
             row_imgs = [to_pil(A)]
             for a in alphas:
@@ -430,7 +449,7 @@ def vis_tiny_push(model, device, pairs, out_path: Path, alphas=(0.1, 0.2, 0.3, 0
             rows.append(stack_horiz(row_imgs))
     stack_vert(rows).save(out_path)
 
-# 2) Counterfactual line search along Δ-hat
+# 2) Counterfactual line search (along z-direction)
 def vis_line_search(model, device, pairs, out_path: Path, num_lambdas=16, max_lambda=6.0):
     rows = []
     lambdas = torch.linspace(0, max_lambda, num_lambdas)
@@ -444,23 +463,18 @@ def vis_line_search(model, device, pairs, out_path: Path, num_lambdas=16, max_la
             u = zB - zA
             u = u / (torch.linalg.norm(u) + 1e-8)
 
-            best_loss = 1e9
-            best_dec = None
+            best_loss = 1e9; best_dec = None
             for lam in lambdas:
                 z_t = zA + lam.item() * u
                 dec = model.decode(z_t.unsqueeze(0)).squeeze(0).cpu()
                 loss = torch.mean(torch.abs(dec - B)).item()
                 if loss < best_loss:
-                    best_loss = loss
-                    best_dec = dec
-            rows.append(stack_horiz([
-                to_pil(A), to_pil(B),
-                to_pil(best_dec),
-                im_to_heat(torch.abs(best_dec - B).mean(0).numpy())
-            ]))
+                    best_loss = loss; best_dec = dec
+            rows.append(stack_horiz([to_pil(A), to_pil(B), to_pil(best_dec),
+                                     im_to_heat(torch.abs(best_dec - B).mean(0).numpy())]))
     stack_vert(rows).save(out_path)
 
-# 3) Orthogonal directions control
+# 3) Orthogonal directions around zA
 def gram_schmidt(u, basis: List[torch.Tensor]):
     v = u.clone()
     for b in basis:
@@ -478,8 +492,7 @@ def vis_orthogonals(model, device, pairs, out_path: Path, step=0.5):
             zA = out["zA"].squeeze(0)
             zB = out["zB"].squeeze(0)
 
-            e1 = zB - zA
-            e1 = e1 / (torch.linalg.norm(e1) + 1e-8)
+            e1 = zB - zA; e1 = e1 / (torch.linalg.norm(e1) + 1e-8)
             e2 = gram_schmidt(torch.randn_like(e1), [e1])
             e3 = gram_schmidt(torch.randn_like(e1), [e1, e2])
 
@@ -535,8 +548,7 @@ def vis_feature_corr(model, device, pairs, out_path: Path):
             sim = torch.einsum("bcn,bcm->bnm", fA_flat, fB_flat).squeeze(0)  # [N,M]
             sim_max, _ = torch.max(sim, dim=1)
             sim_map = sim_max.view(Ha, Wa).cpu().numpy()
-            # 🔧 NumPy 2.0 fix: use np.ptp instead of sim_map.ptp()
-            rng = np.ptp(sim_map)
+            rng = np.ptp(sim_map)  # NumPy 2.0 safe
             sim_map = np.clip((sim_map - sim_map.min()) / (rng + 1e-8), 0, 1)
             rows.append(stack_horiz([to_pil(A), to_pil(B), im_to_heat(sim_map)]))
     stack_vert(rows).save(out_path)
@@ -549,7 +561,7 @@ def vis_occlusion(model, device, pairs, out_path: Path, patch=24, stride=12):
         B1 = B.unsqueeze(0).to(device)
         with torch.no_grad():
             out = model(A1, B1, torch.rand(1, device=device))
-            base = out["dist_hat"].item()
+            y_hat = out["dist_hat"].item()
         H, W = A.shape[1], A.shape[2]
         A_occ = np.zeros((H, W), dtype=np.float32)
         for y in range(0, H - patch + 1, stride):
@@ -558,7 +570,7 @@ def vis_occlusion(model, device, pairs, out_path: Path, patch=24, stride=12):
                 Ao1 = Ao.unsqueeze(0).to(device)
                 with torch.no_grad():
                     d = model(Ao1, B1, torch.rand(1, device=device))["dist_hat"].item()
-                A_occ[y:y+patch, x:x+patch] = max(A_occ[y:y+patch, x:x+patch].max(), base - d)
+                A_occ[y:y+patch, x:x+patch] = max(A_occ[y:y+patch, x:x+patch].max(), y_hat - d)
         B_occ = np.zeros((H, W), dtype=np.float32)
         for y in range(0, H - patch + 1, stride):
             for x in range(0, W - patch + 1, stride):
@@ -566,19 +578,19 @@ def vis_occlusion(model, device, pairs, out_path: Path, patch=24, stride=12):
                 Bo1 = Bo.unsqueeze(0).to(device)
                 with torch.no_grad():
                     d = model(A1, Bo1, torch.rand(1, device=device))["dist_hat"].item()
-                B_occ[y:y+patch, x:x+patch] = max(B_occ[y:y+patch, x:x+patch].max(), base - d)
+                B_occ[y:y+patch, x:x+patch] = max(B_occ[y:y+patch, x:x+patch].max(), y_hat - d)
         rows.append(stack_horiz([to_pil(A), im_to_heat(A_occ), to_pil(B), im_to_heat(B_occ)]))
     stack_vert(rows).save(out_path)
 
-# 7) Gradient attribution
+# 7) Gradient attribution (on ŷ)
 def vis_grad_attr(model, device, pairs, out_path: Path):
     rows = []
     for (A, B, gap, *_ ) in pairs:
         A1 = A.unsqueeze(0).to(device).clone().requires_grad_(True)
         B1 = B.unsqueeze(0).to(device).clone().requires_grad_(True)
         out = model(A1, B1, torch.rand(1, device=device))
-        d = out["dist_hat"].mean()
-        d.backward()
+        y_hat = out["dist_hat"].mean()
+        y_hat.backward()
         gA = A1.grad.detach().abs().mean(1).squeeze(0).cpu().numpy()
         gB = B1.grad.detach().abs().mean(1).squeeze(0).cpu().numpy()
         rows.append(stack_horiz([to_pil(A), im_to_heat(gA), to_pil(B), im_to_heat(gB)]))
@@ -602,7 +614,7 @@ def vis_jacobian_probes(model, device, pairs, out_path: Path, dims=4, eps=0.15):
             rows.append(stack_horiz(tiles))
     stack_vert(rows).save(out_path)
 
-# 9) Δ-length calibration (uses cached pairs)
+# 9) Δ-length calibration (uses cached Δ)
 def vis_length_calibration(delta_cache: List[Tuple[np.ndarray, int]], out_path: Path):
     if len(delta_cache) == 0:
         return
@@ -627,9 +639,9 @@ def vis_length_calibration(delta_cache: List[Tuple[np.ndarray, int]], out_path: 
     plt.title("Δ-length calibration")
     plt.tight_layout(); plt.savefig(out_path); plt.close()
 
-# 10) Neighborhood morphs along Δ
+# 10) Neighborhood morphs along z-direction
 def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path, K=3, beta=0.7, pool_samples=400):
-    # Build a small pool of latents
+    # pool
     all_paths = []
     for tid, frames in enumerate(ds.trajs):
         for i, p in enumerate(frames):
@@ -640,7 +652,6 @@ def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path,
     X = torch.stack(imgs, 0).to(device)
     with torch.no_grad():
         Z = model.encoder(X)  # [N,D]
-
     rows = []
     with torch.no_grad():
         for (A, B, gap, *_ ) in pairs:
@@ -648,8 +659,6 @@ def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path,
             zB = model.encoder(B.unsqueeze(0).to(device)).squeeze(0)
             u = zB - zA
             u = u / (torch.linalg.norm(u) + 1e-8)
-
-            # nearest neighbors of A in z-space
             sims = (Z @ zA)
             idx = torch.topk(sims, k=min(K, Z.size(0))).indices
             tiles = [to_pil(A)]
@@ -657,11 +666,8 @@ def vis_neighbor_morphs(model, device, ds: TrajectorySet, pairs, out_path: Path,
                 zn = Z[ix]
                 dec_n = model.decode(zn.unsqueeze(0)).squeeze(0).cpu()
                 dec_n_plus = model.decode((zn + beta * u).unsqueeze(0)).squeeze(0).cpu()
-                tiles.append(stack_vert([
-                    to_pil(dec_n),
-                    to_pil(dec_n_plus),
-                    im_to_heat(torch.abs(dec_n_plus - dec_n).mean(0).numpy())
-                ]))
+                tiles.append(stack_vert([to_pil(dec_n), to_pil(dec_n_plus),
+                                         im_to_heat(torch.abs(dec_n_plus - dec_n).mean(0).numpy())]))
             rows.append(stack_horiz(tiles))
     stack_vert(rows).save(out_path)
 
@@ -676,19 +682,17 @@ def default_device_str() -> str:
     return "cpu"
 
 def make_argparser():
-    ap = argparse.ArgumentParser(description="Train action-distance model by regressing observed step gaps (CFM + decoder, stabilized).")
+    ap = argparse.ArgumentParser(description="Train action-distance model by regressing log-steps with CFM + decoder (stabilized).")
     ap.add_argument("--data_root", type=str, required=True,
                     help="Root directory containing traj_*/states/state_*.png (required).")
     ap.add_argument("--out_dir", type=str, default="out.action_distance",
                     help="Directory for checkpoints, debug, and visuals (default: %(default)s)")
     ap.add_argument("--batch_size", type=int, default=8,
                     help="Mini-batch size (default: %(default)s)")
-    ap.add_argument("--epochs", type=int, default=1000,
+    ap.add_argument("--epochs", type=int, default=5,
                     help="Number of training epochs (default: %(default)s)")
     ap.add_argument("--steps_per_epoch", type=int, default=500,
                     help="Optimization steps per epoch (default: %(default)s)")
-    ap.add_argument("--lr", type=float, default=1e-4,
-                    help="Base AdamW learning rate (heads use this, encoder uses 0.5×) (default: %(default)s)")
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
     ap.add_argument("--device", type=str, default=default_device_str(),
@@ -697,16 +701,15 @@ def make_argparser():
                     help="Embedding dimension (default: %(default)s)")
     ap.add_argument("--vec_dim", type=int, default=8,
                     help="Displacement vector dimensionality (default: %(default)s)")
-    ap.add_argument("--max_gap", type=int, default=8,
+    ap.add_argument("--max_gap", type=int, default=6,
                     help="Max step gap when sampling pairs to stabilize early training (default: %(default)s)")
-    ap.add_argument("--balanced_gaps", action="store_true",
+    ap.add_argument("--balanced_gaps", action="store_true", default=True,
                     help="Sample pairs roughly uniformly across gap bins (default: %(default)s)")
     ap.add_argument("--debug_every", type=int, default=50,
                     help="Steps between saving a two-column A/B debug grid (default: %(default)s)")
     ap.add_argument("--save_every", type=int, default=1000,
                     help="Steps between saving a checkpoint (default: %(default)s)")
-
-    # Visualization controls
+    # Visualization
     ap.add_argument("--vis_every_epoch", type=int, default=1,
                     help="Epoch interval for producing visualization suite (default: %(default)s)")
     ap.add_argument("--vis_pairs", type=int, default=4,
@@ -745,18 +748,18 @@ def main():
     aug_cfg = AugmentConfig()
     model = ActionDistanceModel(dim_z=args.dim_z, vec_dim=args.vec_dim).to(device)
 
-    # Param groups: smaller LR for encoder
+    # Param groups: encoder lower LR, heads/decoder higher LR
     opt = torch.optim.AdamW(
         [
-            {"params": model.encoder.parameters(), "lr": args.lr * 0.5},
+            {"params": model.encoder.parameters(), "lr": 1e-4, "weight_decay": 1e-4},
             {"params": list(model.vec_head.parameters())
-                      + list(model.dist_head.parameters())
-                      + list(model.cfm.parameters())
-                      + list(model.decoder.parameters())
-                      + list(model.calib.parameters()),
-             "lr": args.lr},
-        ],
-        lr=args.lr, weight_decay=1e-4
+                    + list(model.dist_head.parameters())
+                    + list(model.cfm.parameters())
+                    + list(model.decoder.parameters())
+                    + list(model.zcalib.parameters())
+                    + list(model.calib.parameters()),
+             "lr": 3e-4, "weight_decay": 1e-5},
+        ]
     )
 
     global_step = 0
@@ -778,50 +781,76 @@ def main():
             t_for_cfm = torch.rand(A_t.size(0), device=device)
             out = model(A_t, B_t, t_for_cfm)
 
-            # Losses
-            d_scalar = out["dist_hat"]                   # main scalar head prediction
-            L_reg = F.smooth_l1_loss(d_scalar, gap_t)    # robust to outliers
+            # Targets in log-space
+            y = torch.log1p(gap_t)          # [B]
+            y_hat = out["dist_hat"]         # [B] (unbounded)
 
+            # Main regression loss (Huber)
+            L_reg = F.smooth_l1_loss(y_hat, y)
+
+            # Pairwise ranking hinge to enforce monotonicity
+            with torch.no_grad():
+                num_pairs = max(1, A_t.size(0) // 2)
+                idx_i = torch.randint(0, A_t.size(0), (num_pairs,), device=device)
+                idx_j = torch.randint(0, A_t.size(0), (num_pairs,), device=device)
+                sign = torch.sign((y[idx_i] - y[idx_j]).clamp(min=-1, max=1))
+            margin = 0.05
+            rank_term = ( (y_hat[idx_i] - y_hat[idx_j]) * sign )
+            L_rank = F.relu(margin - rank_term).mean()
+
+            # Calibrations
+            # Δ-norm (very tiny weight)
             delta_norm = torch.linalg.norm(out["delta_AB"], dim=-1, keepdim=True)  # [B,1]
-            gap_from_norm = F.softplus(model.calib(delta_norm)).squeeze(-1)        # [B]
-            L_cal = 0.1 * F.smooth_l1_loss(gap_from_norm, gap_t)
+            y_from_delta = model.calib(delta_norm).squeeze(-1)
+            L_cal = 0.02 * F.smooth_l1_loss(y_from_delta, y)
+            # z-distance (main light calibration)
+            zdist = torch.linalg.norm(out["zB"] - out["zA"], dim=-1, keepdim=True)  # [B,1]
+            y_from_z = model.zcalib(zdist).squeeze(-1)
+            L_zcal = 0.1 * F.smooth_l1_loss(y_from_z, y)
 
+            # CFM & reconstruction
             L_cfm = cfm_loss(out["cfm_v"], out["zA"], out["zB"])
             decA = model.decode(out["zA"]); decB = model.decode(out["zB"])
             L_rec = 0.5 * (F.l1_loss(decA, A_t) + F.l1_loss(decB, B_t))
 
-            loss = L_reg + 0.5 * L_cfm + 0.1 * L_rec + L_cal
+            loss = L_reg + 0.5 * L_cfm + 0.1 * L_rec + L_zcal + L_cal + 0.2 * L_rank
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gn_enc  = grad_norm(model.encoder)
-            gn_head = grad_norm(model.vec_head) + grad_norm(model.dist_head)
+            gn_heads = (grad_norm(model.vec_head) + grad_norm(model.dist_head) +
+                        grad_norm(model.cfm) + grad_norm(model.decoder) +
+                        grad_norm(model.zcalib) + grad_norm(model.calib))
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             opt.step()
 
-            # Metrics
+            # Metrics (report in steps using d̂ = expm1(ŷ))
             with torch.no_grad():
+                d_hat_steps = torch.expm1(y_hat.detach())
                 dn = torch.linalg.norm(out["delta_AB"], dim=-1)
-                mae = float(torch.abs(d_scalar - gap_t).mean())
-                corr_scalar = pearson_corr(d_scalar.detach(), gap_t)
+                mae = float(torch.abs(d_hat_steps - gap_t).mean())
+                corr_scalar = pearson_corr(d_hat_steps, gap_t)
+                ycorr = pearson_corr(y_hat.detach(), y)
                 corr_deln   = pearson_corr(dn.detach(), gap_t)
                 gap_mean = float(gap_t.mean()); gap_std = float(gap_t.std())
-                d_mean = float(d_scalar.mean()); d_std = float(d_scalar.std())
+                gmin, gmax = int(gap_t.min().item()), int(gap_t.max().item())
+                d_mean = float(d_hat_steps.mean()); d_std = float(d_hat_steps.std())
 
             if (global_step % 50) == 0:
                 print(
                     f"ep {epoch} step {step} | loss {loss.item():.4f} | "
-                    f"Lreg {L_reg.item():.3f} Lcfm {L_cfm.item():.3f} Lrec {L_rec.item():.3f} Lcal {L_cal.item():.3f} | "
-                    f"gap {gap_mean:.2f}±{gap_std:.2f} | d̂ {d_mean:.2f}±{d_std:.2f} | "
-                    f"MAE {mae:.3f} | corr(d̂,gap) {corr_scalar:.3f} | corr(||Δ||,gap) {corr_deln:.3f} | "
-                    f"∥g_enc∥ {gn_enc:.3e} ∥g_heads∥ {gn_head:.3e}"
+                    f"Lreg {L_reg.item():.3f} Lrank {L_rank.item():.3f} Lcfm {L_cfm.item():.3f} Lrec {L_rec.item():.3f} "
+                    f"Lzcal {L_zcal.item():.3f} Lcal {L_cal.item():.3f} | "
+                    f"gap {gap_mean:.2f}±{gap_std:.2f} [{gmin},{gmax}] | d̂ {d_mean:.2f}±{d_std:.2f} | "
+                    f"MAE {mae:.3f} | corr(ŷ,log1p(gap)) {ycorr:.3f} | corr(d̂,gap) {corr_scalar:.3f} | corr(||Δ||,gap) {corr_deln:.3f} | "
+                    f"∥g_enc∥ {gn_enc:.3e} ∥g_heads∥ {gn_heads:.3e}"
                 )
 
             # Two-column debug grid
             if (global_step % args.debug_every) == 0:
                 k = min(6, A_t.size(0))
                 dbg_pairs = [(A_t[i].detach().cpu(), B_t[i].detach().cpu(), int(gap_t[i].item()), None, None, None) for i in range(k)]
-                preds = [float(d_scalar[i].item()) for i in range(k)]
+                preds = [float(d_hat_steps[i].item()) for i in range(k)]
                 deltas = [out["delta_AB"][i].detach().cpu().numpy() for i in range(k)]
                 save_debug_columns(dbg_pairs, preds, deltas, out_dir / f"debug_cols_step_{global_step}.jpg")
 
@@ -843,32 +872,21 @@ def main():
         if ((epoch + 1) % args.vis_every_epoch) == 0:
             model.eval()
             base_pairs = sample_pairs(ds, batch_size=args.vis_pairs, max_gap=args.max_gap, balanced=True)
-            # reload clean (no aug) versions
             base_pairs = [(load_image_from_index(ds, tid, i).cpu(),
                            load_image_from_index(ds, tid, j).cpu(),
                            gap, tid, i, j)
                           for (_, _, gap, tid, i, j) in base_pairs]
 
             vis_dir_epoch = vis_dir
-            # 1) Tiny push
             vis_tiny_push(model, device, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_1_tiny_push.jpg")
-            # 2) Counterfactual line search
             vis_line_search(model, device, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_2_line_search.jpg")
-            # 3) Orthogonals
             vis_orthogonals(model, device, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_3_orthogonals.jpg")
-            # 4) PCA on Δ cache
             vis_pca_deltas(delta_cache, vis_dir_epoch / f"ep{epoch:02d}_4_pca_deltas.png")
-            # 5) Feature correspondence
             vis_feature_corr(model, device, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_5_feat_corr.jpg")
-            # 6) Occlusion sensitivity
             vis_occlusion(model, device, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_6_occlusion.jpg")
-            # 7) Gradient attribution
             vis_grad_attr(model, device, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_7_grad_attr.jpg")
-            # 8) Decoder Jacobian probes
             vis_jacobian_probes(model, device, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_8_jacobian.jpg")
-            # 9) Δ-length calibration
             vis_length_calibration(delta_cache, vis_dir_epoch / f"ep{epoch:02d}_9_length_calib.png")
-            # 10) Neighborhood morphs
             vis_neighbor_morphs(model, device, ds, base_pairs, vis_dir_epoch / f"ep{epoch:02d}_10_neighbor_morphs.jpg")
 
         # save per-epoch model
