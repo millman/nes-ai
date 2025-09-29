@@ -20,18 +20,16 @@ What it does:
       L_rec = ||dec(zA) - A||_1 + ||dec(zB) - B||_1
   - Optional latent regularization (small) to keep scales tame.
   - Debug viz: decodes interpolants between A and B and saves a grid.
-    Also shows an Euler rollout using the learned vector field (optional).
-
-You can treat ||zB - zA|| as a first "action-distance" proxy if you want a scalar,
-or later attach a small head to map that to predicted step gaps.
+    Also shows an Euler rollout using the learned vector field.
 
 CLI:
   python action_distance_cfm.py --data_root traj_dumps --out_dir out.action_distance_cfm
 """
 
 from __future__ import annotations
-import argparse, math, random
+import argparse, math, random, contextlib
 from dataclasses import dataclass
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -41,8 +39,8 @@ from PIL import Image, ImageDraw, ImageFont
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.amp import autocast, GradScaler  # <-- add near your imports
 from torch.utils.data import Dataset, DataLoader
+from torch.amp import autocast, GradScaler
 
 # --------------------------------------------------------------------------------------
 # Config
@@ -133,7 +131,6 @@ class PairFromTrajDataset(Dataset):
 class Encoder(nn.Module):
     def __init__(self, z_dim: int = 128):
         super().__init__()
-        # (3,240,224) -> (z)
         self.conv = nn.Sequential(
             nn.Conv2d(3, 32, 5, stride=2, padding=2), nn.ReLU(inplace=True),   # 120x112
             nn.Conv2d(32,64, 3, stride=2, padding=1), nn.ReLU(inplace=True),   # 60x56
@@ -146,7 +143,7 @@ class Encoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.conv(x).flatten(1)
         z = self.fc(h)
-        return z  # do NOT normalize; we want meaningful scale for interpolation
+        return z  # keep scale (no normalization)
 
 class Decoder(nn.Module):
     def __init__(self, z_dim: int = 128):
@@ -159,7 +156,6 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(64, 32,  kernel_size=4, stride=2, padding=1), nn.ReLU(inplace=True),  # 16x16
             nn.ConvTranspose2d(32, 16,  kernel_size=4, stride=2, padding=1), nn.ReLU(inplace=True),  # 32x32
         )
-        # From 32x32 to 240x224 with upsampling + convs (keeps it simple & stable)
         self.final = nn.Sequential(
             nn.Upsample(size=(60,56), mode="bilinear", align_corners=False),
             nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(inplace=True),
@@ -199,7 +195,7 @@ class VectorField(nn.Module):
         return self.net(feat)
 
 # --------------------------------------------------------------------------------------
-# Utilities
+# Utilities & Debug helpers
 # --------------------------------------------------------------------------------------
 def set_seed(seed: int):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -208,6 +204,18 @@ def _to_pil(t: torch.Tensor) -> Image.Image:
     t = t.detach().clamp(0,1)
     arr = (t.permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr)
+
+def _psnr(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    # assuming x,y in [0,1]
+    mse = F.mse_loss(x, y, reduction="mean").clamp_min(eps)
+    return 10.0 * torch.log10(1.0 / mse)
+
+def _grad_norm(module: nn.Module) -> float:
+    total = 0.0
+    for p in module.parameters():
+        if p.grad is not None:
+            total += float(p.grad.detach().data.pow(2).sum().cpu())
+    return math.sqrt(total) if total > 0 else 0.0
 
 # --------------------------------------------------------------------------------------
 # Visualization: decode linear interpolants (and optional flow rollouts)
@@ -255,7 +263,6 @@ def save_interpolation_grid(
             rollout_seq.append(torch.cat(rollout_imgs, dim=0))  # (steps+2, 3,H,W)
 
     # Compose canvas
-    # Each row: A | dec(zA) | interp_1 .. interp_K | dec(zB) | B  (=> steps+4 tiles)
     tiles_per_row = steps + 4
     tile_w, tile_h = W, H
     total_w = tile_w * tiles_per_row
@@ -266,7 +273,7 @@ def save_interpolation_grid(
         font = ImageFont.load_default()
     except Exception:
         font = None
-    #test
+
     # Put linear interpolation rows
     for r in range(Bsz):
         x = 0; y = r * tile_h
@@ -277,13 +284,12 @@ def save_interpolation_grid(
         canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); x += tile_w
         canvas.paste(_to_pil(B[r]), (x, y))
 
-        # annotate
         txt = f"||zB-zA||={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
         if font:
             bbox = draw.textbbox((0, 0), txt, font=font)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         else:
-            tw, th = len(txt) * 6, 10
+            tw, th = len(txt)*6, 10
         draw.rectangle([2, y+2, 2+tw+2, y+2+th+2], fill=(0,0,0))
         draw.text((4, y+4), txt, font=font, fill=(255,255,255))
 
@@ -306,7 +312,7 @@ def save_interpolation_grid(
                 bbox = draw.textbbox((0, 0), txt, font=font)
                 tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
             else:
-                tw, th = len(txt) * 6, 10
+                tw, th = len(txt)*6, 10
             draw.rectangle([2, y+2, 2+tw+2, y+2+th+2], fill=(0,0,0))
             draw.text((4, y+4), txt, font=font, fill=(200,255,200))
 
@@ -339,6 +345,7 @@ class TrainCfg:
     viz_rows: int = 6
     viz_cols: int = 9
     save_every_ep: bool = True
+    log_every: int = 50
 
 def pick_device(pref: Optional[str]) -> torch.device:
     if pref:
@@ -359,12 +366,11 @@ def train(cfg: TrainCfg):
     ds_tr = PairFromTrajDataset(cfg.data_root, "train", 0.95, cfg.seed, cfg.max_step_gap, cfg.p_cross_traj)
     ds_va = PairFromTrajDataset(cfg.data_root, "val",   0.95, cfg.seed, cfg.max_step_gap, cfg.p_cross_traj)
 
-    use_pin = (device.type == "cuda")  # no pinning on cpu/mps
-    dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True,
-                    num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=True)
-    dl_va = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False,
-                    num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=False)
-    print(f"[Data] train pairs≈{len(ds_tr)}  val pairs≈{len(ds_va)}")
+    use_pin = (device.type == "cuda")  # pinning not useful on CPU/MPS; avoids MPS warning
+    dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True,  num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=True)
+    dl_va = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=False)
+
+    print(f"[Device] {device} | [Data] train pairs≈{len(ds_tr)}  val pairs≈{len(ds_va)}")
 
     enc = Encoder(cfg.z_dim).to(device)
     dec = Decoder(cfg.z_dim).to(device)
@@ -372,10 +378,24 @@ def train(cfg: TrainCfg):
 
     params = list(enc.parameters()) + list(dec.parameters()) + list(vf.parameters())
     opt = torch.optim.AdamW(params, lr=cfg.lr)
-    scaler = GradScaler(enabled=(device.type == "cuda"))
+
+    # AMP setup: CUDA only
+    if device.type == "cuda":
+        amp_autocast = lambda: autocast(device_type="cuda")
+        scaler = GradScaler(enabled=True)
+    else:
+        amp_autocast = contextlib.nullcontext
+        scaler = GradScaler(enabled=False)
 
     global_step = 0
     best_val = float("inf")
+
+    # running windows for pretty logs
+    win = 50
+    q_lcfm, q_lrec, q_llat, q_ltot = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
+    q_dnorm, q_vnorm, q_cos = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
+    q_psnrA, q_psnrB = deque(maxlen=win), deque(maxlen=win)
+    q_genc, q_gdec, q_gvf = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
 
     for ep in range(1, cfg.epochs+1):
         enc.train(); dec.train(); vf.train()
@@ -385,7 +405,7 @@ def train(cfg: TrainCfg):
             A = A.to(device, non_blocking=True)
             B = B.to(device, non_blocking=True)
 
-            with autocast(device_type=device.type, enabled=(device.type == "cuda")):
+            with amp_autocast():
                 zA = enc(A)
                 zB = enc(B)
 
@@ -412,6 +432,10 @@ def train(cfg: TrainCfg):
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            # gradient norms (after backward, before step)
+            g_enc = _grad_norm(enc)
+            g_dec = _grad_norm(dec)
+            g_vf  = _grad_norm(vf)
             scaler.step(opt)
             scaler.update()
 
@@ -419,6 +443,35 @@ def train(cfg: TrainCfg):
             run_loss_rec += loss_rec.item() * A.shape[0]
             run_n += A.shape[0]
             global_step += 1
+
+            # --------- Light-weight debug stats ----------
+            with torch.no_grad():
+                d = (zB - zA)
+                dnorm = torch.linalg.norm(d, dim=1).mean().item()
+                vnorm = torch.linalg.norm(v, dim=1).mean().item()
+                cosvu = F.cosine_similarity(v, u, dim=1).mean().item()
+                psnrA = _psnr(xA_rec, A).item()
+                psnrB = _psnr(xB_rec, B).item()
+
+                q_lcfm.append(float(loss_cfm.item()))
+                q_lrec.append(float(loss_rec.item()))
+                q_llat.append(float(loss_lat.item()))
+                q_ltot.append(float(loss.item()))
+                q_dnorm.append(dnorm); q_vnorm.append(vnorm); q_cos.append(cosvu)
+                q_psnrA.append(psnrA); q_psnrB.append(psnrB)
+                q_genc.append(g_enc); q_gdec.append(g_dec); q_gvf.append(g_vf)
+
+            if (cfg.log_every > 0) and (global_step % cfg.log_every == 0):
+                def avg(q):
+                    return (sum(q) / len(q)) if len(q) else 0.0
+                print(
+                    f"ep {ep:02d} step {global_step:06d} | "
+                    f"loss {avg(q_ltot):.4f} | "
+                    f"Lcfm {avg(q_lcfm):.4f} Lrec {avg(q_lrec):.4f} Llat {avg(q_llat):.5f} | "
+                    f"‖Δ‖ {avg(q_dnorm):.3f} ‖v‖ {avg(q_vnorm):.3f} cos(v,u) {avg(q_cos):.3f} | "
+                    f"PSNR A {avg(q_psnrA):.2f}dB B {avg(q_psnrB):.2f}dB | "
+                    f"∥g_enc∥ {avg(q_genc):.3e} ∥g_dec∥ {avg(q_gdec):.3e} ∥g_vf∥ {avg(q_gvf):.3e}"
+                )
 
             if (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0):
                 enc.eval(); dec.eval(); vf.eval()
@@ -523,9 +576,10 @@ def parse_args():
     ap.add_argument("--lambda_rec", type=float, default=0.1)
     ap.add_argument("--lambda_latent_l2", type=float, default=1e-4)
 
-    ap.add_argument("--viz_every", type=int, default=100)
+    ap.add_argument("--viz_every", type=int, default=500)
     ap.add_argument("--viz_rows", type=int, default=6)   # not used directly, but kept for parity
     ap.add_argument("--viz_cols", type=int, default=9)
+    ap.add_argument("--log_every", type=int, default=50, help="print running debug stats every N steps")
 
     # optional export
     ap.add_argument("--export_pairs", type=int, default=0, help="if >0, export N pairs’ ||zB-zA|| to CSV after training")
@@ -539,7 +593,7 @@ def main():
         num_workers=args.num_workers, device=args.device, max_step_gap=args.max_step_gap,
         p_cross_traj=args.p_cross_traj, lambda_cfm=args.lambda_cfm, lambda_rec=args.lambda_rec,
         lambda_latent_l2=args.lambda_latent_l2, viz_every=args.viz_every,
-        viz_rows=args.viz_rows, viz_cols=args.viz_cols
+        viz_rows=args.viz_rows, viz_cols=args.viz_cols, log_every=args.log_every
     )
     train(cfg)
 
