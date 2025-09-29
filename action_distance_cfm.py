@@ -56,7 +56,8 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     return torch.from_numpy(arr).permute(2,0,1).contiguous()
 
 def load_frame_as_tensor(p: Path) -> torch.Tensor:
-    img = Image.open(p).convert("RGB").resize((W, H), resample=Image.BICUBIC)
+    # NES frames are low-resolution pixel art; keep nearest-neighbour scaling to avoid color bleeding.
+    img = Image.open(p).convert("RGB").resize((W, H), resample=Image.NEAREST)
     return pil_to_tensor(img)
 
 def short_traj_state_label(path_str: str) -> str:
@@ -289,9 +290,20 @@ def set_seed(seed: int):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
-    t = t.detach().clamp(-1,1) * 0.5 + 0.5  # [-1,1] -> [0,1]
-    arr = (t.permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
+    t = t.detach().clamp(-1,1)
+    t = t.cpu() * 0.5 + 0.5  # [-1,1] -> [0,1]
+    arr = (t.permute(1,2,0).contiguous().numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr)
+
+
+def _stack_tiles(images: List[Image.Image]) -> Image.Image:
+    if not images:
+        raise ValueError("No images to stack")
+    w, h = images[0].size
+    canvas = Image.new("RGB", (w * len(images), h))
+    for idx, img in enumerate(images):
+        canvas.paste(img, (idx * w, 0))
+    return canvas
 
 def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     # compute PSNR in [0,1] space
@@ -321,9 +333,19 @@ def save_full_interpolation_grid(
     Bsz = min(A.shape[0], 8)
     K = max(1, int(interp_steps))
 
-    A = A[:Bsz].to(device); B = B[:Bsz].to(device)
-    pA = pathsA[:Bsz];      pB = pathsB[:Bsz]
-    zA = enc(A); zB = enc(B)
+    A = A[:Bsz]
+    B = B[:Bsz]
+    pA = pathsA[:Bsz]
+    pB = pathsB[:Bsz]
+
+    # Clone CPU copies before any async device transfer to avoid pinned-buffer reuse artefacts.
+    A_vis = A.detach().clone()
+    B_vis = B.detach().clone()
+
+    A = A.to(device)
+    B = B.to(device)
+    zA = enc(A)
+    zB = enc(B)
 
     t_vals = torch.linspace(0, 1, K+2, device=device)[1:-1]
     interp_decoded = []
@@ -360,7 +382,7 @@ def save_full_interpolation_grid(
         labelA = short_traj_state_label(pA[r])
         labelB = short_traj_state_label(pB[r])
 
-        canvas.paste(_to_pil(A[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
+        canvas.paste(_to_pil(A_vis[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
         canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelA + " (dec)", (220,220,255)); x += tile_w
 
         for k in range(K):
@@ -369,10 +391,58 @@ def save_full_interpolation_grid(
             x += tile_w
 
         canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
-        canvas.paste(_to_pil(B[r]), (x, y)); annotate(draw, x, y, labelB)
+        canvas.paste(_to_pil(B_vis[r]), (x, y)); annotate(draw, x, y, labelB)
 
         txt = f"‖zB−zA‖={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
         annotate(draw, 2, y + tile_h - 22, txt, (255,255,0))
+
+    canvas.save(out_path)
+
+
+@torch.no_grad()
+def save_simple_debug_grid(
+    enc: Encoder, dec: Decoder,
+    A: torch.Tensor, B: torch.Tensor,
+    pathsA: List[str], pathsB: List[str],
+    out_path: Path, device: torch.device
+):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    Bsz = min(A.shape[0], 4)
+    A = A[:Bsz].detach().clone()
+    B = B[:Bsz].detach().clone()
+
+    # Stage samples through device and back to isolate where artefacts appear
+    A_dev = A.to(device)
+    B_dev = B.to(device)
+    A_dev_back = A_dev.detach().to("cpu")
+    B_dev_back = B_dev.detach().to("cpu")
+
+    with torch.no_grad():
+        zA = enc(A_dev)
+        zB = enc(B_dev)
+        A_rec = dec(zA).detach().to("cpu")
+        B_rec = dec(zB).detach().to("cpu")
+
+    cols = [
+        ("A cpu", A),
+        ("A gpu→cpu", A_dev_back),
+        ("A recon", A_rec),
+        ("B cpu", B),
+        ("B gpu→cpu", B_dev_back),
+        ("B recon", B_rec),
+    ]
+
+    tile_w, tile_h = W, H
+    canvas = Image.new("RGB", (tile_w * len(cols), tile_h * Bsz), (0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    for r in range(Bsz):
+        y = r * tile_h
+        for c, (label, stack) in enumerate(cols):
+            x = c * tile_w
+            canvas.paste(_to_pil(stack[r]), (x, y))
+            draw.rectangle([x + 2, y + 2, x + tile_w - 2, y + 26], outline=(255,255,0))
+            draw.text((x + 6, y + 6), label, fill=(255, 255, 0))
 
     canvas.save(out_path)
 
@@ -409,6 +479,7 @@ class TrainCfg:
     viz_every: int = 500
     interp_steps: int = 12
     log_every: int = 50
+    simple_viz: bool = False
 
 # --------------------------------------------------------------------------------------
 # Train
@@ -480,6 +551,10 @@ def train(cfg: TrainCfg):
         run_loss_cfm = run_loss_rec = run_n = 0.0
 
         for A, B, pathsA, pathsB in dl_tr:
+            # Keep CPU copies for debug viz before any device transfer
+            A_cpu = A.detach().clone()
+            B_cpu = B.detach().clone()
+
             A = A.to(device, non_blocking=True)
             B = B.to(device, non_blocking=True)
 
@@ -540,7 +615,6 @@ def train(cfg: TrainCfg):
             run_loss_cfm += loss_cfm.item() * A.shape[0]
             run_loss_rec += loss_rec.item() * A.shape[0]
             run_n += A.shape[0]
-            global_step += 1
 
             with torch.no_grad():
                 d = (zB - zA)
@@ -569,16 +643,28 @@ def train(cfg: TrainCfg):
                     f"∥g_enc∥ {avg(q_genc):.3e} ∥g_dec∥ {avg(q_gdec):.3e} ∥g_vf∥ {avg(q_gvf):.3e}"
                 )
 
-            if (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0):
+            if global_step % cfg.viz_every == 0:
                 enc.eval(); dec.eval()
-                save_full_interpolation_grid(
-                    enc, dec,
-                    A.cpu(), B.cpu(),
-                    list(pathsA), list(pathsB),
-                    cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}.png",
-                    device=device, interp_steps=cfg.interp_steps
-                )
+                out_path = cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}.png"
+                if cfg.simple_viz:
+                    save_simple_debug_grid(
+                        enc, dec,
+                        A_cpu, B_cpu,
+                        list(pathsA), list(pathsB),
+                        out_path,
+                        device=device,
+                    )
+                else:
+                    save_full_interpolation_grid(
+                        enc, dec,
+                        A_cpu, B_cpu,
+                        list(pathsA), list(pathsB),
+                        out_path,
+                        device=device, interp_steps=cfg.interp_steps
+                    )
                 enc.train(); dec.train()
+
+            global_step += 1
 
         tr_cfm = run_loss_cfm / max(1, run_n)
         tr_rec = run_loss_rec / max(1, run_n)
@@ -675,9 +761,10 @@ def parse_args():
     ap.add_argument("--warmup_steps", type=int, default=2000)
     ap.add_argument("--vf_grad_clip", type=float, default=1.0)
 
-    ap.add_argument("--viz_every", type=int, default=100)
+    ap.add_argument("--viz_every", type=int, default=10)
     ap.add_argument("--interp_steps", type=int, default=12)
     ap.add_argument("--log_every", type=int, default=50)
+    ap.add_argument("--simple_viz", action="store_true", help="emit minimal GPU debug grids instead of full interpolation viz")
 
     ap.add_argument("--export_pairs", type=int, default=0)
     return ap.parse_args()
@@ -692,6 +779,7 @@ def main():
         lambda_cfm=args.lambda_cfm, lambda_rec=args.lambda_rec, lambda_latent_l2=args.lambda_latent_l2,
         lambda_zcal=args.lambda_zcal, warmup_steps=args.warmup_steps, vf_grad_clip=args.vf_grad_clip,
         viz_every=args.viz_every, interp_steps=args.interp_steps, log_every=args.log_every,
+        simple_viz=args.simple_viz,
     )
     train(cfg)
 
