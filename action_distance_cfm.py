@@ -3,24 +3,8 @@
 """
 Action-distance (CFM) toy trainer with a tiny encoder/decoder for visualization.
 
-Data layout (same as your other scripts):
-  traj_dumps/
-    traj_0/states/state_00000.png
-    traj_0/states/state_00001.png
-    ...
-    traj_1/states/state_00000.png
-    ...
-
-What it does:
-  - Encodes two frames A,B -> (zA, zB)
-  - Samples t ~ U[0,1] and forms a *line* latent: z_t = (1 - t) zA + t zB
-  - Trains a conditional vector field vθ(z_t, t | cond(A,B)) to match the *target* d/dt z_t = zB - zA
-      L_CFM = E[ || vθ( z_t, t, cond ) - (zB - zA) ||^2 ]
-  - Adds a tiny autoencoder reconstruction loss on A and B for sanity/viz:
-      L_rec = ||dec(zA) - A||_1 + ||dec(zB) - B||_1
-  - Optional latent regularization (small) to keep scales tame.
-  - Debug viz: decodes interpolants between A and B and saves a grid.
-    Also shows an Euler rollout using the learned vector field.
+Debug visualization: full latent interpolation from A→B decoded as images:
+  [A] [dec(zA)] [t-samples ...] [dec(zB)] [B]
 
 CLI:
   python action_distance_cfm.py --data_root traj_dumps --out_dir out.action_distance_cfm
@@ -218,55 +202,41 @@ def _grad_norm(module: nn.Module) -> float:
     return math.sqrt(total) if total > 0 else 0.0
 
 # --------------------------------------------------------------------------------------
-# Visualization: decode linear interpolants (and optional flow rollouts)
+# Visualization: FULL interpolation from A→B (decoded)
 # --------------------------------------------------------------------------------------
 @torch.no_grad()
-def save_interpolation_grid(
-    enc: Encoder, dec: Decoder, vf: VectorField,
+def save_full_interpolation_grid(
+    enc: Encoder, dec: Decoder,
     A: torch.Tensor, B: torch.Tensor,
     out_path: Path, device: torch.device,
-    cols: int = 9, euler_rollout: bool = True, rollout_steps: Optional[int] = None
+    interp_steps: int = 12
 ):
     """
-    For the first N rows in batch:
+    For the first up to 8 rows in batch:
       Row shows: [A] [dec(zA)] [dec(z_t1)] ... [dec(z_tK)] [dec(zB)] [B]
-      Also an Euler rollout using vθ starting at zA over K steps (optional).
+      where z_tk = (1 - t_k) * zA + t_k * zB,  t_k in (0,1), K = interp_steps
+      Endpoints (t=0, t=1) are shown as dec(zA), dec(zB) next to raw A, B.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Bsz = min(A.shape[0], 8)
-    K = max(2, cols)  # number of *internal* samples between endpoints
-    steps = K
-    if rollout_steps is None:
-        rollout_steps = K
+    K = max(1, int(interp_steps))  # number of *internal* samples (excluding endpoints)
 
     A = A[:Bsz].to(device); B = B[:Bsz].to(device)
     zA = enc(A); zB = enc(B)
 
-    # linear interpolants
-    ts = torch.linspace(0, 1, steps+2, device=device)  # include 0 and 1
-    z_seq = []
-    for t in ts:
+    # t values in (0,1), excluding endpoints; shape (K,)
+    t_vals = torch.linspace(0, 1, K+2, device=device)[1:-1]
+    # Precompute decoded samples for efficiency: list of (B,3,H,W)
+    interp_decoded = []
+    for t in t_vals:
         zt = (1.0 - t) * zA + t * zB
-        z_seq.append(dec(zt))
-    # Euler rollout with learned field (optional)
-    rollout_seq = []
-    if euler_rollout:
-        for b in range(Bsz):
-            z = zA[b:b+1].clone()
-            rollout_imgs = [dec(z)]
-            for s in range(steps):
-                t = torch.full((1,), (s+1)/(steps+1), device=device)
-                v = vf(z, t, zA[b:b+1], zB[b:b+1])
-                z = z + (1.0/(steps+1)) * v  # simple Euler step on unit-time interval
-                rollout_imgs.append(dec(z))
-            rollout_imgs.append(dec(zB[b:b+1]))
-            rollout_seq.append(torch.cat(rollout_imgs, dim=0))  # (steps+2, 3,H,W)
+        interp_decoded.append(dec(zt))  # (B,3,H,W)
 
     # Compose canvas
-    tiles_per_row = steps + 4
+    tiles_per_row = 2 + K + 2  # A | dec(zA) | K interps | dec(zB) | B
     tile_w, tile_h = W, H
     total_w = tile_w * tiles_per_row
-    total_h = tile_h * (Bsz + (Bsz if euler_rollout else 0))
+    total_h = tile_h * Bsz
     canvas = Image.new("RGB", (total_w, total_h), (0,0,0))
     draw = ImageDraw.Draw(canvas)
     try:
@@ -274,16 +244,34 @@ def save_interpolation_grid(
     except Exception:
         font = None
 
-    # Put linear interpolation rows
+    # Place rows
     for r in range(Bsz):
         x = 0; y = r * tile_h
+        # Raw A
         canvas.paste(_to_pil(A[r]), (x, y)); x += tile_w
+        # dec(zA)
         canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); x += tile_w
-        for s in range(steps):
-            canvas.paste(_to_pil(z_seq[s+1][r]), (x, y)); x += tile_w
+        # K internal samples
+        for k in range(K):
+            canvas.paste(_to_pil(interp_decoded[k][r]), (x, y))
+            # annotate t on first row only to reduce clutter
+            if r == 0:
+                tt = float(t_vals[k].item())
+                txt = f"t={tt:.2f}"
+                if font:
+                    bbox = draw.textbbox((0, 0), txt, font=font)
+                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                else:
+                    tw, th = len(txt)*6, 10
+                draw.rectangle([x+2, y+2, x+2+tw+2, y+2+th+2], fill=(0,0,0))
+                draw.text((x+4, y+4), txt, font=font, fill=(220,220,255))
+            x += tile_w
+        # dec(zB)
         canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); x += tile_w
-        canvas.paste(_to_pil(B[r]), (x, y))
+        # Raw B
+        canvas.paste(_to_pil(B[r]), (x, y)); x += tile_w
 
+        # row annotation: ||zB-zA||
         txt = f"||zB-zA||={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
         if font:
             bbox = draw.textbbox((0, 0), txt, font=font)
@@ -292,29 +280,6 @@ def save_interpolation_grid(
             tw, th = len(txt)*6, 10
         draw.rectangle([2, y+2, 2+tw+2, y+2+th+2], fill=(0,0,0))
         draw.text((4, y+4), txt, font=font, fill=(255,255,255))
-
-    # Put rollout rows
-    if euler_rollout:
-        base_y = Bsz * tile_h
-        for r in range(Bsz):
-            x = 0; y = base_y + r * tile_h
-            # A and dec(zA)
-            canvas.paste(_to_pil(A[r]), (x, y)); x += tile_w
-            canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); x += tile_w
-            seq = rollout_seq[r]  # (steps+2, 3,H,W)
-            for s in range(1, steps+1):
-                canvas.paste(_to_pil(seq[s]), (x, y)); x += tile_w
-            canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); x += tile_w
-            canvas.paste(_to_pil(B[r]), (x, y))
-
-            txt = "Euler rollout via vθ"
-            if font:
-                bbox = draw.textbbox((0, 0), txt, font=font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            else:
-                tw, th = len(txt)*6, 10
-            draw.rectangle([2, y+2, 2+tw+2, y+2+th+2], fill=(0,0,0))
-            draw.text((4, y+4), txt, font=font, fill=(200,255,200))
 
     canvas.save(out_path)
 
@@ -342,8 +307,7 @@ class TrainCfg:
 
     # viz/debug
     viz_every: int = 500
-    viz_rows: int = 6
-    viz_cols: int = 9
+    interp_steps: int = 12   # <--- controls density of the full interpolation
     save_every_ep: bool = True
     log_every: int = 50
 
@@ -474,11 +438,14 @@ def train(cfg: TrainCfg):
                 )
 
             if (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0):
-                enc.eval(); dec.eval(); vf.eval()
-                save_interpolation_grid(enc, dec, vf, A.cpu(), B.cpu(),
-                                        cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}.png",
-                                        device=device, cols=cfg.viz_cols, euler_rollout=True)
-                enc.train(); dec.train(); vf.train()
+                enc.eval(); dec.eval()
+                save_full_interpolation_grid(
+                    enc, dec,
+                    A.cpu(), B.cpu(),
+                    cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}.png",
+                    device=device, interp_steps=cfg.interp_steps
+                )
+                enc.train(); dec.train()
 
         tr_cfm = run_loss_cfm / max(1, run_n)
         tr_rec = run_loss_rec / max(1, run_n)
@@ -564,7 +531,7 @@ def parse_args():
     ap.add_argument("--out_dir", type=Path, default=Path("out.action_distance_cfm"))
     ap.add_argument("--z_dim", type=int, default=128)
     ap.add_argument("--batch_size", type=int, default=32)
-    ap.add_argument("--epochs", type=int, default=5)
+    ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -576,9 +543,8 @@ def parse_args():
     ap.add_argument("--lambda_rec", type=float, default=0.1)
     ap.add_argument("--lambda_latent_l2", type=float, default=1e-4)
 
-    ap.add_argument("--viz_every", type=int, default=500)
-    ap.add_argument("--viz_rows", type=int, default=6)   # not used directly, but kept for parity
-    ap.add_argument("--viz_cols", type=int, default=9)
+    ap.add_argument("--viz_every", type=int, default=100)
+    ap.add_argument("--interp_steps", type=int, default=12, help="number of internal interpolation samples between dec(zA) and dec(zB)")
     ap.add_argument("--log_every", type=int, default=50, help="print running debug stats every N steps")
 
     # optional export
@@ -593,7 +559,7 @@ def main():
         num_workers=args.num_workers, device=args.device, max_step_gap=args.max_step_gap,
         p_cross_traj=args.p_cross_traj, lambda_cfm=args.lambda_cfm, lambda_rec=args.lambda_rec,
         lambda_latent_l2=args.lambda_latent_l2, viz_every=args.viz_every,
-        viz_rows=args.viz_rows, viz_cols=args.viz_cols, log_every=args.log_every
+        interp_steps=args.interp_steps, log_every=args.log_every
     )
     train(cfg)
 
