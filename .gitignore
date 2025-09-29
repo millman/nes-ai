@@ -137,15 +137,22 @@ dmypy.json
 # NES specific stuff
 .nes
 .pal
-/roms
-/testroms
+/.idea
+/build
 /junk
 /logs
-/build
-/.idea
+/roms
+/testroms
+/timm_il_models
 
+# Input, output and datasets
+/data
+/data.*
+/out
+/out.*
 /predict_outputs
 /runs
+/traj_dumps
 /videos
 
 # Cython objects
