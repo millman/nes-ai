@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Action-distance (CFM) trainer with a ResNet-style autoencoder, AE warmup, and
+Action-distance (CFM) trainer with a lightweight CNN autoencoder, AE warmup, and
 full A→B latent interpolation visualization with trajectory/state labels.
 
 Run:
@@ -9,7 +9,7 @@ Run:
 """
 
 from __future__ import annotations
-import argparse, math, random, contextlib, os, time
+import argparse, math, random, contextlib, os, time, warnings
 from dataclasses import dataclass
 from collections import deque
 from pathlib import Path
@@ -17,8 +17,6 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from torchvision.models import resnet18, ResNet18_Weights
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -51,22 +49,21 @@ def list_trajectories(data_root: Path) -> Dict[str, List[Path]]:
     return out
 
 def _normalize_tensor(t: torch.Tensor) -> torch.Tensor:
-    # For NES pixel art, keep in [0,1] range - no ImageNet normalization
+    # Deprecated placeholder (kept for compatibility with older checkpoints)
     return t
 
 
 def _denormalize_tensor(t: torch.Tensor) -> torch.Tensor:
-    # For NES pixel art, keep in [0,1] range - no ImageNet denormalization
+    # Deprecated placeholder (kept for compatibility with older checkpoints)
     return t
 
 
 def pil_to_tensor(img: Image.Image) -> torch.Tensor:
-    arr = np.asarray(img, dtype=np.uint8)
+    arr = np.array(img, dtype=np.float32, copy=True) / 255.0
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
     if arr.shape[2] == 4:
         arr = arr[:, :, :3]
-    arr = arr.astype(np.float32) / 255.0
     t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
     return _normalize_tensor(t)
 
@@ -167,67 +164,74 @@ class PairFromTrajDataset(Dataset):
         b = load_frame_as_tensor(p2)
         return a, b, str(p1), str(p2)
 
-# --------------------------------------------------------------------------------------
-# ResNet-style AE (no skips): Encoder/Decoder
-# --------------------------------------------------------------------------------------
-class PixelShuffleResBlock(nn.Module):
-    """Sub-pixel residual upsampler with lightweight activations only."""
 
-    def __init__(self, c_in: int, c_out: int, scale: int = 2):
+def to_float01(t: torch.Tensor, device: torch.device, non_blocking: bool = True) -> torch.Tensor:
+    """Move uint8 image batch to device and convert to float in [0,1]."""
+    if t.dtype != torch.uint8:
+        return t.to(device=device, non_blocking=non_blocking)
+    return t.to(device=device, non_blocking=non_blocking, dtype=torch.float32) / 255.0
+
+# --------------------------------------------------------------------------------------
+# Lightweight CNN AE (no skips): Encoder/Decoder
+# --------------------------------------------------------------------------------------
+class DownBlock(nn.Module):
+    def __init__(self, c_in: int, c_out: int, kernel_size: int = 3):
         super().__init__()
-        exp_channels = c_out * (scale ** 2)
-
-        self.conv1 = nn.Conv2d(c_in, exp_channels, kernel_size=3, padding=1)
-        self.shuffle = nn.PixelShuffle(scale)
-        self.conv2 = nn.Conv2d(c_out, c_out, kernel_size=3, padding=1)
-
-        self.skip = nn.Sequential(
-            nn.Conv2d(c_in, exp_channels, kernel_size=1),
-            nn.PixelShuffle(scale),
+        padding = kernel_size // 2
+        self.net = nn.Sequential(
+            nn.Conv2d(c_in, c_out, kernel_size=kernel_size, stride=2, padding=padding),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_out, c_out, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
         )
-
-        self.act1 = nn.SiLU(inplace=True)
-        self.act2 = nn.SiLU(inplace=True)
-        self.out_act = nn.SiLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.conv1(x)
-        h = self.act1(h)
-        h = self.shuffle(h)
-        h = self.conv2(h)
-        h = self.act2(h)
-        return self.out_act(h + self.skip(x))
+        return self.net(x)
+
+
+class UpBlock(nn.Module):
+    def __init__(self, c_in: int, c_out: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.ConvTranspose2d(c_in, c_out, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_out, c_out, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 class Encoder(nn.Module):
-    def __init__(self, z_dim: int = 128, pretrained: bool = True, freeze_backbone: bool = False):
+    def __init__(self, z_dim: int = 128, pretrained: bool = False, freeze_backbone: bool = False):
         super().__init__()
-        weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
-        backbone = resnet18(weights=weights)
+        if pretrained or freeze_backbone:
+            warnings.warn(
+                "Lightweight encoder does not support pretrained/freeze flags; ignoring.",
+                RuntimeWarning,
+            )
 
-        self.feature_extractor = nn.Sequential(
-            backbone.conv1,
-            backbone.bn1,
-            backbone.relu,
-            backbone.maxpool,
-            backbone.layer1,
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4,
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),  # 120x112
+            nn.SiLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
         )
-        self.out_channels = backbone.fc.in_features  # 512 for ResNet-18
+        self.down1 = DownBlock(32, 64)   # 60x56
+        self.down2 = DownBlock(64, 128)  # 30x28
+        self.down3 = DownBlock(128, 256) # 15x14
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(self.out_channels, z_dim)
+        self.fc = nn.Linear(256, z_dim)
         nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
         if self.fc.bias is not None:
             nn.init.zeros_(self.fc.bias)
 
-        if freeze_backbone and weights is not None:
-            for param in self.feature_extractor.parameters():
-                param.requires_grad = False
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feat = self.feature_extractor(x)
-        h = self.pool(feat).flatten(1)
+        h = self.stem(x)
+        h = self.down1(h)
+        h = self.down2(h)
+        h = self.down3(h)
+        h = self.pool(h).flatten(1)
         return self.fc(h)
 
 class Decoder(nn.Module):
@@ -236,14 +240,14 @@ class Decoder(nn.Module):
         self.h0 = (256, 15, 14)
         self.fc = nn.Linear(z_dim, int(np.prod(self.h0)))
         self.pre = nn.SiLU(inplace=True)
-        self.up1 = PixelShuffleResBlock(256, 256, scale=2)  # 30x28
-        self.up2 = PixelShuffleResBlock(256, 128, scale=2)  # 60x56
-        self.up3 = PixelShuffleResBlock(128, 64,  scale=2)  # 120x112
-        self.up4 = PixelShuffleResBlock(64,  32,  scale=2)  # 240x224
+        self.up1 = UpBlock(256, 128)  # 30x28
+        self.up2 = UpBlock(128, 64)   # 60x56
+        self.up3 = UpBlock(64, 32)    # 120x112
+        self.up4 = UpBlock(32, 16)    # 240x224
         self.head = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(32, 3, kernel_size=1),
+            nn.Conv2d(16, 3, kernel_size=1),
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -286,16 +290,29 @@ def set_seed(seed: int):
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
     t = t.detach().cpu()
-    t = _denormalize_tensor(t)
-    t = t.clamp(0.0, 1.0)
-    arr = (t.permute(1, 2, 0).contiguous().numpy() * 255).astype(np.uint8)
+    if t.dtype == torch.uint8:
+        arr = t.permute(1, 2, 0).contiguous().numpy()
+    else:
+        t = _denormalize_tensor(t)
+        if t.dtype != torch.float32:
+            t = t.float()
+        t = t.clamp(0.0, 1.0)
+        arr = (t.permute(1, 2, 0).contiguous().numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr)
 
 
 def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     # compute PSNR in [0,1] space
-    x01 = _denormalize_tensor(x).clamp(0.0, 1.0)
-    y01 = _denormalize_tensor(y).clamp(0.0, 1.0)
+    if x.dtype != torch.float32:
+        x01 = x.float().div(255.0)
+    else:
+        x01 = x
+    if y.dtype != torch.float32:
+        y01 = y.float().div(255.0)
+    else:
+        y01 = y
+    x01 = _denormalize_tensor(x01).clamp(0.0, 1.0)
+    y01 = _denormalize_tensor(y01).clamp(0.0, 1.0)
     mse = F.mse_loss(x01, y01, reduction="mean").clamp_min(eps)
     return 10.0 * torch.log10(1.0 / mse)
 
@@ -326,8 +343,8 @@ def save_full_interpolation_grid(
     pA = pathsA[:Bsz]
     pB = pathsB[:Bsz]
 
-    A_dev = A.to(device)
-    B_dev = B.to(device)
+    A_dev = to_float01(A, device, non_blocking=False)
+    B_dev = to_float01(B, device, non_blocking=False)
     zA = enc(A_dev)
     zB = enc(B_dev)
     pair_recon = dec(torch.cat([zA, zB], dim=0))
@@ -399,8 +416,8 @@ def save_simple_debug_grid(
     B = B[:Bsz].contiguous()
 
     # Stage samples through device and back to isolate where artefacts appear
-    A_dev = A.to(device)
-    B_dev = B.to(device)
+    A_dev = to_float01(A, device, non_blocking=False)
+    B_dev = to_float01(B, device, non_blocking=False)
     A_dev_back = A_dev.to("cpu")
     B_dev_back = B_dev.to("cpu")
 
@@ -451,8 +468,8 @@ class TrainCfg:
     max_step_gap: int = 20
     allow_cross_traj: bool = False
     p_cross_traj: float = 0.0
-    encoder_pretrained: bool = True
-    freeze_backbone: bool = False
+    encoder_pretrained: bool = False  # no-op with lightweight encoder (kept for CLI compatibility)
+    freeze_backbone: bool = False     # no-op with lightweight encoder
     use_foreach_optim: bool = True
 
     # Loss weights
@@ -562,8 +579,8 @@ def train(cfg: TrainCfg):
 
             # TIMING: Data transfer
             data_start = time.perf_counter()
-            A = A.to(device, non_blocking=True)
-            B = B.to(device, non_blocking=True)
+            A = to_float01(A, device)
+            B = to_float01(B, device)
             data_time = time.perf_counter() - data_start
 
             # TIMING: Forward pass
@@ -711,7 +728,8 @@ def train(cfg: TrainCfg):
         va_cfm = va_rec = va_n = 0.0
         with torch.no_grad():
             for A, B, _, _ in dl_va:
-                A = A.to(device); B = B.to(device)
+                A = to_float01(A, device, non_blocking=False)
+                B = to_float01(B, device, non_blocking=False)
                 zA = enc(A); zB = enc(B)
                 t = torch.rand(A.shape[0], device=device)
 
@@ -762,7 +780,8 @@ def export_latent_distances(ckpt_path: Path, data_root: Path, n_pairs: int, out_
     rows = [("path_a","path_b","latent_l2")]
     for _ in range(n_pairs):
         a, b, pa, pb = ds[rng.randrange(0, len(ds))]
-        A = a.unsqueeze(0).to(device); B = b.unsqueeze(0).to(device)
+        A = to_float01(a.unsqueeze(0), device, non_blocking=False)
+        B = to_float01(b.unsqueeze(0), device, non_blocking=False)
         zA = enc(A); zB = enc(B)
         d = torch.linalg.norm(zB - zA, dim=1).item()
         rows.append((pa, pb, f"{d:.6f}"))
@@ -803,10 +822,12 @@ def parse_args():
     ap.add_argument("--interp_steps", type=int, default=12)
     ap.add_argument("--log_every", type=int, default=50)
     ap.add_argument("--simple_viz", action="store_true", help="emit minimal GPU debug grids instead of full interpolation viz")
-    ap.add_argument("--encoder_pretrained", dest="encoder_pretrained", action="store_true", help="initialize encoder from ImageNet-pretrained ResNet-18")
+    ap.add_argument("--encoder_pretrained", dest="encoder_pretrained", action="store_true",
+                    help="(deprecated) no-op with lightweight encoder; kept for CLI compatibility")
     ap.add_argument("--no_encoder_pretrained", dest="encoder_pretrained", action="store_false")
-    ap.set_defaults(encoder_pretrained=True)
-    ap.add_argument("--freeze_backbone", action="store_true", help="freeze pretrained ResNet layers during training")
+    ap.set_defaults(encoder_pretrained=False)
+    ap.add_argument("--freeze_backbone", action="store_true",
+                    help="(deprecated) no-op with lightweight encoder; kept for CLI compatibility")
     ap.add_argument("--no_foreach_optim", dest="use_foreach_optim", action="store_false",
                     help="disable foreach AdamW updates (use if PyTorch build lacks foreach support)")
     ap.add_argument("--foreach_optim", dest="use_foreach_optim", action="store_true",
