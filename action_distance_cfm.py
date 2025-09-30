@@ -9,7 +9,7 @@ Run:
 """
 
 from __future__ import annotations
-import argparse, math, random, contextlib, os
+import argparse, math, random, contextlib, os, time
 from dataclasses import dataclass
 from collections import deque
 from pathlib import Path
@@ -30,8 +30,9 @@ from torch.amp import autocast, GradScaler
 # --------------------------------------------------------------------------------------
 H, W = 240, 224  # (height, width)
 
-IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
-IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
+# Removed ImageNet normalization - using [0,1] range for NES pixel art
+# IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
+# IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
 
 # --------------------------------------------------------------------------------------
 # IO utils
@@ -50,15 +51,13 @@ def list_trajectories(data_root: Path) -> Dict[str, List[Path]]:
     return out
 
 def _normalize_tensor(t: torch.Tensor) -> torch.Tensor:
-    mean = IMAGENET_MEAN[:, None, None].to(t.device, t.dtype)
-    std = IMAGENET_STD[:, None, None].to(t.device, t.dtype)
-    return (t - mean) / std
+    # For NES pixel art, keep in [0,1] range - no ImageNet normalization
+    return t
 
 
 def _denormalize_tensor(t: torch.Tensor) -> torch.Tensor:
-    mean = IMAGENET_MEAN[:, None, None].to(t.device, t.dtype)
-    std = IMAGENET_STD[:, None, None].to(t.device, t.dtype)
-    return t * std + mean
+    # For NES pixel art, keep in [0,1] range - no ImageNet denormalization
+    return t
 
 
 def pil_to_tensor(img: Image.Image) -> torch.Tensor:
@@ -268,6 +267,7 @@ class Decoder(nn.Module):
             nn.GroupNorm(16, 32),
             nn.SiLU(inplace=True),
             nn.Conv2d(32, 3, 3, padding=1),
+            nn.Sigmoid(),  # Ensure output is in [0,1] range for NES pixel art
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -548,12 +548,15 @@ def train(cfg: TrainCfg):
     q_dnorm, q_vnorm, q_cos = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
     q_psnrA, q_psnrB = deque(maxlen=win), deque(maxlen=win)
     q_genc, q_gdec, q_gvf = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
+    step_time_accum = 0.0
+    step_time_count = 0
 
     for ep in range(1, cfg.epochs+1):
         enc.train(); dec.train(); vf.train()
         run_loss_cfm = run_loss_rec = run_n = 0.0
 
         for A, B, pathsA, pathsB in dl_tr:
+            step_start = time.perf_counter()
             need_viz = (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0)
             A_cpu = A.detach().clone() if need_viz else None
             B_cpu = B.detach().clone() if need_viz else None
@@ -615,6 +618,10 @@ def train(cfg: TrainCfg):
             scaler.step(opt)
             scaler.update()
 
+            step_time = time.perf_counter() - step_start
+            step_time_accum += step_time
+            step_time_count += 1
+
             run_loss_cfm += loss_cfm.item() * A.shape[0]
             run_loss_rec += loss_rec.item() * A.shape[0]
             run_n += A.shape[0]
@@ -637,13 +644,21 @@ def train(cfg: TrainCfg):
 
             if (cfg.log_every > 0) and (global_step % cfg.log_every == 0):
                 avg = lambda q: (sum(q)/len(q)) if len(q) else 0.0
+                avg_step_time = (step_time_accum / step_time_count) if step_time_count else 0.0
+                step_time_accum = 0.0
+                step_time_count = 0
+                if avg_step_time > 0:
+                    throughput = (cfg.batch_size / avg_step_time)
+                else:
+                    throughput = 0.0
                 print(
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg(q_ltot):.4f} | "
                     f"Lcfm {avg(q_lcfm):.4f} Lrec {avg(q_lrec):.4f} Llat {avg(q_llat):.5f} | "
                     f"‖Δ‖ {avg(q_dnorm):.3f} ‖v‖ {avg(q_vnorm):.3f} cos(v,u) {avg(q_cos):.3f} | "
                     f"PSNR A {avg(q_psnrA):.2f}dB B {avg(q_psnrB):.2f}dB | "
-                    f"∥g_enc∥ {avg(q_genc):.3e} ∥g_dec∥ {avg(q_gdec):.3e} ∥g_vf∥ {avg(q_gvf):.3e}"
+                    f"∥g_enc∥ {avg(q_genc):.3e} ∥g_dec∥ {avg(q_gdec):.3e} ∥g_vf∥ {avg(q_gvf):.3e} | "
+                    f"step_time {avg_step_time*1000:.1f} ms  ({throughput:.1f} samples/s)"
                 )
 
             if global_step % cfg.viz_every == 0:
