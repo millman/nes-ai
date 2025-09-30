@@ -296,15 +296,6 @@ def _to_pil(t: torch.Tensor) -> Image.Image:
     return Image.fromarray(arr)
 
 
-def _stack_tiles(images: List[Image.Image]) -> Image.Image:
-    if not images:
-        raise ValueError("No images to stack")
-    w, h = images[0].size
-    canvas = Image.new("RGB", (w * len(images), h))
-    for idx, img in enumerate(images):
-        canvas.paste(img, (idx * w, 0))
-    return canvas
-
 def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     # compute PSNR in [0,1] space
     def to01(a): return a.clamp(-1,1) * 0.5 + 0.5
@@ -333,19 +324,15 @@ def save_full_interpolation_grid(
     Bsz = min(A.shape[0], 8)
     K = max(1, int(interp_steps))
 
-    A = A[:Bsz]
-    B = B[:Bsz]
+    A = A[:Bsz].contiguous()
+    B = B[:Bsz].contiguous()
     pA = pathsA[:Bsz]
     pB = pathsB[:Bsz]
 
-    # Clone CPU copies before any async device transfer to avoid pinned-buffer reuse artefacts.
-    A_vis = A.detach().clone()
-    B_vis = B.detach().clone()
-
-    A = A.to(device)
-    B = B.to(device)
-    zA = enc(A)
-    zB = enc(B)
+    A_dev = A.to(device)
+    B_dev = B.to(device)
+    zA = enc(A_dev)
+    zB = enc(B_dev)
 
     t_vals = torch.linspace(0, 1, K+2, device=device)[1:-1]
     interp_decoded = []
@@ -382,7 +369,7 @@ def save_full_interpolation_grid(
         labelA = short_traj_state_label(pA[r])
         labelB = short_traj_state_label(pB[r])
 
-        canvas.paste(_to_pil(A_vis[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
+        canvas.paste(_to_pil(A[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
         canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelA + " (dec)", (220,220,255)); x += tile_w
 
         for k in range(K):
@@ -391,7 +378,7 @@ def save_full_interpolation_grid(
             x += tile_w
 
         canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
-        canvas.paste(_to_pil(B_vis[r]), (x, y)); annotate(draw, x, y, labelB)
+        canvas.paste(_to_pil(B[r]), (x, y)); annotate(draw, x, y, labelB)
 
         txt = f"‖zB−zA‖={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
         annotate(draw, 2, y + tile_h - 22, txt, (255,255,0))
@@ -408,28 +395,28 @@ def save_simple_debug_grid(
 ):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Bsz = min(A.shape[0], 4)
-    A = A[:Bsz].detach().clone()
-    B = B[:Bsz].detach().clone()
+    A = A[:Bsz].contiguous()
+    B = B[:Bsz].contiguous()
 
     # Stage samples through device and back to isolate where artefacts appear
     A_dev = A.to(device)
     B_dev = B.to(device)
-    A_dev_back = A_dev.detach().to("cpu")
-    B_dev_back = B_dev.detach().to("cpu")
+    A_dev_back = A_dev.to("cpu")
+    B_dev_back = B_dev.to("cpu")
 
     with torch.no_grad():
         zA = enc(A_dev)
         zB = enc(B_dev)
-        A_rec = dec(zA).detach().to("cpu")
-        B_rec = dec(zB).detach().to("cpu")
+        A_rec = dec(zA).to("cpu")
+        B_rec = dec(zB).to("cpu")
 
     cols = [
-        ("A cpu", A),
-        ("A gpu→cpu", A_dev_back),
+        ("A raw", A),
         ("A recon", A_rec),
-        ("B cpu", B),
-        ("B gpu→cpu", B_dev_back),
+        ("A gpu→cpu", A_dev_back),
+        ("B raw", B),
         ("B recon", B_rec),
+        ("B gpu→cpu", B_dev_back),
     ]
 
     tile_w, tile_h = W, H
@@ -551,9 +538,9 @@ def train(cfg: TrainCfg):
         run_loss_cfm = run_loss_rec = run_n = 0.0
 
         for A, B, pathsA, pathsB in dl_tr:
-            # Keep CPU copies for debug viz before any device transfer
-            A_cpu = A.detach().clone()
-            B_cpu = B.detach().clone()
+            need_viz = (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0)
+            A_cpu = A.detach().clone() if need_viz else None
+            B_cpu = B.detach().clone() if need_viz else None
 
             A = A.to(device, non_blocking=True)
             B = B.to(device, non_blocking=True)
@@ -645,23 +632,25 @@ def train(cfg: TrainCfg):
 
             if global_step % cfg.viz_every == 0:
                 enc.eval(); dec.eval()
+                out_path = cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}_simple.png"
+                save_simple_debug_grid(
+                    enc, dec,
+                    A_cpu if A_cpu is not None else A.detach().cpu(),
+                    B_cpu if B_cpu is not None else B.detach().cpu(),
+                    list(pathsA), list(pathsB),
+                    out_path,
+                    device=device,
+                )
+
                 out_path = cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}.png"
-                if cfg.simple_viz:
-                    save_simple_debug_grid(
-                        enc, dec,
-                        A_cpu, B_cpu,
-                        list(pathsA), list(pathsB),
-                        out_path,
-                        device=device,
-                    )
-                else:
-                    save_full_interpolation_grid(
-                        enc, dec,
-                        A_cpu, B_cpu,
-                        list(pathsA), list(pathsB),
-                        out_path,
-                        device=device, interp_steps=cfg.interp_steps
-                    )
+                save_full_interpolation_grid(
+                    enc, dec,
+                    A_cpu if A_cpu is not None else A.detach().cpu(),
+                    B_cpu if B_cpu is not None else B.detach().cpu(),
+                    list(pathsA), list(pathsB),
+                    out_path,
+                    device=device, interp_steps=cfg.interp_steps
+                )
                 enc.train(); dec.train()
 
             global_step += 1
