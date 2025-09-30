@@ -170,54 +170,33 @@ class PairFromTrajDataset(Dataset):
 # --------------------------------------------------------------------------------------
 # ResNet-style AE (no skips): Encoder/Decoder
 # --------------------------------------------------------------------------------------
-class ResBlock(nn.Module):
-    def __init__(self, c_in, c_out, norm_groups=16, up=False, down=False):
+class PixelShuffleResBlock(nn.Module):
+    """Sub-pixel residual upsampler with lightweight activations only."""
+
+    def __init__(self, c_in: int, c_out: int, scale: int = 2):
         super().__init__()
-        self.up, self.down = up, down
-        self.need_skip = (c_in != c_out) or up or down
+        exp_channels = c_out * (scale ** 2)
 
-        self.norm1 = nn.GroupNorm(norm_groups, c_in)
-        self.act1  = nn.SiLU(inplace=True)
-        self.conv1 = nn.Conv2d(c_in, c_out, 3, padding=1)
+        self.conv1 = nn.Conv2d(c_in, exp_channels, kernel_size=3, padding=1)
+        self.shuffle = nn.PixelShuffle(scale)
+        self.conv2 = nn.Conv2d(c_out, c_out, kernel_size=3, padding=1)
 
-        self.norm2 = nn.GroupNorm(norm_groups, c_out)
-        self.act2  = nn.SiLU(inplace=True)
-        self.conv2 = nn.Conv2d(c_out, c_out, 3, padding=1)
+        self.skip = nn.Sequential(
+            nn.Conv2d(c_in, exp_channels, kernel_size=1),
+            nn.PixelShuffle(scale),
+        )
 
-        if up:
-            self.ups = nn.Upsample(scale_factor=2, mode="nearest")
-        if down:
-            self.downs = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.act1 = nn.SiLU(inplace=True)
+        self.act2 = nn.SiLU(inplace=True)
+        self.out_act = nn.SiLU(inplace=True)
 
-        if self.need_skip:
-            if up:
-                self.skip = nn.Sequential(
-                    nn.Upsample(scale_factor=2, mode="nearest"),
-                    nn.Conv2d(c_in, c_out, 1)
-                )
-            elif down:
-                self.skip = nn.Sequential(
-                    nn.AvgPool2d(kernel_size=2, stride=2),
-                    nn.Conv2d(c_in, c_out, 1)
-                )
-            else:
-                self.skip = nn.Conv2d(c_in, c_out, 1)
-        else:
-            self.skip = nn.Identity()
-
-    def forward(self, x):
-        h = x
-        if self.up:
-            h = self.ups(h)
-            x = self.skip(x)  # upsampled in skip path as needed
-        if self.down:
-            h = self.downs(h)
-            x = self.skip(x)
-        h = self.conv1(self.act1(self.norm1(h)))
-        h = self.conv2(self.act2(self.norm2(h)))
-        if not (self.up or self.down) and self.need_skip:
-            x = self.skip(x)
-        return h + x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.conv1(x)
+        h = self.act1(h)
+        h = self.shuffle(h)
+        h = self.conv2(h)
+        h = self.act2(h)
+        return self.out_act(h + self.skip(x))
 
 class Encoder(nn.Module):
     def __init__(self, z_dim: int = 128, pretrained: bool = True, freeze_backbone: bool = False):
@@ -256,25 +235,25 @@ class Decoder(nn.Module):
         super().__init__()
         self.h0 = (256, 15, 14)
         self.fc = nn.Linear(z_dim, int(np.prod(self.h0)))
-        self.d4 = nn.Sequential(ResBlock(256, 256))
-        self.d3 = nn.Sequential(ResBlock(256, 256, up=True), ResBlock(256, 256))   # 30x28
-        self.d2 = nn.Sequential(ResBlock(256, 256, up=True), ResBlock(256, 128))   # 60x56
-        self.d1 = nn.Sequential(
-            ResBlock(128, 128, up=True), ResBlock(128, 64),                         # 120x112
-            ResBlock(64, 64, up=True),  ResBlock(64, 32),                           # 240x224
-        )
+        self.pre = nn.SiLU(inplace=True)
+        self.up1 = PixelShuffleResBlock(256, 256, scale=2)  # 30x28
+        self.up2 = PixelShuffleResBlock(256, 128, scale=2)  # 60x56
+        self.up3 = PixelShuffleResBlock(128, 64,  scale=2)  # 120x112
+        self.up4 = PixelShuffleResBlock(64,  32,  scale=2)  # 240x224
         self.head = nn.Sequential(
-            nn.GroupNorm(16, 32),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(32, 3, 3, padding=1),
-            # No activation - will clamp in forward pass for softer constraint
+            nn.Conv2d(32, 3, kernel_size=1),
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         h = self.fc(z).view(-1, *self.h0)
-        h = self.d4(h); h = self.d3(h); h = self.d2(h); h = self.d1(h)
+        h = self.pre(h)
+        h = self.up1(h)
+        h = self.up2(h)
+        h = self.up3(h)
+        h = self.up4(h)
         x = self.head(h)
-        # Soft constraint to [0,1] range - allows gradients unlike sigmoid saturation
         return torch.clamp(x, 0.0, 1.0)
 
 # --------------------------------------------------------------------------------------
@@ -351,12 +330,15 @@ def save_full_interpolation_grid(
     B_dev = B.to(device)
     zA = enc(A_dev)
     zB = enc(B_dev)
+    pair_recon = dec(torch.cat([zA, zB], dim=0))
+    dec_zA, dec_zB = pair_recon.chunk(2, dim=0)
 
-    t_vals = torch.linspace(0, 1, K+2, device=device)[1:-1]
-    interp_decoded = []
-    for t in t_vals:
-        zt = (1.0 - t) * zA + t * zB
-        interp_decoded.append(dec(zt))  # (B,3,H,W)
+    t_vals = torch.linspace(0, 1, K + 2, device=device)[1:-1]
+    if K > 0:
+        z_interp = torch.stack([(1.0 - t) * zA + t * zB for t in t_vals], dim=0)
+        interp_decoded = dec(z_interp.view(-1, zA.shape[1])).view(K, Bsz, 3, H, W)
+    else:
+        interp_decoded = torch.empty(0, Bsz, 3, H, W, device=device)
 
     tiles_per_row = 2 + K + 2  # A | dec(zA) | K interps | dec(zB) | B
     tile_w, tile_h = W, H
@@ -388,14 +370,14 @@ def save_full_interpolation_grid(
         labelB = short_traj_state_label(pB[r])
 
         canvas.paste(_to_pil(A[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
-        canvas.paste(_to_pil(dec(zA[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelA + " (dec)", (220,220,255)); x += tile_w
+        canvas.paste(_to_pil(dec_zA[r]), (x, y)); annotate(draw, x, y, labelA + " (dec)", (220,220,255)); x += tile_w
 
         for k in range(K):
-            canvas.paste(_to_pil(interp_decoded[k][r]), (x, y))
+            canvas.paste(_to_pil(interp_decoded[k, r]), (x, y))
             annotate(draw, x, y, f"t={float(t_vals[k]):.2f}", (200,255,200))
             x += tile_w
 
-        canvas.paste(_to_pil(dec(zB[r:r+1])[0]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
+        canvas.paste(_to_pil(dec_zB[r]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
         canvas.paste(_to_pil(B[r]), (x, y)); annotate(draw, x, y, labelB)
 
         txt = f"‖zB−zA‖={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
@@ -425,8 +407,8 @@ def save_simple_debug_grid(
     with torch.no_grad():
         zA = enc(A_dev)
         zB = enc(B_dev)
-        A_rec = dec(zA).to("cpu")
-        B_rec = dec(zB).to("cpu")
+        rec_pair = dec(torch.cat([zA, zB], dim=0)).to("cpu")
+        A_rec, B_rec = rec_pair.chunk(2, dim=0)
 
     cols = [
         ("A raw", A),
@@ -471,6 +453,7 @@ class TrainCfg:
     p_cross_traj: float = 0.0
     encoder_pretrained: bool = True
     freeze_backbone: bool = False
+    use_foreach_optim: bool = True
 
     # Loss weights
     lambda_cfm: float = 0.3
@@ -530,11 +513,24 @@ def train(cfg: TrainCfg):
     dec.apply(kaiming_init); vf.apply(kaiming_init)
 
     # Per-module LRs (VF slower)
-    opt = torch.optim.AdamW([
-        {"params": enc.parameters(), "lr": cfg.lr},
-        {"params": dec.parameters(), "lr": cfg.lr},
-        {"params": vf.parameters(),  "lr": cfg.lr * cfg.vf_lr_mult},
-    ], lr=cfg.lr, weight_decay=1e-4)
+    optim_kwargs = {"lr": cfg.lr, "weight_decay": 1e-4}
+    if cfg.use_foreach_optim:
+        optim_kwargs["foreach"] = True
+    try:
+        opt = torch.optim.AdamW([
+            {"params": enc.parameters(), "lr": cfg.lr},
+            {"params": dec.parameters(), "lr": cfg.lr},
+            {"params": vf.parameters(),  "lr": cfg.lr * cfg.vf_lr_mult},
+        ], **optim_kwargs)
+    except TypeError:
+        if optim_kwargs.pop("foreach", None) is not None:
+            opt = torch.optim.AdamW([
+                {"params": enc.parameters(), "lr": cfg.lr},
+                {"params": dec.parameters(), "lr": cfg.lr},
+                {"params": vf.parameters(),  "lr": cfg.lr * cfg.vf_lr_mult},
+            ], **optim_kwargs)
+        else:
+            raise
 
     # AMP only on CUDA
     amp_autocast = contextlib.nullcontext
@@ -590,8 +586,9 @@ def train(cfg: TrainCfg):
                 loss_cfm = cos_term + mag_term
 
                 # Reconstruction
-                xA_rec = dec(zA)
-                xB_rec = dec(zB)
+                z_pair = torch.cat([zA, zB], dim=0)
+                x_pair = dec(z_pair)
+                xA_rec, xB_rec = x_pair.chunk(2, dim=0)
                 loss_rec = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
 
                 # small latent penalties
@@ -727,7 +724,9 @@ def train(cfg: TrainCfg):
                 mag_term = (torch.linalg.norm(v - u_tgt, dim=1) / (torch.linalg.norm(u_tgt, dim=1) + eps)).mean()
                 loss_cfm = (cos_term + mag_term) * A.shape[0]
 
-                loss_rec = F.l1_loss(dec(zA), A, reduction="sum") + F.l1_loss(dec(zB), B, reduction="sum")
+                x_pair = dec(torch.cat([zA, zB], dim=0))
+                xA_rec, xB_rec = x_pair.chunk(2, dim=0)
+                loss_rec = F.l1_loss(xA_rec, A, reduction="sum") + F.l1_loss(xB_rec, B, reduction="sum")
                 va_cfm += loss_cfm.item()
                 va_rec += loss_rec.item()
                 va_n   += A.shape[0]
@@ -808,6 +807,11 @@ def parse_args():
     ap.add_argument("--no_encoder_pretrained", dest="encoder_pretrained", action="store_false")
     ap.set_defaults(encoder_pretrained=True)
     ap.add_argument("--freeze_backbone", action="store_true", help="freeze pretrained ResNet layers during training")
+    ap.add_argument("--no_foreach_optim", dest="use_foreach_optim", action="store_false",
+                    help="disable foreach AdamW updates (use if PyTorch build lacks foreach support)")
+    ap.add_argument("--foreach_optim", dest="use_foreach_optim", action="store_true",
+                    help="force-enable foreach AdamW updates")
+    ap.set_defaults(use_foreach_optim=True)
 
     ap.add_argument("--export_pairs", type=int, default=0)
     return ap.parse_args()
@@ -823,6 +827,7 @@ def main():
         lambda_zcal=args.lambda_zcal, warmup_steps=args.warmup_steps, vf_grad_clip=args.vf_grad_clip,
         viz_every=args.viz_every, interp_steps=args.interp_steps, log_every=args.log_every,
         simple_viz=args.simple_viz, encoder_pretrained=args.encoder_pretrained, freeze_backbone=args.freeze_backbone,
+        use_foreach_optim=args.use_foreach_optim,
     )
     train(cfg)
 
