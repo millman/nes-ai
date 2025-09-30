@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from torchvision.models import resnet18, ResNet18_Weights
 
 import torch
 import torch.nn as nn
@@ -28,6 +29,9 @@ from torch.amp import autocast, GradScaler
 # Global image size (NES frames resized to this)
 # --------------------------------------------------------------------------------------
 H, W = 240, 224  # (height, width)
+
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
+IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
 
 # --------------------------------------------------------------------------------------
 # IO utils
@@ -45,15 +49,27 @@ def list_trajectories(data_root: Path) -> Dict[str, List[Path]]:
         raise FileNotFoundError(f"No trajectories under {data_root} (expected traj_*/states/state_*.png)")
     return out
 
+def _normalize_tensor(t: torch.Tensor) -> torch.Tensor:
+    mean = IMAGENET_MEAN[:, None, None].to(t.device, t.dtype)
+    std = IMAGENET_STD[:, None, None].to(t.device, t.dtype)
+    return (t - mean) / std
+
+
+def _denormalize_tensor(t: torch.Tensor) -> torch.Tensor:
+    mean = IMAGENET_MEAN[:, None, None].to(t.device, t.dtype)
+    std = IMAGENET_STD[:, None, None].to(t.device, t.dtype)
+    return t * std + mean
+
+
 def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     arr = np.asarray(img, dtype=np.uint8)
     if arr.ndim == 2:
-        arr = np.stack([arr]*3, axis=-1)
+        arr = np.stack([arr] * 3, axis=-1)
     if arr.shape[2] == 4:
         arr = arr[:, :, :3]
     arr = arr.astype(np.float32) / 255.0
-    arr = arr * 2.0 - 1.0  # -> [-1, 1]
-    return torch.from_numpy(arr).permute(2,0,1).contiguous()
+    t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+    return _normalize_tensor(t)
 
 def load_frame_as_tensor(p: Path) -> torch.Tensor:
     # NES frames are low-resolution pixel art; keep nearest-neighbour scaling to avoid color bleeding.
@@ -205,39 +221,36 @@ class ResBlock(nn.Module):
         return h + x
 
 class Encoder(nn.Module):
-    def __init__(self, z_dim: int = 128):
+    def __init__(self, z_dim: int = 128, pretrained: bool = True, freeze_backbone: bool = False):
         super().__init__()
-        # 240x224 -> 120x112 -> 60x56 -> 30x28 -> 15x14
-        self.stem = nn.Conv2d(3, 64, 3, padding=1)
-        self.e1 = nn.Sequential(
-            ResBlock(64, 64),
-            ResBlock(64, 128, down=True),      # 120x112
-            ResBlock(128, 128),
+        weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = resnet18(weights=weights)
+
+        self.feature_extractor = nn.Sequential(
+            backbone.conv1,
+            backbone.bn1,
+            backbone.relu,
+            backbone.maxpool,
+            backbone.layer1,
+            backbone.layer2,
+            backbone.layer3,
+            backbone.layer4,
         )
-        self.e2 = nn.Sequential(
-            ResBlock(128, 256, down=True),     # 60x56
-            ResBlock(256, 256),
-        )
-        self.e3 = nn.Sequential(
-            ResBlock(256, 256, down=True),     # 30x28
-            ResBlock(256, 256),
-        )
-        self.e4 = nn.Sequential(
-            ResBlock(256, 256, down=True),     # 15x14
-            ResBlock(256, 256),
-        )
-        self.pool = nn.AdaptiveAvgPool2d((1,1))
-        self.fc   = nn.Linear(256, z_dim)
+        self.out_channels = backbone.fc.in_features  # 512 for ResNet-18
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(self.out_channels, z_dim)
+        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
+        if self.fc.bias is not None:
+            nn.init.zeros_(self.fc.bias)
+
+        if freeze_backbone and weights is not None:
+            for param in self.feature_extractor.parameters():
+                param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.stem(x)
-        x = self.e1(x)
-        x = self.e2(x)
-        x = self.e3(x)
-        x = self.e4(x)               # (B,256,15,14)
-        h = self.pool(x).flatten(1)  # (B,256)
-        z = self.fc(h)               # (B,z_dim)
-        return z
+        feat = self.feature_extractor(x)
+        h = self.pool(feat).flatten(1)
+        return self.fc(h)
 
 class Decoder(nn.Module):
     def __init__(self, z_dim: int = 128):
@@ -252,9 +265,9 @@ class Decoder(nn.Module):
             ResBlock(64, 64, up=True),  ResBlock(64, 32),                           # 240x224
         )
         self.head = nn.Sequential(
-            nn.GroupNorm(16, 32), nn.SiLU(inplace=True),
+            nn.GroupNorm(16, 32),
+            nn.SiLU(inplace=True),
             nn.Conv2d(32, 3, 3, padding=1),
-            nn.Tanh(),  # output in [-1,1]
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -292,16 +305,18 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
-    t = t.detach().clamp(-1,1)
-    t = t.cpu() * 0.5 + 0.5  # [-1,1] -> [0,1]
-    arr = (t.permute(1,2,0).contiguous().numpy() * 255).astype(np.uint8)
+    t = t.detach().cpu()
+    t = _denormalize_tensor(t)
+    t = t.clamp(0.0, 1.0)
+    arr = (t.permute(1, 2, 0).contiguous().numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr)
 
 
 def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     # compute PSNR in [0,1] space
-    def to01(a): return a.clamp(-1,1) * 0.5 + 0.5
-    mse = F.mse_loss(to01(x), to01(y), reduction="mean").clamp_min(eps)
+    x01 = _denormalize_tensor(x).clamp(0.0, 1.0)
+    y01 = _denormalize_tensor(y).clamp(0.0, 1.0)
+    mse = F.mse_loss(x01, y01, reduction="mean").clamp_min(eps)
     return 10.0 * torch.log10(1.0 / mse)
 
 def _grad_norm(module: nn.Module) -> float:
@@ -453,6 +468,8 @@ class TrainCfg:
     max_step_gap: int = 20
     allow_cross_traj: bool = False
     p_cross_traj: float = 0.0
+    encoder_pretrained: bool = True
+    freeze_backbone: bool = False
 
     # Loss weights
     lambda_cfm: float = 0.3
@@ -506,10 +523,10 @@ def train(cfg: TrainCfg):
 
     print(f"[Device] {device} | [Data] train pairs≈{len(ds_tr)}  val pairs≈{len(ds_va)}")
 
-    enc = Encoder(cfg.z_dim).to(device)
+    enc = Encoder(cfg.z_dim, pretrained=cfg.encoder_pretrained, freeze_backbone=cfg.freeze_backbone).to(device)
     dec = Decoder(cfg.z_dim).to(device)
     vf  = VectorField(cfg.z_dim).to(device)
-    enc.apply(kaiming_init); dec.apply(kaiming_init); vf.apply(kaiming_init)
+    dec.apply(kaiming_init); vf.apply(kaiming_init)
 
     # Per-module LRs (VF slower)
     opt = torch.optim.AdamW([
@@ -519,10 +536,7 @@ def train(cfg: TrainCfg):
     ], lr=cfg.lr, weight_decay=1e-4)
 
     # AMP only on CUDA
-    if device.type == "mps":
-        amp_autocast = lambda: autocast(device_type="mps")
-    else:
-        amp_autocast = contextlib.nullcontext
+    amp_autocast = contextlib.nullcontext
     scaler = GradScaler(enabled=False)
 
     global_step = 0
@@ -707,7 +721,7 @@ def export_latent_distances(ckpt_path: Path, data_root: Path, n_pairs: int, out_
     device = pick_device(device_str)
     ckpt = torch.load(ckpt_path, map_location="cpu")
     z_dim = ckpt.get("cfg", {}).get("z_dim", 128)
-    enc = Encoder(z_dim).to(device)
+    enc = Encoder(z_dim, pretrained=False).to(device)
     enc.load_state_dict(ckpt["enc"]); enc.eval()
     ds = PairFromTrajDataset(data_root, "val", 0.95, 0, 20, False, 0.0)
     rng = random.Random(0)
@@ -756,6 +770,10 @@ def parse_args():
     ap.add_argument("--interp_steps", type=int, default=12)
     ap.add_argument("--log_every", type=int, default=50)
     ap.add_argument("--simple_viz", action="store_true", help="emit minimal GPU debug grids instead of full interpolation viz")
+    ap.add_argument("--encoder_pretrained", dest="encoder_pretrained", action="store_true", help="initialize encoder from ImageNet-pretrained ResNet-18")
+    ap.add_argument("--no_encoder_pretrained", dest="encoder_pretrained", action="store_false")
+    ap.set_defaults(encoder_pretrained=True)
+    ap.add_argument("--freeze_backbone", action="store_true", help="freeze pretrained ResNet layers during training")
 
     ap.add_argument("--export_pairs", type=int, default=0)
     return ap.parse_args()
@@ -770,7 +788,7 @@ def main():
         lambda_cfm=args.lambda_cfm, lambda_rec=args.lambda_rec, lambda_latent_l2=args.lambda_latent_l2,
         lambda_zcal=args.lambda_zcal, warmup_steps=args.warmup_steps, vf_grad_clip=args.vf_grad_clip,
         viz_every=args.viz_every, interp_steps=args.interp_steps, log_every=args.log_every,
-        simple_viz=args.simple_viz,
+        simple_viz=args.simple_viz, encoder_pretrained=args.encoder_pretrained, freeze_backbone=args.freeze_backbone,
     )
     train(cfg)
 
