@@ -267,14 +267,15 @@ class Decoder(nn.Module):
             nn.GroupNorm(16, 32),
             nn.SiLU(inplace=True),
             nn.Conv2d(32, 3, 3, padding=1),
-            nn.Sigmoid(),  # Ensure output is in [0,1] range for NES pixel art
+            # No activation - will clamp in forward pass for softer constraint
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         h = self.fc(z).view(-1, *self.h0)
         h = self.d4(h); h = self.d3(h); h = self.d2(h); h = self.d1(h)
         x = self.head(h)
-        return x
+        # Soft constraint to [0,1] range - allows gradients unlike sigmoid saturation
+        return torch.clamp(x, 0.0, 1.0)
 
 # --------------------------------------------------------------------------------------
 # Conditional vector field for CFM
@@ -548,6 +549,8 @@ def train(cfg: TrainCfg):
     q_dnorm, q_vnorm, q_cos = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
     q_psnrA, q_psnrB = deque(maxlen=win), deque(maxlen=win)
     q_genc, q_gdec, q_gvf = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
+    # Timing queues
+    q_data_time, q_forward_time, q_backward_time = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
     step_time_accum = 0.0
     step_time_count = 0
 
@@ -561,9 +564,14 @@ def train(cfg: TrainCfg):
             A_cpu = A.detach().clone() if need_viz else None
             B_cpu = B.detach().clone() if need_viz else None
 
+            # TIMING: Data transfer
+            data_start = time.perf_counter()
             A = A.to(device, non_blocking=True)
             B = B.to(device, non_blocking=True)
+            data_time = time.perf_counter() - data_start
 
+            # TIMING: Forward pass
+            forward_start = time.perf_counter()
             with amp_autocast():
                 zA = enc(A)
                 zB = enc(B)
@@ -600,7 +608,10 @@ def train(cfg: TrainCfg):
                 zcl_w = 0.0 if global_step < cfg.warmup_steps else cfg.lambda_zcal
 
                 loss = cfm_w*loss_cfm + cfg.lambda_rec*loss_rec + lat_w*loss_lat + zcl_w*loss_zcal
+            forward_time = time.perf_counter() - forward_start
 
+            # TIMING: Backward pass
+            backward_start = time.perf_counter()
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
 
@@ -617,6 +628,7 @@ def train(cfg: TrainCfg):
 
             scaler.step(opt)
             scaler.update()
+            backward_time = time.perf_counter() - backward_start
 
             step_time = time.perf_counter() - step_start
             step_time_accum += step_time
@@ -641,6 +653,10 @@ def train(cfg: TrainCfg):
                 q_dnorm.append(dnorm); q_vnorm.append(vnorm); q_cos.append(cosvu)
                 q_psnrA.append(psnrA); q_psnrB.append(psnrB)
                 q_genc.append(g_enc); q_gdec.append(g_dec); q_gvf.append(g_vff)
+                # Add timing data
+                q_data_time.append(data_time * 1000)  # Convert to ms
+                q_forward_time.append(forward_time * 1000)  # Convert to ms
+                q_backward_time.append(backward_time * 1000)  # Convert to ms
 
             if (cfg.log_every > 0) and (global_step % cfg.log_every == 0):
                 avg = lambda q: (sum(q)/len(q)) if len(q) else 0.0
@@ -658,20 +674,23 @@ def train(cfg: TrainCfg):
                     f"‖Δ‖ {avg(q_dnorm):.3f} ‖v‖ {avg(q_vnorm):.3f} cos(v,u) {avg(q_cos):.3f} | "
                     f"PSNR A {avg(q_psnrA):.2f}dB B {avg(q_psnrB):.2f}dB | "
                     f"∥g_enc∥ {avg(q_genc):.3e} ∥g_dec∥ {avg(q_gdec):.3e} ∥g_vf∥ {avg(q_gvf):.3e} | "
+                    f"timing: data {avg(q_data_time):.1f}ms fwd {avg(q_forward_time):.1f}ms bwd {avg(q_backward_time):.1f}ms | "
                     f"step_time {avg_step_time*1000:.1f} ms  ({throughput:.1f} samples/s)"
                 )
 
             if global_step % cfg.viz_every == 0:
                 enc.eval(); dec.eval()
-                out_path = cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}_simple.png"
-                save_simple_debug_grid(
-                    enc, dec,
-                    A_cpu if A_cpu is not None else A.detach().cpu(),
-                    B_cpu if B_cpu is not None else B.detach().cpu(),
-                    list(pathsA), list(pathsB),
-                    out_path,
-                    device=device,
-                )
+
+                if cfg.simple_viz:
+                    out_path = cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}_simple.png"
+                    save_simple_debug_grid(
+                        enc, dec,
+                        A_cpu if A_cpu is not None else A.detach().cpu(),
+                        B_cpu if B_cpu is not None else B.detach().cpu(),
+                        list(pathsA), list(pathsB),
+                        out_path,
+                        device=device,
+                    )
 
                 out_path = cfg.out_dir / "viz" / f"ep{ep:02d}_step{global_step:06d}.png"
                 save_full_interpolation_grid(
