@@ -287,7 +287,9 @@ class VectorField(nn.Module):
 # Utilities & debug helpers
 # --------------------------------------------------------------------------------------
 def set_seed(seed: int):
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
     t = t.detach().clamp(-1,1)
@@ -473,11 +475,12 @@ class TrainCfg:
 # --------------------------------------------------------------------------------------
 def pick_device(pref: Optional[str]) -> torch.device:
     if pref:
-        return torch.device(pref)
+        dev = torch.device(pref)
+        if dev.type == "cuda":
+            raise ValueError("CUDA is not supported by this trainer; use 'cpu' or 'mps'.")
+        return dev
     if torch.backends.mps.is_available():
         return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
     return torch.device("cpu")
 
 def kaiming_init(m):
@@ -497,7 +500,7 @@ def train(cfg: TrainCfg):
     ds_tr = PairFromTrajDataset(cfg.data_root, "train", 0.95, cfg.seed, cfg.max_step_gap, cfg.allow_cross_traj, cfg.p_cross_traj)
     ds_va = PairFromTrajDataset(cfg.data_root, "val",   0.95, cfg.seed, cfg.max_step_gap, cfg.allow_cross_traj, cfg.p_cross_traj)
 
-    use_pin = (device.type == "cuda")
+    use_pin = False
     dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True,  num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=True)
     dl_va = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=use_pin, drop_last=False)
 
@@ -516,12 +519,11 @@ def train(cfg: TrainCfg):
     ], lr=cfg.lr, weight_decay=1e-4)
 
     # AMP only on CUDA
-    if device.type == "cuda":
-        amp_autocast = lambda: autocast(device_type="cuda")
-        scaler = GradScaler(enabled=True)
+    if device.type == "mps":
+        amp_autocast = lambda: autocast(device_type="mps")
     else:
         amp_autocast = contextlib.nullcontext
-        scaler = GradScaler(enabled=False)
+    scaler = GradScaler(enabled=False)
 
     global_step = 0
     best_val = float("inf")
