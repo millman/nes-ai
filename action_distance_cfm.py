@@ -471,6 +471,7 @@ class TrainCfg:
     encoder_pretrained: bool = False  # no-op with lightweight encoder (kept for CLI compatibility)
     freeze_backbone: bool = False     # no-op with lightweight encoder
     use_foreach_optim: bool = True
+    detach_decoder_from_encoder: bool = False  # prevents recon gradients from updating encoder/CFM
 
     # Loss weights
     lambda_cfm: float = 0.3
@@ -603,7 +604,10 @@ def train(cfg: TrainCfg):
                 loss_cfm = cos_term + mag_term
 
                 # Reconstruction
-                z_pair = torch.cat([zA, zB], dim=0)
+                if cfg.detach_decoder_from_encoder:
+                    z_pair = torch.cat([zA.detach(), zB.detach()], dim=0)
+                else:
+                    z_pair = torch.cat([zA, zB], dim=0)
                 x_pair = dec(z_pair)
                 xA_rec, xB_rec = x_pair.chunk(2, dim=0)
                 loss_rec = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
@@ -833,6 +837,8 @@ def parse_args():
     ap.add_argument("--foreach_optim", dest="use_foreach_optim", action="store_true",
                     help="force-enable foreach AdamW updates")
     ap.set_defaults(use_foreach_optim=True)
+    ap.add_argument("--detach_decoder_from_encoder", action="store_true",
+                    help="stop reconstruction gradients from updating encoder/CFM; decoder trains for viz only")
 
     ap.add_argument("--export_pairs", type=int, default=0)
     return ap.parse_args()
@@ -849,6 +855,7 @@ def main():
         viz_every=args.viz_every, interp_steps=args.interp_steps, log_every=args.log_every,
         simple_viz=args.simple_viz, encoder_pretrained=args.encoder_pretrained, freeze_backbone=args.freeze_backbone,
         use_foreach_optim=args.use_foreach_optim,
+        detach_decoder_from_encoder=args.detach_decoder_from_encoder,
     )
     train(cfg)
 
