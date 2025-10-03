@@ -238,7 +238,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, z_dim: int = 128, clamp_output: bool = True):
+    def __init__(self, z_dim: int = 128):
         super().__init__()
         self.h0 = (256, 15, 14)
         self.fc = nn.Linear(z_dim, int(np.prod(self.h0)))
@@ -252,7 +252,6 @@ class Decoder(nn.Module):
             nn.SiLU(inplace=True),
             nn.Conv2d(16, 3, kernel_size=1),
         )
-        self.clamp_output = clamp_output
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         h = self.fc(z).view(-1, *self.h0)
@@ -262,9 +261,7 @@ class Decoder(nn.Module):
         h = self.up3(h)
         h = self.up4(h)
         x = self.head(h)
-        if self.clamp_output:
-            return torch.clamp(x, 0.0, 1.0)
-        return x
+        return torch.clamp(x, 0.0, 1.0)
 
 
 # --------------------------------------------------------------------------------------
@@ -310,19 +307,6 @@ def _grad_norm(module: nn.Module) -> float:
         if p.grad is not None:
             s += float(p.grad.detach().data.pow(2).sum().cpu())
     return math.sqrt(s) if s > 0 else 0.0
-
-
-def _image_gradients(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Finite differences for horizontal/vertical gradients (edge emphasis)."""
-    dx = x[..., :, 1:] - x[..., :, :-1]
-    dy = x[..., 1:, :] - x[..., :-1, :]
-    return dx, dy
-
-
-def gradient_loss(x_rec: torch.Tensor, x_ref: torch.Tensor) -> torch.Tensor:
-    gx_rec, gy_rec = _image_gradients(x_rec)
-    gx_ref, gy_ref = _image_gradients(x_ref)
-    return F.l1_loss(gx_rec, gx_ref) + F.l1_loss(gy_rec, gy_ref)
 
 
 @torch.no_grad()
@@ -488,12 +472,7 @@ class TrainCfg:
     lambda_rec: float = 2.0
     lambda_latent_l2: float = 0.0
     lambda_zcal: float = 0.05
-    lambda_grad: float = 0.5
     reg_warmup_steps: int = 2000
-    use_grad_loss: bool = True
-    use_latent_l2: bool = True
-    use_zcal: bool = True
-    decoder_clamp: bool = True
 
     viz_every: int = 500
     interp_steps: int = 12
@@ -569,7 +548,7 @@ def train(cfg: TrainCfg):
     print(f"[Device] {device} | [Data] train pairs≈{len(ds_tr)}  val pairs≈{len(ds_va)}")
 
     enc = Encoder(cfg.z_dim, pretrained=cfg.encoder_pretrained, freeze_backbone=cfg.freeze_backbone).to(device)
-    dec = Decoder(cfg.z_dim, clamp_output=cfg.decoder_clamp).to(device)
+    dec = Decoder(cfg.z_dim).to(device)
     dec.apply(kaiming_init)
 
     optim_kwargs = {"lr": cfg.lr, "weight_decay": 1e-4}
@@ -602,13 +581,7 @@ def train(cfg: TrainCfg):
     best_val = float("inf")
 
     win = 50
-    q_lrec, q_lgrad, q_llat, q_lzcal, q_ltot = (
-        deque(maxlen=win),
-        deque(maxlen=win),
-        deque(maxlen=win),
-        deque(maxlen=win),
-        deque(maxlen=win),
-    )
+    q_lrec, q_llat, q_lzcal, q_ltot = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
     q_psnrA, q_psnrB = deque(maxlen=win), deque(maxlen=win)
     q_genc, q_gdec = deque(maxlen=win), deque(maxlen=win)
     q_data_time, q_forward_time, q_backward_time = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
@@ -641,33 +614,15 @@ def train(cfg: TrainCfg):
                 xA_rec, xB_rec = x_pair.chunk(2, dim=0)
 
                 loss_rec = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
-
-                if cfg.use_grad_loss and cfg.lambda_grad > 0.0:
-                    loss_grad = gradient_loss(xA_rec, A) + gradient_loss(xB_rec, B)
-                else:
-                    loss_grad = torch.zeros((), device=A.device, dtype=loss_rec.dtype)
-
-                if cfg.use_latent_l2 and cfg.lambda_latent_l2 > 0.0:
-                    loss_lat = 0.5 * (zA.pow(2).mean() + zB.pow(2).mean())
-                else:
-                    loss_lat = torch.zeros((), device=A.device, dtype=loss_rec.dtype)
-
-                if cfg.use_zcal and cfg.lambda_zcal > 0.0:
-                    z_all = torch.cat([zA, zB], dim=0)
-                    loss_zcal = (z_all.std(dim=0) - 1.0).abs().mean()
-                else:
-                    loss_zcal = torch.zeros((), device=A.device, dtype=loss_rec.dtype)
+                loss_lat = 0.5 * (zA.pow(2).mean() + zB.pow(2).mean())
+                z_all = torch.cat([zA, zB], dim=0)
+                loss_zcal = (z_all.std(dim=0) - 1.0).abs().mean()
 
                 reg_on = 1.0 if global_step >= cfg.reg_warmup_steps else 0.0
-                lat_w = reg_on * cfg.lambda_latent_l2 if cfg.use_latent_l2 else 0.0
-                zcl_w = reg_on * cfg.lambda_zcal if cfg.use_zcal else 0.0
+                lat_w = reg_on * cfg.lambda_latent_l2
+                zcl_w = reg_on * cfg.lambda_zcal
 
-                loss = (
-                    cfg.lambda_rec * loss_rec
-                    + (cfg.lambda_grad if cfg.use_grad_loss else 0.0) * loss_grad
-                    + lat_w * loss_lat
-                    + zcl_w * loss_zcal
-                )
+                loss = cfg.lambda_rec * loss_rec + lat_w * loss_lat + zcl_w * loss_zcal
             forward_time = time.perf_counter() - forward_start
 
             backward_start = time.perf_counter()
@@ -685,16 +640,14 @@ def train(cfg: TrainCfg):
             run_n += A.shape[0]
 
             with torch.no_grad():
+                d = (zB - zA)
+                dnorm = torch.linalg.norm(d, dim=1).mean().item()
                 psnrA = _psnr_01(xA_rec, A).item()
                 psnrB = _psnr_01(xB_rec, B).item()
 
                 q_lrec.append(float(loss_rec.item()))
-                if cfg.use_grad_loss and cfg.lambda_grad > 0.0:
-                    q_lgrad.append(float(loss_grad.item()))
-                if cfg.use_latent_l2 and cfg.lambda_latent_l2 > 0.0:
-                    q_llat.append(float(loss_lat.item()))
-                if cfg.use_zcal and cfg.lambda_zcal > 0.0:
-                    q_lzcal.append(float(loss_zcal.item()))
+                q_llat.append(float(loss_lat.item()))
+                q_lzcal.append(float(loss_zcal.item()))
                 q_ltot.append(float(loss.item()))
                 q_psnrA.append(psnrA)
                 q_psnrB.append(psnrB)
@@ -710,33 +663,17 @@ def train(cfg: TrainCfg):
                 step_time_accum = 0.0
                 step_time_count = 0
                 throughput = (cfg.batch_size / avg_step_time) if avg_step_time > 0 else 0.0
-                grad_str = (
-                    f"{avg(q_lgrad):.4f}"
-                    if (cfg.use_grad_loss and cfg.lambda_grad > 0.0 and q_lgrad)
-                    else "off"
-                )
-                lat_str = (
-                    f"{avg(q_llat):.5f}"
-                    if (cfg.use_latent_l2 and cfg.lambda_latent_l2 > 0.0 and q_llat)
-                    else "off"
-                )
-                zcal_str = (
-                    f"{avg(q_lzcal):.5f}"
-                    if (cfg.use_zcal and cfg.lambda_zcal > 0.0 and q_lzcal)
-                    else "off"
-                )
-
                 print(
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg(q_ltot):.4f} | "
-                    f"Lrec {avg(q_lrec):.4f} Lgrad {grad_str} Llat {lat_str} Lzcal {zcal_str} | "
+                    f"Lrec {avg(q_lrec):.4f} Llat {avg(q_llat):.5f} Lzcal {avg(q_lzcal):.5f} | "
                     f"PSNR A {avg(q_psnrA):.2f}dB B {avg(q_psnrB):.2f}dB | "
                     f"∥g_enc∥ {avg(q_genc):.3e} ∥g_dec∥ {avg(q_gdec):.3e} | "
                     f"timing: data {avg(q_data_time):.1f}ms fwd {avg(q_forward_time):.1f}ms bwd {avg(q_backward_time):.1f}ms | "
                     f"step_time {avg_step_time * 1000:.1f} ms ({throughput:.1f} samples/s)"
                 )
 
-            if (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0):
+            if global_step % cfg.viz_every == 0:
                 enc.eval()
                 dec.eval()
 
@@ -775,7 +712,7 @@ def train(cfg: TrainCfg):
 
         enc.eval()
         dec.eval()
-        va_rec = va_grad = va_n = 0.0
+        va_rec = va_n = 0.0
         with torch.no_grad():
             for A, B, _, _ in dl_va:
                 A = to_float01(A, device, non_blocking=False)
@@ -785,21 +722,10 @@ def train(cfg: TrainCfg):
                 x_pair = dec(torch.cat([zA, zB], dim=0))
                 xA_rec, xB_rec = x_pair.chunk(2, dim=0)
                 loss_rec = F.l1_loss(xA_rec, A, reduction="sum") + F.l1_loss(xB_rec, B, reduction="sum")
-                if cfg.use_grad_loss and cfg.lambda_grad > 0.0:
-                    loss_grad = gradient_loss(xA_rec, A) + gradient_loss(xB_rec, B)
-                else:
-                    loss_grad = torch.zeros((), device=A.device, dtype=loss_rec.dtype)
                 va_rec += loss_rec.item()
-                if cfg.use_grad_loss and cfg.lambda_grad > 0.0:
-                    va_grad += loss_grad.item() * A.shape[0]
                 va_n += A.shape[0]
         va_rec /= max(1, va_n)
-        if cfg.use_grad_loss and cfg.lambda_grad > 0.0:
-            va_grad /= max(1, va_n)
-            grad_val_str = f"{va_grad:.4f}"
-        else:
-            grad_val_str = "off"
-        print(f"[ep {ep:02d}]   val: Lrec={va_rec:.4f}  Lgrad={grad_val_str}")
+        print(f"[ep {ep:02d}]   val: Lrec={va_rec:.4f}")
 
         ckpt = {
             "epoch": ep,
@@ -876,30 +802,9 @@ def parse_args():
     ap.add_argument("--p_cross_traj", type=float, default=0.0)
 
     ap.add_argument("--lambda_rec", type=float, default=2.0)
-    ap.add_argument("--lambda_grad", type=float, default=0.5)
     ap.add_argument("--lambda_latent_l2", type=float, default=0.0)
     ap.add_argument("--lambda_zcal", type=float, default=0.05)
     ap.add_argument("--reg_warmup_steps", type=int, default=2000)
-    ap.add_argument("--no_grad_loss", dest="use_grad_loss", action="store_false",
-                    help="Disable gradient (edge) loss component")
-    ap.add_argument("--grad_loss", dest="use_grad_loss", action="store_true",
-                    help="Ensure gradient (edge) loss is enabled")
-    ap.set_defaults(use_grad_loss=True)
-    ap.add_argument("--no_latent_l2", dest="use_latent_l2", action="store_false",
-                    help="Disable latent L2 regularization term")
-    ap.add_argument("--latent_l2", dest="use_latent_l2", action="store_true",
-                    help="Ensure latent L2 regularization is enabled")
-    ap.set_defaults(use_latent_l2=True)
-    ap.add_argument("--no_zcal", dest="use_zcal", action="store_false",
-                    help="Disable latent scale calibration term")
-    ap.add_argument("--zcal", dest="use_zcal", action="store_true",
-                    help="Ensure latent scale calibration is enabled")
-    ap.set_defaults(use_zcal=True)
-    ap.add_argument("--decoder_no_clamp", dest="decoder_clamp", action="store_false",
-                    help="Allow decoder outputs outside [0,1] (skip clamp)")
-    ap.add_argument("--decoder_clamp", dest="decoder_clamp", action="store_true",
-                    help="Clamp decoder outputs to [0,1] (default)")
-    ap.set_defaults(decoder_clamp=True)
 
     ap.add_argument("--viz_every", type=int, default=10)
     ap.add_argument("--interp_steps", type=int, default=12)
@@ -955,14 +860,9 @@ def main():
         freeze_backbone=args.freeze_backbone,
         use_foreach_optim=args.use_foreach_optim,
         lambda_rec=args.lambda_rec,
-        lambda_grad=args.lambda_grad,
         lambda_latent_l2=args.lambda_latent_l2,
         lambda_zcal=args.lambda_zcal,
         reg_warmup_steps=args.reg_warmup_steps,
-        use_grad_loss=args.use_grad_loss,
-        use_latent_l2=args.use_latent_l2,
-        use_zcal=args.use_zcal,
-        decoder_clamp=args.decoder_clamp,
         viz_every=args.viz_every,
         interp_steps=args.interp_steps,
         log_every=args.log_every,
