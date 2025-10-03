@@ -191,6 +191,44 @@ def pick_device(pref: Optional[str]) -> torch.device:
 # --------------------------------------------------------------------------------------
 # Encoder: MobileNetV3-Large -> latent vector
 # --------------------------------------------------------------------------------------
+
+
+def _resolve_imagenet_norm(weights: Optional[MobileNet_V3_Large_Weights]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return broadcastable mean/std buffers even on old torchvision builds."""
+    default_mean = (0.485, 0.456, 0.406)
+    default_std = (0.229, 0.224, 0.225)
+
+    mean: Optional[Tuple[float, float, float]] = None
+    std: Optional[Tuple[float, float, float]] = None
+
+    meta = getattr(weights, "meta", None)
+    if isinstance(meta, dict):
+        mean = tuple(meta.get("mean", ())) or None
+        std = tuple(meta.get("std", ())) or None
+
+    if (mean is None or std is None) and weights is not None:
+        try:
+            transforms = weights.transforms()  # type: ignore[operator]
+        except Exception:
+            transforms = None
+        if transforms is not None:
+            mean_attr = getattr(transforms, "mean", None)
+            std_attr = getattr(transforms, "std", None)
+            if isinstance(mean_attr, (list, tuple)) and len(mean_attr) == 3:
+                mean = tuple(float(x) for x in mean_attr)
+            if isinstance(std_attr, (list, tuple)) and len(std_attr) == 3:
+                std = tuple(float(x) for x in std_attr)
+
+    if mean is None:
+        mean = default_mean
+    if std is None:
+        std = default_std
+
+    mean_t = torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1)
+    std_t = torch.tensor(std, dtype=torch.float32).view(1, 3, 1, 1)
+    return mean_t, std_t
+
+
 class MobileNetEncoder(nn.Module):
     def __init__(
         self,
@@ -209,12 +247,7 @@ class MobileNetEncoder(nn.Module):
         if self.proj.bias is not None:
             nn.init.zeros_(self.proj.bias)
 
-        if weights is not None:
-            mean = torch.tensor(weights.meta["mean"]).view(1, 3, 1, 1)
-            std = torch.tensor(weights.meta["std"]).view(1, 3, 1, 1)
-        else:
-            mean = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
-            std = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
+        mean, std = _resolve_imagenet_norm(weights)
         self.register_buffer("input_mean", mean, persistent=False)
         self.register_buffer("input_std", std, persistent=False)
 
