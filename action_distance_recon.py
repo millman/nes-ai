@@ -112,7 +112,7 @@ def save_full_interpolation_grid(
 ):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Bsz = min(A.shape[0], 8)
-    K = max(1, int(interp_steps))
+    _ = interp_steps  # kept for CLI compatibility; grid now uses fixed t-grid
 
     A = A[:Bsz].contiguous()
     B = B[:Bsz].contiguous()
@@ -126,14 +126,15 @@ def save_full_interpolation_grid(
     pair_recon = dec(torch.cat([zA, zB], dim=0))
     dec_zA, dec_zB = pair_recon.chunk(2, dim=0)
 
-    t_vals = torch.linspace(0, 1, K + 2, device=device)[1:-1]
-    if K > 0:
-        z_interp = torch.stack([(1.0 - t) * zA + t * zB for t in t_vals], dim=0)
-        interp_decoded = dec(z_interp.view(-1, zA.shape[1])).view(K, Bsz, 3, H, W)
+    t_vals = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], device=device)
+    mid_t_vals = t_vals[1:-1]
+    if mid_t_vals.numel() > 0:
+        z_interp = torch.stack([(1.0 - t) * zA + t * zB for t in mid_t_vals], dim=0)
+        interp_decoded = dec(z_interp.view(-1, zA.shape[1])).view(mid_t_vals.numel(), Bsz, 3, H, W)
     else:
         interp_decoded = torch.empty(0, Bsz, 3, H, W, device=device)
 
-    tiles_per_row = 2 + K + 2  # A | dec(zA) | interps | dec(zB) | B
+    tiles_per_row = 2 + len(t_vals)  # A raw | t columns | B raw
     tile_w, tile_h = W, H
     total_w = tile_w * tiles_per_row
     total_h = tile_h * Bsz
@@ -167,16 +168,16 @@ def save_full_interpolation_grid(
         annotate(draw, x, y, labelA)
         x += tile_w
         canvas.paste(_to_pil(dec_zA[r]), (x, y))
-        annotate(draw, x, y, labelA + " (dec)", (220, 220, 255))
+        annotate(draw, x, y, "t=0.0 (A)", (220, 220, 255))
         x += tile_w
 
-        for k in range(K):
+        for k in range(mid_t_vals.numel()):
             canvas.paste(_to_pil(interp_decoded[k, r]), (x, y))
-            annotate(draw, x, y, f"t={float(t_vals[k]):.2f}", (200, 255, 200))
+            annotate(draw, x, y, f"t={float(mid_t_vals[k]):.1f}", (200, 255, 200))
             x += tile_w
 
         canvas.paste(_to_pil(dec_zB[r]), (x, y))
-        annotate(draw, x, y, labelB + " (dec)", (220, 220, 255))
+        annotate(draw, x, y, "t=1.0 (B)", (220, 220, 255))
         x += tile_w
         canvas.paste(_to_pil(B[r]), (x, y))
         annotate(draw, x, y, labelB)
