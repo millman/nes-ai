@@ -384,6 +384,8 @@ def train(cfg: TrainCfg):
     (cfg.out_dir / "checkpoints").mkdir(exist_ok=True, parents=True)
     (cfg.out_dir / "viz").mkdir(exist_ok=True, parents=True)
 
+    start_time = time.monotonic()
+
     ds_tr = PairFromTrajDataset(
         cfg.data_root,
         "train",
@@ -493,7 +495,12 @@ def train(cfg: TrainCfg):
                 avg_psnrB = (sum(q_psnrB) / len(q_psnrB)) if q_psnrB else 0.0
                 avg_step_ms = (sum(q_step_ms) / len(q_step_ms)) if q_step_ms else 0.0
                 throughput = (cfg.batch_size / (avg_step_ms / 1000.0)) if avg_step_ms > 0 else 0.0
+                elapsed = int(time.monotonic() - start_time)
+                h = elapsed // 3600
+                m = (elapsed % 3600) // 60
+                s = elapsed % 60
                 print(
+                    f"[{h:02d}:{m:02d}:{s:02d}] "
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg_loss:.4f} | "
                     f"L1 {avg_l1:.4f} MS-SSIM {avg_ms:.4f} | "
