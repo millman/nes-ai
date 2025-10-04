@@ -111,6 +111,79 @@ def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tenso
     return psnr_01(_denormalize_tensor(x), _denormalize_tensor(y), eps)
 
 
+def _gaussian_window(window_size: int, sigma: float, channels: int, device: torch.device) -> torch.Tensor:
+    coords = torch.arange(window_size, dtype=torch.float32, device=device) - window_size // 2
+    gauss = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    gauss = (gauss / gauss.sum()).unsqueeze(0)
+    window_2d = (gauss.t() @ gauss).unsqueeze(0).unsqueeze(0)
+    return window_2d.expand(channels, 1, window_size, window_size).contiguous()
+
+
+def _ssim_components(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    window: torch.Tensor,
+    data_range: float = 1.0,
+    k1: float = 0.01,
+    k2: float = 0.03,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    padding = window.shape[-1] // 2
+    mu_x = F.conv2d(x, window, padding=padding, groups=x.shape[1])
+    mu_y = F.conv2d(y, window, padding=padding, groups=y.shape[1])
+
+    mu_x_sq = mu_x.pow(2)
+    mu_y_sq = mu_y.pow(2)
+    mu_xy = mu_x * mu_y
+
+    sigma_x_sq = F.conv2d(x * x, window, padding=padding, groups=x.shape[1]) - mu_x_sq
+    sigma_y_sq = F.conv2d(y * y, window, padding=padding, groups=y.shape[1]) - mu_y_sq
+    sigma_xy = F.conv2d(x * y, window, padding=padding, groups=x.shape[1]) - mu_xy
+
+    C1 = (k1 * data_range) ** 2
+    C2 = (k2 * data_range) ** 2
+
+    numerator = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
+    denominator = (mu_x_sq + mu_y_sq + C1) * (sigma_x_sq + sigma_y_sq + C2)
+    ssim_map = numerator / denominator
+    cs_map = (2 * sigma_xy + C2) / (sigma_x_sq + sigma_y_sq + C2)
+
+    ssim_val = ssim_map.mean(dim=(1, 2, 3))
+    cs_val = cs_map.mean(dim=(1, 2, 3))
+    return ssim_val, cs_val
+
+
+def ms_ssim(x: torch.Tensor, y: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    if weights is None:
+        weights = torch.tensor([0.0448, 0.2856, 0.3001, 0.2363, 0.1333], device=x.device, dtype=x.dtype)
+    window_size = 11
+    sigma = 1.5
+    channels = x.shape[1]
+    window = _gaussian_window(window_size, sigma, channels, x.device)
+    levels = weights.shape[0]
+    mssim: List[torch.Tensor] = []
+    mcs: List[torch.Tensor] = []
+
+    x_scaled, y_scaled = x, y
+    for _ in range(levels):
+        ssim_val, cs_val = _ssim_components(x_scaled, y_scaled, window)
+        mssim.append(ssim_val)
+        mcs.append(cs_val)
+        x_scaled = F.avg_pool2d(x_scaled, kernel_size=2, stride=2, padding=0, ceil_mode=False)
+        y_scaled = F.avg_pool2d(y_scaled, kernel_size=2, stride=2, padding=0, ceil_mode=False)
+
+    mssim_tensor = torch.stack(mssim, dim=0)
+    mcs_tensor = torch.stack(mcs[:-1], dim=0)
+
+    pow1 = weights[:-1].unsqueeze(1)
+    pow2 = weights[-1]
+    ms_prod = torch.prod(mcs_tensor ** pow1, dim=0) * (mssim_tensor[-1] ** pow2)
+    return ms_prod.mean()
+
+
+def ms_ssim_loss(x: torch.Tensor, y: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return 1.0 - ms_ssim(x, y, weights=weights)
+
+
 @torch.no_grad()
 def save_full_interpolation_grid(
     enc: Encoder,
@@ -267,6 +340,8 @@ class TrainCfg:
     viz_every: int = 200
     log_every: int = 50
     simple_viz: bool = False
+    lambda_l1: float = 0.5
+    lambda_ms_ssim: float = 0.5
 
 
 # --------------------------------------------------------------------------------------
@@ -350,6 +425,8 @@ def train(cfg: TrainCfg):
 
     win = 50
     q_loss = deque(maxlen=win)
+    q_l1 = deque(maxlen=win)
+    q_ms = deque(maxlen=win)
     q_psnrA, q_psnrB = deque(maxlen=win), deque(maxlen=win)
     q_step_ms = deque(maxlen=win)
 
@@ -371,9 +448,9 @@ def train(cfg: TrainCfg):
 
             xA_rec = dec(zA)
             xB_rec = dec(zB)
-            lossA = F.l1_loss(xA_rec, A)
-            lossB = F.l1_loss(xB_rec, B)
-            loss = lossA + lossB
+            loss_l1 = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
+            loss_ms = ms_ssim_loss(xA_rec, A) + ms_ssim_loss(xB_rec, B)
+            loss = cfg.lambda_l1 * loss_l1 + cfg.lambda_ms_ssim * loss_ms
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -385,17 +462,21 @@ def train(cfg: TrainCfg):
                 psnrA = _psnr_01(xA_rec, A).item()
                 psnrB = _psnr_01(xB_rec, B).item()
 
-            batch_mean = 0.5 * (lossA.item() + lossB.item())
+            batch_mean = 0.5 * loss_l1.item()
             run_loss_rec += batch_mean * A.shape[0]
             run_n += A.shape[0]
 
             q_loss.append(float(loss.item()))
+            q_l1.append(float(loss_l1.item()))
+            q_ms.append(float(loss_ms.item()))
             q_psnrA.append(psnrA)
             q_psnrB.append(psnrB)
             q_step_ms.append(step_time * 1000.0)
 
             if (cfg.log_every > 0) and (global_step % cfg.log_every == 0):
                 avg_loss = (sum(q_loss) / len(q_loss)) if q_loss else 0.0
+                avg_l1 = (sum(q_l1) / len(q_l1)) if q_l1 else 0.0
+                avg_ms = (sum(q_ms) / len(q_ms)) if q_ms else 0.0
                 avg_psnrA = (sum(q_psnrA) / len(q_psnrA)) if q_psnrA else 0.0
                 avg_psnrB = (sum(q_psnrB) / len(q_psnrB)) if q_psnrB else 0.0
                 avg_step_ms = (sum(q_step_ms) / len(q_step_ms)) if q_step_ms else 0.0
@@ -403,6 +484,7 @@ def train(cfg: TrainCfg):
                 print(
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg_loss:.4f} | "
+                    f"L1 {avg_l1:.4f} MS-SSIM {avg_ms:.4f} | "
                     f"PSNR A {avg_psnrA:.2f}dB B {avg_psnrB:.2f}dB | "
                     f"step {avg_step_ms:.1f} ms ({throughput:.1f} samples/s)"
                 )
@@ -454,9 +536,7 @@ def train(cfg: TrainCfg):
                 zB = enc(B)
                 xA_rec = dec(zA)
                 xB_rec = dec(zB)
-                lossA = F.l1_loss(xA_rec, A)
-                lossB = F.l1_loss(xB_rec, B)
-                batch_mean = 0.5 * (lossA.item() + lossB.item())
+                batch_mean = 0.5 * (F.l1_loss(xA_rec, A).item() + F.l1_loss(xB_rec, B).item())
                 va_rec += batch_mean * A.shape[0]
                 va_n += A.shape[0]
         va_rec = va_rec / max(1, va_n)
@@ -501,6 +581,8 @@ def parse_args():
         action="store_true",
         help="emit a smaller debug grid instead of the full interpolation layout",
     )
+    ap.add_argument("--lambda_l1", type=float, default=0.5)
+    ap.add_argument("--lambda_ms_ssim", type=float, default=0.5)
     return ap.parse_args()
 
 
@@ -520,6 +602,8 @@ def main():
         viz_every=args.viz_every,
         log_every=args.log_every,
         simple_viz=args.simple_viz,
+        lambda_l1=args.lambda_l1,
+        lambda_ms_ssim=args.lambda_ms_ssim,
     )
     train(cfg)
 
