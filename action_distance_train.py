@@ -45,6 +45,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
+from recon import (
+    H,
+    W,
+    list_trajectories,
+    load_frame_as_tensor as base_load_frame_as_tensor,
+)
+from recon.utils import set_seed as base_set_seed, tensor_to_pil
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -53,37 +61,21 @@ import matplotlib.pyplot as plt
 # Repro
 # -------------------------
 def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    base_set_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 # -------------------------
 # IO
 # -------------------------
 def load_frame(path: Path) -> torch.Tensor:
-    img = Image.open(path).convert("RGB")
-    if img.size != (224, 240):
-        img = img.resize((224, 240), Image.BILINEAR)
-    arr = np.asarray(img, dtype=np.float32) / 255.0
-    arr = np.transpose(arr, (2, 0, 1))
-    return torch.from_numpy(arr)
+    return base_load_frame_as_tensor(path, size=(H, W), resample=Image.BILINEAR)
 
 def discover_trajectories(root: Path) -> List[List[Path]]:
-    trajs = []
-    for traj_dir in sorted(root.glob("traj_*")):
-        state_dir = traj_dir / "states"
-        if not state_dir.exists():
-            continue
-        frames = sorted(state_dir.glob("state_*.png"), key=lambda p: int(p.stem.split("_")[-1]))
-        if len(frames) >= 2:
-            trajs.append(frames)
-    return trajs
+    traj_map = list_trajectories(root)
+    return [traj_map[name] for name in sorted(traj_map.keys())]
 
 def to_pil(img_t: torch.Tensor) -> Image.Image:
-    arr = (img_t.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
-    arr = np.transpose(arr, (1, 2, 0))
-    return Image.fromarray(arr)
+    return tensor_to_pil(img_t)
 
 # -------------------------
 # Noise-only augmentations
