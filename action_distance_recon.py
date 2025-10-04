@@ -249,21 +249,31 @@ def save_full_interpolation_grid(
         labelB = short_traj_state_label(pB[r])
 
         canvas.paste(_to_pil(A[r]), (x, y))
+        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
+        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
         annotate(draw, x, y, labelA)
         x += tile_w
         canvas.paste(_to_pil(dec_zA[r]), (x, y))
+        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
+        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
         annotate(draw, x, y, "t=0.0 (A)", (220, 220, 255))
         x += tile_w
 
         for k in range(mid_t_vals.numel()):
             canvas.paste(_to_pil(interp_decoded[k, r]), (x, y))
+            draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
+            draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
             annotate(draw, x, y, f"t={float(mid_t_vals[k]):.1f}", (200, 255, 200))
             x += tile_w
 
         canvas.paste(_to_pil(dec_zB[r]), (x, y))
+        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
+        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
         annotate(draw, x, y, "t=1.0 (B)", (220, 220, 255))
         x += tile_w
         canvas.paste(_to_pil(B[r]), (x, y))
+        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
+        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
         annotate(draw, x, y, labelB)
 
         txt = f"‖zB−zA‖={torch.linalg.norm(zB[r] - zA[r]).item():.2f}"
@@ -316,6 +326,8 @@ def save_simple_debug_grid(
         for c, (label, stack) in enumerate(cols):
             x = c * tile_w
             canvas.paste(_to_pil(stack[r]), (x, y))
+            draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
+            draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
             draw.rectangle([x + 2, y + 2, x + tile_w - 2, y + 26], outline=(255, 255, 0))
             draw.text((x + 6, y + 6), label, fill=(255, 255, 0))
 
