@@ -18,6 +18,20 @@ NormalizeFn = Callable[[torch.Tensor], torch.Tensor]
 LoadFrameFn = Callable[[Path], torch.Tensor]
 
 
+def _assert_unit_range(t: torch.Tensor, *, source: Optional[Path] = None) -> None:
+    """Ensure tensors that are expected to be in [0, 1] actually are."""
+    if not torch.isfinite(t).all():
+        loc = f" from {source}" if source is not None else ""
+        raise ValueError(f"Non-finite value encountered in image tensor{loc}.")
+    min_val = float(t.min())
+    max_val = float(t.max())
+    if min_val < -1e-5 or max_val > 1.0 + 1e-5:
+        loc = f" from {source}" if source is not None else ""
+        raise ValueError(
+            f"Image tensor{loc} has values outside [0, 1]: min={min_val:.6f}, max={max_val:.6f}"
+        )
+
+
 def list_trajectories(data_root: Path) -> Dict[str, List[Path]]:
     """Return mapping of trajectory directory -> ordered state image paths."""
     out: Dict[str, List[Path]] = {}
@@ -47,6 +61,7 @@ def pil_to_tensor(
     t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
     if normalize is not None:
         t = normalize(t)
+    _assert_unit_range(t)
     return t
 
 
@@ -60,7 +75,9 @@ def load_frame_as_tensor(
     """Read state PNG and return normalized tensor."""
     with Image.open(path) as img:
         img = img.convert("RGB").resize((size[1], size[0]), resample=resample)
-        return pil_to_tensor(img, normalize=normalize)
+        tensor = pil_to_tensor(img, normalize=normalize)
+        _assert_unit_range(tensor, source=path)
+        return tensor
 
 
 def short_traj_state_label(path_str: str) -> str:
