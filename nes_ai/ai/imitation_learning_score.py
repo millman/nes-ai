@@ -58,7 +58,8 @@ def main():
 
     l = load_learner("fastai_output/final_model.pkl")
     print(l)
-    img = np.array(Image.open("expert_images/264.png"))
+    with Image.open("expert_images/264.png") as pil_img:
+        img = np.array(pil_img)
     x = l.predict(img)
     print(x)
 

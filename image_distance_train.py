@@ -278,10 +278,11 @@ class FramesDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         p = self.paths[idx]
-        img = Image.open(p).convert("RGB")
-        img = img.resize((W, H), resample=Image.BICUBIC)  # guard
-        t = pil_to_tensor(img)
-        return t
+        with Image.open(p) as img:
+            img = img.convert("RGB")
+            img = img.resize((W, H), resample=Image.BICUBIC)  # guard
+            t = pil_to_tensor(img)
+            return t
 
 
 # -------------------------

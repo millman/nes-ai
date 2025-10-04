@@ -130,15 +130,17 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
 
 
 def load_frame_as_tensor(p: Path) -> torch.Tensor:
-    img = Image.open(p).convert("RGB").resize((W, H), resample=Image.BICUBIC)
-    return pil_to_tensor(img)
+    with Image.open(p) as img:
+        img = img.convert("RGB").resize((W, H), resample=Image.BICUBIC)
+        return pil_to_tensor(img)
 
 
 def load_frame_both(p: Path) -> Tuple[Image.Image, torch.Tensor]:
     """Load, resize to (W,H), return (PIL_RGB, Tensor[1,3,H,W])."""
-    img = Image.open(p).convert("RGB").resize((W, H), resample=Image.BICUBIC)
-    t = pil_to_tensor(img).unsqueeze(0)
-    return img, t
+    with Image.open(p) as img:
+        img = img.convert("RGB").resize((W, H), resample=Image.BICUBIC)
+        t = pil_to_tensor(img).unsqueeze(0)
+        return img, t
 
 
 # ---------------------------------------------------------------------

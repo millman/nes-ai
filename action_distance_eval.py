@@ -31,12 +31,13 @@ import matplotlib.pyplot as plt
 
 # Reuse minimal components from train (copied to avoid imports)
 def load_frame(path: Path) -> torch.Tensor:
-    img = Image.open(path).convert("RGB")
-    if img.size != (224, 240):
-        img = img.resize((224, 240), Image.BILINEAR)
-    arr = np.asarray(img, dtype=np.float32) / 255.0
-    arr = np.transpose(arr, (2, 0, 1))
-    return torch.from_numpy(arr)
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+        if img.size != (224, 240):
+            img = img.resize((224, 240), Image.BILINEAR)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        arr = np.transpose(arr, (2, 0, 1))
+        return torch.from_numpy(arr)
 
 def discover_trajectories(root: Path) -> List[List[Path]]:
     trajs = []

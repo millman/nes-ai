@@ -133,9 +133,9 @@ def main():
     for x in range(100, len(image_files) - 10, 5):
         video_arr = None
         for y in range(10):
-            img = Image.open(f"{image_files[x+y]}")
-            img = img.resize((224, 224))
-            img_arr = np.array(img)
+            with Image.open(f"{image_files[x+y]}") as img:
+                img = img.resize((224, 224))
+                img_arr = np.array(img)
             if video_arr is None:
                 video_arr = np.zeros((10, img_arr.shape[0], img_arr.shape[1], 3))
             video_arr[y, :, :, :] = img_arr

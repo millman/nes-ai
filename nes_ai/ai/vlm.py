@@ -137,7 +137,7 @@ class Phi3VisionLanguageModel(VisionLanguageModel):
 if __name__ == "__main__":
     vlm = GptVisionLanguageModel("test")
     #vlm = Phi3VisionLanguageModel("test")
-    image = Image.open("test.png")
-    csv = vlm.vlm(image, prompt="<|image_1|>Produce a GFM file from this image.", system_prompt="Answer in a github-flavored markdown (GFM) format. Replace empty cells with the word 'EMPTY'")
+    with Image.open("test.png") as image:
+        csv = vlm.vlm(image, prompt="<|image_1|>Produce a GFM file from this image.", system_prompt="Answer in a github-flavored markdown (GFM) format. Replace empty cells with the word 'EMPTY'")
     #csv = vlm.vlm(image, prompt="<|image_1|>Output all cells in this table.", system_prompt="Output each cell of the table as it's own line with the format: Row Name, Column Name, Cell Value.")
     print(csv)

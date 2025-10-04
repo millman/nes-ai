@@ -65,8 +65,9 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
 
 
 def load_frame_as_tensor(p: Path) -> torch.Tensor:
-    img = Image.open(p).convert("RGB").resize((W, H), resample=Image.NEAREST)
-    return pil_to_tensor(img)
+    with Image.open(p) as img:
+        img = img.convert("RGB").resize((W, H), resample=Image.NEAREST)
+        return pil_to_tensor(img)
 
 
 def short_traj_state_label(path_str: str) -> str:

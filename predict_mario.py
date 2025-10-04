@@ -79,14 +79,14 @@ class MarioTrajectoryDataset(Dataset):
         # input sequence: 4 frames
         input_frames = []
         for i in range(4):
-            img = Image.open(files[offset + i])
-            input_frames.append(self.transform(img))
+            with Image.open(files[offset + i]) as img:
+                input_frames.append(self.transform(img))
         state = torch.cat(input_frames, dim=0)
         # ground truth next sequence: 4 frames
         gt_frames = []
         for i in range(4, 8):
-            img = Image.open(files[offset + i])
-            gt_frames.append(self.transform(img))
+            with Image.open(files[offset + i]) as img:
+                gt_frames.append(self.transform(img))
         next_frames = torch.cat(gt_frames, dim=0)
         # action corresponding to last input frame
         action = actions[offset + 3]

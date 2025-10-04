@@ -58,8 +58,9 @@ def load_frame_as_tensor(
     resample: int = Image.NEAREST,
 ) -> torch.Tensor:
     """Read state PNG and return normalized tensor."""
-    img = Image.open(path).convert("RGB").resize((size[1], size[0]), resample=resample)
-    return pil_to_tensor(img, normalize=normalize)
+    with Image.open(path) as img:
+        img = img.convert("RGB").resize((size[1], size[0]), resample=resample)
+        return pil_to_tensor(img, normalize=normalize)
 
 
 def short_traj_state_label(path_str: str) -> str:

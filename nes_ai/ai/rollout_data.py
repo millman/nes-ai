@@ -61,7 +61,8 @@ class RolloutData:
 
     def get_image(self, frame):
         img_byte_arr = io.BytesIO(self.input_images[str(frame)])
-        return Image.open(img_byte_arr)
+        with Image.open(img_byte_arr) as img:
+            return img.copy()
 
     def clear(self):
         self.input_images.clear()

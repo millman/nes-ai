@@ -87,8 +87,9 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     return t
 
 def load_frame_as_tensor(p: Path) -> torch.Tensor:
-    img = Image.open(p).convert("RGB").resize((W, H), resample=Image.BICUBIC)
-    return pil_to_tensor(img)
+    with Image.open(p) as img:
+        img = img.convert("RGB").resize((W, H), resample=Image.BICUBIC)
+        return pil_to_tensor(img)
 
 # ---------------------------------------------------------------------
 # Augmentations (match training semantics)

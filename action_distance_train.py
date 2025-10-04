@@ -397,7 +397,8 @@ def im_to_heat(arr: np.ndarray) -> Image.Image:
     plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
     plt.close()
     buf.seek(0)
-    return Image.open(buf).convert("RGB").resize((224, 240), Image.BILINEAR)
+    with Image.open(buf) as img:
+        return img.convert("RGB").resize((224, 240), Image.BILINEAR)
 
 def stack_horiz(pils: List[Image.Image]) -> Image.Image:
     H = max(im.size[1] for im in pils)
