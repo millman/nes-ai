@@ -9,40 +9,36 @@ Run:
 """
 
 from __future__ import annotations
-import argparse, contextlib, math, os, random, time, warnings
+
+import argparse
+import contextlib
+import random
+import time
+import warnings
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler
-from torch.utils.data import DataLoader, Dataset, get_worker_info
+from torch.utils.data import DataLoader
 
-# --------------------------------------------------------------------------------------
-# Global image size (NES frames resized to this)
-# --------------------------------------------------------------------------------------
-H, W = 240, 224  # (height, width)
-
-# --------------------------------------------------------------------------------------
-# IO utils
-# --------------------------------------------------------------------------------------
-def list_trajectories(data_root: Path) -> Dict[str, List[Path]]:
-    out: Dict[str, List[Path]] = {}
-    for traj_dir in sorted(data_root.glob("traj_*")):
-        state_dir = traj_dir / "states"
-        if not state_dir.is_dir():
-            continue
-        paths = sorted(state_dir.glob("state_*.png"), key=lambda p: int(p.stem.split("_")[1]))
-        if paths:
-            out[traj_dir.name] = paths
-    if not out:
-        raise FileNotFoundError(f"No trajectories under {data_root} (expected traj_*/states/state_*.png)")
-    return out
+from recon import (
+    H,
+    W,
+    Decoder,
+    DownBlock,
+    PairFromTrajDataset,
+    load_frame_as_tensor as base_load_frame_as_tensor,
+    set_seed,
+    short_traj_state_label,
+    to_float01,
+)
+from recon.utils import grad_norm, psnr_01, tensor_to_pil
 
 
 def _normalize_tensor(t: torch.Tensor) -> torch.Tensor:
@@ -53,155 +49,8 @@ def _denormalize_tensor(t: torch.Tensor) -> torch.Tensor:
     return t  # kept for compatibility with legacy checkpoints
 
 
-def pil_to_tensor(img: Image.Image) -> torch.Tensor:
-    arr = np.array(img, dtype=np.float32, copy=True) / 255.0
-    if arr.ndim == 2:
-        arr = np.stack([arr] * 3, axis=-1)
-    if arr.shape[2] == 4:
-        arr = arr[:, :, :3]
-    t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
-    return _normalize_tensor(t)
-
-
-def load_frame_as_tensor(p: Path) -> torch.Tensor:
-    img = Image.open(p).convert("RGB").resize((W, H), resample=Image.NEAREST)
-    return pil_to_tensor(img)
-
-
-def short_traj_state_label(path_str: str) -> str:
-    base = os.path.normpath(path_str)
-    parts = base.split(os.sep)
-    traj_idx = next((i for i, p in enumerate(parts) if p.startswith("traj_")), None)
-    if (
-        traj_idx is not None
-        and traj_idx + 2 < len(parts)
-        and parts[traj_idx + 1] == "states"
-        and parts[traj_idx + 2].startswith("state_")
-    ):
-        return f"{parts[traj_idx]}/{os.path.splitext(parts[traj_idx + 2])[0]}"
-    if len(parts) >= 2:
-        return f"{parts[-2]}/{os.path.splitext(parts[-1])[0]}"
-    return os.path.splitext(os.path.basename(base))[0]
-
-
-# --------------------------------------------------------------------------------------
-# Dataset: by default, sample A/B from the SAME trajectory
-# --------------------------------------------------------------------------------------
-class PairFromTrajDataset(Dataset):
-    def __init__(
-        self,
-        data_root: Path,
-        split: str = "train",
-        train_frac: float = 0.95,
-        seed: int = 0,
-        max_step_gap: int = 20,
-        allow_cross_traj: bool = False,
-        p_cross_traj: float = 0.0,
-    ):
-        super().__init__()
-        self.trajs = list_trajectories(data_root)
-        self.traj_items = list(self.trajs.items())
-        all_paths = [p for lst in self.trajs.values() for p in lst]
-
-        self._base_seed = seed
-        self._main_rng = random.Random(seed)
-        self._worker_rngs: Dict[int, random.Random] = {}
-
-        self._main_rng.shuffle(all_paths)
-        n_train = int(round(len(all_paths) * train_frac))
-        self.pool = all_paths[:n_train] if split == "train" else all_paths[n_train:]
-        self.max_step_gap = max_step_gap
-        self.allow_cross_traj = allow_cross_traj
-        self.p_cross_traj = p_cross_traj if allow_cross_traj else 0.0
-
-        pool_set = set(map(str, self.pool))
-        self.split_trajs: Dict[str, List[Path]] = {}
-        for traj_name, paths in self.traj_items:
-            kept = [p for p in paths if str(p) in pool_set]
-            if len(kept) >= 2:
-                self.split_trajs[traj_name] = kept
-        if not self.split_trajs:
-            raise RuntimeError(f"No trajectories with >=2 frames in split='{split}'")
-        self.split_traj_items = list(self.split_trajs.items())
-
-    def __len__(self):
-        return sum(len(v) for v in self.split_trajs.values())
-
-    def _get_worker_rng(self) -> random.Random:
-        info = get_worker_info()
-        if info is None:
-            return self._main_rng
-        wid = info.id
-        rng = self._worker_rngs.get(wid)
-        if rng is None:
-            rng = random.Random(info.seed)
-            self._worker_rngs[wid] = rng
-        return rng
-
-    def _sample_same_traj_pair(self, rng: random.Random) -> Tuple[Path, Path]:
-        traj_idx = rng.randrange(len(self.split_traj_items))
-        _, paths = self.split_traj_items[traj_idx]
-        if len(paths) < 2:
-            return paths[0], paths[-1]
-        i0 = rng.randrange(0, len(paths) - 1)
-        gap = rng.randint(1, min(max(1, self.max_step_gap), len(paths) - 1 - i0))
-        j0 = i0 + gap
-        return paths[i0], paths[j0]
-
-    def _sample_cross_traj_pair(self, rng: random.Random) -> Tuple[Path, Path]:
-        idx1 = rng.randrange(len(self.split_traj_items))
-        idx2 = rng.randrange(len(self.split_traj_items))
-        p1s = self.split_traj_items[idx1][1]
-        p2s = self.split_traj_items[idx2][1]
-        return p1s[rng.randrange(len(p1s))], p2s[rng.randrange(len(p2s))]
-
-    def __getitem__(self, idx: int):
-        rng = self._get_worker_rng()
-        if self.allow_cross_traj and (rng.random() < self.p_cross_traj):
-            p1, p2 = self._sample_cross_traj_pair(rng)
-        else:
-            p1, p2 = self._sample_same_traj_pair(rng)
-        a = load_frame_as_tensor(p1)
-        b = load_frame_as_tensor(p2)
-        return a, b, str(p1), str(p2)
-
-
-def to_float01(t: torch.Tensor, device: torch.device, non_blocking: bool = True) -> torch.Tensor:
-    if t.dtype != torch.uint8:
-        return t.to(device=device, non_blocking=non_blocking)
-    return t.to(device=device, non_blocking=non_blocking, dtype=torch.float32) / 255.0
-
-
-# --------------------------------------------------------------------------------------
-# Lightweight CNN AE (no skips): Encoder/Decoder
-# --------------------------------------------------------------------------------------
-class DownBlock(nn.Module):
-    def __init__(self, c_in: int, c_out: int, kernel_size: int = 3):
-        super().__init__()
-        padding = kernel_size // 2
-        self.net = nn.Sequential(
-            nn.Conv2d(c_in, c_out, kernel_size=kernel_size, stride=2, padding=padding),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(c_out, c_out, kernel_size=3, padding=1),
-            nn.SiLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-class UpBlock(nn.Module):
-    def __init__(self, c_in: int, c_out: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.ConvTranspose2d(c_in, c_out, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(c_out, c_out, kernel_size=3, padding=1),
-            nn.SiLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+def load_frame_as_tensor(path: Path) -> torch.Tensor:
+    return base_load_frame_as_tensor(path, normalize=_normalize_tensor)
 
 
 class Encoder(nn.Module):
@@ -237,76 +86,16 @@ class Encoder(nn.Module):
         return self.fc(h)
 
 
-class Decoder(nn.Module):
-    def __init__(self, z_dim: int = 128):
-        super().__init__()
-        self.h0 = (256, 15, 14)
-        self.fc = nn.Linear(z_dim, int(np.prod(self.h0)))
-        self.pre = nn.SiLU(inplace=True)
-        self.up1 = UpBlock(256, 128)
-        self.up2 = UpBlock(128, 64)
-        self.up3 = UpBlock(64, 32)
-        self.up4 = UpBlock(32, 16)
-        self.head = nn.Sequential(
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(16, 3, kernel_size=1),
-        )
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.fc(z).view(-1, *self.h0)
-        h = self.pre(h)
-        h = self.up1(h)
-        h = self.up2(h)
-        h = self.up3(h)
-        h = self.up4(h)
-        x = self.head(h)
-        return torch.clamp(x, 0.0, 1.0)
-
-
-# --------------------------------------------------------------------------------------
-# Utilities & debug helpers
-# --------------------------------------------------------------------------------------
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
 def _to_pil(t: torch.Tensor) -> Image.Image:
-    t = t.detach().cpu()
-    if t.dtype == torch.uint8:
-        arr = t.permute(1, 2, 0).contiguous().numpy()
-    else:
-        t = _denormalize_tensor(t)
-        if t.dtype != torch.float32:
-            t = t.float()
-        t = t.clamp(0.0, 1.0)
-        arr = (t.permute(1, 2, 0).contiguous().numpy() * 255).astype(np.uint8)
-    return Image.fromarray(arr)
+    return tensor_to_pil(t, denormalize=_denormalize_tensor)
 
 
 def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    if x.dtype != torch.float32:
-        x01 = x.float().div(255.0)
-    else:
-        x01 = x
-    if y.dtype != torch.float32:
-        y01 = y.float().div(255.0)
-    else:
-        y01 = y
-    x01 = _denormalize_tensor(x01).clamp(0.0, 1.0)
-    y01 = _denormalize_tensor(y01).clamp(0.0, 1.0)
-    mse = F.mse_loss(x01, y01, reduction="mean").clamp_min(eps)
-    return 10.0 * torch.log10(1.0 / mse)
+    return psnr_01(_denormalize_tensor(x), _denormalize_tensor(y), eps)
 
 
 def _grad_norm(module: nn.Module) -> float:
-    s = 0.0
-    for p in module.parameters():
-        if p.grad is not None:
-            s += float(p.grad.detach().data.pow(2).sum().cpu())
-    return math.sqrt(s) if s > 0 else 0.0
+    return grad_norm(module)
 
 
 @torch.no_grad()
@@ -516,6 +305,7 @@ def train(cfg: TrainCfg):
         cfg.max_step_gap,
         cfg.allow_cross_traj,
         cfg.p_cross_traj,
+        load_frame=load_frame_as_tensor,
     )
     ds_va = PairFromTrajDataset(
         cfg.data_root,
@@ -525,6 +315,7 @@ def train(cfg: TrainCfg):
         cfg.max_step_gap,
         cfg.allow_cross_traj,
         cfg.p_cross_traj,
+        load_frame=load_frame_as_tensor,
     )
 
     use_pin = False
@@ -761,7 +552,16 @@ def export_latent_distances(
     enc = Encoder(z_dim, pretrained=False).to(device)
     enc.load_state_dict(ckpt["enc"])
     enc.eval()
-    ds = PairFromTrajDataset(data_root, "val", 0.95, 0, 20, False, 0.0)
+    ds = PairFromTrajDataset(
+        data_root,
+        "val",
+        0.95,
+        0,
+        20,
+        False,
+        0.0,
+        load_frame=load_frame_as_tensor,
+    )
     rng = random.Random(0)
 
     rows = [("path_a", "path_b", "latent_l2")]

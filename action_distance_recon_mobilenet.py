@@ -184,8 +184,13 @@ def to_float01(t: torch.Tensor, device: torch.device, non_blocking: bool = True)
 
 def pick_device(pref: Optional[str]) -> torch.device:
     if pref:
-        return torch.device(pref)
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dev = torch.device(pref)
+        if dev.type == "cuda":
+            raise ValueError("CUDA is not supported by this trainer; use 'cpu' or 'mps'.")
+        return dev
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 # --------------------------------------------------------------------------------------
