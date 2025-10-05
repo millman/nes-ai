@@ -567,11 +567,11 @@ def train(cfg: TrainCfg):
                     loss_terms.append(f"MS-SSIM {avg_ms:.4f}")
                 if cfg.lambda_patch > 0:
                     loss_terms.append(f"Patch {avg_patch:.4f}")
+                loss_detail = " ".join(loss_terms)
                 print(
                     f"[{h:02d}:{m:02d}:{s:02d}] "
                     f"ep {ep:02d} step {global_step:06d} | "
-                    f"loss {avg_loss:.4f} | "
-                    " ".join(loss_terms) + " | "
+                    f"loss {avg_loss:.4f} | {loss_detail} |"
                     f"PSNR A {avg_psnrA:.2f}dB B {avg_psnrB:.2f}dB | "
                     f"step {avg_step_ms:.1f} ms ({throughput:.1f} samples/s)"
                 )
