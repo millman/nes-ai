@@ -29,7 +29,7 @@ from recon import (
     to_float01,
 )
 from recon.data import list_trajectories
-from recon.models import Decoder, DownBlock
+# Decoder redefined locally to mirror action_distance_recon.py
 from recon.utils import psnr_01, tensor_to_pil
 
 # --------------------------------------------------------------------------------------
@@ -215,17 +215,20 @@ class SkillCFMDataset(Dataset):
 # --------------------------------------------------------------------------------------
 
 class Encoder(nn.Module):
+    """Lightweight conv encoder matching action_distance_recon."""
+
     def __init__(self, z_dim: int = 128):
         super().__init__()
-        self.stem = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
-            nn.SiLU(inplace=True),
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
         )
-        self.down1 = DownBlock(32, 64)
-        self.down2 = DownBlock(64, 128)
-        self.down3 = DownBlock(128, 256)
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(256, z_dim)
         nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
@@ -233,12 +236,38 @@ class Encoder(nn.Module):
             nn.init.zeros_(self.fc.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.stem(x)
-        h = self.down1(h)
-        h = self.down2(h)
-        h = self.down3(h)
+        h = self.features(x)
         h = self.pool(h).flatten(1)
         return self.fc(h)
+
+
+class Decoder(nn.Module):
+    """Transpose-conv decoder mirrored from action_distance_recon."""
+
+    def __init__(self, z_dim: int = 128):
+        super().__init__()
+        self.fc = nn.Linear(z_dim, 256 * 15 * 14)
+        self.pre = nn.ReLU(inplace=True)
+        self.net = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),
+        )
+        nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
+        if self.fc.bias is not None:
+            nn.init.zeros_(self.fc.bias)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        h = self.fc(z).view(-1, 256, 15, 14)
+        h = self.pre(h)
+        x = self.net(h)
+        return torch.sigmoid(x)
 
 
 class SkillEncoder(nn.Module):
@@ -282,7 +311,7 @@ class SkillDeltaHead(nn.Module):
         )
 
     def forward(self, omega: torch.Tensor) -> torch.Tensor:
-        return self.net(omega)
+        return torch.sigmoid(self.net(omega))
 
 
 class VectorField(nn.Module):
