@@ -463,8 +463,13 @@ def train(cfg: TrainCfg):
             xA_rec = dec(zA)
             xB_rec = dec(zB)
             loss_l1 = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
-            loss_ms = ms_ssim_loss(xA_rec, A) + ms_ssim_loss(xB_rec, B)
-            loss = cfg.lambda_l1 * loss_l1 + cfg.lambda_ms_ssim * loss_ms
+
+            if cfg.lambda_ms_ssim > 0:
+                loss_ms = ms_ssim_loss(xA_rec, A) + ms_ssim_loss(xB_rec, B)
+                loss = cfg.lambda_l1 * loss_l1 + cfg.lambda_ms_ssim * loss_ms
+            else:
+                loss_ms = torch.tensor([float('nan')])
+                loss = cfg.lambda_l1 * loss_l1
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
