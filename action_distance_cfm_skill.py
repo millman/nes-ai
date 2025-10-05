@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import random
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -463,8 +464,11 @@ def train(cfg: TrainConfig) -> None:
     set_seed(cfg.seed)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
 
+    start_time = time.monotonic()
+
     dl_tr, dl_va = make_loaders(cfg)
     print(
+        f"[Device] {device} | "
         f"[Data] train chunks≈{len(dl_tr.dataset)} val≈{len(dl_va.dataset)} | "
         f"chunk_len={cfg.chunk_len} deltas={list(cfg.delta_choices)}"
     )
@@ -607,7 +611,12 @@ def train(cfg: TrainConfig) -> None:
 
             if cfg.log_every > 0 and global_step % cfg.log_every == 0:
                 avg = lambda q: sum(q) / max(1, len(q))
+                elapsed = int(time.monotonic() - start_time)
+                h = elapsed // 3600
+                m = (elapsed % 3600) // 60
+                s = elapsed % 60
                 print(
+                    f"[{h:02d}:{m:02d}:{s:02d}] "
                     f"ep {epoch:02d} step {global_step:06d} | "
                     f"loss {avg(q_loss_total):.4f} | "
                     f"Lcfm {avg(q_loss_cfm):.4f} Lrec {avg(q_loss_rec):.4f} Lskill {avg(q_loss_skill):.4f} | "
@@ -728,6 +737,9 @@ def train(cfg: TrainConfig) -> None:
             best_val = va_loss
             torch.save(ckpt, cfg.out_dir / "best.pt")
             print(f"[ep {epoch:02d}] saved new best checkpoint (val loss {best_val:.4f})")
+
+    elapsed = time.monotonic() - start_time
+    print(f"Training finished in {elapsed/60:.2f} min ({elapsed:.1f} s)")
 
 
 def build_argparser() -> argparse.ArgumentParser:
