@@ -184,6 +184,30 @@ def ms_ssim_loss(x: torch.Tensor, y: torch.Tensor, weights: Optional[torch.Tenso
     return 1.0 - ms_ssim(x, y, weights=weights)
 
 
+def focal_patch_l1_loss(
+    x_hat: torch.Tensor,
+    x_true: torch.Tensor,
+    *,
+    patch_size: int,
+    stride: int,
+    gamma: float,
+    eps: float,
+) -> torch.Tensor:
+    """Compute focal-weighted mean L1 across spatial patches."""
+
+    stride = max(1, stride)
+    err = (x_hat - x_true).abs().mean(dim=1, keepdim=True)
+    pooled = F.avg_pool2d(err, kernel_size=patch_size, stride=stride, padding=0)
+    if gamma > 0:
+        weights = (pooled + eps).pow(gamma)
+        weighted = (weights * pooled).sum(dim=(1, 2, 3))
+        norm = weights.sum(dim=(1, 2, 3)).clamp_min(eps)
+        loss = weighted / norm
+    else:
+        loss = pooled.mean(dim=(1, 2, 3))
+    return loss.mean()
+
+
 @torch.no_grad()
 def save_full_interpolation_grid(
     enc: Encoder,
@@ -354,6 +378,11 @@ class TrainCfg:
     simple_viz: bool = False
     lambda_l1: float = 0.5
     lambda_ms_ssim: float = 0.5
+    lambda_patch: float = 0.0
+    patch_size: int = 32
+    patch_stride: int = 16
+    patch_focal_gamma: float = 1.5
+    patch_eps: float = 1e-6
 
 
 # --------------------------------------------------------------------------------------
@@ -441,6 +470,7 @@ def train(cfg: TrainCfg):
     q_loss = deque(maxlen=win)
     q_l1 = deque(maxlen=win)
     q_ms = deque(maxlen=win)
+    q_patch = deque(maxlen=win) if cfg.lambda_patch > 0 else None
     q_psnrA, q_psnrB = deque(maxlen=win), deque(maxlen=win)
     q_step_ms = deque(maxlen=win)
 
@@ -466,10 +496,34 @@ def train(cfg: TrainCfg):
 
             if cfg.lambda_ms_ssim > 0:
                 loss_ms = ms_ssim_loss(xA_rec, A) + ms_ssim_loss(xB_rec, B)
-                loss = cfg.lambda_l1 * loss_l1 + cfg.lambda_ms_ssim * loss_ms
             else:
-                loss_ms = torch.tensor([float('nan')])
-                loss = cfg.lambda_l1 * loss_l1
+                loss_ms = torch.tensor([float('nan')], device=xA_rec.device)
+
+            if cfg.lambda_patch > 0:
+                loss_patch = focal_patch_l1_loss(
+                    xA_rec,
+                    A,
+                    patch_size=cfg.patch_size,
+                    stride=cfg.patch_stride,
+                    gamma=cfg.patch_focal_gamma,
+                    eps=cfg.patch_eps,
+                )
+                loss_patch = loss_patch + focal_patch_l1_loss(
+                    xB_rec,
+                    B,
+                    patch_size=cfg.patch_size,
+                    stride=cfg.patch_stride,
+                    gamma=cfg.patch_focal_gamma,
+                    eps=cfg.patch_eps,
+                )
+            else:
+                loss_patch = torch.tensor([float('nan')], device=xA_rec.device)
+
+            loss = cfg.lambda_l1 * loss_l1
+            if cfg.lambda_ms_ssim > 0:
+                loss = loss + cfg.lambda_ms_ssim * loss_ms
+            if cfg.lambda_patch > 0:
+                loss = loss + cfg.lambda_patch * loss_patch
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -487,7 +541,10 @@ def train(cfg: TrainCfg):
 
             q_loss.append(float(loss.item()))
             q_l1.append(float(loss_l1.item()))
-            q_ms.append(float(loss_ms.item()))
+            if cfg.lambda_ms_ssim > 0:
+                q_ms.append(float(loss_ms.item()))
+            if cfg.lambda_patch > 0 and q_patch is not None:
+                q_patch.append(float(loss_patch.item()))
             q_psnrA.append(psnrA)
             q_psnrB.append(psnrB)
             q_step_ms.append(step_time * 1000.0)
@@ -496,6 +553,7 @@ def train(cfg: TrainCfg):
                 avg_loss = (sum(q_loss) / len(q_loss)) if q_loss else 0.0
                 avg_l1 = (sum(q_l1) / len(q_l1)) if q_l1 else 0.0
                 avg_ms = (sum(q_ms) / len(q_ms)) if q_ms else 0.0
+                avg_patch = (sum(q_patch) / len(q_patch)) if (q_patch and len(q_patch)) else 0.0
                 avg_psnrA = (sum(q_psnrA) / len(q_psnrA)) if q_psnrA else 0.0
                 avg_psnrB = (sum(q_psnrB) / len(q_psnrB)) if q_psnrB else 0.0
                 avg_step_ms = (sum(q_step_ms) / len(q_step_ms)) if q_step_ms else 0.0
@@ -504,11 +562,16 @@ def train(cfg: TrainCfg):
                 h = elapsed // 3600
                 m = (elapsed % 3600) // 60
                 s = elapsed % 60
+                loss_terms = [f"L1 {avg_l1:.4f}"]
+                if cfg.lambda_ms_ssim > 0:
+                    loss_terms.append(f"MS-SSIM {avg_ms:.4f}")
+                if cfg.lambda_patch > 0:
+                    loss_terms.append(f"Patch {avg_patch:.4f}")
                 print(
                     f"[{h:02d}:{m:02d}:{s:02d}] "
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg_loss:.4f} | "
-                    f"L1 {avg_l1:.4f} MS-SSIM {avg_ms:.4f} | "
+                    " ".join(loss_terms) + " | "
                     f"PSNR A {avg_psnrA:.2f}dB B {avg_psnrB:.2f}dB | "
                     f"step {avg_step_ms:.1f} ms ({throughput:.1f} samples/s)"
                 )
@@ -552,6 +615,7 @@ def train(cfg: TrainCfg):
         enc.eval()
         dec.eval()
         va_rec = va_n = 0.0
+        va_patch = 0.0 if cfg.lambda_patch > 0 else None
         with torch.no_grad():
             for A, B, _, _ in dl_va:
                 A = to_float01(A, device, non_blocking=False)
@@ -562,15 +626,38 @@ def train(cfg: TrainCfg):
                 xB_rec = dec(zB)
                 batch_mean = 0.5 * (F.l1_loss(xA_rec, A).item() + F.l1_loss(xB_rec, B).item())
                 va_rec += batch_mean * A.shape[0]
+                if cfg.lambda_patch > 0 and va_patch is not None:
+                    batch_patch = focal_patch_l1_loss(
+                        xA_rec,
+                        A,
+                        patch_size=cfg.patch_size,
+                        stride=cfg.patch_stride,
+                        gamma=cfg.patch_focal_gamma,
+                        eps=cfg.patch_eps,
+                    )
+                    batch_patch = batch_patch + focal_patch_l1_loss(
+                        xB_rec,
+                        B,
+                        patch_size=cfg.patch_size,
+                        stride=cfg.patch_stride,
+                        gamma=cfg.patch_focal_gamma,
+                        eps=cfg.patch_eps,
+                    )
+                    va_patch += float(batch_patch.item()) * A.shape[0]
                 va_n += A.shape[0]
         va_rec = va_rec / max(1, va_n)
-        print(f"[ep {ep:02d}]   val: Lrec={va_rec:.4f}")
+        if cfg.lambda_patch > 0 and va_patch is not None:
+            va_patch_mean = va_patch / max(1, va_n)
+            print(f"[ep {ep:02d}]   val: Lrec={va_rec:.4f} Patch={va_patch_mean:.4f}")
+        else:
+            print(f"[ep {ep:02d}]   val: Lrec={va_rec:.4f}")
 
         ckpt = {
             "epoch": ep,
             "enc": enc.state_dict(),
             "dec": dec.state_dict(),
             "val_rec": va_rec,
+            "val_patch": va_patch / max(1, va_n) if (cfg.lambda_patch > 0 and va_patch is not None) else None,
             "cfg": vars(cfg),
         }
         torch.save(ckpt, cfg.out_dir / "last.ckpt")
@@ -607,6 +694,11 @@ def parse_args():
     )
     ap.add_argument("--lambda_l1", type=float, default=0.5)
     ap.add_argument("--lambda_ms_ssim", type=float, default=0.5)
+    ap.add_argument("--lambda_patch", type=float, default=0.0)
+    ap.add_argument("--patch_size", type=int, default=32)
+    ap.add_argument("--patch_stride", type=int, default=16)
+    ap.add_argument("--patch_focal_gamma", type=float, default=1.5)
+    ap.add_argument("--patch_eps", type=float, default=1e-6)
     return ap.parse_args()
 
 
@@ -628,6 +720,11 @@ def main():
         simple_viz=args.simple_viz,
         lambda_l1=args.lambda_l1,
         lambda_ms_ssim=args.lambda_ms_ssim,
+        lambda_patch=args.lambda_patch,
+        patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
+        patch_focal_gamma=args.patch_focal_gamma,
+        patch_eps=args.patch_eps,
     )
     train(cfg)
 
