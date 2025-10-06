@@ -34,7 +34,9 @@ from recon import (
     Decoder,
     DownBlock,
     PairFromTrajDataset,
+    TileSpec,
     load_frame_as_tensor as base_load_frame_as_tensor,
+    render_image_grid,
     set_seed,
     short_traj_state_label,
     to_float01,
@@ -158,50 +160,54 @@ def save_full_interpolation_grid(
     else:
         interp_decoded = torch.empty(0, Bsz, 3, H, W, device=device)
 
-    tiles_per_row = 2 + K + 2  # A | dec(zA) | K interps | dec(zB) | B
-    tile_w, tile_h = W, H
-    total_w = tile_w * tiles_per_row
-    total_h = tile_h * Bsz
-    canvas = Image.new("RGB", (total_w, total_h), (0,0,0))
-    draw = ImageDraw.Draw(canvas)
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", size=18)
-    except Exception:
-        try:
-            font = ImageFont.load_default()
-        except Exception:
-            font = None
+    z_norm = torch.linalg.norm(zB - zA, dim=1).cpu()
+    t_vals_cpu = t_vals.detach().cpu().tolist()
 
-    def annotate(draw, x, y, txt, fill=(255,255,255)):
-        if font:
-            bbox = draw.textbbox((0, 0), txt, font=font)
-            tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
-        else:
-            tw, th = len(txt)*6, 10
-        pad = 4
-        draw.rectangle([x+2, y+2, x+2+tw+pad*2, y+2+th+pad*2], fill=(0,0,0))
-        draw.text((x+2+pad, y+2+pad), txt, font=font, fill=fill)
+    rows: List[List[TileSpec]] = []
+    for idx in range(Bsz):
+        labelA = short_traj_state_label(pA[idx])
+        labelB = short_traj_state_label(pB[idx])
 
-    for r in range(Bsz):
-        x = 0; y = r * tile_h
-        labelA = short_traj_state_label(pA[r])
-        labelB = short_traj_state_label(pB[r])
+        row: List[TileSpec] = [
+            TileSpec(
+                image=_to_pil(A[idx]),
+                top_label=labelA,
+                bottom_label=f"‖zB−zA‖={z_norm[idx]:.2f}",
+                bottom_color=(255, 255, 0),
+            ),
+            TileSpec(
+                image=_to_pil(dec_zA[idx]),
+                top_label=f"{labelA} (dec)",
+                top_color=(220, 220, 255),
+            ),
+        ]
 
-        canvas.paste(_to_pil(A[r]), (x, y)); annotate(draw, x, y, labelA); x += tile_w
-        canvas.paste(_to_pil(dec_zA[r]), (x, y)); annotate(draw, x, y, labelA + " (dec)", (220,220,255)); x += tile_w
+        for interp_idx, t_val in enumerate(t_vals_cpu):
+            row.append(
+                TileSpec(
+                    image=_to_pil(interp_decoded[interp_idx, idx]),
+                    top_label=f"t={t_val:.2f}",
+                    top_color=(200, 255, 200),
+                )
+            )
 
-        for k in range(K):
-            canvas.paste(_to_pil(interp_decoded[k, r]), (x, y))
-            annotate(draw, x, y, f"t={float(t_vals[k]):.2f}", (200,255,200))
-            x += tile_w
+        row.extend(
+            [
+                TileSpec(
+                    image=_to_pil(dec_zB[idx]),
+                    top_label=f"{labelB} (dec)",
+                    top_color=(220, 220, 255),
+                ),
+                TileSpec(
+                    image=_to_pil(B[idx]),
+                    top_label=labelB,
+                ),
+            ]
+        )
 
-        canvas.paste(_to_pil(dec_zB[r]), (x, y)); annotate(draw, x, y, labelB + " (dec)", (220,220,255)); x += tile_w
-        canvas.paste(_to_pil(B[r]), (x, y)); annotate(draw, x, y, labelB)
+        rows.append(row)
 
-        txt = f"‖zB−zA‖={torch.linalg.norm(zB[r]-zA[r]).item():.2f}"
-        annotate(draw, 2, y + tile_h - 22, txt, (255,255,0))
-
-    canvas.save(out_path)
+    render_image_grid(rows, out_path, tile_size=(W, H))
 
 
 @torch.no_grad()

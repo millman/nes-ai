@@ -28,7 +28,9 @@ from recon import (
     H,
     W,
     PairFromTrajDataset,
+    TileSpec,
     load_frame_as_tensor as base_load_frame_as_tensor,
+    render_image_grid,
     set_seed,
     short_traj_state_label,
     to_float01,
@@ -258,62 +260,54 @@ def save_full_interpolation_grid(
     else:
         interp_decoded = torch.empty(0, Bsz, 3, H, W, device=device)
 
-    tiles_per_row = 2 + len(t_vals)  # A raw | t columns | B raw
-    tile_w, tile_h = W, H
-    total_w = tile_w * tiles_per_row
-    total_h = tile_h * Bsz
-    canvas = Image.new("RGB", (total_w, total_h), (0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-    font = _load_label_font(18)
+    z_norm = torch.linalg.norm(zB - zA, dim=1).cpu()
+    mid_t_vals_cpu = mid_t_vals.detach().cpu().tolist()
 
-    def annotate(draw_ctx, x, y, txt, fill=(255, 255, 255)):
-        if font:
-            bbox = draw_ctx.textbbox((0, 0), txt, font=font)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        else:
-            tw, th = len(txt) * 6, 10
-        pad = 4
-        draw_ctx.rectangle([x + 2, y + 2, x + 2 + tw + pad * 2, y + 2 + th + pad * 2], fill=(0, 0, 0))
-        draw_ctx.text((x + 2 + pad, y + 2 + pad), txt, font=font, fill=fill)
+    rows: List[List[TileSpec]] = []
+    for idx in range(Bsz):
+        labelA = short_traj_state_label(pA[idx])
+        labelB = short_traj_state_label(pB[idx])
 
-    for r in range(Bsz):
-        x = 0
-        y = r * tile_h
-        labelA = short_traj_state_label(pA[r])
-        labelB = short_traj_state_label(pB[r])
+        row: List[TileSpec] = [
+            TileSpec(
+                image=_to_pil(A[idx]),
+                top_label=labelA,
+                bottom_label=f"‖zB−zA‖={z_norm[idx]:.2f}",
+                bottom_color=(255, 255, 0),
+            ),
+            TileSpec(
+                image=_to_pil(dec_zA[idx]),
+                top_label="t=0.0 (A)",
+                top_color=(220, 220, 255),
+            ),
+        ]
 
-        canvas.paste(_to_pil(A[r]), (x, y))
-        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
-        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
-        annotate(draw, x, y, labelA)
-        x += tile_w
-        canvas.paste(_to_pil(dec_zA[r]), (x, y))
-        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
-        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
-        annotate(draw, x, y, "t=0.0 (A)", (220, 220, 255))
-        x += tile_w
+        for interp_idx, t_val in enumerate(mid_t_vals_cpu):
+            row.append(
+                TileSpec(
+                    image=_to_pil(interp_decoded[interp_idx, idx]),
+                    top_label=f"t={t_val:.1f}",
+                    top_color=(200, 255, 200),
+                )
+            )
 
-        for k in range(mid_t_vals.numel()):
-            canvas.paste(_to_pil(interp_decoded[k, r]), (x, y))
-            draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
-            draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
-            annotate(draw, x, y, f"t={float(mid_t_vals[k]):.1f}", (200, 255, 200))
-            x += tile_w
+        row.extend(
+            [
+                TileSpec(
+                    image=_to_pil(dec_zB[idx]),
+                    top_label="t=1.0 (B)",
+                    top_color=(220, 220, 255),
+                ),
+                TileSpec(
+                    image=_to_pil(B[idx]),
+                    top_label=labelB,
+                ),
+            ]
+        )
 
-        canvas.paste(_to_pil(dec_zB[r]), (x, y))
-        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
-        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
-        annotate(draw, x, y, "t=1.0 (B)", (220, 220, 255))
-        x += tile_w
-        canvas.paste(_to_pil(B[r]), (x, y))
-        draw.line([(x, y), (x, y + tile_h - 1)], fill=(255, 255, 255))
-        draw.line([(x + tile_w - 1, y), (x + tile_w - 1, y + tile_h - 1)], fill=(0, 0, 0))
-        annotate(draw, x, y, labelB)
+        rows.append(row)
 
-        txt = f"‖zB−zA‖={torch.linalg.norm(zB[r] - zA[r]).item():.2f}"
-        annotate(draw, 2, y + tile_h - 22, txt, (255, 255, 0))
-
-    canvas.save(out_path)
+    render_image_grid(rows, out_path, tile_size=(W, H))
 
 
 @torch.no_grad()
