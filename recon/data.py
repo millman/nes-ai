@@ -77,7 +77,7 @@ def load_frame_as_tensor(
         img = img.convert("RGB").resize((size[1], size[0]), resample=resample)
         tensor = pil_to_tensor(img, normalize=normalize)
         _assert_unit_range(tensor, source=path)
-        return tensor
+    return tensor
 
 
 def short_traj_state_label(path_str: str) -> str:

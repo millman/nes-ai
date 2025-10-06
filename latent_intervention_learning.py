@@ -38,6 +38,9 @@ from recon import (
 )
 from recon.utils import grad_norm, psnr_01, tensor_to_pil
 
+torch.multiprocessing.set_sharing_strategy('file_system')
+
+
 def _normalize_tensor(t: torch.Tensor) -> torch.Tensor:
     return t
 
