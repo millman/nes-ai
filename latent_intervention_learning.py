@@ -166,9 +166,16 @@ class CrossAttnMask(nn.Module):
         B, C, H, W = z.shape
         K = self.to_k(z).flatten(2)                       # (B, C, H*W)
         q = self.to_q(u).unsqueeze(1)                     # (B, 1, C)
-        attn_logits = torch.bmm(q, K) / (C ** 0.5)        # (B, 1, H*W)
-        attn = torch.softmax(attn_logits, dim=-1)
-        M = attn.view(B, 1, H, W)
+
+        if False:
+            attn_logits = torch.bmm(q, K) / (C ** 0.5)        # (B, 1, H*W)
+            attn = torch.softmax(attn_logits, dim=-1)
+            M = attn.view(B, 1, H, W)
+        else:
+            logits = torch.bmm(q, K) / (C ** 0.5)             # (B, 1, H*W)
+            # Sigmoid gate so values are in [0,1] but NOT normalized to sum-1
+            tau = 0.5
+            M = torch.sigmoid(logits / tau).view(B, 1, H, W)
         return M
 
 class BaseResidualDynamics(nn.Module):
@@ -186,6 +193,8 @@ class BaseResidualDynamics(nn.Module):
             nn.SiLU(),
             nn.Conv2d(z_ch, z_ch, 1, 1, 0),               # pointwise
         )
+        # Learnable scale for residual injection so it doesn't get numerically washed out
+        self.gamma = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, z_t: Tensor, u: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """
@@ -195,7 +204,10 @@ class BaseResidualDynamics(nn.Module):
         u_e      = self.u_embed(u)
         M        = self.mask(z_t, u_e)                    # (B,1,H,W)
         Δz_resid = self.resid(z_t)
-        z_pred   = z_t + Δz_base + M * Δz_resid
+        if False:
+            z_pred   = z_t + Δz_base + M * Δz_resid
+        else:
+            z_pred   = z_t + Δz_base + self.gamma * (M * Δz_resid)
         return z_pred, Δz_base, M * Δz_resid, M
 
 # ---------------------------
@@ -211,6 +223,9 @@ class LatentInterventionModel(nn.Module):
         self.dyn = BaseResidualDynamics(z_ch, du)
         self.du = du
         self.k_hist = k_hist
+
+        # Drop residual on a fraction of samples during training to keep base/off strong
+        self.drop_residual_p: float = 0.25  # you can expose to cfg if desired
 
     def infer_u(self, z_hist, z_t, z_tp1):
         mu, logvar, w_noop = self.inf_u(z_hist, z_t, z_tp1)
@@ -233,11 +248,22 @@ class LatentInterventionModel(nn.Module):
 
         # Factual prediction (with intervention)
         z_pred, dB, dR_m, M = self.dyn(z_t, u)
-        x_pred = self.dec(z_pred)
 
         # Counterfactual (no intervention): zero residual path
         z_pred_off = z_t + dB                      # same base, M*dR disabled
-        x_pred_off = self.dec(z_pred_off)
+
+        # Decode with and without residual
+        # Train-time residual dropout: forces base/off path + decoder to stay competent
+        if self.training and self.drop_residual_p > 0.0:
+            Bsz = z_t.size(0)
+            keep = (torch.rand(Bsz, 1, 1, 1, device=z_t.device) > self.drop_residual_p).float()
+            # Rebuild z_pred with sampled residual gate
+            # Note: use same gamma as in dyn to preserve scale
+            z_pred_drop = z_t + dB + (self.dyn.gamma * dR_m) * keep
+            x_pred = self.dec(z_pred_drop)
+        else:
+            x_pred = self.dec(z_pred)
+        x_pred_off = self.dec(z_t + dB)
 
         return {
             "x_pred": x_pred, "x_pred_off": x_pred_off,
@@ -252,33 +278,90 @@ class LatentInterventionModel(nn.Module):
 
 def compute_losses(batch: Dict[str, Tensor],
                    out: Dict[str, Tensor],
-                   λ_per: float = 0.0,           # set >0 if you plug an LPIPS/feature loss
+                   λ_per: float = 0.0,         # unused placeholder for LPIPS if you add it
                    λ_cf: float = 1.0,
                    λ_u: float = 1e-3,
                    λ_M: float = 1e-3,
                    λ_tv: float = 1e-3,
-                   λ_ortho: float = 1e-1) -> Dict[str, Tensor]:
-    x_tp1 = batch["x_tp1"]    # (B,3,240,240)
-    x_pred = out["x_pred"]
-    x_pred_off = out["x_pred_off"]
+                   λ_ortho: float = 1e-1,
+                   λ_wcal: float = 1.0,        # NEW: w calibration strength
+                   λ_align: float = 1.0,        # NEW: mask–delta alignment
+                   λ_resmag: float = 1e-3,   # NEW: residual magnitude regularizer
+                   η_cf_boot: float = 0.5,    # NEW: bootstrap weight for base/off supervision
+                   ) -> Dict[str, Tensor]:
+    x_t   = batch["x_t"]
+    x_tp1 = batch["x_tp1"]
 
-    # Recon (L1; add LPIPS/SSIM if desired)
+    x_pred     = out["x_pred"]
+    x_pred_off = out["x_pred_off"]
+    M          = out["M"]          # (B,1,h,w)
+    w_noop     = out["w_noop"]     # (B,1)
+
+    # 1) Reconstruction (with intervention)
     L_rec = F.l1_loss(x_pred, x_tp1)
 
-    # Counterfactual weighted by no-op detector
-    w = out["w_noop"].detach()      # stopgrad
-    L_cf = (w * (x_pred_off - x_tp1).abs().mean(dim=(1,2,3), keepdim=True)).mean()
+    # Counterfactual weighting: make shapes explicit
+    B = x_t.size(0)
 
-    # KL on u
+    # 2) Counterfactual: if it's truly a no-op, the base-only pred should match target.
+    #    IMPORTANT: do NOT detach w_noop so it actually learns this association.
+    L_cf_per = (x_pred_off - x_tp1).abs().mean(dim=(1,2,3), keepdim=True)   # (B,1,1,1)
+    L_cf = (w_noop.view(B, 1, 1, 1) * L_cf_per).mean()                      # (B,1,1,1) -> scalar
+
+    # 3) KL on u (unchanged)
     L_kl = kl_gaussian_standard(out["mu"], out["logvar"])
 
-    # Sparsity & locality
-    L_u = out["u"].abs().mean()
-    L_M = out["M"].abs().mean()
-    L_tv = tv_loss(out["M"])
+    # 4) Sparsity / locality on intervention controls
+    L_u  = out["u"].abs().mean()
+    L_M  = M.abs().mean()
+    L_tv = tv_loss(M)
 
-    # Orthogonality between base and masked residual deltas in latent space
+    # 5) Orthogonality in latent (unchanged)
     L_ortho = cosine_sim(out["Δz_base"].detach(), out["Δz_resid_masked"]).pow(2)
+
+    # -------- NEW POSITIVE PRESSURE TERMS --------
+    # A) Calibrate w_noop from the magnitude of the *intervention effect*.
+    #    If x_pred and x_pred_off differ a lot, it's NOT a no-op → w_noop should be small.
+    with torch.no_grad():
+        # batchwise normalize to [0,1] for a stable target
+        d_img = (x_pred - x_pred_off).abs().mean(dim=(1,2,3), keepdim=True)  # (B,1,1,1)
+        d_norm = d_img / (d_img.mean(dim=0, keepdim=True) + 1e-6)
+        w_target = (1.0 - d_norm).clamp(0.0, 1.0)  # large diff ⇒ target near 0 (not a no-op)
+        w_target = w_target.view(B, 1)                                         # <-- match (B,1)
+
+    L_wcal = F.mse_loss(w_noop, w_target)
+
+    # B) Mask–delta alignment: upsample mask and align it to where the intervention changed pixels
+    M_up = F.interpolate(M, size=x_t.shape[-2:], mode="bilinear", align_corners=False)  # (B,1,H,W)
+    delta_pix = (x_pred - x_pred_off).abs().detach()                                     # (B,3,H,W)
+    delta_g   = delta_pix.mean(dim=1, keepdim=True)                                      # (B,1,H,W)
+    # Encourage overlap while staying sparse: maximize <M, delta>, then your existing L_M keeps it compact.
+    # Turn it into a loss by negating the overlap:
+    L_align = -(M_up * delta_g).mean()
+
+    # C) Bootstrap alignment to *true* frame change (independent of residual)
+    delta_true = (x_tp1 - x_t).abs().mean(dim=1, keepdim=True)                          # (B,1,H,W)
+    dmin = delta_true.amin(dim=(-2, -1), keepdim=True)
+    dmax = delta_true.amax(dim=(-2, -1), keepdim=True)
+    delta_true_n = (delta_true - dmin) / (dmax - dmin + 1e-6)
+    L_align_boot = -(M_up * delta_true_n).mean()
+
+     # D) Residual usage: encourage residual image delta to explain base-only error
+    delta_u = (x_pred - x_pred_off).abs()
+    target_resid = (x_tp1 - x_pred_off).abs().detach()
+    L_use = F.l1_loss(delta_u, target_resid)
+
+    # --- Bootstrap supervision for the OFF path (independent of learned w_noop) ---
+    # Use actual frame change as a crude no-op estimator: small change ⇒ should be predictable without residual
+    delta_true = (x_tp1 - x_t).abs().mean(dim=(1,2,3), keepdim=True)     # (B,1,1,1)
+    # Normalize per-batch for stability
+    dt_mean = delta_true.mean(dim=0, keepdim=True)
+    w_boot = (1.0 - (delta_true / (dt_mean + 1e-6))).clamp(0.0, 1.0)     # (B,1,1,1)
+    # Train OFF prediction more when true change is small (likely no-op)
+    L_cf_boot = (w_boot * (x_pred_off - x_tp1).abs().mean(dim=(1,2,3), keepdim=True)).mean()
+
+    # --- Residual magnitude regularizer (keeps residual as "correction", not full rewrite) ---
+    L_resmag = out["Δz_resid_masked"].abs().mean()
 
     # Total
     loss = (L_rec
@@ -287,60 +370,23 @@ def compute_losses(batch: Dict[str, Tensor],
             + λ_u * L_u
             + λ_M * L_M
             + λ_tv * L_tv
-            + λ_ortho * L_ortho)
+            + λ_ortho * L_ortho
+            + λ_wcal * L_wcal
+            + λ_align * L_align
+            + 0.5 * L_align_boot
+            + 1.0 * L_use
+            + η_cf_boot * L_cf_boot
+            + λ_resmag * L_resmag)
+
 
     return dict(
         loss=loss, L_rec=L_rec, L_cf=L_cf, L_kl=L_kl,
         L_u=L_u, L_M=L_M, L_tv=L_tv, L_ortho=L_ortho,
-        infl=((x_pred - x_pred_off).pow(2).mean(dim=(1,2,3)) / (x_tp1 - batch["x_t"]).pow(2).mean(dim=(1,2,3)).clamp_min(1e-6)).mean()
+        L_wcal=L_wcal, L_align=L_align, L_align_boot=L_align_boot, L_use=L_use,
+        L_cf_boot=L_cf_boot, L_resmag=L_resmag,
+        infl=((x_pred - x_pred_off).pow(2).mean(dim=(1,2,3)) /
+              (x_tp1 - x_t).pow(2).mean(dim=(1,2,3)).clamp_min(1e-6)).mean(),
     )
-
-# ---------------------------
-# One training step (sketch)
-# ---------------------------
-
-def train_step(model: LatentInterventionModel, optimizer, batch: Dict[str, Tensor], scaler=None) -> Dict[str, float]:
-    model.train()
-    x_t, x_tp1 = batch["x_t"], batch["x_tp1"]        # (B,3,240,240)
-    x_hist = batch.get("x_hist", torch.zeros(0, device=x_t.device))  # optional
-
-    with torch.autocast(device_type=x_t.device.type, dtype=torch.bfloat16 if x_t.device.type=="cuda" else torch.float32):
-        out = model(x_hist, x_t, x_tp1)
-        losses = compute_losses(batch, out)
-
-    optimizer.zero_grad(set_to_none=True)
-    if scaler:
-        scaler.scale(losses["loss"]).grad_scaler_step = None
-        scaler.scale(losses["loss"]).backward()
-        scaler.step(optimizer); scaler.update()
-    else:
-        losses["loss"].backward()
-        optimizer.step()
-
-    return {k: float(v.detach().item()) for k, v in losses.items()}
-
-# ---------------------------
-# Visualization hooks (minimal)
-# ---------------------------
-
-@torch.no_grad()
-def make_viz_panel(model: LatentInterventionModel, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
-    model.eval()
-    x_t, x_tp1 = batch["x_t"], batch["x_tp1"]
-    x_hist = batch.get("x_hist", torch.zeros(0, device=x_t.device))
-    out = model(x_hist, x_t, x_tp1)
-    # key maps
-    M_up = F.interpolate(out["M"], size=x_t.shape[-2:], mode="bilinear", align_corners=False)
-    delta_u = (out["x_pred"] - out["x_pred_off"]).abs()  # what intervention changed
-    panel = {
-        "x_t": x_t,
-        "x_tp1": x_tp1,
-        "x_pred": out["x_pred"],
-        "x_pred_off": out["x_pred_off"],
-        "M_overlay": (x_t * 0.5 + M_up.expand_as(x_t) * 0.5).clamp(0,1),
-        "delta_u": delta_u.clamp(0,1),
-    }
-    return panel
 
 # ---------------------------
 # Visualization
@@ -375,6 +421,19 @@ def save_viz_grid(
 
         w_noop_val = out["w_noop"][idx, 0].item()
 
+        delta_onoff = (out["x_pred"] - out["x_pred_off"]).abs().mean().item()
+
+        # show bootstrap weight for context (how "no-op" this sample looked)
+        delta_true_val = (x_tp1[idx] - x_t[idx]).abs().mean().item()
+        # avoid batch stats here; just a raw number to compare rows
+        note = f"Δ(on,off)={delta_onoff:.3g}  w_noop={w_noop_val:.2f}  |Δ_true|={delta_true_val:.3g}"
+
+        # Per-image min/max normalization for display (spatial dims)
+        mmin = M_up.amin(dim=(-2,-1), keepdim=True)
+        mmax = M_up.amax(dim=(-2,-1), keepdim=True)
+        M_disp = (M_up - mmin) / (mmax - mmin + 1e-6)
+        mask_overlay = (x_t[idx] * 0.5 + M_disp[idx].cpu() * 0.5).clamp(0,1)
+
         row: List[TileSpec] = [
             TileSpec(
                 image=_to_pil(x_t[idx]),
@@ -395,13 +454,13 @@ def save_viz_grid(
                 top_label=f"{labelB} (t+1)",
             ),
             TileSpec(
-                image=_to_pil((x_t[idx] * 0.5 + M_up[idx].cpu() * 0.5).clamp(0,1)),
+                image=_to_pil(mask_overlay),
                 top_label=f"mask overlay",
                 top_color=(255, 255, 200),
             ),
             TileSpec(
                 image=_to_pil(delta_u[idx].cpu().clamp(0,1)),
-                top_label=f"Δ(u) w={w_noop_val:.2f}",
+                top_label=f"Δ(u) w={w_noop_val:.2f} {note}",
                 top_color=(220, 220, 255),
             ),
         ]
@@ -523,6 +582,8 @@ def train(cfg: TrainCfg):
     q_psnr, q_infl = deque(maxlen=win), deque(maxlen=win)
     q_gmodel = deque(maxlen=win)
     q_data_time, q_forward_time, q_backward_time = deque(maxlen=win), deque(maxlen=win), deque(maxlen=win)
+    q_delta_onoff, q_mean_M = deque(maxlen=win), deque(maxlen=win)
+
     step_time_accum = 0.0
     step_time_count = 0
 
@@ -594,6 +655,15 @@ def train(cfg: TrainCfg):
                 q_forward_time.append(forward_time * 1000)
                 q_backward_time.append(backward_time * 1000)
 
+                x_t = A
+                delta_onoff = (out["x_pred"] - out["x_pred_off"]).abs().mean().item()
+                m_up = F.interpolate(out["M"], size=x_t.shape[-2:], mode="bilinear", align_corners=False)
+                mean_M = m_up.mean().item()
+
+                print(f"[sanity] Δ(on,off): {delta_onoff:.6f}  mean(M): {mean_M:.4f}")
+                q_delta_onoff.append(delta_onoff)
+                q_mean_M.append(mean_M)
+
             if (cfg.log_every > 0) and (global_step % cfg.log_every == 0):
                 avg = lambda q: (sum(q)/len(q)) if len(q) else 0.0
                 avg_step_time = (step_time_accum / step_time_count) if step_time_count else 0.0
@@ -607,13 +677,14 @@ def train(cfg: TrainCfg):
                 h = elapsed // 3600
                 m = (elapsed % 3600) // 60
                 s = elapsed % 60
+
                 print(
                     f"[{h:02d}:{m:02d}:{s:02d}] "
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg(q_ltot):.4f} | "
                     f"Lrec {avg(q_rec):.4f} Lcf {avg(q_cf):.4f} Lkl {avg(q_kl):.5f} "
                     f"Lu {avg(q_u):.5f} LM {avg(q_M):.5f} Ltv {avg(q_tv):.5f} Lortho {avg(q_ortho):.4f} | "
-                    f"PSNR {avg(q_psnr):.2f}dB infl {avg(q_infl):.3f} | "
+                    f"PSNR {avg(q_psnr):.2f}dB infl {avg(q_infl):.3f} | Δ(on,off) {avg(q_delta_onoff):.4f} | mean(M) {avg(q_mean_M):.3f} |"
                     f"∥g∥ {avg(q_gmodel):.3e} | "
                     f"timing: data {avg(q_data_time):.1f}ms fwd {avg(q_forward_time):.1f}ms bwd {avg(q_backward_time):.1f}ms | "
                     f"step_time {avg_step_time*1000:.1f} ms  ({throughput:.1f} samples/s)"
