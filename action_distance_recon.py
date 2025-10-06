@@ -164,6 +164,18 @@ class Decoder(nn.Module):
         r = self.refine(torch.cat([x_hat0.detach(), x_hat0], dim=1))
         return (x_hat0 + r).clamp(0.0, 1.0)
 
+    def self_refine_train(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Trainable self-refine: decode base x_hat0, then refine using x_hat0 as context
+        (no torch.no_grad), so gradients flow through refine and base paths.
+        """
+        h = self.fc(z).view(-1, 256, 15, 14)
+        h = self.pre(h)
+        x_hat0 = torch.sigmoid(self.net(h))
+        r = self.refine(torch.cat([x_hat0, x_hat0], dim=1))
+        x_hat = (x_hat0 + r).clamp(0.0, 1.0)
+        return x_hat
+
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
     return tensor_to_pil(t, denormalize=_denormalize_tensor)
@@ -369,7 +381,7 @@ def save_full_interpolation_grid(
     dec_zA = dec(zA, x=A_dev)
     dec_zB = dec(zB, x=B_dev)
 
-    t_vals = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], device=device)
+    t_vals = torch.tensor([0.0, 0.01, 0.2, 0.4, 0.6, 0.8, 0.99, 1.0], device=device)
     mid_t_vals = t_vals[1:-1]
     if mid_t_vals.numel() > 0:
         if False: # cfg.interp_mode.lower() == "slerp":
@@ -579,19 +591,28 @@ class TrainCfg:
     interp_vis_contrast: float = 1.0
     normalize_mids: bool = False
     interp_context: str = "endpoints"  # 'none' | 'self' | 'blend' | 'endpoints'
+
     # Refinement options
     use_refine: bool = False
     refine_ch: int = 64
     self_refine_mids: bool = False
+
+    # Teach base decoder (no-refine) to reconstruct a bit
+    lambda_no_refine: float = 0.1
+
+    # Teach refinement to use BLENDED context x=(1-t)A+tB for mixed latents
+    lambda_blend_ctx: float = 0.0    # try 0.1 to turn on
+
+    # Teach self-refine path (no external context) to do something useful
+    lambda_self_refine: float = 0.0  # try 0.05–0.1
+
     # Latent mixup (training only)
     lambda_latent_mix: float = 0.0   # set >0 to enable (e.g., 0.1)
     mixup_alpha: float = 0.5         # Beta(alpha,alpha), or fixed 0<lambda<1 if <=0
 
     # Visualization diagnostics (no training effect)
-    viz_diag: bool = False           # dump raw mids, add borders, synthetic mids
+    viz_diag: bool = False           # dump raw mids, add borders, synthetic mids,
 
-    # Teach base decoder (no-refine) to reconstruct a bit
-    lambda_no_refine: float = 0.1
 
 
 # --------------------------------------------------------------------------------------
@@ -736,6 +757,13 @@ def train(cfg: TrainCfg):
             else:
                 loss_patch = torch.tensor([float('nan')], device=xA_rec.device)
 
+            # --- Base-path supervision (no refine) so mids aren’t gray ---
+            loss_no_ref = 0.0
+            if cfg.lambda_no_refine > 0.0:
+                xA_base = dec.decode_no_refine(zA)
+                xB_base = dec.decode_no_refine(zB)
+                loss_no_ref = F.l1_loss(xA_base, A) + F.l1_loss(xB_base, B)
+
             # ---- Latent mixup regularizer (teach decoder to handle interpolations) ----
             mixup_loss = 0.0
             if cfg.lambda_latent_mix > 0.0:
@@ -752,13 +780,53 @@ def train(cfg: TrainCfg):
                 x_mix_rec = dec.decode_no_refine(z_mix)
                 mixup_loss = F.l1_loss(x_mix_rec, x_mix)
 
+            # ---- Blended-context supervision (teaches the REFINE path for "blend" viz) ----
+            blend_ctx_loss = 0.0
+            if cfg.lambda_blend_ctx > 0.0:
+                Bsz = A.shape[0]
+                # use the same lambda as above if available, otherwise sample fresh
+                if not ('lam' in locals()):
+                    if cfg.mixup_alpha > 0:
+                        lam = torch.distributions.Beta(cfg.mixup_alpha, cfg.mixup_alpha).sample((Bsz,)).to(device)
+                    else:
+                        lam = torch.full((Bsz,), 0.5, device=device)
+                    lam = lam.view(Bsz, 1, 1, 1)
+                # build blended latent and blended context image
+                z_blend = (lam.view(Bsz,1) * zA + (1 - lam).view(Bsz,1) * zB)
+                x_blend = lam * A + (1 - lam) * B
+                # decode WITH blended context through the normal forward (refine) path
+                x_blend_rec = dec(z_blend, x=x_blend)
+                blend_ctx_loss = F.l1_loss(x_blend_rec, x_blend)
+
+            # ---- Self-refine supervision (teach 'self' viz mode) ----
+            self_refine_loss = 0.0
+            if cfg.lambda_self_refine > 0.0:
+                # endpoints
+                xA_self = dec.self_refine_train(zA)
+                xB_self = dec.self_refine_train(zB)
+                self_refine_loss = F.l1_loss(xA_self, A) + F.l1_loss(xB_self, B)
+                # optional: blended mids too (pairs with blend_ctx supervision)
+                if cfg.lambda_blend_ctx > 0.0:
+                    if not ('lam' in locals()):
+                        Bsz = A.shape[0]
+                        if cfg.mixup_alpha > 0:
+                            lam = torch.distributions.Beta(cfg.mixup_alpha, cfg.mixup_alpha).sample((Bsz,)).to(device)
+                        else:
+                            lam = torch.full((Bsz,), 0.5, device=device)
+                        lam = lam.view(Bsz, 1, 1, 1)
+                    z_blend = lam.view(Bsz,1) * zA + (1 - lam).view(Bsz,1) * zB
+                    x_blend = lam * A + (1 - lam) * B
+                    x_blend_self = dec.self_refine_train(z_blend)
+                    self_refine_loss = self_refine_loss + F.l1_loss(x_blend_self, x_blend)
 
             loss = (
                 cfg.lambda_l1 * loss_l1 +
                 cfg.lambda_ms_ssim * loss_ms +
                 cfg.lambda_patch * loss_patch +
                 cfg.lambda_latent_mix * mixup_loss +
-                cfg.lambda_no_refine * loss_no_ref
+                cfg.lambda_no_refine * loss_no_ref +
+                cfg.lambda_self_refine * self_refine_loss +
+                cfg.lambda_blend_ctx * blend_ctx_loss
             )
 
 
@@ -804,7 +872,14 @@ def train(cfg: TrainCfg):
                     loss_terms.append(f"MS-SSIM {avg_ms:.4f}")
                 if cfg.lambda_patch > 0:
                     loss_terms.append(f"Patch {avg_patch:.4f}")
+                if cfg.lambda_latent_mix > 0.0:
+                    loss_terms.append(f"Mix {float(mixup_loss):.4f}")
+                if cfg.lambda_no_refine > 0.0:
+                    loss_terms.append(f"NoRef {float(loss_no_ref):.4f}")
+                if cfg.lambda_blend_ctx > 0.0:
+                    loss_terms.append(f"BlendCtx {float(blend_ctx_loss):.4f}")
                 loss_detail = " ".join(loss_terms)
+
                 print(
                     f"[{h:02d}:{m:02d}:{s:02d}] "
                     f"ep {ep:02d} step {global_step:06d} | "
@@ -926,7 +1001,7 @@ def parse_args():
     ap.add_argument("--num_workers", type=int, default=2)
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--max_step_gap", type=int, default=10)
-    ap.add_argument("--viz_every", type=int, default=200)
+    ap.add_argument("--viz_every", type=int, default=50)
     ap.add_argument("--log_every", type=int, default=50)
     ap.add_argument(
         "--simple_viz",
@@ -955,8 +1030,13 @@ def parse_args():
                     help="Beta(alpha,alpha) for mixup λ. Use <=0 for fixed 0.5.")
     ap.add_argument("--self_refine_mids", action="store_true",
                     help="Allow a self-refine pass for interpolated tiles (uses x_hat as its own context).")
+    ap.add_argument("--lambda_self_refine", type=float, default=0.0,
+                    help="Weight for self-refine loss (endpoints + optional blended mids). Try 0.05.")
     ap.add_argument("--viz_diag", action="store_true",
                     help="Visualization diagnostics: dump raw mids, add borders, and write a synthetic check image.")
+    ap.add_argument("--lambda_blend_ctx", type=float, default=0.0,
+                    help="Weight for blended-context refine loss: supervise dec(z_mix, x=(1-t)A+tB) to match the blended image. Try 0.1.")
+
 
     return ap.parse_args()
 
@@ -991,6 +1071,8 @@ def main():
         lambda_latent_mix=args.lambda_latent_mix,
         mixup_alpha=args.mixup_alpha,
         viz_diag=args.viz_diag,
+        lambda_blend_ctx=args.lambda_blend_ctx,
+        lambda_self_refine=args.lambda_self_refine,
     )
     train(cfg)
 
