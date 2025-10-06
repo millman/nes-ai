@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import time
 from collections import deque
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -45,6 +46,21 @@ def _denormalize_tensor(t: torch.Tensor) -> torch.Tensor:
 
 def load_frame_as_tensor(path: Path) -> torch.Tensor:
     return base_load_frame_as_tensor(path, normalize=_normalize_tensor)
+
+
+@lru_cache(maxsize=None)
+def _load_label_font(size: int = 18) -> Optional[ImageFont.ImageFont]:
+    """Cache font loading to avoid leaking file descriptors when viz runs often."""
+    loaders = (
+        lambda: ImageFont.truetype("DejaVuSans.ttf", size=size),
+        ImageFont.load_default,
+    )
+    for loader in loaders:
+        try:
+            return loader()
+        except Exception:
+            continue
+    return None
 
 
 class Encoder(nn.Module):
@@ -248,13 +264,7 @@ def save_full_interpolation_grid(
     total_h = tile_h * Bsz
     canvas = Image.new("RGB", (total_w, total_h), (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", size=18)
-    except Exception:
-        try:
-            font = ImageFont.load_default()
-        except Exception:
-            font = None
+    font = _load_label_font(18)
 
     def annotate(draw_ctx, x, y, txt, fill=(255, 255, 255)):
         if font:
