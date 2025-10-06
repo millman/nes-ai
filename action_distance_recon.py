@@ -81,11 +81,12 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """Symmetric transpose-conv decoder with sigmoid output."""
 
-    def __init__(self, z_dim: int = 64, *, use_refine: bool = False, refine_ch: int = 64):
+    def __init__(self, z_dim: int = 64, *, use_refine: bool, self_refine_mids: bool, refine_ch: int = 64):
 
         super().__init__()
         self.use_refine = use_refine
         self.refine_ch = refine_ch
+        self.self_refine_mids = self_refine_mids
         self.fc = nn.Linear(z_dim, 256 * 15 * 14)
         self.pre = nn.ReLU(inplace=True)
         self.net = nn.Sequential(
@@ -100,15 +101,15 @@ class Decoder(nn.Module):
             nn.Conv2d(16, 3, kernel_size=3, padding=1),
         )
         # --- Residual/refinement head: predicts r from concat([x, x_hat]) ---
-        # Keep it lightweight; GroupNorm groups chosen to be valid for refine_ch, else fall back to 1 group.
-        if self.use_refine:
-            gn_groups = 8 if (refine_ch % 8 == 0 and refine_ch >= 8) else 1
-            self.refine = nn.Sequential(
-                nn.Conv2d(3 * 2, refine_ch, kernel_size=3, padding=1, bias=False),
-                nn.GroupNorm(num_groups=gn_groups, num_channels=refine_ch),
-                nn.SiLU(inplace=True),
-                nn.Conv2d(refine_ch, 3, kernel_size=3, padding=1),
-            )
+        # Always build it so we can self-refine mids even if --use_refine wasn't passed.
+        gn_groups = 8 if (refine_ch % 8 == 0 and refine_ch >= 8) else 1
+        self.refine = nn.Sequential(
+            nn.Conv2d(3 * 2, refine_ch, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=gn_groups, num_channels=refine_ch),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(refine_ch, 3, kernel_size=3, padding=1),
+        )
+
         nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
         if self.fc.bias is not None:
             nn.init.zeros_(self.fc.bias)
@@ -116,11 +117,19 @@ class Decoder(nn.Module):
     def forward(self, z: torch.Tensor, x: torch.Tensor | None = None) -> torch.Tensor:
         h = self.fc(z).view(-1, 256, 15, 14)
         h = self.pre(h)
-        x_hat = torch.sigmoid(self.net(h))
-        # Optional refinement uses original image x as context
+        x_hat0 = torch.sigmoid(self.net(h))
+
+        # Optional refinement: prefer real image x; else (if enabled) self-refine with x_hat as context
         if self.use_refine and (x is not None):
-            r = self.refine(torch.cat([x, x_hat], dim=1))
-            x_hat = (x_hat + r).clamp(0.0, 1.0)
+            r = self.refine(torch.cat([x, x_hat0], dim=1))
+            x_hat = (x_hat0 + r).clamp(0.0, 1.0)
+        elif self.self_refine_mids:
+            x_ctx = x_hat0.detach()
+            r = self.refine(torch.cat([x_ctx, x_hat0], dim=1))
+            x_hat = (x_hat0 + r).clamp(0.0, 1.0)
+        else:
+            x_hat = x_hat0
+
         return x_hat
 
     @torch.no_grad()
@@ -133,9 +142,75 @@ class Decoder(nn.Module):
         h = self.pre(h)
         return torch.sigmoid(self.net(h))
 
+    @torch.no_grad()
+    def decode_logits(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Return pre-sigmoid logits of the base decoder for diagnostics.
+        """
+        h = self.fc(z).view(-1, 256, 15, 14)
+        h = self.pre(h)
+        return self.net(h)  # (N,3,H,W) pre-sigmoid
+
+    @torch.no_grad()
+    def decode_self_refine(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Decode latents and apply a single self-refine pass: uses x_hat as its own context.
+        This is purely for visualization of mids (no ground-truth context available).
+        """
+        h = self.fc(z).view(-1, 256, 15, 14)
+        h = self.pre(h)
+        x_hat0 = torch.sigmoid(self.net(h))
+        # self-refine even if use_refine=False (refine head is always built now)
+        r = self.refine(torch.cat([x_hat0.detach(), x_hat0], dim=1))
+        return (x_hat0 + r).clamp(0.0, 1.0)
+
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
     return tensor_to_pil(t, denormalize=_denormalize_tensor)
+
+def _to_uint8_bchw(imgs: torch.Tensor) -> torch.Tensor:
+    """
+    imgs: (N,C,H,W) in [0,1] float -> uint8 tensor (N,C,H,W) without normalization.
+    """
+    return (imgs.clamp(0,1) * 255.0 + 0.5).floor().to(torch.uint8)
+
+def _safe_norm01(img: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """
+    Per-image normalization to [0,1] that avoids collapse when max≈min.
+    img: (C,H,W) float
+    """
+    mn = img.amin(dim=(1,2), keepdim=True)
+    mx = img.amax(dim=(1,2), keepdim=True)
+    rng = torch.maximum(mx - mn, torch.tensor(eps, device=img.device, dtype=img.dtype))
+    return (img - mn) / rng
+
+def _boost_contrast01(img: torch.Tensor, k: float) -> torch.Tensor:
+    """
+    Linear contrast boost around 0.5 in [0,1]: y = clamp((x-0.5)*k + 0.5, 0, 1)
+    """
+    if k is None or k <= 1.0:
+        return img
+    return ((img - 0.5) * k + 0.5).clamp(0, 1)
+
+def _save_tensor_png(path: Path, img_chw: torch.Tensor) -> None:
+    """Save a single (C,H,W) float [0,1] as PNG without any normalization magic."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = img_chw.detach().clamp(0,1).to("cpu")
+    pil = Image.fromarray((img.permute(1,2,0).numpy()*255.0 + 0.5).astype("uint8"))
+    pil.save(path)
+
+def _draw_border_uint8(img_chw_u8: torch.Tensor, thickness: int = 1) -> torch.Tensor:
+    """Draw a white border on a uint8 (C,H,W) image tensor."""
+    c,h,w = img_chw_u8.shape
+    img = img_chw_u8.clone()
+    img[:, :thickness, :] = 255
+    img[:, -thickness:, :] = 255
+    img[:, :, :thickness] = 255
+    img[:, :, -thickness:] = 255
+    return img
+
+def _annotate_minmax(tile: torch.Tensor) -> str:
+    return f"min={tile.amin().item():.4f} max={tile.amax().item():.4f} mean={tile.mean().item():.4f}"
 
 
 def _psnr_01(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -239,6 +314,30 @@ def focal_patch_l1_loss(
     return loss.mean()
 
 
+# --------------------------- Latent helpers ---------------------------------
+def _slerp(zA: torch.Tensor, zB: torch.Tensor, t: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    """
+    Spherical interpolation along unit hypersphere per pair in the batch.
+    zA,zB: (B, Z); t: scalar or (T,) or (T,B)
+    Returns: (T,B,Z) if t is (T,) else (B,Z) for scalar.
+    """
+    def _unit(x): return x / (x.norm(dim=-1, keepdim=True).clamp_min(eps))
+    a = _unit(zA); b = _unit(zB)
+    dot = (a * b).sum(dim=-1).clamp(-1 + 1e-6, 1 - 1e-6)  # (B,)
+    omega = torch.acos(dot)                                 # (B,)
+    so = torch.sin(omega).clamp_min(eps)
+    if t.ndim == 0:
+        t = t.view(1)
+    if t.ndim == 1:
+        t = t[:, None]                                     # (T,1)
+    t = t.to(zA.device, zA.dtype)
+    # (T,B) weights
+    w1 = torch.sin((1 - t) * omega[None, :]) / so[None, :]
+    w2 = torch.sin(t * omega[None, :]) / so[None, :]
+    out = w1[..., None] * a[None, :, :] + w2[..., None] * b[None, :, :]
+    return out
+
+
 @torch.no_grad()
 def save_full_interpolation_grid(
     enc: Encoder,
@@ -249,6 +348,10 @@ def save_full_interpolation_grid(
     pathsB: List[str],
     out_path: Path,
     device: torch.device,
+    viz_diag: bool,
+    interp_context: str,
+    normalize_mids: bool,
+    interp_vis_contrast: float,
 ):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Bsz = min(A.shape[0], 8)
@@ -269,17 +372,79 @@ def save_full_interpolation_grid(
     t_vals = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], device=device)
     mid_t_vals = t_vals[1:-1]
     if mid_t_vals.numel() > 0:
-        z_interp = torch.stack([(1.0 - t) * zA + t * zB for t in mid_t_vals], dim=0)  # (Tmid, B, Z)
+        if False: # cfg.interp_mode.lower() == "slerp":
+            z_interp = _slerp(zA, zB, mid_t_vals)  # (Tmid, B, Z) on unit sphere
+        else:
+            z_interp = torch.stack([(1.0 - t) * zA + t * zB for t in mid_t_vals], dim=0)  # (Tmid, B, Z)
+
+            #z_interp = torch.stack([(1.0 - t) * zA.detach() + t * zB.detach() for t in mid_t_vals], dim=0)
+
         Tmid, Bsz, zdim = z_interp.shape
         _, C, H, W = A_dev.shape  # A_dev: (B, 3, H, W)
         z_interp_flat = z_interp.reshape(Tmid * Bsz, zdim)
-        # Decode mids with refinement fully disabled to avoid accidental residual use
-        interp_decoded_flat = dec.decode_no_refine(z_interp_flat)  # (Tmid*B, 3, H, W)
-        interp_decoded = interp_decoded_flat.reshape(Tmid, Bsz, C, H, W)
+
+        # ---- Choose how to decode mids ----
+        interp_context = interp_context.lower()
+        assert interp_context in ("none", "self", "blend", "endpoints"), f"bad interp_context={interp_context}"
+        if interp_context == "none":
+            interp_decoded_flat = dec.decode_no_refine(z_interp_flat)
+            ctx_used = "none"
+        elif interp_context == "self":
+            interp_decoded_flat = dec.decode_self_refine(z_interp_flat)
+            ctx_used = "self"
+        elif interp_context == "blend":
+            # build blended context x = (1-t)*A + t*B matching each z_interp (Tmid*B, 3, H, W)
+            # expand A_dev/B_dev to (Tmid,B,3,H,W) with per-row t
+            lam = mid_t_vals.view(Tmid, 1, 1, 1, 1)  # (Tmid,1,1,1,1)
+            x_blend = (1.0 - lam) * A_dev[None, ...] + lam * B_dev[None, ...]  # (Tmid,B,3,H,W)
+            x_blend_flat = x_blend.reshape(Tmid * Bsz, C, H, W)
+            interp_decoded_flat = dec(z_interp_flat, x=x_blend_flat)
+            ctx_used = "blend"
+        else:  # 'endpoints'
+            # Use A as context for t<0.5, else B
+            # Build per-sample contexts aligned with z_interp_flat ordering
+            x_ctx = []
+            for ti, tval in enumerate(mid_t_vals.tolist()):
+                if tval < 0.5:
+                    x_ctx.append(A_dev)
+                else:
+                    x_ctx.append(B_dev)
+            x_ctx = torch.stack(x_ctx, dim=0).reshape(Tmid * Bsz, C, H, W)
+            interp_decoded_flat = dec(z_interp_flat, x=x_ctx)
+            ctx_used = "endpoints"
+
+        # Prepare a copy for optional per-tile normalization/contrast (viz only)
+        mids_flat = interp_decoded_flat
+        if normalize_mids:
+            mids_flat = torch.stack([_safe_norm01(m) for m in mids_flat], dim=0)
+            mids_flat = _boost_contrast01(mids_flat, interp_vis_contrast)
+
         # Quick sanity check to help diagnose "empty" outputs
-        if False:
+        if True:
             mn, mx = interp_decoded_flat.min().item(), interp_decoded_flat.max().item()
-            print(f"[interp sanity] min={mn:.4f} max={mx:.4f} shape={tuple(interp_decoded_flat.shape)}")
+            #print(f"[interp sanity] min={mn:.4f} max={mx:.4f} shape={tuple(interp_decoded_flat.shape)}")
+            print(f"[interp sanity] ctx={ctx_used} min={mn:.4f} max={mx:.4f} shape={tuple(mids_flat.shape)} (vis k={interp_vis_contrast})")
+
+        # Final tensor for grid layout (no normalization here; keep the true values)
+        interp_decoded = interp_decoded_flat.reshape(Tmid, Bsz, C, H, W)
+
+        # --- Viz diagnostics: dump raw mids and a synthetic pattern through the same pipe ---
+        if viz_diag:
+            print("VIZ DIAG")
+            dump_dir = out_path.parent / (out_path.stem + "_mids_dump")
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            # save first 8 mids as standalone PNGs (no grids, no normalize)
+            n_dump = min(8, mids_flat.shape[0])
+            for i in range(n_dump):
+                _save_tensor_png(dump_dir / f"mid_{i:02d}.png", mids_flat[i])
+                print("[viz_diag]", i, _annotate_minmax(mids_flat[i]))
+            # also create a synthetic checker/ramp and save it via the SAME path
+            yy = torch.linspace(0,1,H, device=mids_flat.device).view(1,H,1).expand(1,H,W)
+            xx = torch.linspace(0,1,W, device=mids_flat.device).view(1,1,W).expand(1,H,W)
+            checker = (((xx*16).floor() + (yy*16).floor()) % 2)  # 0/1 checker
+            synth = torch.cat([yy, xx, checker], dim=0).clamp(0,1)  # (3,H,W)
+            _save_tensor_png(dump_dir / "synthetic_check.png", synth)
+            print("[viz_diag] wrote synthetic_check.png to ensure save path renders contrast")
     else:
         interp_decoded = torch.empty(0, Bsz, 3, H, W, device=device)
 
@@ -309,7 +474,7 @@ def save_full_interpolation_grid(
             row.append(
                 TileSpec(
                     image=_to_pil(interp_decoded[interp_idx, idx]),
-                    top_label=f"t={t_val:.1f}",
+                    top_label=f"t={t_val:.2f} ({ctx_used})",
                     top_color=(200, 255, 200),
                 )
             )
@@ -410,9 +575,23 @@ class TrainCfg:
     patch_stride: int = 16
     patch_focal_gamma: float = 1.5
     patch_eps: float = 1e-6
+    # Visualization-only knobs
+    interp_vis_contrast: float = 1.0
+    normalize_mids: bool = False
+    interp_context: str = "endpoints"  # 'none' | 'self' | 'blend' | 'endpoints'
     # Refinement options
     use_refine: bool = False
     refine_ch: int = 64
+    self_refine_mids: bool = False
+    # Latent mixup (training only)
+    lambda_latent_mix: float = 0.0   # set >0 to enable (e.g., 0.1)
+    mixup_alpha: float = 0.5         # Beta(alpha,alpha), or fixed 0<lambda<1 if <=0
+
+    # Visualization diagnostics (no training effect)
+    viz_diag: bool = False           # dump raw mids, add borders, synthetic mids
+
+    # Teach base decoder (no-refine) to reconstruct a bit
+    lambda_no_refine: float = 0.1
 
 
 # --------------------------------------------------------------------------------------
@@ -487,7 +666,7 @@ def train(cfg: TrainCfg):
     print(f"[Device] {device} | [Data] train pairs≈{len(ds_tr)}  val pairs≈{len(ds_va)}")
 
     enc = Encoder(cfg.z_dim).to(device)
-    dec = Decoder(cfg.z_dim, use_refine=cfg.use_refine, refine_ch=cfg.refine_ch).to(device)
+    dec = Decoder(cfg.z_dim, use_refine=cfg.use_refine, refine_ch=cfg.refine_ch, self_refine_mids=cfg.self_refine_mids).to(device)
     enc.apply(kaiming_init)
     dec.apply(kaiming_init)
 
@@ -525,6 +704,13 @@ def train(cfg: TrainCfg):
             xB_rec = dec(zB, x=B)
             loss_l1 = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
 
+            # --- Base-path supervision (no refine) so mids aren’t gray ---
+            loss_no_ref = 0.0
+            if cfg.lambda_no_refine > 0.0:
+                xA_base = dec.decode_no_refine(zA)
+                xB_base = dec.decode_no_refine(zB)
+                loss_no_ref = F.l1_loss(xA_base, A) + F.l1_loss(xB_base, B)
+
             if cfg.lambda_ms_ssim > 0:
                 loss_ms = ms_ssim_loss(xA_rec, A) + ms_ssim_loss(xB_rec, B)
             else:
@@ -550,11 +736,31 @@ def train(cfg: TrainCfg):
             else:
                 loss_patch = torch.tensor([float('nan')], device=xA_rec.device)
 
-            loss = cfg.lambda_l1 * loss_l1
-            if cfg.lambda_ms_ssim > 0:
-                loss = loss + cfg.lambda_ms_ssim * loss_ms
-            if cfg.lambda_patch > 0:
-                loss = loss + cfg.lambda_patch * loss_patch
+            # ---- Latent mixup regularizer (teach decoder to handle interpolations) ----
+            mixup_loss = 0.0
+            if cfg.lambda_latent_mix > 0.0:
+                Bsz = A.shape[0]
+                if cfg.mixup_alpha > 0:
+                    lam = torch.distributions.Beta(cfg.mixup_alpha, cfg.mixup_alpha).sample((Bsz,)).to(device)
+                else:
+                    lam = torch.full((Bsz,), 0.5, device=device)  # fixed
+                lam = lam.view(Bsz, 1, 1, 1)  # broadcast over CHW
+                # Latent + image mix
+                z_mix = (lam.view(Bsz,1) * zA + (1 - lam).view(Bsz,1) * zB)
+                x_mix = lam * A + (1 - lam) * B
+                # Decode with (optional) self-refine using x_mix as context if you want; safer is no context:
+                x_mix_rec = dec.decode_no_refine(z_mix)
+                mixup_loss = F.l1_loss(x_mix_rec, x_mix)
+
+
+            loss = (
+                cfg.lambda_l1 * loss_l1 +
+                cfg.lambda_ms_ssim * loss_ms +
+                cfg.lambda_patch * loss_patch +
+                cfg.lambda_latent_mix * mixup_loss +
+                cfg.lambda_no_refine * loss_no_ref
+            )
+
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -634,6 +840,10 @@ def train(cfg: TrainCfg):
                     list(pathsB),
                     out_path,
                     device=device,
+                    viz_diag=cfg.viz_diag,
+                    interp_context=cfg.interp_context,
+                    normalize_mids=cfg.normalize_mids,
+                    interp_vis_contrast=cfg.interp_vis_contrast,
                 )
                 enc.train()
                 dec.train()
@@ -730,10 +940,24 @@ def parse_args():
     ap.add_argument("--patch_stride", type=int, default=16)
     ap.add_argument("--patch_focal_gamma", type=float, default=1.5)
     ap.add_argument("--patch_eps", type=float, default=1e-6)
+    ap.add_argument("--interp_context", type=str, default="endpoints",
+                    choices=["none","self","blend","endpoints"],
+                    help="Decode mids with: no context, self-refine, blended A/B context, or endpoint context.")
     ap.add_argument("--use_refine", action="store_true",
                     help="Enable residual/refinement head: predicts r from [x, x_hat] and applies x_hat+=r.")
     ap.add_argument("--refine_ch", type=int, default=64,
                     help="Hidden channels for the refinement head.")
+    ap.add_argument("--interp_mode", type=str, default="lerp", choices=["lerp", "slerp"],
+                    help="Interpolation mode in latent space for visualization.")
+    ap.add_argument("--lambda_latent_mix", type=float, default=0.0,
+                    help="Weight for latent mixup reconstruction loss. Try 0.1.")
+    ap.add_argument("--mixup_alpha", type=float, default=0.5,
+                    help="Beta(alpha,alpha) for mixup λ. Use <=0 for fixed 0.5.")
+    ap.add_argument("--self_refine_mids", action="store_true",
+                    help="Allow a self-refine pass for interpolated tiles (uses x_hat as its own context).")
+    ap.add_argument("--viz_diag", action="store_true",
+                    help="Visualization diagnostics: dump raw mids, add borders, and write a synthetic check image.")
+
     return ap.parse_args()
 
 
@@ -761,7 +985,12 @@ def main():
         patch_focal_gamma=args.patch_focal_gamma,
         patch_eps=args.patch_eps,
         use_refine=args.use_refine,
+        interp_context=args.interp_context,
         refine_ch=args.refine_ch,
+        self_refine_mids=args.self_refine_mids,
+        lambda_latent_mix=args.lambda_latent_mix,
+        mixup_alpha=args.mixup_alpha,
+        viz_diag=args.viz_diag,
     )
     train(cfg)
 
