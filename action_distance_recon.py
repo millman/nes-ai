@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import time
 from collections import deque
-from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -52,21 +51,6 @@ def load_frame_as_tensor(path: Path) -> torch.Tensor:
     return base_load_frame_as_tensor(path, normalize=_normalize_tensor)
 
 
-@lru_cache(maxsize=None)
-def _load_label_font(size: int = 18) -> Optional[ImageFont.ImageFont]:
-    """Cache font loading to avoid leaking file descriptors when viz runs often."""
-    loaders = (
-        lambda: ImageFont.truetype("DejaVuSans.ttf", size=size),
-        ImageFont.load_default,
-    )
-    for loader in loaders:
-        try:
-            return loader()
-        except Exception:
-            continue
-    return None
-
-
 class Encoder(nn.Module):
     """Compact convolutional encoder for NES frames."""
 
@@ -97,8 +81,11 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """Symmetric transpose-conv decoder with sigmoid output."""
 
-    def __init__(self, z_dim: int = 64):
+    def __init__(self, z_dim: int = 64, *, use_refine: bool = False, refine_ch: int = 64):
+
         super().__init__()
+        self.use_refine = use_refine
+        self.refine_ch = refine_ch
         self.fc = nn.Linear(z_dim, 256 * 15 * 14)
         self.pre = nn.ReLU(inplace=True)
         self.net = nn.Sequential(
@@ -112,15 +99,39 @@ class Decoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(16, 3, kernel_size=3, padding=1),
         )
+        # --- Residual/refinement head: predicts r from concat([x, x_hat]) ---
+        # Keep it lightweight; GroupNorm groups chosen to be valid for refine_ch, else fall back to 1 group.
+        if self.use_refine:
+            gn_groups = 8 if (refine_ch % 8 == 0 and refine_ch >= 8) else 1
+            self.refine = nn.Sequential(
+                nn.Conv2d(3 * 2, refine_ch, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_groups, num_channels=refine_ch),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(refine_ch, 3, kernel_size=3, padding=1),
+            )
         nn.init.kaiming_normal_(self.fc.weight, nonlinearity="relu")
         if self.fc.bias is not None:
             nn.init.zeros_(self.fc.bias)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, z: torch.Tensor, x: torch.Tensor | None = None) -> torch.Tensor:
         h = self.fc(z).view(-1, 256, 15, 14)
         h = self.pre(h)
-        x = self.net(h)
-        return torch.sigmoid(x)
+        x_hat = torch.sigmoid(self.net(h))
+        # Optional refinement uses original image x as context
+        if self.use_refine and (x is not None):
+            r = self.refine(torch.cat([x, x_hat], dim=1))
+            x_hat = (x_hat + r).clamp(0.0, 1.0)
+        return x_hat
+
+    @torch.no_grad()
+    def decode_no_refine(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Decode latents WITHOUT applying refinement, even if use_refine=True.
+        Useful for latent interpolations where we don't have a ground-truth x.
+        """
+        h = self.fc(z).view(-1, 256, 15, 14)
+        h = self.pre(h)
+        return torch.sigmoid(self.net(h))
 
 
 def _to_pil(t: torch.Tensor) -> Image.Image:
@@ -251,14 +262,24 @@ def save_full_interpolation_grid(
     B_dev = to_float01(B, device, non_blocking=False)
     zA = enc(A_dev)
     zB = enc(B_dev)
-    pair_recon = dec(torch.cat([zA, zB], dim=0))
-    dec_zA, dec_zB = pair_recon.chunk(2, dim=0)
+    # Decode endpoints with refinement context (when available)
+    dec_zA = dec(zA, x=A_dev)
+    dec_zB = dec(zB, x=B_dev)
 
     t_vals = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], device=device)
     mid_t_vals = t_vals[1:-1]
     if mid_t_vals.numel() > 0:
-        z_interp = torch.stack([(1.0 - t) * zA + t * zB for t in mid_t_vals], dim=0)
-        interp_decoded = dec(z_interp.view(-1, zA.shape[1])).view(mid_t_vals.numel(), Bsz, 3, H, W)
+        z_interp = torch.stack([(1.0 - t) * zA + t * zB for t in mid_t_vals], dim=0)  # (Tmid, B, Z)
+        Tmid, Bsz, zdim = z_interp.shape
+        _, C, H, W = A_dev.shape  # A_dev: (B, 3, H, W)
+        z_interp_flat = z_interp.reshape(Tmid * Bsz, zdim)
+        # Decode mids with refinement fully disabled to avoid accidental residual use
+        interp_decoded_flat = dec.decode_no_refine(z_interp_flat)  # (Tmid*B, 3, H, W)
+        interp_decoded = interp_decoded_flat.reshape(Tmid, Bsz, C, H, W)
+        # Quick sanity check to help diagnose "empty" outputs
+        if False:
+            mn, mx = interp_decoded_flat.min().item(), interp_decoded_flat.max().item()
+            print(f"[interp sanity] min={mn:.4f} max={mx:.4f} shape={tuple(interp_decoded_flat.shape)}")
     else:
         interp_decoded = torch.empty(0, Bsz, 3, H, W, device=device)
 
@@ -335,8 +356,8 @@ def save_simple_debug_grid(
 
     zA = enc(A_dev)
     zB = enc(B_dev)
-    rec_pair = dec(torch.cat([zA, zB], dim=0)).to("cpu")
-    A_rec, B_rec = rec_pair.chunk(2, dim=0)
+    A_rec = dec(zA, x=A_dev).to("cpu")
+    B_rec = dec(zB, x=B_dev).to("cpu")
 
     cols = [
         ("A raw", A),
@@ -389,6 +410,9 @@ class TrainCfg:
     patch_stride: int = 16
     patch_focal_gamma: float = 1.5
     patch_eps: float = 1e-6
+    # Refinement options
+    use_refine: bool = False
+    refine_ch: int = 64
 
 
 # --------------------------------------------------------------------------------------
@@ -463,7 +487,7 @@ def train(cfg: TrainCfg):
     print(f"[Device] {device} | [Data] train pairs≈{len(ds_tr)}  val pairs≈{len(ds_va)}")
 
     enc = Encoder(cfg.z_dim).to(device)
-    dec = Decoder(cfg.z_dim).to(device)
+    dec = Decoder(cfg.z_dim, use_refine=cfg.use_refine, refine_ch=cfg.refine_ch).to(device)
     enc.apply(kaiming_init)
     dec.apply(kaiming_init)
 
@@ -496,8 +520,9 @@ def train(cfg: TrainCfg):
             zA = enc(A)
             zB = enc(B)
 
-            xA_rec = dec(zA)
-            xB_rec = dec(zB)
+            # Pass original images as context so the decoder can refine against [x, x_hat]
+            xA_rec = dec(zA, x=A)
+            xB_rec = dec(zB, x=B)
             loss_l1 = F.l1_loss(xA_rec, A) + F.l1_loss(xB_rec, B)
 
             if cfg.lambda_ms_ssim > 0:
@@ -628,8 +653,8 @@ def train(cfg: TrainCfg):
                 B = to_float01(B, device, non_blocking=False)
                 zA = enc(A)
                 zB = enc(B)
-                xA_rec = dec(zA)
-                xB_rec = dec(zB)
+                xA_rec = dec(zA, x=A)
+                xB_rec = dec(zB, x=B)
                 batch_mean = 0.5 * (F.l1_loss(xA_rec, A).item() + F.l1_loss(xB_rec, B).item())
                 va_rec += batch_mean * A.shape[0]
                 if cfg.lambda_patch > 0 and va_patch is not None:
@@ -705,6 +730,10 @@ def parse_args():
     ap.add_argument("--patch_stride", type=int, default=16)
     ap.add_argument("--patch_focal_gamma", type=float, default=1.5)
     ap.add_argument("--patch_eps", type=float, default=1e-6)
+    ap.add_argument("--use_refine", action="store_true",
+                    help="Enable residual/refinement head: predicts r from [x, x_hat] and applies x_hat+=r.")
+    ap.add_argument("--refine_ch", type=int, default=64,
+                    help="Hidden channels for the refinement head.")
     return ap.parse_args()
 
 
@@ -731,6 +760,8 @@ def main():
         patch_stride=args.patch_stride,
         patch_focal_gamma=args.patch_focal_gamma,
         patch_eps=args.patch_eps,
+        use_refine=args.use_refine,
+        refine_ch=args.refine_ch,
     )
     train(cfg)
 
