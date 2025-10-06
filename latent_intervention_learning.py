@@ -523,6 +523,8 @@ def train(cfg: TrainCfg):
     step_time_accum = 0.0
     step_time_count = 0
 
+    start_time = time.monotonic()
+
     for ep in range(1, cfg.epochs+1):
         model.train()
         run_loss = run_n = 0.0
@@ -598,7 +600,12 @@ def train(cfg: TrainCfg):
                     throughput = (cfg.batch_size / avg_step_time)
                 else:
                     throughput = 0.0
+                elapsed = int(time.monotonic() - start_time)
+                h = elapsed // 3600
+                m = (elapsed % 3600) // 60
+                s = elapsed % 60
                 print(
+                    f"[{h:02d}:{m:02d}:{s:02d}] "
                     f"ep {ep:02d} step {global_step:06d} | "
                     f"loss {avg(q_ltot):.4f} | "
                     f"Lrec {avg(q_rec):.4f} Lcf {avg(q_cf):.4f} Lkl {avg(q_kl):.5f} "
