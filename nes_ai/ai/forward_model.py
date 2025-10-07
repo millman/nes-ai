@@ -203,7 +203,7 @@ def push_games(queue: multiprocessing.Queue):
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method("spawn")
+    # torch.multiprocessing.set_start_method("spawn")
 
     queue = multiprocessing.Queue()
 

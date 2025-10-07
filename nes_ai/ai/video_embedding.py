@@ -14,7 +14,7 @@ from huggingface_hub import hf_hub_download
 from transformers import EarlyStoppingCallback as TFEarlyStoppingCallback
 from transformers import VivitConfig, VivitForVideoClassification, VivitImageProcessor
 
-torch.multiprocessing.set_start_method("spawn")
+# torch.multiprocessing.set_start_method("spawn")
 
 
 def main():

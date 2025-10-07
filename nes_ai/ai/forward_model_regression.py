@@ -242,7 +242,7 @@ def push_games(queue: multiprocessing.Queue):
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method("spawn")
+    # multiprocessing.set_start_method("spawn")
     # multiprocessing.set_sharing_strategy('file_system')
 
     queue = multiprocessing.Queue()
