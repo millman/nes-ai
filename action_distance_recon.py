@@ -581,8 +581,8 @@ class TrainCfg:
     lambda_l1: float = 0.5
     lambda_ms_ssim: float = 0.5
     lambda_patch: float = 0.0
-    patch_size: int = 32
-    patch_stride: int = 16
+    patch_size: int = 16
+    patch_stride: int = 8
     patch_focal_gamma: float = 1.5
     patch_eps: float = 1e-6
     # Visualization-only knobs
