@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import itertools
+import logging
 import os
 import random
+import threading
+import traceback
+from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -16,6 +22,140 @@ from .constants import H, W
 
 NormalizeFn = Callable[[torch.Tensor], torch.Tensor]
 LoadFrameFn = Callable[[Path], torch.Tensor]
+
+
+logger = logging.getLogger(__name__)
+
+
+# Toggle via NESAI_LOG_FILE_OPENS to help diagnose leaked file descriptors.
+_FILE_OPEN_LOG_ENV = "NESAI_LOG_FILE_OPENS"
+_file_open_mode = os.environ.get(_FILE_OPEN_LOG_ENV)
+_log_file_opens = bool(_file_open_mode)
+_log_file_stack = bool(_file_open_mode and "stack" in _file_open_mode.lower())
+_open_sequence = itertools.count()
+_open_lock = threading.Lock()
+_active_opens: Dict[int, Path] = {}
+_PROC_FD_CANDIDATES = (
+    Path(f"/proc/{os.getpid()}/fd"),
+    Path("/proc/self/fd"),
+    Path("/dev/fd"),
+)
+
+
+def _get_thread_native_id() -> Optional[int]:
+    get_native_id = getattr(threading, "get_native_id", None)
+    if get_native_id is None:
+        return None
+    try:
+        return get_native_id()
+    except RuntimeError:
+        return None
+
+
+def _scan_fd_dir(path: Path) -> Optional[Tuple[int, Counter[str]]]:
+    try:
+        iterator = os.scandir(path)
+    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+        return None
+    counter: Counter[str] = Counter()
+    total = 0
+    try:
+        for entry in iterator:
+            total += 1
+            target: Optional[str]
+            try:
+                target = os.readlink(entry.path)
+            except OSError:
+                target = None
+            category = "other"
+            if target:
+                lower = target.lower()
+                if "torch_shm_manager" in lower:
+                    category = "torch_shm_manager"
+                elif "pipe" in lower:
+                    category = "pipe"
+                elif "socket" in lower:
+                    category = "socket"
+            counter[category] += 1
+        return total, counter
+    except OSError:
+        return None
+    finally:
+        iterator.close()
+
+
+def _collect_fd_info(candidates: Tuple[Path, ...]) -> Tuple[Optional[int], Optional[Counter[str]]]:
+    for candidate in candidates:
+        info = _scan_fd_dir(candidate)
+        if info is not None:
+            return info
+    return None, None
+
+
+def _collect_thread_fd_info(native_thread_id: Optional[int]) -> Tuple[Optional[int], Optional[Counter[str]]]:
+    if native_thread_id is None:
+        return None, None
+    task_dir = Path(f"/proc/{os.getpid()}/task/{native_thread_id}/fd")
+    info = _scan_fd_dir(task_dir)
+    if info is None:
+        return None, None
+    return info
+
+
+def _format_fd_categories(counter: Optional[Counter[str]]) -> str:
+    if not counter:
+        return ""
+    items = [f"{k}:{counter[k]}" for k in (
+        "torch_shm_manager",
+        "pipe",
+        "socket",
+        "other",
+    ) if counter.get(k)]
+    if not items:
+        return ""
+    return f" fd_types={'/'.join(items)}"
+
+
+def _log_file_event(phase: str, path: Path, *, idx: int, active_count: Optional[int] = None) -> None:
+    if not _log_file_opens:
+        return
+    worker = get_worker_info()
+    worker_id = worker.id if worker is not None else None
+    thread_name = threading.current_thread().name
+    native_thread_id = _get_thread_native_id()
+    proc_fds, proc_fd_types = _collect_fd_info(_PROC_FD_CANDIDATES)
+    thread_fds, thread_fd_types = _collect_thread_fd_info(native_thread_id)
+    image_opens = f" image_opens={active_count}" if active_count is not None else ""
+    proc_fd_summary = _format_fd_categories(proc_fd_types)
+    thread_fd_summary = _format_fd_categories(thread_fd_types)
+    message = (
+        f"{phase} file idx={idx} pid={os.getpid()} thread={thread_name}"
+        f" native_tid={native_thread_id} worker={worker_id}"
+        f" proc_fds={proc_fds}{proc_fd_summary}"
+        f" thread_fds={thread_fds}{thread_fd_summary}{image_opens} path={path}"
+    )
+    if _log_file_stack:
+        stack = "".join(traceback.format_stack(limit=6))
+        logger.warning("%s\nTraceback (most recent call last):\n%s", message, stack.rstrip())
+    else:
+        logger.warning(message)
+
+
+@contextmanager
+def _logged_image_open(path: Path):
+    idx = next(_open_sequence)
+    with _open_lock:
+        _active_opens[idx] = path
+        active_count = len(_active_opens)
+    _log_file_event("OPEN", path, idx=idx, active_count=active_count)
+    try:
+        with Image.open(path) as img:
+            yield img
+    finally:
+        with _open_lock:
+            _active_opens.pop(idx, None)
+            active_count = len(_active_opens)
+        _log_file_event("CLOSE", path, idx=idx, active_count=active_count)
 
 
 def _assert_unit_range(t: torch.Tensor, *, source: Optional[Path] = None) -> None:
@@ -73,7 +213,8 @@ def load_frame_as_tensor(
     resample: int = Image.NEAREST,
 ) -> torch.Tensor:
     """Read state PNG and return normalized tensor."""
-    with Image.open(path) as img:
+    open_ctx = _logged_image_open(path) if _log_file_opens else Image.open(path)
+    with open_ctx as img:
         img = img.convert("RGB").resize((size[1], size[0]), resample=resample)
         tensor = pil_to_tensor(img, normalize=normalize)
         _assert_unit_range(tensor, source=path)
