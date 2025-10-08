@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import logging
+import os
 import time
+import traceback
+import weakref
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 import torch
@@ -38,7 +42,58 @@ from recon import (
 )
 from recon.utils import grad_norm, psnr_01, tensor_to_pil
 
-torch.multiprocessing.set_sharing_strategy('file_system')
+
+_ITER_TRACK_ENV = "NESAI_TRACK_DATALOADER_ITERS"
+_iter_track_mode = os.environ.get(_ITER_TRACK_ENV)
+_track_iters = bool(_iter_track_mode)
+_track_iter_stacks = bool(_iter_track_mode and "stack" in _iter_track_mode.lower())
+_iter_logger = logging.getLogger(__name__)
+_iter_finalizers: Dict[int, weakref.finalize] = {}
+_iter_creation_stacks: Dict[int, str] = {}
+
+
+def _track_dataloader_iter(name: str, iterator: object) -> None:
+    if not _track_iters:
+        return
+    iter_id = id(iterator)
+    creation_stack = "".join(traceback.format_stack(limit=8)) if _track_iter_stacks else None
+    if creation_stack:
+        _iter_logger.warning(
+            "DataLoader iterator %s created (id=%s)\nStack (most recent call last):\n%s",
+            name,
+            iter_id,
+            creation_stack.rstrip(),
+        )
+        _iter_creation_stacks[iter_id] = creation_stack
+    else:
+        _iter_logger.warning("DataLoader iterator %s created (id=%s)", name, iter_id)
+
+    def _on_finalize(iter_name: str = name, iter_id_val: int = iter_id) -> None:
+        stack_info = _iter_creation_stacks.pop(iter_id_val, None)
+        if stack_info and _track_iter_stacks:
+            _iter_logger.warning(
+                "DataLoader iterator %s finalized (id=%s) created at:\n%s",
+                iter_name,
+                iter_id_val,
+                stack_info.rstrip(),
+            )
+        else:
+            _iter_logger.warning("DataLoader iterator %s finalized (id=%s)", iter_name, iter_id_val)
+        _iter_finalizers.pop(iter_id_val, None)
+
+    finalizer = weakref.finalize(iterator, _on_finalize)
+    _iter_finalizers[iter_id] = finalizer
+
+
+def _finalize_tracked_iterator(iterator: object) -> None:
+    if not _track_iters:
+        return
+    iter_id = id(iterator)
+    finalizer = _iter_finalizers.get(iter_id)
+    if finalizer is None:
+        return
+    if finalizer.alive:
+        finalizer()
 
 
 def _normalize_tensor(t: torch.Tensor) -> torch.Tensor:
@@ -593,7 +648,10 @@ def train(cfg: TrainCfg):
         model.train()
         run_loss = run_n = 0.0
 
-        for A, B, pathsA, pathsB in dl_tr:
+        dl_tr_it = iter(dl_tr)
+        _track_dataloader_iter("dl_tr_it", dl_tr_it)
+
+        for A, B, pathsA, pathsB in dl_tr_it:
             step_start = time.perf_counter()
             need_viz = (cfg.viz_every > 0) and (global_step % cfg.viz_every == 0)
             A_cpu = A.detach().clone() if need_viz else None
@@ -708,11 +766,17 @@ def train(cfg: TrainCfg):
         tr_loss = run_loss / max(1, run_n)
         print(f"[ep {ep:02d}] train: loss={tr_loss:.4f}")
 
+        dl_tr_it._shutdown_workers()
+        _finalize_tracked_iterator(dl_tr_it)
+        del dl_tr_it
+
         # ---- Validation ----
         model.eval()
         va_loss = va_n = 0.0
         with torch.no_grad():
-            for A, B, _, _ in dl_va:
+            dl_va_it = iter(dl_va)
+            _track_dataloader_iter("dl_va_it", dl_va_it)
+            for A, B, _, _ in dl_va_it:
                 A = to_float01(A, device, non_blocking=False)
                 B = to_float01(B, device, non_blocking=False)
                 x_hist = torch.zeros(0, device=device)
@@ -728,6 +792,10 @@ def train(cfg: TrainCfg):
                 )
                 va_loss += losses["loss"].item() * A.shape[0]
                 va_n += A.shape[0]
+
+            dl_va_it._shutdown_workers()
+            _finalize_tracked_iterator(dl_va_it)
+            del dl_va_it
         va_loss /= max(1, va_n)
         print(f"[ep {ep:02d}]   val: loss={va_loss:.4f}")
 
