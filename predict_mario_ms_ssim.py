@@ -308,6 +308,8 @@ class Args:
     device: Optional[str] = None
     max_trajs: Optional[int] = None
     save_every: int = 50
+    ms_weight: float = 1.0
+    l1_weight: float = 0.1
 
 
 def main():
@@ -338,7 +340,9 @@ def main():
             yb = yb.to(device)            # (B,3,H,W)  normalized
             y_hat = model(xb)             # (B,3,H,W) still in normalized space
             # NOTE: model outputs normalized tensors; MS-SSIM will unnormalize before scoring.
-            loss = ms_ssim_loss(y_hat, yb)
+            ms_loss = ms_ssim_loss(y_hat, yb)
+            l1_loss = F.l1_loss(y_hat, yb)
+            loss = args.ms_weight * ms_loss + args.l1_weight * l1_loss
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -348,7 +352,10 @@ def main():
             loss_hist.append((global_step, float(loss.item())))
 
             if global_step % 10 == 0:
-                print(f"[ep {ep:02d}] step {global_step:06d} | loss={loss.item():.4f}")
+                print(
+                    f"[ep {ep:02d}] step {global_step:06d} | loss={loss.item():.4f} "
+                    f"(ms={ms_loss.item():.4f}, l1={l1_loss.item():.4f})"
+                )
 
             if global_step % args.save_every == 0:
                 with torch.no_grad():
