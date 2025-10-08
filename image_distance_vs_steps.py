@@ -23,7 +23,8 @@ Outputs (under --out_dir):
               columns:
                 traj_i, i, path_i, traj_j, j, path_j,
                 known_steps (0/1), step_gap (int or ''),
-                pred_pixel_dist (float), v_ab_x, v_ab_y, v_ba_x, v_ba_y
+                pred_pixel_dist (float), pred_vec_x, pred_vec_y,
+                v_ab_x, v_ab_y, v_ba_x, v_ba_y
   - PNG:      scatter_steps_vs_pixels.png      (known pairs only)
   - PNG:      hist_unknown_pixel_distance.png  (unknown pairs only)
   - TXT:      stats.txt                        (summary/correlation stats)
@@ -150,16 +151,14 @@ def load_frame_both(p: Path) -> Tuple[Image.Image, torch.Tensor]:
 def predict_distance(model: DistanceRegressor, device: torch.device,
                      img1_t: torch.Tensor, img2_t: torch.Tensor,
                      bidirectional: bool = True) -> float:
-    """Return scalar pixel distance as ‖v‖ where v is the model's (dx,dy)."""
-    v_ab = model(img1_t.to(device), img2_t.to(device))   # [1,2]
-    d_ab = torch.linalg.norm(v_ab, dim=1)                # [1]
+    """Return scalar pixel distance as ‖v‖ using antisymmetric raw vectors."""
+    v_ab = model(img1_t.to(device), img2_t.to(device))[0].detach().cpu().numpy()
     if bidirectional:
-        v_ba = model(img2_t.to(device), img1_t.to(device))
-        d_ba = torch.linalg.norm(v_ba, dim=1)
-        d = 0.5 * (d_ab + d_ba)
+        v_ba_t = model(img2_t.to(device), img1_t.to(device))[0].detach().cpu().numpy()
+        vec = combine_vectors(v_ab, v_ba_t)
     else:
-        d = d_ab
-    return float(d.item())
+        vec = v_ab
+    return vector_norm(vec)
 
 
 @torch.no_grad()
@@ -180,6 +179,13 @@ def predict_vectors(model: DistanceRegressor, device: torch.device,
 
 def vector_norm(v: np.ndarray) -> float:
     return float(np.sqrt((v**2).sum()))
+
+
+def combine_vectors(v_ab: np.ndarray, v_ba: Optional[np.ndarray]) -> np.ndarray:
+    """Return a single antisymmetric A→B vector."""
+    if v_ba is None:
+        return v_ab
+    return 0.5 * (v_ab - v_ba)
 
 
 # ---------------------------------------------------------------------
@@ -326,8 +332,8 @@ def eval_vs_steps(
     rows = []
 
     known_x_steps = []  # steps
-    known_y_pix   = []  # inferred pixel distance (mean magnitude)
-    unknown_pix   = []  # inferred pixel distance (mean magnitude for cross-traj)
+    known_y_pix   = []  # ‖antisymmetric v‖ for known pairs
+    unknown_pix   = []  # ‖antisymmetric v‖ for cross-traj pairs
 
     # sample saving
     save_known_dir = out_dir / "samples" / "known"
@@ -350,22 +356,22 @@ def eval_vs_steps(
             img_a, a_t = load_frame_both(p_i)
             img_b, b_t = load_frame_both(p_j)
 
-            v_ab, v_ba = predict_vectors(model, device, a_t, b_t, bidirectional=True)
-            mags = [vector_norm(v_ab)]
-            if v_ba is not None: mags.append(vector_norm(v_ba))
-            pred_mean = float(sum(mags)/len(mags))
+            v_ab, v_ba = predict_vectors(model, device, a_t, b_t, bidirectional=bidirectional)
+            pred_vec = combine_vectors(v_ab, v_ba)
+            pred_norm = vector_norm(pred_vec)
 
             rows.append({
                 "traj_i": traj_name, "i": i, "path_i": str(p_i),
                 "traj_j": traj_name, "j": j, "path_j": str(p_j),
                 "known_steps": 1, "step_gap": gap,
-                "pred_pixel_dist": pred_mean,
+                "pred_pixel_dist": pred_norm,
+                "pred_vec_x": pred_vec[0], "pred_vec_y": pred_vec[1],
                 "v_ab_x": v_ab[0], "v_ab_y": v_ab[1],
                 "v_ba_x": (v_ba[0] if v_ba is not None else ""),
                 "v_ba_y": (v_ba[1] if v_ba is not None else ""),
             })
             known_x_steps.append(gap)
-            known_y_pix.append(pred_mean)
+            known_y_pix.append(pred_norm)
 
             if n_saved_known < save_samples:
                 fname = f"{t:06d}_{traj_name}_{i:06d}__{traj_name}_{j:06d}.png"
@@ -394,22 +400,22 @@ def eval_vs_steps(
                 img_a, a_t = load_frame_both(p_i)
                 img_b, b_t = load_frame_both(p_j)
 
-                v_ab, v_ba = predict_vectors(model, device, a_t, b_t, bidirectional=True)
-                mags = [vector_norm(v_ab)]
-                if v_ba is not None: mags.append(vector_norm(v_ba))
-                pred_mean = float(sum(mags)/len(mags))
+                v_ab, v_ba = predict_vectors(model, device, a_t, b_t, bidirectional=bidirectional)
+                pred_vec = combine_vectors(v_ab, v_ba)
+                pred_norm = vector_norm(pred_vec)
 
                 rows.append({
                     "traj_i": traj_i, "i": i, "path_i": str(p_i),
                     "traj_j": traj_i, "j": j, "path_j": str(p_j),
                     "known_steps": 1, "step_gap": abs(j-i),
-                    "pred_pixel_dist": pred_mean,
+                    "pred_pixel_dist": pred_norm,
+                    "pred_vec_x": pred_vec[0], "pred_vec_y": pred_vec[1],
                     "v_ab_x": v_ab[0], "v_ab_y": v_ab[1],
                     "v_ba_x": (v_ba[0] if v_ba is not None else ""),
                     "v_ba_y": (v_ba[1] if v_ba is not None else ""),
                 })
                 known_x_steps.append(abs(j-i))
-                known_y_pix.append(pred_mean)
+                known_y_pix.append(pred_norm)
 
                 if n_saved_known < save_samples:
                     fname = f"{t:06d}_{traj_i}_{i:06d}__{traj_i}_{j:06d}.png"
@@ -426,21 +432,21 @@ def eval_vs_steps(
                 img_a, a_t = load_frame_both(p_i)
                 img_b, b_t = load_frame_both(p_j)
 
-                v_ab, v_ba = predict_vectors(model, device, a_t, b_t, bidirectional=True)
-                mags = [vector_norm(v_ab)]
-                if v_ba is not None: mags.append(vector_norm(v_ba))
-                pred_mean = float(sum(mags)/len(mags))
+                v_ab, v_ba = predict_vectors(model, device, a_t, b_t, bidirectional=bidirectional)
+                pred_vec = combine_vectors(v_ab, v_ba)
+                pred_norm = vector_norm(pred_vec)
 
                 rows.append({
                     "traj_i": traj_i, "i": i, "path_i": str(p_i),
                     "traj_j": traj_j, "j": j, "path_j": str(p_j),
                     "known_steps": 0, "step_gap": "",
-                    "pred_pixel_dist": pred_mean,
+                    "pred_pixel_dist": pred_norm,
+                    "pred_vec_x": pred_vec[0], "pred_vec_y": pred_vec[1],
                     "v_ab_x": v_ab[0], "v_ab_y": v_ab[1],
                     "v_ba_x": (v_ba[0] if v_ba is not None else ""),
                     "v_ba_y": (v_ba[1] if v_ba is not None else ""),
                 })
-                unknown_pix.append(pred_mean)
+                unknown_pix.append(pred_norm)
 
                 if n_saved_unknown < save_samples:
                     fname = f"{t:06d}_{traj_i}_{i:06d}__{traj_j}_{j:06d}.png"
@@ -458,6 +464,7 @@ def eval_vs_steps(
         w = csv.DictWriter(f, fieldnames=[
             "traj_i","i","path_i","traj_j","j","path_j",
             "known_steps","step_gap","pred_pixel_dist",
+            "pred_vec_x","pred_vec_y",
             "v_ab_x","v_ab_y","v_ba_x","v_ba_y"
         ])
         w.writeheader()
@@ -470,7 +477,7 @@ def eval_vs_steps(
         plt.figure(figsize=(7,5))
         plt.scatter(known_x_steps, known_y_pix, s=8, alpha=0.5)
         plt.xlabel("Trajectory steps (Δt)")
-        plt.ylabel("Inferred pixel distance (‖v‖ mean)")
+        plt.ylabel("Inferred pixel distance (‖antisym v‖)")
         plt.title(f"Steps vs Pixel Distance (known pairs N={len(known_x_steps)})")
         plt.tight_layout()
         plt.savefig(sc_path, dpi=150)
@@ -484,7 +491,7 @@ def eval_vs_steps(
         hist_path = out_dir / "hist_unknown_pixel_distance.png"
         plt.figure(figsize=(7,5))
         plt.hist(unknown_pix, bins=60)
-        plt.xlabel("Inferred pixel distance (‖v‖ mean)")
+        plt.xlabel("Inferred pixel distance (‖antisym v‖)")
         plt.ylabel("Count")
         plt.title(f"Unknown (cross-traj) pairs pixel-distance histogram (N={len(unknown_pix)})")
         plt.tight_layout()
