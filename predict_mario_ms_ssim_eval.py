@@ -23,13 +23,19 @@ from predict_mario_ms_ssim import (
 @dataclass
 class Args:
     traj_dir: str = "data.image_distance.train_levels_1_2"
-    checkpoint: str = "out.predict_mario_ms_ssim/run__2025-10-08_11-45-38/last.pt"
     out_dir: str = "out.predict_mario_ms_ssim_eval"
     num_samples: int = 10
     max_trajs: Optional[int] = None
     seed: int = 0
     device: Optional[str] = None
     save_name: Optional[str] = None
+
+    # Trained models:
+    #   out.predict_mario_ms_ssim/run__2025-10-08_11-45-38/last.pt
+    #     - trained on: data.image_distance.train_levels_1_2
+    #     - uses MS-SSIM loss only.
+    #
+    checkpoint: str = "out.predict_mario_ms_ssim/run__2025-10-08_11-45-38/last.pt"
 
 
 @torch.no_grad()
