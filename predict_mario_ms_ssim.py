@@ -12,23 +12,20 @@ Run:
 """
 from __future__ import annotations
 
-import argparse
 import csv
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import numpy as np
-from PIL import Image
-
+import tyro
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, RandomSampler
-
-import matplotlib.pyplot as plt
 import torchvision.transforms as T
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 from torchvision.models import resnet18, ResNet18_Weights
 
 
@@ -301,30 +298,20 @@ def plot_loss(hist: List[Tuple[int,float]], out_dir: Path, step: int) -> None:
 # --------------------------------------------------------------------------------------
 @dataclass
 class Args:
-    traj_dir: str
-    out_dir: str = "out.ms_ssim_unet"
+    traj_dir: str = "data.image_distance.train_levels_1_2"
+    out_dir: str = "out.predict_mario_ms_ssim"
     batch_size: int = 32
     lr: float = 1e-4
-    epochs: int = 2
+    epochs: int = 1000
     steps_per_epoch: int = 100
-    num_workers: int = 2
+    num_workers: int = 0
     device: Optional[str] = None
     max_trajs: Optional[int] = None
     save_every: int = 50
 
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--traj_dir", type=str, required=True)
-    ap.add_argument("--out_dir", type=str, default="out.ms_ssim_unet")
-    ap.add_argument("--batch_size", type=int, default=32)
-    ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--epochs", type=int, default=1000)
-    ap.add_argument("--steps_per_epoch", type=int, default=100)
-    ap.add_argument("--num_workers", type=int, default=0)
-    ap.add_argument("--device", type=str, default=None)
-    ap.add_argument("--max_trajs", type=int, default=None)
-    ap.add_argument("--save_every", type=int, default=50)
-    args = ap.parse_args()
+    args = tyro.cli(Args)
 
     device = pick_device(args.device)
     print(f"[Device] {device}")

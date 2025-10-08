@@ -245,7 +245,7 @@ class Args:
     batches_per_epoch: int = 8  # number of batches per epoch
     num_epochs: int = 1024 * 1024
     lr: float = 1e-4
-    output_dir: str = "predict_outputs"  # where to save outputs
+    output_dir: str = "out.predict_mario"  # where to save outputs
     pipeflush: bool = False
 
 
