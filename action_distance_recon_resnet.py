@@ -319,8 +319,20 @@ def _ssim_components(
 
     numerator = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
     denominator = (mu_x_sq + mu_y_sq + C1) * (sigma_x_sq + sigma_y_sq + C2)
+    cs_denominator = sigma_x_sq + sigma_y_sq + C2
+
+    eps = torch.finfo(x.dtype).eps if x.dtype.is_floating_point else 1e-12
+    denominator = denominator.clamp_min(eps)
+    cs_denominator = cs_denominator.clamp_min(eps)
+
     ssim_map = numerator / denominator
-    cs_map = (2 * sigma_xy + C2) / (sigma_x_sq + sigma_y_sq + C2)
+    cs_map = (2 * sigma_xy + C2) / cs_denominator
+
+    ssim_map = torch.nan_to_num(ssim_map, nan=0.0, posinf=1.0, neginf=0.0)
+    cs_map = torch.nan_to_num(cs_map, nan=0.0, posinf=1.0, neginf=0.0)
+
+    ssim_map = torch.relu(ssim_map).clamp_min(eps).clamp_max(1.0)
+    cs_map = torch.relu(cs_map).clamp_min(eps).clamp_max(1.0)
 
     ssim_val = ssim_map.mean(dim=(1, 2, 3))
     cs_val = cs_map.mean(dim=(1, 2, 3))
@@ -631,7 +643,7 @@ class TrainCfg:
     epochs: int = 20
     lr: float = 1e-3
     seed: int = 0
-    num_workers: int = 2
+    num_workers: int = 0
     device: Optional[str] = None
     max_step_gap: int = 10
     viz_every: int = 200
@@ -796,7 +808,7 @@ def train(cfg: TrainCfg):
             if cfg.lambda_ms_ssim > 0:
                 loss_ms = ms_ssim_loss(xA_rec, A) + ms_ssim_loss(xB_rec, B)
             else:
-                loss_ms = torch.tensor([float('nan')], device=xA_rec.device)
+                loss_ms = xA_rec.new_zeros(())
 
             if cfg.lambda_patch > 0:
                 loss_patch = focal_patch_l1_loss(
@@ -816,7 +828,7 @@ def train(cfg: TrainCfg):
                     eps=cfg.patch_eps,
                 )
             else:
-                loss_patch = torch.tensor([float('nan')], device=xA_rec.device)
+                loss_patch = xA_rec.new_zeros(())
 
             # --- Base-path supervision (no refine) so mids aren’t gray ---
             loss_no_ref = 0.0
@@ -1056,10 +1068,10 @@ def parse_args():
     ap.add_argument("--out_dir", type=Path, default=Path("out.action_distance_recon_resnet"))
     ap.add_argument("--z_dim", type=int, default=64)
     ap.add_argument("--batch_size", type=int, default=16)
-    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--num_workers", type=int, default=2)
+    ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--max_step_gap", type=int, default=10)
     ap.add_argument("--viz_every", type=int, default=50)

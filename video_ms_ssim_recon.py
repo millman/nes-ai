@@ -228,6 +228,11 @@ def ms_ssim(x: torch.Tensor, y: torch.Tensor, weights: Optional[torch.Tensor]=No
     mssim_tensor = torch.stack(mssim, dim=0)
     mcs_tensor   = torch.stack(mcs[:-1], dim=0)
 
+    # clamp to keep values in a numerically safe range before fractional powers
+    eps = torch.finfo(mssim_tensor.dtype).eps
+    mssim_tensor = mssim_tensor.clamp(min=eps, max=1.0)
+    mcs_tensor = mcs_tensor.clamp(min=eps, max=1.0)
+
     pow1 = weights[:-1].unsqueeze(1)
     pow2 = weights[-1]
     ms_prod = torch.prod(mcs_tensor ** pow1, dim=0) * (mssim_tensor[-1] ** pow2)
@@ -315,7 +320,7 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--steps_per_epoch", type=int, default=100)
-    ap.add_argument("--num_workers", type=int, default=2)
+    ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--max_trajs", type=int, default=None)
     ap.add_argument("--save_every", type=int, default=50)
