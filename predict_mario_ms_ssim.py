@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-4-to-1 next-frame prediction with U-Net decoder and MS-SSIM loss.
-- Input: stack of 4 RGB frames (12xH×W)
-- Output: next RGB frame (3xH×W)
-- Loss: 1 - MS-SSIM only
-- Saves sample grids, loss plots, and CSV history.
+4-to-1 next-frame prediction with U-Net decoder, MS-SSIM + L1 loss, and
+optional multi-step scheduled sampling.
+- Input: stack of 4 RGB frames (12×H×W)
+- Output: one or more future RGB frames (rollout×3×H×W)
+- Loss: weighted (1 - MS-SSIM) + L1, averaged across rollout steps
+- Extras: mixed teacher forcing and auto-regressive rollouts during training
 
 Run:
-  python video_ms_ssim_recon.py --traj_dir /path/to/traj_dumps --out_dir out.ms_ssim_unet
+  python predict_mario_ms_ssim.py --traj_dir /path/to/traj_dumps --out_dir out.predict_mario_ms_ssim
 """
 from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
 from datetime import datetime
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -49,18 +51,22 @@ def default_transform() -> T.Compose:
     return ResNet18_Weights.DEFAULT.transforms()
 
 State = torch.Tensor  # (12,H,W) for 4 stacked RGB frames
-Next = torch.Tensor   # (3,H,W) next RGB frame
+NextSeq = torch.Tensor   # (K,3,H,W) next RGB frame sequence
 class Mario4to1Dataset(Dataset):
     """
     Expects root_dir/:
       traj_*/
         states/*.png
         actions.npz   (ignored here; we are in the 'no actions' setting)
-    We slide a 5-frame window: take frames i..i+3 as input, i+4 as next target.
+    We slide a (4+rollout)-frame window: frames i..i+3 seed the model,
+    and the next `rollout` frames provide supervision targets.
     """
     def __init__(self, root_dir: str, transform: Optional[T.Compose]=None,
-                 max_trajs: Optional[int]=None) -> None:
+                 max_trajs: Optional[int]=None, rollout: int = 1) -> None:
         self.transform = transform or default_transform()
+        if rollout < 1:
+            raise ValueError("rollout must be >= 1")
+        self.rollout = rollout
         self.index: List[Tuple[List[Path], int]] = []
         traj_count = 0
         for traj_path in sorted(Path(root_dir).iterdir()):
@@ -70,10 +76,11 @@ class Mario4to1Dataset(Dataset):
             if not states_dir.is_dir():
                 continue
             files = sorted(states_dir.iterdir())
-            if len(files) < 5:
+            needed = 4 + self.rollout
+            if len(files) < needed:
                 continue
-            # slide window: 4 in, 1 out => need 5 consecutive frames
-            for i in range(len(files)-4):
+            # slide window: 4 in, rollout out => need 4+rollout consecutive frames
+            for i in range(len(files)-needed+1):
                 self.index.append((files, i))
             traj_count += 1
             if max_trajs and traj_count >= max_trajs:
@@ -82,7 +89,7 @@ class Mario4to1Dataset(Dataset):
     def __len__(self) -> int:
         return len(self.index)
 
-    def __getitem__(self, idx: int) -> Tuple[State, Next]:
+    def __getitem__(self, idx: int) -> Tuple[State, NextSeq]:
         files, offset = self.index[idx]
         inputs = []
         for i in range(4):
@@ -90,8 +97,11 @@ class Mario4to1Dataset(Dataset):
                 inputs.append(self.transform(img))  # (3,H,W) normalized
         x = torch.cat(inputs, dim=0)               # (12,H,W)
 
-        with Image.open(files[offset+4]).convert("RGB") as img:
-            y = self.transform(img)                # (3,H,W) normalized
+        targets = []
+        for j in range(self.rollout):
+            with Image.open(files[offset+4+j]).convert("RGB") as img:
+                targets.append(self.transform(img))
+        y = torch.stack(targets, dim=0)            # (rollout,3,H,W)
         return x, y
 
 
@@ -245,33 +255,50 @@ def ms_ssim_loss(x_hat_norm: torch.Tensor, x_true_norm: torch.Tensor) -> torch.T
 # --------------------------------------------------------------------------------------
 # Utils: saving samples and loss history
 # --------------------------------------------------------------------------------------
-def save_samples_grid(x4: torch.Tensor, y_hat: torch.Tensor, y_true: torch.Tensor, out_dir: Path, step: int) -> None:
+def save_samples_grid(context4: torch.Tensor, preds: torch.Tensor, targets: torch.Tensor,
+                      out_dir: Path, step: int) -> None:
+    """Visualize context frames alongside multi-step targets and predictions."""
     out_dir.mkdir(parents=True, exist_ok=True)
     to_pil = T.ToPILImage()
-    # split inputs
-    B, C, H, W = x4.shape
-    frames = x4.view(B, 4, 3, H, W)  # (B,4,3,H,W)
 
-    # unnormalize everything for visualization
-    def unnorm3(t):
-        if t.dim() == 3:
-            mean = INV_MEAN[:, None, None].to(t.device, t.dtype)
-            std  = INV_STD [:, None, None].to(t.device, t.dtype)
-            return (t * std + mean).clamp(0, 1)
-        if t.dim() == 4:
-            mean = INV_MEAN[None, :, None, None].to(t.device, t.dtype)
-            std  = INV_STD [None, :, None, None].to(t.device, t.dtype)
-            return (t * std + mean).clamp(0, 1)
-        raise ValueError(f"Expected 3D or 4D tensor, got {t.dim()}D tensor")
+    if context4.dim() != 5:
+        raise ValueError(f"Expected context4 as (B,4,3,H,W); got shape {context4.shape}")
 
-    for i in range(min(4, B)):
-        row1 = [to_pil(unnorm3(frames[i,j])) for j in range(4)] + [to_pil(unnorm3(y_true[i]))]
-        row2 = [Image.new('RGB', (row1[0].width, row1[0].height), (0,0,0))]*4 + [to_pil(unnorm3(y_hat[i]))]
+    B, ctx_len, _, H, W = context4.shape
+    if preds.dim() != 5 or targets.dim() != 5:
+        raise ValueError("preds/targets must have shape (B,S,3,H,W)")
 
-        Ww, Hh = row1[0].size
-        canvas = Image.new('RGB', (Ww*5, Hh*2))
-        for k, im in enumerate(row1): canvas.paste(im, (k*Ww, 0))
-        for k, im in enumerate(row2): canvas.paste(im, (k*Ww, Hh))
+    steps = preds.shape[1]
+    if targets.shape[1] != steps:
+        raise ValueError("preds and targets must share rollout length")
+
+    # unnormalize helper handles 3D (C,H,W) tensors
+    def unnorm3(t: torch.Tensor) -> torch.Tensor:
+        if t.dim() != 3:
+            raise ValueError("Expected 3D tensor for frame visualization")
+        mean = INV_MEAN[:, None, None].to(t.device, t.dtype)
+        std  = INV_STD [:, None, None].to(t.device, t.dtype)
+        return (t * std + mean).clamp(0, 1)
+
+    max_rows = min(4, B)
+    for i in range(max_rows):
+        ctx_imgs = [to_pil(unnorm3(context4[i, j])) for j in range(ctx_len)]
+        tgt_imgs = [to_pil(unnorm3(targets[i, s])) for s in range(steps)]
+        pred_imgs = [to_pil(unnorm3(preds[i, s])) for s in range(steps)]
+
+        # Align predictions beneath targets; show context along the left columns
+        blank = Image.new('RGB', ctx_imgs[0].size, (0, 0, 0))
+        top_row = ctx_imgs + tgt_imgs
+        bottom_row = [blank] * ctx_len + pred_imgs
+
+        tile_w, tile_h = ctx_imgs[0].size
+        cols = ctx_len + steps
+        canvas = Image.new('RGB', (tile_w * cols, tile_h * 2))
+        for k, im in enumerate(top_row):
+            canvas.paste(im, (k * tile_w, 0))
+        for k, im in enumerate(bottom_row):
+            canvas.paste(im, (k * tile_w, tile_h))
+
         canvas.save(out_dir / f"sample_step_{step:06d}_idx_{i}.png")
 
 def write_loss_csv(hist: List[Tuple[int,float]], out_dir: Path) -> None:
@@ -310,15 +337,22 @@ class Args:
     save_every: int = 50
     ms_weight: float = 1.0
     l1_weight: float = 0.1
+    rollout_steps: int = 4
+    teacher_forcing_prob: float = 0.7
 
 
 def main():
     args = tyro.cli(Args)
 
+    if not (0.0 <= args.teacher_forcing_prob <= 1.0):
+        raise ValueError("teacher_forcing_prob must be in [0, 1]")
+    if args.rollout_steps < 1:
+        raise ValueError("rollout_steps must be >= 1")
+
     device = pick_device(args.device)
     print(f"[Device] {device}")
 
-    ds = Mario4to1Dataset(args.traj_dir, max_trajs=args.max_trajs)
+    ds = Mario4to1Dataset(args.traj_dir, max_trajs=args.max_trajs, rollout=args.rollout_steps)
     print(f"Dataset: {len(ds)} samples.")
     # random subset per epoch using RandomSampler (similar flavor to predict_mario.py)
     sampler = RandomSampler(ds, replacement=False, num_samples=args.steps_per_epoch * args.batch_size)
@@ -332,16 +366,52 @@ def main():
 
     global_step = 0
     loss_hist: List[Tuple[int,float]] = []
+    start_time = time.monotonic()
 
     for ep in range(1, args.epochs+1):
         model.train()
         for xb, yb in dl:
             xb = xb.to(device)            # (B,12,H,W) normalized
-            yb = yb.to(device)            # (B,3,H,W)  normalized
-            y_hat = model(xb)             # (B,3,H,W) still in normalized space
-            # NOTE: model outputs normalized tensors; MS-SSIM will unnormalize before scoring.
-            ms_loss = ms_ssim_loss(y_hat, yb)
-            l1_loss = F.l1_loss(y_hat, yb)
+            yb = yb.to(device)            # (B,S,3,H,W) normalized
+            if yb.dim() == 4:             # Handle legacy case with single frame targets
+                yb = yb.unsqueeze(1)
+
+            B, S, C, H, W = yb.shape
+            context = xb.reshape(B, 4, 3, H, W)
+            seed_context = context.clone()
+            ms_losses: List[torch.Tensor] = []
+            l1_losses: List[torch.Tensor] = []
+            pred_seq: List[torch.Tensor] = []
+            target_seq: List[torch.Tensor] = []
+
+            for step in range(S):
+                model_input = context.reshape(B, 12, H, W)
+                preds = model(model_input)
+                target = yb[:, step]
+
+                ms_step = ms_ssim_loss(preds, target)
+                l1_step = F.l1_loss(preds, target)
+                ms_losses.append(ms_step)
+                l1_losses.append(l1_step)
+
+                pred_seq.append(preds.detach())
+                target_seq.append(target.detach())
+
+                if step + 1 == S:
+                    continue
+
+                if args.teacher_forcing_prob >= 1.0:
+                    next_frame = target
+                elif args.teacher_forcing_prob <= 0.0:
+                    next_frame = preds
+                else:
+                    mask = (torch.rand(B, device=device) < args.teacher_forcing_prob).float().view(B, 1, 1, 1)
+                    next_frame = mask * target + (1.0 - mask) * preds
+
+                context = torch.cat([context[:, 1:], next_frame.unsqueeze(1)], dim=1)
+
+            ms_loss = torch.stack(ms_losses).mean()
+            l1_loss = torch.stack(l1_losses).mean()
             loss = args.ms_weight * ms_loss + args.l1_weight * l1_loss
 
             opt.zero_grad(set_to_none=True)
@@ -352,17 +422,24 @@ def main():
             loss_hist.append((global_step, float(loss.item())))
 
             if global_step % 10 == 0:
+                elapsed = time.monotonic() - start_time
                 print(
                     f"[ep {ep:02d}] step {global_step:06d} | loss={loss.item():.4f} "
-                    f"(ms={ms_loss.item():.4f}, l1={l1_loss.item():.4f})"
+                    f"(ms={ms_loss.item():.4f}, l1={l1_loss.item():.4f}) | "
+                    f"elapsed={elapsed/60:.2f} min"
                 )
 
-            if global_step % args.save_every == 0:
+            if global_step % args.save_every == 0 and pred_seq:
                 with torch.no_grad():
-                    save_samples_grid(xb.cpu(), y_hat.cpu(), yb.cpu(), out_dir / "samples", global_step)
+                    preds_tensor = torch.stack(pred_seq, dim=1).cpu()
+                    targets_tensor = torch.stack(target_seq, dim=1).cpu()
+                    save_samples_grid(seed_context.cpu(), preds_tensor, targets_tensor,
+                                      out_dir / "samples", global_step)
+                elapsed = time.monotonic() - start_time
                 plot_loss(loss_hist, out_dir, global_step)
                 torch.save({"ep": ep, "step": global_step, "model": model.state_dict()},
                            out_dir / "last.pt")
+                print(f"[ep {ep:02d}] saved samples/checkpoint at step {global_step:06d} | elapsed={elapsed/60:.2f} min")
 
         print(f"[ep {ep:02d}] done.")
 
