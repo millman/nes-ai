@@ -72,8 +72,16 @@ def default_transform(img_size: Tuple[int,int]=(224,224)) -> T.Compose:
     return base
 
 def unnormalize(img: torch.Tensor) -> torch.Tensor:
-    mean = INV_MEAN[None, :, None, None].to(img.device, img.dtype)
-    std  = INV_STD [None, :, None, None].to(img.device, img.dtype)
+    if img.ndim == 4:  # batched NCHW
+        mean = INV_MEAN[None, :, None, None]
+        std = INV_STD[None, :, None, None]
+    elif img.ndim == 3:  # single CHW image
+        mean = INV_MEAN[:, None, None]
+        std = INV_STD[:, None, None]
+    else:
+        raise ValueError(f"Expected 3D or 4D tensor, got shape {tuple(img.shape)}")
+    mean = mean.to(img.device, img.dtype)
+    std = std.to(img.device, img.dtype)
     return (img * std + mean).clamp(0, 1)
 
 # ----------------------- MS-SSIM proxy (stop-grad) -----------------------------
@@ -387,21 +395,40 @@ def entropy_on_factors(m: torch.Tensor) -> torch.Tensor:
 
 def heatmap_mass_consistency(maps: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
     """
-    Enforce sum_{u,v} maps[:,k,:,:] ≈ m[:,k] (after scaling).
+    Encourage per-factor map mass (after batch-wise scaling) to match energy m.
+    Scaling factor is detached so gradients flow only into maps.
     """
-    B, r, Hm, Wm = maps.shape
+    eps = 1e-6
     mass = maps.flatten(2).sum(dim=-1)  # [B,r]
-    # Scale mass with a learnable-free scalar to match magnitude of m
-    # Use normalized comparison:
-    mass_n = mass / (mass.sum(dim=-1, keepdim=True) + 1e-6)
-    m_n    = m    / (m.sum(dim=-1,    keepdim=True) + 1e-6)
-    return F.l1_loss(mass_n, m_n)
+    with torch.no_grad():
+        scale = (m.sum(dim=-1, keepdim=True) + eps) / (mass.sum(dim=-1, keepdim=True) + eps)
+    mass_scaled = mass * scale
+    return F.l1_loss(mass_scaled, m.detach())
 
 def heatmap_global_consistency(maps: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
-    D_map = maps.sum(dim=(1,2,3))  # [B]
-    Dn = D / (D.mean().detach() + 1e-6)
-    Dmn = D_map / (D_map.mean().detach() + 1e-6)
-    return F.l1_loss(Dmn, Dn)
+    """
+    Encourage global map energy (after normalised scaling) to match scalar distance.
+    The scaling factor is computed from running batch statistics but treated as
+    constant for the backward pass to avoid collapsing towards degenerate zeros.
+    """
+    eps = 1e-6
+    D_map = maps.mean(dim=(2, 3)).sum(dim=1)  # [B]
+    with torch.no_grad():
+        scale = (D.mean() + eps) / (D_map.mean() + eps)
+    D_map_scaled = D_map * scale
+    return F.l1_loss(D_map_scaled, D.detach())
+
+def heatmap_spatial_entropy(maps: torch.Tensor) -> torch.Tensor:
+    """
+    Maximize spatial entropy of each heatmap to avoid collapse to tiny blobs.
+    Returns negative entropy so adding with positive lambda encourages spread.
+    """
+    eps = 1e-8
+    flat = maps.flatten(2)
+    mass = flat.sum(dim=-1, keepdim=True)
+    p = flat / (mass + eps)
+    entropy = -(p * torch.log(p + eps)).sum(dim=-1)  # [B,r]
+    return -entropy.mean()
 
 def heatmap_shift_equivariance(xb: torch.Tensor, model: DiffVecModel, shift_px: int=2) -> torch.Tensor:
     """
@@ -430,6 +457,22 @@ def heatmap_shift_equivariance(xb: torch.Tensor, model: DiffVecModel, shift_px: 
     return F.l1_loss(maps1, maps0r)
 
 # ------------------------------- Viz -------------------------------------------
+def summarize_maps(maps: torch.Tensor) -> Dict[str, float]:
+    B, r, Hm, Wm = maps.shape
+    m = maps.detach()
+    flat = m.view(B * r, -1)
+    mass = m.flatten(2).sum(dim=-1)
+    stats = {
+        "mean": float(m.mean().item()),
+        "std": float(m.std().item()),
+        "min": float(m.min().item()),
+        "max": float(m.max().item()),
+        "mass_mean": float(mass.mean().item()),
+        "mass_std": float(mass.std().item()),
+        "spatial_std": float(flat.std(dim=-1).mean().item()),
+    }
+    return stats
+
 def plot_scree_and_bars(m: torch.Tensor, out_path: Path, title: str, topk: int = 10) -> None:
     r = m.numel()
     vals, _ = torch.sort(m, descending=True)
@@ -447,17 +490,32 @@ def plot_scree_and_bars(m: torch.Tensor, out_path: Path, title: str, topk: int =
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout(); plt.savefig(out_path, bbox_inches="tight"); plt.close()
 
-def save_pair(xa: torch.Tensor, xb: torch.Tensor, out_path: Path, caption: str="") -> None:
+def save_pair(xa: torch.Tensor, xb: torch.Tensor, out_path: Path, caption: str="", row_captions: Optional[List[str]] = None) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    xa0 = unnormalize(xa[:1]).squeeze(0).cpu()
-    xb0 = unnormalize(xb[:1]).squeeze(0).cpu()
+    max_rows = min(4, xa.shape[0])
     to_pil = T.ToPILImage()
-    im_a = to_pil(xa0); im_b = to_pil(xb0)
-    W, H = im_a.size
-    canvas = Image.new('RGB', (W*2, H), (0,0,0))
-    canvas.paste(im_a, (0,0)); canvas.paste(im_b, (W,0))
+    xa0 = unnormalize(xa[0:1]).squeeze(0).cpu()
+    xb0 = unnormalize(xb[0:1]).squeeze(0).cpu()
+    im_a0 = to_pil(xa0)
+    im_b0 = to_pil(xb0)
+    W, H = im_a0.size
+    pad = 6
+    canvas_w = W * 2 + pad
+    canvas_h = H * max_rows + pad * (max_rows - 1)
+    canvas = Image.new('RGB', (canvas_w, canvas_h), (0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    for row in range(max_rows):
+        xa_i = unnormalize(xa[row:row+1]).squeeze(0).cpu()
+        xb_i = unnormalize(xb[row:row+1]).squeeze(0).cpu()
+        im_a = to_pil(xa_i)
+        im_b = to_pil(xb_i)
+        y = row * (H + pad)
+        canvas.paste(im_a, (0, y))
+        canvas.paste(im_b, (W + pad, y))
+        if row_captions and row < len(row_captions):
+            draw.text((5, y + 5), row_captions[row], fill=(255, 255, 0))
     if caption:
-        draw = ImageDraw.Draw(canvas); draw.text((5,5), caption, fill=(255,255,0))
+        draw.text((5, 5), caption, fill=(255, 255, 0))
     canvas.save(out_path)
 
 def overlay_heatmaps_on_xb(xb: torch.Tensor, maps: torch.Tensor, out_path: Path, topk: int=6) -> None:
@@ -466,39 +524,44 @@ def overlay_heatmaps_on_xb(xb: torch.Tensor, maps: torch.Tensor, out_path: Path,
     Saves a grid with xb and top-k factor overlays.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    xb0 = unnormalize(xb[:1]).squeeze(0).cpu()   # [3,H,W]
-    maps0 = maps[:1].squeeze(0).detach().cpu()   # [r,Hm,Wm]
-    r, Hm, Wm = maps0.shape
-    # pick top-k by total mass
-    mass = maps0.flatten(1).sum(-1)  # [r]
-    vals, idx = torch.sort(mass, descending=True)
-    k = min(topk, r)
-    idx = idx[:k]
-    # upsample maps to xb size
-    maps_up = F.interpolate(maps0[idx][None], size=xb0.shape[-2:], mode="bilinear", align_corners=False).squeeze(0)  # [k,H,W]
-    # normalize each heatmap to [0,1]
-    hm = maps_up
-    hm = (hm - hm.min(dim=(1,2), keepdim=True).values) / (hm.max(dim=(1,2), keepdim=True).values + 1e-6)
-    # make colored overlays
-    to_pil = T.ToPILImage()
-    base = to_pil(xb0)
-    W, H = base.size
+    batch = xb.shape[0]
+    rows = min(4, batch)
+    k = min(topk, maps.shape[1])
     pad = 6
+    to_pil = T.ToPILImage()
+    xb0 = unnormalize(xb[0:1]).squeeze(0).cpu()
+    base0 = to_pil(xb0)
+    W, H = base0.size
     grid_w = (W + pad) * (k + 1) - pad
-    grid = Image.new('RGB', (grid_w, H), (0,0,0))
-    grid.paste(base, (0,0))
-    for i in range(k):
-        cmap = plt.get_cmap('magma')
-        hm_i = hm[i].numpy()
-        rgba = cmap(hm_i)  # HxW x RGBA
-        heat = (rgba[..., :3] * 255).astype(np.uint8)
-        over = Image.fromarray(heat)
-        # blend: alpha proportional to heatmap (rescaled)
-        alpha = (hm_i * 200).clip(0,255).astype(np.uint8)      # 0..200
-        over.putalpha(Image.fromarray(alpha))
-        comp = base.copy()
-        comp.paste(over, (0,0), over)
-        grid.paste(comp, ((i+1)*(W+pad), 0))
+    grid_h = (H + pad) * rows - pad
+    grid = Image.new('RGB', (grid_w, grid_h), (0, 0, 0))
+    for row in range(rows):
+        xb_i = unnormalize(xb[row:row+1]).squeeze(0).cpu()
+        base = to_pil(xb_i)
+        maps_i = maps[row].detach().cpu()
+        mass = maps_i.flatten(1).sum(-1)
+        _, idx = torch.sort(mass, descending=True)
+        idx = idx[:k]
+        maps_sel = maps_i[idx]
+        maps_up = F.interpolate(maps_sel.unsqueeze(0), size=xb_i.shape[-2:], mode="bilinear", align_corners=False).squeeze(0)
+        hm_flat = maps_up.view(maps_up.shape[0], -1)
+        hm_min = hm_flat.min(dim=1, keepdim=True).values.view(-1, 1, 1)
+        hm_max = hm_flat.max(dim=1, keepdim=True).values.view(-1, 1, 1)
+        hm = (maps_up - hm_min) / (hm_max - hm_min + 1e-6)
+        y = row * (H + pad)
+        grid.paste(base, (0, y))
+        for col in range(k):
+            cmap = plt.get_cmap('magma')
+            hm_i = hm[col].cpu().numpy()
+            rgba = cmap(hm_i)
+            heat = (rgba[..., :3] * 255).astype(np.uint8)
+            over = Image.fromarray(heat)
+            alpha = (hm_i * 200).clip(0, 255).astype(np.uint8)
+            over.putalpha(Image.fromarray(alpha))
+            comp = base.copy()
+            comp.paste(over, (0, 0), over)
+            x = (col + 1) * (W + pad)
+            grid.paste(comp, (x, y))
     grid.save(out_path)
 
 def write_loss_csv(hist: List[Tuple[int, float]], out_dir: Path) -> None:
@@ -508,16 +571,32 @@ def write_loss_csv(hist: List[Tuple[int, float]], out_dir: Path) -> None:
         w.writerow(["step","loss"])
         w.writerows(hist)
 
-def plot_loss(hist: List[Tuple[int,float]], out_dir: Path, step: int, name: str="total") -> None:
-    if not hist: return
-    steps, losses = zip(*hist)
-    plt.figure()
-    plt.semilogy(steps, losses)
-    plt.xlabel("Step"); plt.ylabel("Loss")
-    plt.title(f"{name} loss up to step {step}")
+def plot_loss_grid(histories: Dict[str, List[Tuple[int,float]]], out_dir: Path, step: int) -> None:
+    items = [(name, hist) for name, hist in histories.items() if hist]
+    if not items:
+        return
+    cols = min(3, len(items))
+    rows = math.ceil(len(items) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3), squeeze=False)
+    axes_flat = list(axes.flat)
+    for idx, (name, hist) in enumerate(items):
+        ax = axes_flat[idx]
+        steps, losses = zip(*hist)
+        if all(l > 0 for l in losses):
+            ax.semilogy(steps, losses)
+        else:
+            ax.plot(steps, losses)
+        ax.set_title(name)
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Loss")
+        ax.grid(True, which="both", linestyle="--", linewidth=0.4)
+    for ax in axes_flat[len(items):]:
+        ax.set_visible(False)
+    fig.suptitle(f"Loss curves up to step {step}")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     out_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_dir / f"loss_{name}_step_{step:06d}.png", bbox_inches="tight")
-    plt.close()
+    fig.savefig(out_dir / f"losses_step_{step:06d}.png", bbox_inches="tight")
+    plt.close(fig)
 
 # ------------------------------- Train -----------------------------------------
 @dataclass
@@ -558,6 +637,7 @@ class Args:
     lambda_map_mass: float = 0.25
     lambda_map_D: float = 0.10
     lambda_map_eq: float = 0.10
+    lambda_map_spread: float = 0.02
     rank_margin_eps: float = 0.02
     topk_vis: int = 6
 
@@ -587,12 +667,16 @@ def main():
     out_dir = Path(args.out_dir) / f"run__{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     (out_dir / "samples").mkdir(parents=True, exist_ok=True)
 
-    total_hist: List[Tuple[int,float]] = []
-    reg_hist:   List[Tuple[int,float]] = []
-    rank_hist:  List[Tuple[int,float]] = []
-    decor_hist: List[Tuple[int,float]] = []
-    ent_hist:   List[Tuple[int,float]] = []
-    map_hist:   List[Tuple[int,float]] = []
+    total_hist:     List[Tuple[int,float]] = []
+    reg_hist:       List[Tuple[int,float]] = []
+    rank_hist:      List[Tuple[int,float]] = []
+    decor_hist:     List[Tuple[int,float]] = []
+    ent_hist:       List[Tuple[int,float]] = []
+    map_mass_hist:  List[Tuple[int,float]] = []
+    map_D_hist:     List[Tuple[int,float]] = []
+    map_eq_hist:    List[Tuple[int,float]] = []
+    map_total_hist: List[Tuple[int,float]] = []
+    map_spread_hist: List[Tuple[int,float]] = []
 
     global_step = 0
     start_time = time.monotonic()
@@ -625,12 +709,14 @@ def main():
                 L_inv = D.new_zeros(())
 
             # Map losses
-            L_map_mass = L_map_D = L_map_eq = D.new_zeros(())
+            L_map_mass = L_map_D = L_map_eq = L_map_spread = D.new_zeros(())
             if args.use_localizer and maps is not None:
                 L_map_mass = heatmap_mass_consistency(maps, m)
                 L_map_D    = heatmap_global_consistency(maps, D)
                 if args.lambda_map_eq > 0.0 and random.random() < 0.25:
                     L_map_eq = heatmap_shift_equivariance(xb, model, shift_px=2)
+                if args.lambda_map_spread > 0.0:
+                    L_map_spread = heatmap_spatial_entropy(maps)
 
             loss = (args.lambda_reg     * L_reg
                   + args.lambda_rank    * L_rank
@@ -639,7 +725,8 @@ def main():
                   + args.lambda_inv     * L_inv
                   + args.lambda_map_mass* L_map_mass
                   + args.lambda_map_D   * L_map_D
-                  + args.lambda_map_eq  * L_map_eq)
+                  + args.lambda_map_eq  * L_map_eq
+                  + args.lambda_map_spread * L_map_spread)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -653,7 +740,11 @@ def main():
             decor_hist.append((global_step, float(L_decor.item())))
             ent_hist.append((global_step, float(L_ent.item())))
             if args.use_localizer:
-                map_hist.append((global_step, float((L_map_mass + L_map_D + L_map_eq).item())))
+                map_mass_hist.append((global_step, float(L_map_mass.item())))
+                map_D_hist.append((global_step, float(L_map_D.item())))
+                map_eq_hist.append((global_step, float(L_map_eq.item())))
+                map_spread_hist.append((global_step, float(L_map_spread.item())))
+                map_total_hist.append((global_step, float((L_map_mass + L_map_D + L_map_eq + L_map_spread).item())))
 
             if global_step % 10 == 0:
                 elapsed = time.monotonic() - start_time
@@ -662,29 +753,55 @@ def main():
                     f"loss={loss.item():.4f} "
                     f"(reg={L_reg.item():.3f}, rank={L_rank.item():.3f}, decor={L_decor.item():.3f}, "
                     f"ent={L_ent.item():.3f}, inv={L_inv.item():.3f}, "
-                    f"map_mass={L_map_mass.item():.3f}, map_D={L_map_D.item():.3f}, map_eq={L_map_eq.item():.3f}) | "
+                    f"map_mass={L_map_mass.item():.3f}, map_D={L_map_D.item():.3f}, map_eq={L_map_eq.item():.3f}, "
+                    f"map_spread={L_map_spread.item():.3f}) | "
                     f"Δt mean={dt.float().mean().item():.2f} | elapsed={elapsed/60:.2f} min"
                 )
 
             # Save visualizations
             if global_step % args.save_every == 0:
+                if args.use_localizer and maps is not None:
+                    ms = summarize_maps(maps)
+                    print(
+                        f"[maps] μ={ms['mean']:.4f} σ={ms['std']:.4f} min={ms['min']:.4f} max={ms['max']:.4f} "
+                        f"massμ={ms['mass_mean']:.2f} massσ={ms['mass_std']:.2f} spatialσ={ms['spatial_std']:.4f}"
+                    )
                 with torch.no_grad():
                     mi = m[0].detach().cpu()
                     plot_scree_and_bars(mi, out_dir / "samples" / f"scree_step_{global_step:06d}.png",
                                         title=f"step {global_step}", topk=min(args.topk_vis, args.r))
-                    save_pair(xa, xb, out_dir / "samples" / f"pair_step_{global_step:06d}.png",
-                              caption=f"Δt={int(dt[0].item())}, D={float(D[0].item()):.3f}")
+                    max_rows = min(4, xa.shape[0])
+                    row_caps = [
+                        f"Δt={int(dt[i].item())}, D={float(D[i].item()):.3f}"
+                        for i in range(max_rows)
+                    ]
+                    save_pair(
+                        xa,
+                        xb,
+                        out_dir / "samples" / f"pair_step_{global_step:06d}.png",
+                        caption=f"step {global_step}",
+                        row_captions=row_caps,
+                    )
                     if args.use_localizer and ("maps" in out):
                         overlay_heatmaps_on_xb(xb, out["maps"], out_dir / "samples" / f"maps_step_{global_step:06d}.png",
                                                topk=args.topk_vis)
 
-                plot_loss(total_hist, out_dir, global_step, name="total")
-                plot_loss(reg_hist,   out_dir, global_step, name="reg")
-                plot_loss(rank_hist,  out_dir, global_step, name="rank")
-                plot_loss(decor_hist, out_dir, global_step, name="decor")
-                plot_loss(ent_hist,   out_dir, global_step, name="entropy")
+                loss_histories = {
+                    "total": total_hist,
+                    "reg": reg_hist,
+                    "rank": rank_hist,
+                    "decor": decor_hist,
+                    "entropy": ent_hist,
+                }
                 if args.use_localizer:
-                    plot_loss(map_hist, out_dir, global_step, name="maps")
+                    loss_histories.update({
+                        "map_total": map_total_hist,
+                        "map_mass": map_mass_hist,
+                        "map_D": map_D_hist,
+                        "map_eq": map_eq_hist,
+                        "map_spread": map_spread_hist,
+                    })
+                plot_loss_grid(loss_histories, out_dir, global_step)
                 torch.save({"ep": ep, "step": global_step, "model": model.state_dict()},
                            out_dir / "last.pt")
                 print(f"[ep {ep:02d}] saved viz/checkpoint at step {global_step:06d}")
