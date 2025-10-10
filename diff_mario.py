@@ -303,32 +303,19 @@ class MetricHead(nn.Module):
 
 class Localizer(nn.Module):
     """
-    Tiny UNet-ish head to produce K=r heatmaps from mid-level feature maps of both frames.
+    Minimal conv head to produce K=r heatmaps from mid-level feature maps of both frames.
     Input: concat [F_a, F_b, F_a - F_b, F_a * F_b] along channels.
-    Output: maps [B, r, Hm, Wm] in R+ via softplus.
+    Output: maps [B, r, Hm, Wm] normalized with spatial softmax.
     """
     def __init__(self, c_in: int=128, r: int=16):
         super().__init__()
-        cin = c_in * 4
         self.r = r
-        self.down1 = nn.Sequential(nn.Conv2d(cin, 128, 3, padding=1), nn.GELU(),
-                                   nn.Conv2d(128, 128, 3, padding=1), nn.GELU())
-        self.pool1 = nn.MaxPool2d(2)     # /2
-        self.down2 = nn.Sequential(nn.Conv2d(128, 256, 3, padding=1), nn.GELU(),
-                                   nn.Conv2d(256, 256, 3, padding=1), nn.GELU())
-        self.up1   = nn.ConvTranspose2d(256, 128, 2, stride=2)   # x2
-        self.fuse1 = nn.Sequential(nn.Conv2d(128+128, 128, 3, padding=1), nn.GELU())
-        self.out   = nn.Conv2d(128, r, 1)
+        self.proj = nn.Conv2d(c_in * 4, r, kernel_size=1)
 
     def forward(self, Fa: torch.Tensor, Fb: torch.Tensor) -> torch.Tensor:
         x = torch.cat([Fa, Fb, Fa - Fb, Fa * Fb], dim=1)  # [B,4C,H,W]
-        x1 = self.down1(x)
-        x2 = self.down2(self.pool1(x1))
-        y  = self.up1(x2)
-        y  = self.fuse1(torch.cat([y, x1], dim=1))
-        logits = self.out(y)
-        B, _, Hm, Wm = logits.shape
-        maps = torch.softmax(logits.view(B, self.r, -1), dim=-1).view(B, self.r, Hm, Wm)
+        logits = self.proj(x)
+        maps = F.softplus(logits)
         return maps
 
 class DiffVecModel(nn.Module):
@@ -423,20 +410,6 @@ def heatmap_global_consistency(maps: torch.Tensor, D: torch.Tensor) -> torch.Ten
     D_map_scaled = D_map * scale
     return F.l1_loss(D_map_scaled, D)
 
-def heatmap_spatial_entropy(maps: torch.Tensor) -> torch.Tensor:
-    """Entropy of each heatmap; minimizing it discourages uniform blobs."""
-    eps = 1e-8
-    flat = maps.flatten(2)
-    mass = flat.sum(dim=-1, keepdim=True)
-    p = flat / (mass + eps)
-    entropy = -(p * torch.log(p + eps)).sum(dim=-1)  # [B,r]
-    return entropy.mean()
-
-def heatmap_smoothness(maps: torch.Tensor) -> torch.Tensor:
-    """Laplacian smoothness penalty to discourage single-pixel spikes."""
-    dx = maps[:, :, 1:, :] - maps[:, :, :-1, :]
-    dy = maps[:, :, :, 1:] - maps[:, :, :, :-1]
-    return (dx.pow(2).mean() + dy.pow(2).mean())
 
 def heatmap_shift_equivariance(xb: torch.Tensor, model: DiffVecModel, shift_px: int=2) -> torch.Tensor:
     """
@@ -643,10 +616,8 @@ class Args:
     lambda_ent: float = 0.05
     lambda_inv: float = 0.05
     lambda_map_mass: float = 0.10
-    lambda_map_D: float = 0.05
+    lambda_map_D: float = 0.00
     lambda_map_eq: float = 0.00
-    lambda_map_spread: float = 0.05
-    lambda_map_smooth: float = 0.05
     rank_margin_eps: float = 0.02
     topk_vis: int = 6
 
@@ -685,8 +656,6 @@ def main():
     map_D_hist:     List[Tuple[int,float]] = []
     map_eq_hist:    List[Tuple[int,float]] = []
     map_total_hist: List[Tuple[int,float]] = []
-    map_spread_hist: List[Tuple[int,float]] = []
-    map_smooth_hist: List[Tuple[int,float]] = []
 
     global_step = 0
     start_time = time.monotonic()
@@ -719,16 +688,12 @@ def main():
                 L_inv = D.new_zeros(())
 
             # Map losses
-            L_map_mass = L_map_D = L_map_eq = L_map_spread = L_map_smooth = D.new_zeros(())
+            L_map_mass = L_map_D = L_map_eq = D.new_zeros(())
             if args.use_localizer and maps is not None:
                 L_map_mass = heatmap_mass_consistency(maps, m)
                 L_map_D    = heatmap_global_consistency(maps, D)
                 if args.lambda_map_eq > 0.0 and random.random() < 0.25:
                     L_map_eq = heatmap_shift_equivariance(xb, model, shift_px=2)
-                if args.lambda_map_spread > 0.0:
-                    L_map_spread = heatmap_spatial_entropy(maps)
-                if args.lambda_map_smooth > 0.0:
-                    L_map_smooth = heatmap_smoothness(maps)
 
             loss = (args.lambda_reg     * L_reg
                   + args.lambda_rank    * L_rank
@@ -737,9 +702,7 @@ def main():
                   + args.lambda_inv     * L_inv
                   + args.lambda_map_mass* L_map_mass
                   + args.lambda_map_D   * L_map_D
-                  + args.lambda_map_eq  * L_map_eq
-                  + args.lambda_map_spread * L_map_spread
-                  + args.lambda_map_smooth * L_map_smooth)
+                  + args.lambda_map_eq  * L_map_eq)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -756,13 +719,9 @@ def main():
                 map_mass_hist.append((global_step, float(L_map_mass.item())))
                 map_D_hist.append((global_step, float(L_map_D.item())))
                 map_eq_hist.append((global_step, float(L_map_eq.item())))
-                map_spread_hist.append((global_step, float(L_map_spread.item())))
-                map_smooth_hist.append((global_step, float(L_map_smooth.item())))
                 map_total = (args.lambda_map_mass * L_map_mass
                              + args.lambda_map_D * L_map_D
-                             + args.lambda_map_eq * L_map_eq
-                             + args.lambda_map_spread * L_map_spread
-                             + args.lambda_map_smooth * L_map_smooth)
+                             + args.lambda_map_eq * L_map_eq)
                 map_total_hist.append((global_step, float(map_total.item())))
 
             if global_step % 10 == 0:
@@ -772,8 +731,7 @@ def main():
                     f"loss={loss.item():.4f} "
                     f"(reg={L_reg.item():.3f}, rank={L_rank.item():.3f}, decor={L_decor.item():.3f}, "
                     f"ent={L_ent.item():.3f}, inv={L_inv.item():.3f}, "
-                    f"map_mass={L_map_mass.item():.3f}, map_D={L_map_D.item():.3f}, map_eq={L_map_eq.item():.3f}, "
-                    f"map_spread={L_map_spread.item():.3f}, map_smooth={L_map_smooth.item():.3f}) | "
+                    f"map_mass={L_map_mass.item():.3f}, map_D={L_map_D.item():.3f}, map_eq={L_map_eq.item():.3f}) | "
                     f"Δt mean={dt.float().mean().item():.2f} | elapsed={elapsed/60:.2f} min"
                 )
 
@@ -818,8 +776,6 @@ def main():
                         "map_mass": map_mass_hist,
                         "map_D": map_D_hist,
                         "map_eq": map_eq_hist,
-                        "map_spread": map_spread_hist,
-                        "map_smooth": map_smooth_hist,
                     })
                 plot_loss_grid(loss_histories, out_dir, global_step)
                 torch.save({"ep": ep, "step": global_step, "model": model.state_dict()},

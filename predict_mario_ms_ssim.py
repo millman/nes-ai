@@ -76,6 +76,7 @@ class Mario4to1Dataset(Dataset):
             if not states_dir.is_dir():
                 continue
             files = sorted(states_dir.iterdir())
+            files = files[1:]
             needed = 4 + self.rollout
             if len(files) < needed:
                 continue
