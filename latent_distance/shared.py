@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, TypeVar
@@ -101,3 +102,10 @@ def attach_run_output_dir(args: T) -> T:
     run_dir.mkdir(parents=True, exist_ok=True)
     args.out_dir = str(run_dir)
     return args
+
+
+def format_elapsed(start_time: float) -> str:
+    elapsed = int(time.time() - start_time)
+    hours, rem = divmod(elapsed, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"

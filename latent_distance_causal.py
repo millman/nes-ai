@@ -41,6 +41,7 @@ from latent_distance.shared import (
     FramesDataset,
     TrajectoryIndex,
     attach_run_output_dir,
+    format_elapsed,
     pick_device,
     set_seed,
 )
@@ -403,12 +404,6 @@ def train(cfg: Args):
 
     run_start_time = time.time()
 
-    def format_elapsed():
-        elapsed = int(time.time() - run_start_time)
-        h, rem = divmod(elapsed, 3600)
-        m, s = divmod(rem, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
-
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         meter = {
@@ -466,7 +461,7 @@ def train(cfg: Args):
         denom = max(1, n_batches)
         train_elapsed = time.time() - t0
         samples = n_batches * cfg.batch_size
-        prefix = f"[{format_elapsed()}, ep {epoch:03d}]"
+        prefix = f"[{format_elapsed(run_start_time)}, ep {epoch:03d}]"
         msg = (
             f"{prefix} loss {meter['loss']/denom:.4f} | "
             f"dyn {meter['dyn']/denom:.3f} sal {meter['sal']/denom:.3f} "
