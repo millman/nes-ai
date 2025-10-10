@@ -167,15 +167,16 @@ class TinyConvEncoder(nn.Module):
 
 
 class ForwardModel(nn.Module):
-    def __init__(self, feat_dim=256):
+    """Spatial forward model that predicts next frame's feature map."""
+    def __init__(self, in_ch=128):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(feat_dim, feat_dim), nn.SiLU(),
-            nn.Linear(feat_dim, feat_dim)
+            nn.Conv2d(in_ch, in_ch, 3, padding=1), nn.SiLU(),
+            nn.Conv2d(in_ch, in_ch, 3, padding=1),
         )
 
-    def forward(self, h):
-        return self.net(h)
+    def forward(self, feat):
+        return self.net(feat)  # [B,C,H,W] -> [B,C,H,W]
 
 
 class SaliencyHead(nn.Module):
@@ -208,22 +209,23 @@ class CausalDistanceModel(nn.Module):
     def __init__(self, in_ch=3, feat_dim=256):
         super().__init__()
         self.enc = TinyConvEncoder(in_ch=in_ch, feat_dim=feat_dim)
-        self.fwd = ForwardModel(feat_dim=feat_dim)
+        self.fwd = ForwardModel(in_ch=self.enc.out_channels)
         self.sal_head = SaliencyHead(in_ch=self.enc.out_channels)
         self.calibrator = HeadCalibrator()
 
     def encode(self, x):
         return self.enc(x)
 
-    def forward_model(self, h):
-        return self.fwd(h)
+    def forward_model(self, feat):
+        return self.fwd(feat)
 
     def saliency(self, feat):
         return self.sal_head(feat)
 
     def causal_distance(self, feat_a, feat_b, saliency):
         # saliency: [B,1,H,W], feat: [B,C,H,W]
-        diff = torch.abs(feat_a - feat_b)
+        # Compute L2 norm across channels to get proper distance
+        diff = torch.norm(feat_a - feat_b, dim=1, keepdim=True)  # [B,1,H,W]
         weighted = saliency * diff
         dist = weighted.flatten(1).sum(dim=1) / (saliency.flatten(1).sum(dim=1) + 1e-6)
         return self.calibrator(dist)
@@ -435,11 +437,11 @@ def train(cfg: Args):
             opt.zero_grad(set_to_none=True)
 
             h_t, feat_t = model.encode(x_t)
-            h_t1, _ = model.encode(x_t1)
+            h_t1, feat_t1 = model.encode(x_t1)
             h_j, feat_j = model.encode(x_j)
 
-            h_pred = model.forward_model(h_t)
-            loss_dyn = F.mse_loss(h_pred, h_t1)
+            feat_t1_pred = model.forward_model(feat_t)
+            loss_dyn = F.mse_loss(feat_t1_pred, feat_t1)
 
             grads = torch.autograd.grad(loss_dyn, feat_t, retain_graph=True, create_graph=False)[0].detach()
             grad_target = grads.pow(2).sum(dim=1, keepdim=True).sqrt()
