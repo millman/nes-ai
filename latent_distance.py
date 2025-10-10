@@ -88,7 +88,6 @@ class TrajectoryIndex:
         max_len: maximum frames per trajectory (for sanity checks)
     """
     def __init__(self, data_root: Path, img_suffixes=(".png", ".jpg", ".jpeg")):
-        traj_dirs = sorted([p for p in Path(data_root).iterdir() if p.is_dir()])
         self.traj_paths: List[Path] = []
         self.frames: List[List[Path]] = []
         for traj_path in sorted(Path(data_root).iterdir()):
