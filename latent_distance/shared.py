@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import random
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -89,3 +90,14 @@ def pick_device(pref: Optional[str]) -> str:
     if torch.cuda.is_available():
         return 'cuda'
     return 'cpu'
+
+
+T = TypeVar('T')
+
+
+def attach_run_output_dir(args: T) -> T:
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = Path(args.out_dir) / f"run__{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    args.out_dir = str(run_dir)
+    return args

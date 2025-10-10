@@ -60,7 +60,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-from latent_distance.shared import FramesDataset, TrajectoryIndex, pick_device, set_seed
+from latent_distance.shared import (
+    FramesDataset,
+    TrajectoryIndex,
+    attach_run_output_dir,
+    pick_device,
+    set_seed,
+)
 from PIL import Image
 from latent_distance.viz_utils import overlay_heatmap, plot_self_distance, save_image_grid
 
@@ -350,9 +356,10 @@ def vicreg_loss(h: torch.Tensor, sim_coeff=25.0, var_coeff=25.0, cov_coeff=1.0) 
 class Args:
     data_root: str = "data.image_distance.train_10_traj"
     out_dir: str = "out.latent_distance"
+    seed: int = 0
     image_size: int = 128
     batch_size: int = 64
-    epochs: int = 10
+    epochs: int = 1000
     lr: float = 1e-3
     device: Optional[str] = None
     B: int = 16  # positive window for NCE
@@ -366,9 +373,7 @@ class Args:
     lambda_vic: float = 1.0
 
     # logging/viz
-    eval_every: int = 1
-    viz_every: Optional[int] = field(default=None, metadata={'help': 'DEPRECATED alias for --eval_every'})
-    seed: int = 0
+    eval_every: int = 5
 
 
 def build_loaders(cfg: Args):
@@ -733,19 +738,8 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
 # ------------------------------
 
 
-def parse_args() -> Args:
-    args = tyro.cli(Args)
-    if args.viz_every is not None:
-        args.eval_every = args.viz_every
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = Path(args.out_dir) / f"run__{timestamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    args.out_dir = str(run_dir)
-    return args
-
-
 def main():
-    cfg = parse_args()
+    cfg = attach_run_output_dir(tyro.cli(Args))
     cfg.device = pick_device(cfg.device)
     print(f"[Device] {cfg.device} | [Data] {cfg.data_root} | [Out] {cfg.out_dir}", flush=True)
     train(cfg)
