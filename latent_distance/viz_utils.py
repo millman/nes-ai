@@ -61,9 +61,7 @@ def plot_causal_distance(t_steps: np.ndarray, values: np.ndarray, title: str, ou
     if t_steps.shape[0] != values.shape[0]:
         raise ValueError("t_steps and values length mismatch")
     plt.figure(figsize=(6, 4))
-    plt.plot(t_steps, values, marker='o', linewidth=1.5)
-    if len(t_steps) > 1:
-        plt.fill_between(t_steps, values, alpha=0.2)
+    plt.plot(t_steps, values, marker='.', linewidth=1)
     plt.xlabel('time step t')
     plt.ylabel(ylabel)
     plt.title(title)
