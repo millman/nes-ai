@@ -551,12 +551,17 @@ def train(cfg: Args):
         if (epoch % cfg.eval_every) == 0:
             with torch.no_grad():
                 eval_t0 = time.time()
-                n_eval = run_evals(cfg, model, frame_ld, index, tag=f"ep{epoch:03d}")
+                eval_stats = run_evals(cfg, model, frame_ld, index, tag=f"ep{epoch:03d}")
                 eval_elapsed = time.time() - eval_t0
+                n_eval = eval_stats.get('eval_samples', 0)
+                avg_num = eval_stats.get('mean_num')
+                avg_den = eval_stats.get('mean_den')
             eval_msg = (
                 f"{prefix} eval_time {eval_elapsed:.2f}s "
                 f"({n_eval/max(eval_elapsed, 1e-6):.1f} samp/s)"
             )
+            if avg_num is not None and avg_den is not None:
+                eval_msg += f" | sal_num {avg_num:.4f} sal_den {avg_den:.4f}"
             print(eval_msg, flush=True)
 
 

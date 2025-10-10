@@ -295,6 +295,7 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
 
     num_traj_plot = min(4, len(traj_to_indices))
     chosen_traj = sorted(traj_to_indices.keys())[:num_traj_plot]
+    avg_num, avg_den = [], []
     for ti in chosen_traj:
         idxs = traj_to_indices[ti]
         if len(idxs) < 2:
@@ -306,11 +307,14 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
             _, feat0 = model.encode(x0)
             _, feat_s = model.encode(xs)
             sal0 = model.saliency(feat0)
-            causal = model.causal_distance(
-                feat0.repeat(feat_s.shape[0], 1, 1, 1),
-                feat_s,
-                sal0.repeat(feat_s.shape[0], 1, 1, 1)
-            )
+            feat0_rep = feat0.repeat(feat_s.shape[0], 1, 1, 1)
+            sal_rep = sal0.repeat(feat_s.shape[0], 1, 1, 1)
+            diff = torch.abs(feat0_rep - feat_s)
+            numerator = (sal_rep * diff).flatten(1).sum(dim=1)
+            denominator = sal_rep.flatten(1).sum(dim=1)
+            avg_num.append(numerator.mean().item())
+            avg_den.append(denominator.mean().item())
+            causal = model.causal_distance(feat0_rep, feat_s, sal_rep)
         t_steps = np.arange(len(idxs))
         plot_causal_distance(
             t_steps,
@@ -353,7 +357,12 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
     if heat_imgs:
         save_image_grid(heat_imgs, heat_titles, str(out_dir / "saliency_examples.png"), ncol=3)
 
-    return len(all_meta)
+    stats = {
+        'mean_num': float(np.mean(avg_num)) if avg_num else 0.0,
+        'mean_den': float(np.mean(avg_den)) if avg_den else 0.0,
+        'eval_samples': len(all_meta),
+    }
+    return stats
 
 
 # -----------------------------------------------------------------------------
@@ -380,7 +389,7 @@ class Args:
     lambda_dist: float = 1.0
 
     # logging/viz
-    eval_every: int = 5
+    eval_every: int = 1
 
 
 def build_loaders(cfg: Args):
@@ -481,11 +490,15 @@ def train(cfg: Args):
         if epoch % cfg.eval_every == 0:
             with torch.no_grad():
                 eval_t0 = time.time()
-                n_eval = run_evals(cfg, model, frame_ld, index, tag=f"ep{epoch:03d}")
+                eval_stats = run_evals(cfg, model, frame_ld, index, tag=f"ep{epoch:03d}")
                 eval_elapsed = time.time() - eval_t0
+            n_eval = eval_stats['eval_samples']
+            avg_num = eval_stats['mean_num']
+            avg_den = eval_stats['mean_den']
             eval_msg = (
                 f"{prefix} eval_time {eval_elapsed:.2f}s "
                 f"({n_eval/max(eval_elapsed,1e-6):.1f} samp/s)"
+                f" | sal_num {avg_num:.4f} sal_den {avg_den:.4f}"
             )
             print(eval_msg, flush=True)
 
