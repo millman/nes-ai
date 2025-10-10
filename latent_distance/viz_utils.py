@@ -55,20 +55,6 @@ def plot_self_distance(t_steps: np.ndarray, y_vals: np.ndarray, color_vals: np.n
     plt.close()
 
 
-def plot_line(values: np.ndarray, title: str, ylabel: str, out_path: str) -> None:
-    if values.ndim != 1:
-        raise ValueError("values for plot_line must be 1D")
-    plt.figure(figsize=(6, 4))
-    plt.plot(np.arange(len(values)), values, marker='o')
-    plt.xlabel('time step t')
-    plt.ylabel(ylabel)
-    plt.title(title)
-    plt.tight_layout()
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-
-
 def plot_causal_distance(t_steps: np.ndarray, values: np.ndarray, title: str, out_path: str, ylabel: str = 'causal distance to x0') -> None:
     if t_steps.ndim != 1 or values.ndim != 1:
         raise ValueError("t_steps and values must be 1D arrays")

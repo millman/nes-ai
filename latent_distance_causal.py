@@ -21,8 +21,7 @@ frames in terms of how they influence the future?"
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import random
@@ -45,7 +44,7 @@ from latent_distance.shared import (
     pick_device,
     set_seed,
 )
-from latent_distance.viz_utils import overlay_heatmap, plot_line, save_image_grid
+from latent_distance.viz_utils import overlay_heatmap, save_image_grid
 
 
 # -----------------------------------------------------------------------------
