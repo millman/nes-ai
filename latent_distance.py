@@ -98,7 +98,6 @@ class TrajectoryIndex:
             if not states_dir.is_dir():
                 continue
             imgs = sorted(states_dir.iterdir())
-            imgs = imgs[1:]
             if len(imgs) >= 2:  # need at least 2 for pairs
                 self.traj_paths.append(traj_path)
                 self.frames.append(imgs)

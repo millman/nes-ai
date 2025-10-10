@@ -181,10 +181,7 @@ def list_trajectories(data_root: Path) -> Dict[str, List[Path]]:
             continue
         paths = sorted(state_dir.glob("state_*.png"), key=lambda p: int(p.stem.split("_")[1]))
         if paths:
-            # Something went wrong when writing the trajectory states.  The first state is out of sync with the rest.
-            trimmed = paths[1:]
-            if trimmed:
-                out[traj_dir.name] = trimmed
+            out[traj_dir.name] = paths
     if not out:
         raise FileNotFoundError(f"No trajectories under {data_root} (expected traj_*/states/state_*.png)")
     return out

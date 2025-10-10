@@ -88,8 +88,6 @@ def collect_trajectories(root: Path) -> Dict[str, List[Path]]:
         if not states_dir.is_dir():
             continue
         frame_paths = sorted(states_dir.glob("state_*"), key=_frame_sort_key)
-        # The first frame in trajectories seems to be bugged, it is very different from the next frame.
-        frame_paths = frame_paths[1:]
         if not frame_paths:
             continue
         traj_rel = states_dir.parent.relative_to(root)
