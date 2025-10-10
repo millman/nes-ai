@@ -44,7 +44,7 @@ from latent_distance.shared import (
     pick_device,
     set_seed,
 )
-from latent_distance.viz_utils import overlay_heatmap, save_image_grid
+from latent_distance.viz_utils import overlay_heatmap, save_image_grid, plot_causal_distance
 
 
 # -----------------------------------------------------------------------------
