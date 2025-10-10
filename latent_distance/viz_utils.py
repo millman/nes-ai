@@ -67,3 +67,21 @@ def plot_line(values: np.ndarray, title: str, ylabel: str, out_path: str) -> Non
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150)
     plt.close()
+
+
+def plot_causal_distance(t_steps: np.ndarray, values: np.ndarray, title: str, out_path: str, ylabel: str = 'causal distance to x0') -> None:
+    if t_steps.ndim != 1 or values.ndim != 1:
+        raise ValueError("t_steps and values must be 1D arrays")
+    if t_steps.shape[0] != values.shape[0]:
+        raise ValueError("t_steps and values length mismatch")
+    plt.figure(figsize=(6, 4))
+    plt.plot(t_steps, values, marker='o', linewidth=1.5)
+    if len(t_steps) > 1:
+        plt.fill_between(t_steps, values, alpha=0.2)
+    plt.xlabel('time step t')
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=150)
+    plt.close()

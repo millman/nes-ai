@@ -311,11 +311,12 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
                 feat_s,
                 sal0.repeat(feat_s.shape[0], 1, 1, 1)
             )
-        plot_line(
+        t_steps = np.arange(len(idxs))
+        plot_causal_distance(
+            t_steps,
             causal.detach().cpu().numpy(),
             title=f'Traj {traj_names[ti]}: causal self-distance',
-            ylabel='causal distance to x0',
-            out_path=str(out_dir / f"traj{ti:03d}_causal_distance.png")
+            out_path=str(out_dir / f"traj{ti:03d}_causal_distance.png"),
         )
 
     M = 6
