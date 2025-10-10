@@ -60,9 +60,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-from latent_distance_shared import FramesDataset, TrajectoryIndex, pick_device, set_seed
+from latent_distance.shared import FramesDataset, TrajectoryIndex, pick_device, set_seed
 from PIL import Image
-from viz_utils import overlay_heatmap, plot_self_distance, save_image_grid
+from latent_distance.viz_utils import overlay_heatmap, plot_self_distance, save_image_grid
 
 
 # ------------------------------
