@@ -304,6 +304,10 @@ class TwoHeadDistance(nn.Module):
         )
         self.out_vis = nn.Linear(128, 1)
         self.out_hid = nn.Linear(128, 1)
+        # learnable gain terms to calibrate outputs into "frame" units
+        init_gain = math.log(math.e - 1.0)  # softplus^-1(1.0)
+        self.gain_vis = nn.Parameter(torch.tensor(init_gain))
+        self.gain_hid = nn.Parameter(torch.tensor(init_gain))
 
     def pair_features(self, h_i, h_j):
         return torch.cat([h_i, h_j, torch.abs(h_i - h_j), h_i * h_j], dim=-1)
@@ -312,6 +316,10 @@ class TwoHeadDistance(nn.Module):
         p = self.mlp(self.pair_features(h_i, h_j))
         d_vis = F.softplus(self.out_vis(p))  # [B,1]
         d_hid = F.softplus(self.out_hid(p))  # [B,1]
+        gain_vis = F.softplus(self.gain_vis)
+        gain_hid = F.softplus(self.gain_hid)
+        d_vis = gain_vis * d_vis
+        d_hid = gain_hid * d_hid
         d = d_vis + d_hid
         return d_vis.squeeze(-1), d_hid.squeeze(-1), d.squeeze(-1)
 
@@ -489,6 +497,14 @@ def train(cfg: Args):
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
     global_step = 0
+    run_start_time = time.time()
+
+    def format_elapsed() -> str:
+        elapsed = int(time.time() - run_start_time)
+        hours, rem = divmod(elapsed, 3600)
+        minutes, seconds = divmod(rem, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
     for epoch in range(1, cfg.epochs+1):
         model.train()
         t0 = time.time()
@@ -585,8 +601,9 @@ def train(cfg: Args):
         denom = max(1, n_batches)
         samples = n_batches * cfg.batch_size
         samp_per_sec = samples / max(train_elapsed, 1e-6)
+        prefix = f"[{format_elapsed()}, ep {epoch:03d}]"
         msg = (
-            f"[ep {epoch:03d}] loss {meter['loss']/denom:.4f} | "
+            f"{prefix} loss {meter['loss']/denom:.4f} | "
             f"rank {meter['rank']/denom:.3f} time {meter['time']/denom:.3f} "
             f"nce {meter['nce']/denom:.3f} tri {meter['tri']/denom:.3f} "
             f"aug {meter['aug']/denom:.3f} vic {meter['vic']/denom:.3f} | "
@@ -610,7 +627,7 @@ def train(cfg: Args):
                 n_eval = run_evals(cfg, model, frame_ld, index, tag=f"ep{epoch:03d}")
                 eval_elapsed = time.time() - eval_t0
             eval_msg = (
-                f"[ep {epoch:03d}] eval_time {eval_elapsed:.2f}s "
+                f"{prefix} eval_time {eval_elapsed:.2f}s "
                 f"({n_eval/max(eval_elapsed, 1e-6):.1f} samp/s)"
             )
             print(eval_msg, flush=True)
