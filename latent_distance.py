@@ -46,110 +46,28 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
-import math
 import os
 from pathlib import Path
 import random
 import time
-from typing import List, Tuple, Optional, Dict
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import tyro
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+
+from latent_distance_shared import FramesDataset, TrajectoryIndex, pick_device, set_seed
 from PIL import Image
-import matplotlib.pyplot as plt
-
-# ------------------------------
-# Utils
-# ------------------------------
-
-def set_seed(seed: int = 0):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+from viz_utils import overlay_heatmap, plot_self_distance, save_image_grid
 
 
 # ------------------------------
 # Dataset
 # ------------------------------
-
-class TrajectoryIndex:
-    """Index frames across trajectories.
-
-    Attributes:
-        traj_paths: List[Path] for each trajectory dir
-        frames: List[List[Path]] for image paths per trajectory
-        cum_counts: prefix sum over frames count (for global indexing)
-        max_len: maximum frames per trajectory (for sanity checks)
-    """
-    def __init__(self, data_root: Path, img_suffixes=(".png", ".jpg", ".jpeg")):
-        self.traj_paths: List[Path] = []
-        self.frames: List[List[Path]] = []
-        for traj_path in sorted(Path(data_root).iterdir()):
-            if not traj_path.is_dir():
-                continue
-            states_dir = traj_path / "states"
-            if not states_dir.is_dir():
-                continue
-            imgs = sorted(states_dir.iterdir())
-            if len(imgs) >= 2:  # need at least 2 for pairs
-                self.traj_paths.append(traj_path)
-                self.frames.append(imgs)
-        self.cum_counts = np.cumsum([0] + [len(f) for f in self.frames])
-        self.max_len = max((len(f) for f in self.frames), default=0)
-        if len(self.frames) == 0:
-            raise RuntimeError(f"No trajectories with >=2 frames found in {data_root}")
-
-    def num_traj(self) -> int:
-        return len(self.frames)
-
-    def len_traj(self, idx: int) -> int:
-        return len(self.frames[idx])
-
-    def get_path(self, traj_idx: int, t: int) -> Path:
-        return self.frames[traj_idx][t]
-
-
-class FramesDataset(Dataset):
-    """Yields raw frames and metadata for indexing/visualization.
-
-    Returns: dict with keys:
-        x: tensor [C,H,W]
-        traj_idx: int
-        t: int (time index within trajectory)
-        path: str
-    """
-    def __init__(self, index: TrajectoryIndex, image_size: int = 128):
-        self.index = index
-        self.tr = transforms.Compose([
-            transforms.ToTensor(),  # [0,1]
-            # optional: normalize if desired
-        ])
-        self.image_size = image_size
-
-    def __len__(self):
-        return sum(len(f) for f in self.index.frames)
-
-    def __getitem__(self, global_idx: int):
-        # map global_idx to (traj_idx, t)
-        # use cum_counts to find trajectory
-        traj_idx = int(np.searchsorted(self.index.cum_counts, global_idx, side='right') - 1)
-        local_offset = global_idx - self.index.cum_counts[traj_idx]
-        path = self.index.get_path(traj_idx, local_offset)
-        img = Image.open(path).convert('RGB').resize((self.image_size, self.image_size), Image.BILINEAR)
-        x = self.tr(img)
-        return {
-            'x': x,
-            'traj_idx': traj_idx,
-            't': local_offset,
-            'path': str(path),
-        }
-
 
 @dataclass
 class PairSample:
@@ -647,31 +565,13 @@ def train(cfg: Args):
 # Evaluations & Visualizations
 # ------------------------------
 
-def save_image_grid(tensors: List[torch.Tensor], titles: Optional[List[str]], out_path: str, ncol: int = 8):
-    B = len(tensors)
-    ncol = min(ncol, B)
-    nrow = math.ceil(B / ncol)
-    plt.figure(figsize=(1.8*ncol, 1.8*nrow))
-    for i, t in enumerate(tensors):
-        plt.subplot(nrow, ncol, i+1)
-        img = t.detach().cpu().permute(1,2,0).clamp(0,1).numpy()
-        plt.imshow(img)
-        if titles:
-            plt.title(titles[i], fontsize=8)
-        plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+
+def _tensor_to_np_image(t: torch.Tensor) -> np.ndarray:
+    return t.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
 
 
-def overlay_heatmap(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
-    """x: [3,H,W] in [0,1]; m: [1,H,W] in [0,1]; returns [3,H,W]"""
-    x_np = x.detach().cpu()
-    m_np = m.detach().cpu().squeeze(0).numpy()
-    m_color = plt.get_cmap('jet')(m_np)[..., :3]  # [H,W,3]
-    m_color = torch.from_numpy(m_color).permute(2,0,1)
-    out = 0.6 * x_np + 0.4 * m_color
-    return out.clamp(0,1)
+def _tensor_to_np_heatmap(m: torch.Tensor) -> np.ndarray:
+    return m.detach().cpu().squeeze(0).numpy()
 
 
 def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index: TrajectoryIndex, tag: str):
@@ -679,10 +579,9 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
     out_dir = Path(cfg.out_dir) / f"eval_{tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Build embeddings for all frames (for retrieval & self-distance plots)
     all_h = []
     all_x = []
-    all_meta = []  # (traj_idx, t, path)
+    all_meta: List[Tuple[int, int, str]] = []
     with torch.no_grad():
         for batch in frame_ld:
             x = batch['x'].to(cfg.device)
@@ -691,15 +590,14 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
             all_x.append(x.cpu())
             for ti, tt, pp in zip(batch['traj_idx'], batch['t'], batch['path']):
                 all_meta.append((int(ti), int(tt), pp))
-    H = torch.cat(all_h, dim=0).numpy()  # [N,D]
+
+    H = torch.cat(all_h, dim=0).cpu().numpy()
     X = torch.cat(all_x, dim=0)
     N = H.shape[0]
 
-    # maps from (traj_idx) to indices in H
     traj_to_indices: Dict[int, List[int]] = {}
     for idx_global, (ti, tt, _) in enumerate(all_meta):
         traj_to_indices.setdefault(ti, []).append(idx_global)
-    # ensure per-trajectory indices sorted by t
     for ti, lst in traj_to_indices.items():
         lst.sort(key=lambda gidx: all_meta[gidx][1])
 
@@ -708,132 +606,124 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
         for ti in traj_to_indices.keys()
     }
 
-    # 2) Self-distance plot for a few trajectories
     num_traj_plot = min(4, len(traj_to_indices))
     chosen_traj = sorted(traj_to_indices.keys())[:num_traj_plot]
     for ti in chosen_traj:
         idxs = traj_to_indices[ti]
         if len(idxs) < 2:
             continue
-        # x0 vs xt (NOTE: direction is from x0 -> xt)  (updated per user)
         x0_idx = idxs[0]
-        x0 = X[x0_idx:x0_idx+1].to(cfg.device)
+        x0 = X[x0_idx:x0_idx + 1].to(cfg.device)
         xs = X[idxs].to(cfg.device)
         with torch.no_grad():
-            _, _, d_vis, d_hid, _ = model(x0.repeat(xs.shape[0],1,1,1), xs)
+            _, _, d_vis, d_hid, _ = model(x0.repeat(xs.shape[0], 1, 1, 1), xs)
         d_vis = d_vis.cpu().numpy()
         d_hid = d_hid.cpu().numpy()
         t_steps = np.arange(len(idxs))
-        # 2D plot: x-axis time, y-axis d_vis, color = d_hid (viridis)
-        plt.figure(figsize=(6,4))
-        sc = plt.scatter(t_steps, d_vis, c=d_hid, cmap='viridis', marker='.')
-        plt.colorbar(sc, label='d_hid(x0, xt)')
-        plt.xlabel('time step t')
-        plt.ylabel('d_vis(x0, xt)')
-        plt.title(f'Traj {traj_names[ti]}: self-distance (x0 to xt)')
-        plt.tight_layout()
-        plt.savefig(out_dir / f"traj{ti:03d}_self_distance.png", dpi=150)
-        plt.close()
+        plot_self_distance(
+            t_steps,
+            d_vis,
+            d_hid,
+            title=f'Traj {traj_names[ti]}: self-distance (x0 to xt)',
+            ylabel='d_vis(x0, xt)',
+            color_label='d_hid(x0, xt)',
+            out_path=str(out_dir / f"traj{ti:03d}_self_distance.png")
+        )
 
-    # 3) Head heatmaps for a few random pairs
-    # pick up to M random pairs within same trajectory
     M = 8
-    heat_imgs = []
-    heat_titles = []
+    heat_imgs: List[np.ndarray] = []
+    heat_titles: List[str] = []
     rng = random.Random(0)
     for _ in range(M):
         ti = rng.choice(list(traj_to_indices.keys()))
         idxs = traj_to_indices[ti]
         if len(idxs) < 3:
             continue
-        i_local = rng.randrange(0, len(idxs)-1)
-        j_local = rng.randrange(i_local+1, len(idxs))
+        i_local = rng.randrange(0, len(idxs) - 1)
+        j_local = rng.randrange(i_local + 1, len(idxs))
         gi = idxs[i_local]
         gj = idxs[j_local]
-        xi = X[gi:gi+1].to(cfg.device)
-        xj = X[gj:gj+1].to(cfg.device)
+        xi = X[gi:gi + 1].to(cfg.device)
+        xj = X[gj:gj + 1].to(cfg.device)
         with torch.no_grad():
-            # forward once for distances
             _, _, dvis, dhid, _ = model(xi, xj)
-        # cams
-        cam_vis = model.head_heatmaps(xi, xj, which_head='vis')
-        cam_hid = model.head_heatmaps(xi, xj, which_head='hid')
-        ov_vis = overlay_heatmap(xi[0], cam_vis[0])
-        ov_hid = overlay_heatmap(xi[0], cam_hid[0])
-        heat_imgs += [xi[0].cpu(), xj[0].cpu(), ov_vis, ov_hid]
-        heat_titles += [
+            cam_vis = model.head_heatmaps(xi, xj, which_head='vis')
+            cam_hid = model.head_heatmaps(xi, xj, which_head='hid')
+        xi_np = _tensor_to_np_image(xi[0])
+        heat_imgs.extend([
+            xi_np,
+            _tensor_to_np_image(xj[0]),
+            overlay_heatmap(xi_np, _tensor_to_np_heatmap(cam_vis[0])),
+            overlay_heatmap(xi_np, _tensor_to_np_heatmap(cam_hid[0]))
+        ])
+        heat_titles.extend([
             f"{traj_names[ti]} from t={all_meta[gi][1]}",
             f"{traj_names[ti]} to t={all_meta[gj][1]}",
             f"vis {float(dvis):.2f}",
             f"hid {float(dhid):.2f}"
-        ]
-    if len(heat_imgs) > 0:
+        ])
+    if heat_imgs:
         save_image_grid(heat_imgs, heat_titles, str(out_dir / "head_heatmaps.png"), ncol=4)
 
-    # 4) Cross-trajectory nearest/farthest sampling (cosine on H)
-    # Build cosine-normalized embeddings
     Hn = H / (np.linalg.norm(H, axis=1, keepdims=True) + 1e-8)
+
     def cosine_dist(a, B):
-        # a: [D], B: [N,D]
-        sims = B @ a  # cosine since normalized
-        return 1.0 - sims  # distance
+        sims = B @ a
+        return 1.0 - sims
 
     K = 5
     sample_cnt = 6
     rng_idx = list(range(N))
     rng.shuffle(rng_idx)
-    cards_imgs: List[torch.Tensor] = []
+    cards_imgs: List[np.ndarray] = []
     cards_titles: List[str] = []
-
     taken = 0
     for gidx in rng_idx:
         if taken >= sample_cnt:
             break
-        ti, tt, pp = all_meta[gidx]
-        # restrict search to other trajectories
+        ti, tt, _ = all_meta[gidx]
         mask = np.array([m_ti != ti for (m_ti, _, _) in all_meta])
         Hn_other = Hn[mask]
         other_idx = np.nonzero(mask)[0]
-        if Hn_other.shape[0] < K+1:
+        if Hn_other.shape[0] < K + 1:
             continue
         dists = cosine_dist(Hn[gidx], Hn_other)
         order = np.argsort(dists)
         topk = order[:K]
         botk = order[-K:][::-1]
-        # collect frames & scores
+
         anchor = X[gidx]
-        cards_imgs.append(anchor)
+        cards_imgs.append(_tensor_to_np_image(anchor))
         cards_titles.append(f"anchor {traj_names[ti]} t{tt}")
 
-        # Also compute d_vis/d_hid/d_total from anchor to neighbors
         xi = anchor.unsqueeze(0).to(cfg.device)
         neigh_idxs = [int(other_idx[i]) for i in topk] + [int(other_idx[i]) for i in botk]
         xj = X[neigh_idxs].to(cfg.device)
         with torch.no_grad():
-            _, _, dvis, dhid, d = model(xi.repeat(len(neigh_idxs),1,1,1), xj)
+            _, _, dvis, dhid, d = model(xi.repeat(len(neigh_idxs), 1, 1, 1), xj)
         dvis = dvis.cpu().numpy()
         dhid = dhid.cpu().numpy()
         dtot = d.cpu().numpy()
 
         for rank, ni in enumerate(neigh_idxs[:K]):
-            cards_imgs.append(X[ni])
+            cards_imgs.append(_tensor_to_np_image(X[ni]))
             nti, ntt, _ = all_meta[ni]
             cards_titles.append(
-                f"near{rank+1}: {traj_names.get(nti, str(nti))} t{ntt}\n"
+                f"near{rank + 1}: {traj_names.get(nti, str(nti))} t{ntt}\n"
                 f"(dv {dvis[rank]:.2f}, dh {dhid[rank]:.2f}, d {dtot[rank]:.2f})"
             )
         for rank, ni in enumerate(neigh_idxs[K:]):
-            cards_imgs.append(X[ni])
+            cards_imgs.append(_tensor_to_np_image(X[ni]))
             nti, ntt, _ = all_meta[ni]
             cards_titles.append(
-                f"far{rank+1}: {traj_names.get(nti, str(nti))} t{ntt}\n"
-                f"(dv {dvis[K+rank]:.2f}, dh {dhid[K+rank]:.2f}, d {dtot[K+rank]:.2f})"
+                f"far{rank + 1}: {traj_names.get(nti, str(nti))} t{ntt}\n"
+                f"(dv {dvis[K + rank]:.2f}, dh {dhid[K + rank]:.2f}, d {dtot[K + rank]:.2f})"
             )
 
         taken += 1
 
-    if len(cards_imgs) > 0:
-        save_image_grid(cards_imgs, cards_titles, str(out_dir / "cross_traj_topk.png"), ncol=1+2*K)
+    if cards_imgs:
+        save_image_grid(cards_imgs, cards_titles, str(out_dir / "cross_traj_topk.png"), ncol=1 + 2 * K)
 
     return N
 
@@ -854,14 +744,6 @@ def parse_args() -> Args:
     return args
 
 
-def pick_device(pref: Optional[str]) -> str:
-    if pref:
-        return pref
-    if torch.backends.mps.is_available():
-        return 'mps'
-    if torch.cuda.is_available():
-        return 'cuda'
-    return 'cpu'
 def main():
     cfg = parse_args()
     cfg.device = pick_device(cfg.device)

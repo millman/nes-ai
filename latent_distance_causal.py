@@ -23,14 +23,12 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
-import math
 import os
 from pathlib import Path
 import random
 import time
 from typing import Dict, List, Optional
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -40,56 +38,13 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-
-# -----------------------------------------------------------------------------
-# Utilities
-# -----------------------------------------------------------------------------
-
-def set_seed(seed: int = 0):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+from latent_distance_shared import FramesDataset, TrajectoryIndex, pick_device, set_seed
+from viz_utils import overlay_heatmap, plot_line, save_image_grid
 
 
 # -----------------------------------------------------------------------------
 # Datasets
 # -----------------------------------------------------------------------------
-
-
-class TrajectoryIndex:
-    """Index frames across trajectories for random access."""
-
-    def __init__(self, data_root: Path, img_suffixes=(".png", ".jpg", ".jpeg")):
-        traj_dirs = sorted([p for p in Path(data_root).iterdir() if p.is_dir()])
-        if len(traj_dirs) == 0:
-            raise RuntimeError(f"No trajectory directories found in {data_root}")
-
-        self.traj_paths: List[Path] = []
-        self.frames: List[List[Path]] = []
-        for traj_path in traj_dirs:
-            states_dir = traj_path / "states"
-            if not states_dir.is_dir():
-                continue
-            imgs = sorted([p for p in states_dir.iterdir() if p.suffix.lower() in img_suffixes])
-            if len(imgs) < 3:
-                continue
-            self.traj_paths.append(traj_path)
-            self.frames.append(imgs)
-
-        if len(self.frames) == 0:
-            raise RuntimeError(f"No trajectories with >=3 frames found in {data_root}")
-
-        self.cum_counts = np.cumsum([0] + [len(f) for f in self.frames])
-
-    def num_traj(self) -> int:
-        return len(self.frames)
-
-    def len_traj(self, idx: int) -> int:
-        return len(self.frames[idx])
-
-    def get_path(self, traj_idx: int, t: int) -> Path:
-        return self.frames[traj_idx][t]
 
 
 class CausalPairDataset(Dataset):
@@ -291,32 +246,15 @@ def temporal_ranking_loss(dists: torch.Tensor, deltas: torch.Tensor) -> torch.Te
 # -----------------------------------------------------------------------------
 
 
-def save_image_grid(tensors: List[torch.Tensor], titles: Optional[List[str]], out_path: str, ncol: int = 8):
-    B = len(tensors)
-    ncol = min(ncol, B)
-    nrow = math.ceil(B / ncol)
-    plt.figure(figsize=(1.8 * ncol, 1.8 * nrow))
-    for i, t in enumerate(tensors):
-        plt.subplot(nrow, ncol, i + 1)
-        img = t.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
-        plt.imshow(img)
-        if titles:
-            plt.title(titles[i], fontsize=8)
-        plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+def _tensor_to_np_image(t: torch.Tensor) -> np.ndarray:
+    return t.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
 
 
-def overlay_heatmap(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
-    x_np = x.detach().cpu()
-    m_np = m.detach().cpu().squeeze(0)
-    m_np = F.interpolate(m_np.unsqueeze(0), size=x_np.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
-    m_np = m_np.clamp(0, 1).numpy()
-    m_color = plt.get_cmap('jet')(m_np)[..., :3]
-    m_color = torch.from_numpy(m_color).permute(2, 0, 1)
-    out = 0.6 * x_np + 0.4 * m_color
-    return out.clamp(0, 1)
+def _tensor_to_np_heatmap(m: torch.Tensor, target_hw: torch.Size) -> np.ndarray:
+    if m.ndim == 3:
+        m = m.unsqueeze(0)
+    heat = F.interpolate(m, size=target_hw[-2:], mode='bilinear', align_corners=False)
+    return heat.detach().cpu().squeeze(0).squeeze(0).numpy()
 
 
 def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: TrajectoryIndex, tag: str):
@@ -325,7 +263,6 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_h = []
-    all_feat = []
     all_x = []
     all_meta = []
     with torch.no_grad():
@@ -333,12 +270,11 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
             x = batch['x'].to(cfg.device)
             h, feat = model.encode(x)
             all_h.append(h.cpu())
-            all_feat.append(feat.cpu())
             all_x.append(x.cpu())
             for ti, tt, pp in zip(batch['traj_idx'], batch['t'], batch['path']):
                 all_meta.append((int(ti), int(tt), pp))
-    H = torch.cat(all_h, dim=0)
-    Fmaps = torch.cat(all_feat, dim=0)
+
+    H = torch.cat(all_h, dim=0).cpu().numpy()
     X = torch.cat(all_x, dim=0)
 
     traj_to_indices: Dict[int, List[int]] = {}
@@ -351,7 +287,6 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
         for ti in traj_to_indices.keys()
     }
 
-    # Trajectory plots
     num_traj_plot = min(4, len(traj_to_indices))
     chosen_traj = sorted(traj_to_indices.keys())[:num_traj_plot]
     for ti in chosen_traj:
@@ -365,22 +300,21 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
             _, feat0 = model.encode(x0)
             _, feat_s = model.encode(xs)
             sal0 = model.saliency(feat0)
-            causal = model.causal_distance(feat0.repeat(feat_s.shape[0], 1, 1, 1), feat_s, sal0.repeat(feat_s.shape[0], 1, 1, 1))
-        causal = causal.cpu().numpy()
-        t_steps = np.arange(len(idxs))
-        plt.figure(figsize=(6, 4))
-        plt.plot(t_steps, causal, marker='o')
-        plt.xlabel('time step t')
-        plt.ylabel('causal distance to x0')
-        plt.title(f'Traj {traj_names[ti]}: causal self-distance')
-        plt.tight_layout()
-        plt.savefig(out_dir / f"traj{ti:03d}_causal_distance.png", dpi=150)
-        plt.close()
+            causal = model.causal_distance(
+                feat0.repeat(feat_s.shape[0], 1, 1, 1),
+                feat_s,
+                sal0.repeat(feat_s.shape[0], 1, 1, 1)
+            )
+        plot_line(
+            causal.detach().cpu().numpy(),
+            title=f'Traj {traj_names[ti]}: causal self-distance',
+            ylabel='causal distance to x0',
+            out_path=str(out_dir / f"traj{ti:03d}_causal_distance.png")
+        )
 
-    # Heatmaps
     M = 6
-    heat_imgs = []
-    heat_titles = []
+    heat_imgs: List[np.ndarray] = []
+    heat_titles: List[str] = []
     rng = random.Random(0)
     keys = list(traj_to_indices.keys())
     for _ in range(M):
@@ -398,14 +332,18 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
             _, feat_i = model.encode(xi)
             _, feat_j = model.encode(xj)
             sal = model.saliency(feat_i)
-        ov = overlay_heatmap(xi[0], sal[0])
-        heat_imgs += [xi[0], xj[0], ov]
-        heat_titles += [
+        xi_np = _tensor_to_np_image(xi[0])
+        heat_imgs.extend([
+            xi_np,
+            _tensor_to_np_image(xj[0]),
+            overlay_heatmap(xi_np, _tensor_to_np_heatmap(sal, xi.shape))
+        ])
+        heat_titles.extend([
             f"{traj_names[ti]} t={all_meta[gi][1]} (from)",
             f"{traj_names[ti]} t={all_meta[gj][1]} (to)",
             "saliency"
-        ]
-    if len(heat_imgs) > 0:
+        ])
+    if heat_imgs:
         save_image_grid(heat_imgs, heat_titles, str(out_dir / "saliency_examples.png"), ncol=3)
 
     return len(all_meta)
@@ -419,7 +357,7 @@ def run_evals(cfg, model: CausalDistanceModel, frame_ld: DataLoader, index: Traj
 @dataclass
 class Args:
     data_root: str = "data.image_distance.train_10_traj"
-    out_dir: str = "out.latent_distance"
+    out_dir: str = "out.latent_distance_causal"
     image_size: int = 128
     batch_size: int = 64
     epochs: int = 25
@@ -435,49 +373,14 @@ class Args:
     viz_every: Optional[int] = field(default=None, metadata={'help': 'DEPRECATED alias for eval_every'})
 
 
-def pick_device(pref: Optional[str]) -> str:
-    if pref:
-        return pref
-    if torch.backends.mps.is_available():
-        return 'mps'
-    if torch.cuda.is_available():
-        return 'cuda'
-    return 'cpu'
-
-
 def build_loaders(cfg: Args):
-    index = TrajectoryIndex(Path(cfg.data_root))
+    index = TrajectoryIndex(Path(cfg.data_root), min_len=3)
     pair_ds = CausalPairDataset(index, image_size=cfg.image_size, B=cfg.B, seed=cfg.seed)
     pair_ld = DataLoader(pair_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=0, drop_last=True)
 
     frame_ds = FramesDataset(index, image_size=cfg.image_size)
     frame_ld = DataLoader(frame_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
     return index, pair_ld, frame_ld
-
-
-class FramesDataset(Dataset):
-    def __init__(self, index: TrajectoryIndex, image_size: int = 128):
-        self.index = index
-        self.tr = transforms.Compose([
-            transforms.ToTensor(),
-        ])
-        self.image_size = image_size
-
-    def __len__(self):
-        return sum(len(f) for f in self.index.frames)
-
-    def __getitem__(self, global_idx: int):
-        traj_idx = int(np.searchsorted(self.index.cum_counts, global_idx, side='right') - 1)
-        local_offset = global_idx - self.index.cum_counts[traj_idx]
-        path = self.index.get_path(traj_idx, local_offset)
-        img = Image.open(path).convert('RGB').resize((self.image_size, self.image_size), Image.BILINEAR)
-        x = self.tr(img)
-        return {
-            'x': x,
-            'traj_idx': traj_idx,
-            't': local_offset,
-            'path': str(path),
-        }
 
 
 def train(cfg: Args):
