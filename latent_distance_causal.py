@@ -45,7 +45,12 @@ from latent_distance.shared import (
     pick_device,
     set_seed,
 )
-from latent_distance.viz_utils import overlay_heatmap, save_image_grid, plot_causal_distance
+from latent_distance.viz_utils import (
+    overlay_heatmap,
+    plot_causal_distance,
+    plot_loss_grid,
+    save_image_grid,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -414,6 +419,13 @@ def train(cfg: Args):
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
     run_start_time = time.time()
+    loss_hist = {
+        'total': [],
+        'dyn': [],
+        'sal': [],
+        'dist': [],
+        'rank': [],
+    }
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -473,10 +485,20 @@ def train(cfg: Args):
         train_elapsed = time.time() - t0
         samples = n_batches * cfg.batch_size
         prefix = f"[{format_elapsed(run_start_time)}, ep {epoch:03d}]"
+        avg_total = meter['loss']/denom
+        avg_dyn = meter['dyn']/denom
+        avg_sal = meter['sal']/denom
+        avg_dist = meter['dist']/denom
+        avg_rank = meter['rank']/denom
+        loss_hist['total'].append((epoch, avg_total))
+        loss_hist['dyn'].append((epoch, avg_dyn))
+        loss_hist['sal'].append((epoch, avg_sal))
+        loss_hist['dist'].append((epoch, avg_dist))
+        loss_hist['rank'].append((epoch, avg_rank))
         msg = (
-            f"{prefix} loss {meter['loss']/denom:.4f} | "
-            f"dyn {meter['dyn']/denom:.3f} sal {meter['sal']/denom:.3f} "
-            f"dist {meter['dist']/denom:.3f} rank {meter['rank']/denom:.3f} | "
+            f"{prefix} loss {avg_total:.4f} | "
+            f"dyn {avg_dyn:.3f} sal {avg_sal:.3f} "
+            f"dist {avg_dist:.3f} rank {avg_rank:.3f} | "
             f"train_time {train_elapsed:.2f}s ({samples/max(train_elapsed,1e-6):.1f} samp/s)"
         )
         print(msg, flush=True)
@@ -494,15 +516,19 @@ def train(cfg: Args):
                 eval_t0 = time.time()
                 eval_stats = run_evals(cfg, model, frame_ld, index, tag=f"ep{epoch:03d}")
                 eval_elapsed = time.time() - eval_t0
-            n_eval = eval_stats['eval_samples']
-            avg_num = eval_stats['mean_num']
-            avg_den = eval_stats['mean_den']
+            n_eval = eval_stats.get('eval_samples', 0)
+            avg_num = eval_stats.get('mean_num', 0.0)
+            avg_den = eval_stats.get('mean_den', 0.0)
+            cal_scale = float(torch.exp(model.calibrator.log_scale).item())
+            cal_offset = float(model.calibrator.offset.item())
             eval_msg = (
                 f"{prefix} eval_time {eval_elapsed:.2f}s "
                 f"({n_eval/max(eval_elapsed,1e-6):.1f} samp/s)"
                 f" | sal_num {avg_num:.4f} sal_den {avg_den:.4f}"
+                f" | calib_scale {cal_scale:.3f} calib_off {cal_offset:.3f}"
             )
             print(eval_msg, flush=True)
+            plot_loss_grid(loss_hist, Path(cfg.out_dir), step=epoch)
 
 
 # -----------------------------------------------------------------------------

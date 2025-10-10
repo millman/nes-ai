@@ -1,6 +1,6 @@
 import math
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -69,3 +69,31 @@ def plot_causal_distance(t_steps: np.ndarray, values: np.ndarray, title: str, ou
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150)
     plt.close()
+
+
+def plot_loss_grid(histories: Dict[str, List[Tuple[int, float]]], out_dir: Path, step: int) -> None:
+    items = [(name, hist) for name, hist in histories.items() if hist]
+    if not items:
+        return
+    cols = min(3, len(items))
+    rows = math.ceil(len(items) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3), squeeze=False)
+    axes_flat = list(axes.flat)
+    for idx, (name, hist) in enumerate(items):
+        ax = axes_flat[idx]
+        steps, losses = zip(*hist)
+        if all(l > 0 for l in losses):
+            ax.semilogy(steps, losses)
+        else:
+            ax.plot(steps, losses)
+        ax.set_title(name)
+        ax.set_xlabel('Step')
+        ax.set_ylabel('Loss')
+        ax.grid(True, which='both', linestyle='--', linewidth=0.4)
+    for ax in axes_flat[len(items):]:
+        ax.set_visible(False)
+    fig.suptitle(f"Loss curves up to step {step}")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / f"losses_step_{step:06d}.png", bbox_inches='tight')
+    plt.close(fig)
