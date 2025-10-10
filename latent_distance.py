@@ -702,6 +702,11 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
     for ti, lst in traj_to_indices.items():
         lst.sort(key=lambda gidx: all_meta[gidx][1])
 
+    traj_names = {
+        ti: (index.traj_paths[ti].name if ti < len(index.traj_paths) else str(ti))
+        for ti in traj_to_indices.keys()
+    }
+
     # 2) Self-distance plot for a few trajectories
     num_traj_plot = min(4, len(traj_to_indices))
     chosen_traj = sorted(traj_to_indices.keys())[:num_traj_plot]
@@ -720,11 +725,11 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
         t_steps = np.arange(len(idxs))
         # 2D plot: x-axis time, y-axis d_vis, color = d_hid (viridis)
         plt.figure(figsize=(6,4))
-        sc = plt.scatter(t_steps, d_vis, c=d_hid, cmap='viridis')
+        sc = plt.scatter(t_steps, d_vis, c=d_hid, cmap='viridis', marker='.')
         plt.colorbar(sc, label='d_hid(x0, xt)')
         plt.xlabel('time step t')
         plt.ylabel('d_vis(x0, xt)')
-        plt.title(f'Traj {ti}: self-distance (x0 to xt)')
+        plt.title(f'Traj {traj_names[ti]}: self-distance (x0 to xt)')
         plt.tight_layout()
         plt.savefig(out_dir / f"traj{ti:03d}_self_distance.png", dpi=150)
         plt.close()
@@ -756,8 +761,8 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
         ov_hid = overlay_heatmap(xi[0], cam_hid[0])
         heat_imgs += [xi[0].cpu(), xj[0].cpu(), ov_vis, ov_hid]
         heat_titles += [
-            f"t={all_meta[gi][1]} (from)",
-            f"t={all_meta[gj][1]} (to)",
+            f"{traj_names[ti]} from t={all_meta[gi][1]}",
+            f"{traj_names[ti]} to t={all_meta[gj][1]}",
             f"vis {float(dvis):.2f}",
             f"hid {float(dhid):.2f}"
         ]
@@ -797,7 +802,7 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
         # collect frames & scores
         anchor = X[gidx]
         cards_imgs.append(anchor)
-        cards_titles.append(f"anchor T{ti} t{tt}")
+        cards_titles.append(f"anchor {traj_names[ti]} t{tt}")
 
         # Also compute d_vis/d_hid/d_total from anchor to neighbors
         xi = anchor.unsqueeze(0).to(cfg.device)
@@ -812,11 +817,17 @@ def run_evals(cfg: Args, model: LatentDistanceModel, frame_ld: DataLoader, index
         for rank, ni in enumerate(neigh_idxs[:K]):
             cards_imgs.append(X[ni])
             nti, ntt, _ = all_meta[ni]
-            cards_titles.append(f"near{rank+1}: T{nti} t{ntt}\n(dv {dvis[rank]:.2f}, dh {dhid[rank]:.2f}, d {dtot[rank]:.2f})")
+            cards_titles.append(
+                f"near{rank+1}: {traj_names.get(nti, str(nti))} t{ntt}\n"
+                f"(dv {dvis[rank]:.2f}, dh {dhid[rank]:.2f}, d {dtot[rank]:.2f})"
+            )
         for rank, ni in enumerate(neigh_idxs[K:]):
             cards_imgs.append(X[ni])
             nti, ntt, _ = all_meta[ni]
-            cards_titles.append(f"far{rank+1}: T{nti} t{ntt}\n(dv {dvis[K+rank]:.2f}, dh {dhid[K+rank]:.2f}, d {dtot[K+rank]:.2f})")
+            cards_titles.append(
+                f"far{rank+1}: {traj_names.get(nti, str(nti))} t{ntt}\n"
+                f"(dv {dvis[K+rank]:.2f}, dh {dhid[K+rank]:.2f}, d {dtot[K+rank]:.2f})"
+            )
 
         taken += 1
 
