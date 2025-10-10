@@ -436,7 +436,7 @@ class Args:
     batch_size: int = 64
     epochs: int = 10
     lr: float = 1e-3
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device: Optional[str] = None
     B: int = 16  # positive window for NCE
 
     # loss weights
@@ -493,6 +493,7 @@ def sample_negatives_in_batch(d_mat: torch.Tensor, pos_idx: torch.Tensor, K: int
 
 def train(cfg: Args):
     set_seed(cfg.seed)
+    cfg.device = pick_device(cfg.device)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     index, pair_ld, frame_ld = build_loaders(cfg)
@@ -853,8 +854,17 @@ def parse_args() -> Args:
     return args
 
 
+def pick_device(pref: Optional[str]) -> str:
+    if pref:
+        return pref
+    if torch.backends.mps.is_available():
+        return 'mps'
+    if torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'
 def main():
     cfg = parse_args()
+    cfg.device = pick_device(cfg.device)
     print(f"[Device] {cfg.device} | [Data] {cfg.data_root} | [Out] {cfg.out_dir}", flush=True)
     train(cfg)
 

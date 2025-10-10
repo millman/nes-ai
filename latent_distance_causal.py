@@ -310,7 +310,9 @@ def save_image_grid(tensors: List[torch.Tensor], titles: Optional[List[str]], ou
 
 def overlay_heatmap(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
     x_np = x.detach().cpu()
-    m_np = m.detach().cpu().squeeze(0).numpy()
+    m_np = m.detach().cpu().squeeze(0)
+    m_np = F.interpolate(m_np.unsqueeze(0), size=x_np.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
+    m_np = m_np.clamp(0, 1).numpy()
     m_color = plt.get_cmap('jet')(m_np)[..., :3]
     m_color = torch.from_numpy(m_color).permute(2, 0, 1)
     out = 0.6 * x_np + 0.4 * m_color
@@ -422,7 +424,7 @@ class Args:
     batch_size: int = 64
     epochs: int = 25
     lr: float = 1e-3
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device: Optional[str] = None
     B: int = 16
     lambda_dyn: float = 1.0
     lambda_sal: float = 0.1
@@ -431,6 +433,16 @@ class Args:
     eval_every: int = 5
     seed: int = 0
     viz_every: Optional[int] = field(default=None, metadata={'help': 'DEPRECATED alias for eval_every'})
+
+
+def pick_device(pref: Optional[str]) -> str:
+    if pref:
+        return pref
+    if torch.backends.mps.is_available():
+        return 'mps'
+    if torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'
 
 
 def build_loaders(cfg: Args):
@@ -470,6 +482,7 @@ class FramesDataset(Dataset):
 
 def train(cfg: Args):
     set_seed(cfg.seed)
+    cfg.device = pick_device(cfg.device)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     index, pair_ld, frame_ld = build_loaders(cfg)
@@ -588,6 +601,7 @@ def parse_args() -> Args:
 
 def main():
     cfg = parse_args()
+    cfg.device = pick_device(cfg.device)
     print(f"[Device] {cfg.device} | [Data] {cfg.data_root} | [Out] {cfg.out_dir}", flush=True)
     train(cfg)
 
