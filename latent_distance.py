@@ -304,10 +304,6 @@ class TwoHeadDistance(nn.Module):
         )
         self.out_vis = nn.Linear(128, 1)
         self.out_hid = nn.Linear(128, 1)
-        # learnable gain terms to calibrate outputs into "frame" units
-        init_gain = math.log(math.e - 1.0)  # softplus^-1(1.0)
-        self.gain_vis = nn.Parameter(torch.tensor(init_gain))
-        self.gain_hid = nn.Parameter(torch.tensor(init_gain))
 
     def pair_features(self, h_i, h_j):
         return torch.cat([h_i, h_j, torch.abs(h_i - h_j), h_i * h_j], dim=-1)
@@ -316,12 +312,19 @@ class TwoHeadDistance(nn.Module):
         p = self.mlp(self.pair_features(h_i, h_j))
         d_vis = F.softplus(self.out_vis(p))  # [B,1]
         d_hid = F.softplus(self.out_hid(p))  # [B,1]
-        gain_vis = F.softplus(self.gain_vis)
-        gain_hid = F.softplus(self.gain_hid)
-        d_vis = gain_vis * d_vis
-        d_hid = gain_hid * d_hid
         d = d_vis + d_hid
         return d_vis.squeeze(-1), d_hid.squeeze(-1), d.squeeze(-1)
+
+
+class HeadCalibrator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.log_scale = nn.Parameter(torch.zeros(1))  # scale = 1
+        self.offset = nn.Parameter(torch.zeros(1))     # offset = 0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        scale = torch.exp(self.log_scale)
+        return scale * x + self.offset
 
 
 class LatentDistanceModel(nn.Module):
@@ -329,11 +332,16 @@ class LatentDistanceModel(nn.Module):
         super().__init__()
         self.enc = TinyConvEncoder(in_ch=in_ch, feat_dim=feat_dim)
         self.head = TwoHeadDistance(feat_dim=feat_dim)
+        self.calib_vis = HeadCalibrator()
+        self.calib_hid = HeadCalibrator()
 
     def forward(self, x_i, x_j):
         h_i = self.enc(x_i)
         h_j = self.enc(x_j)
-        d_vis, d_hid, d = self.head(h_i, h_j)
+        d_vis_raw, d_hid_raw, d_raw = self.head(h_i, h_j)
+        d_vis = self.calib_vis(d_vis_raw)
+        d_hid = self.calib_hid(d_hid_raw)
+        d = d_vis + d_hid
         return h_i, h_j, d_vis, d_hid, d
 
     # ---- Grad-CAM-ish heatmaps for each head wrt x_i ----
@@ -384,11 +392,6 @@ def temporal_ranking_loss(dists: torch.Tensor, deltas: torch.Tensor) -> torch.Te
         return torch.tensor(0.0, device=dists.device)
     loss = F.softplus(dists[a[mask]] - dists[b[mask]]).mean()
     return loss
-
-
-def time_regression_loss(d_hid: torch.Tensor, deltas: torch.Tensor) -> torch.Tensor:
-    target = torch.log1p(deltas.float())
-    return F.mse_loss(d_hid, target)
 
 
 def nce_loss(dists_pos: torch.Tensor, dists_neg: torch.Tensor) -> torch.Tensor:
@@ -531,8 +534,14 @@ def train(cfg: Args):
             h_i, h_j, d_vis, d_hid, d = model(x_i, x_j)
 
             # --- losses ---
+            target_total = delta_t.float()
             L_rank = temporal_ranking_loss(d, delta_t)
-            L_time = time_regression_loss(d_hid, delta_t)
+
+            # Vision head learns to explain the full Δt, hidden head covers the residual.
+            L_time_vis = F.mse_loss(d_vis, target_total)
+            residual_target = torch.clamp(target_total - d_vis.detach(), min=0.0)
+            L_time_hid = F.mse_loss(d_hid, residual_target)
+            L_time = L_time_vis + L_time_hid
 
             # NCE: need positives per anchor and negatives from others in batch
             # For simplicity, treat each (i,j) in batch as anchor-pos; compute distance matrix among all anchors to all others' positives
