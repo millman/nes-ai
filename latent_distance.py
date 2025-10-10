@@ -430,8 +430,8 @@ def vicreg_loss(h: torch.Tensor, sim_coeff=25.0, var_coeff=25.0, cov_coeff=1.0) 
 
 @dataclass
 class Args:
-    data_root: str
-    out_dir: str
+    data_root: str = "data.image_distance.train_10_traj"
+    out_dir: str = "out.latent_distance"
     image_size: int = 128
     batch_size: int = 64
     epochs: int = 10
