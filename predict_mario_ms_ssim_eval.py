@@ -2,19 +2,25 @@
 """Autoregressive rollout visualizer for predict_mario_ms_ssim models."""
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import matplotlib.pyplot as plt
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 import tyro
 from PIL import Image
+from torchvision.models import ResNet18_Weights, resnet18
 
 from predict_mario_ms_ssim import (
     Mario4to1Dataset,
     UNetPredictor,
+    default_transform,
     pick_device,
     unnormalize,
 )
@@ -68,6 +74,75 @@ def rollout(model: UNetPredictor, context: torch.Tensor, steps: int) -> List[tor
         preds.append(pred)
         window = torch.cat([window[1:], pred.unsqueeze(0)], dim=0)
     return preds
+
+
+@torch.no_grad()
+def compute_self_distance_metrics(traj_dir: Path, device: torch.device, out_dir: Path) -> None:
+    transform = default_transform()
+    backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
+    backbone.fc = nn.Identity()
+    backbone.eval().to(device)
+
+    traj_dirs = [p for p in sorted(traj_dir.iterdir()) if p.is_dir()]
+    if not traj_dirs:
+        print(f"[self-distance] no trajectory directories found in {traj_dir}")
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for traj_path in traj_dirs:
+        states_dir = traj_path / "states"
+        if not states_dir.is_dir():
+            continue
+        frame_paths = sorted(
+            p for p in states_dir.iterdir()
+            if p.suffix.lower() in {'.png', '.jpg', '.jpeg'}
+        )
+        if len(frame_paths) < 2:
+            continue
+
+        embeddings: List[torch.Tensor] = []
+        for frame_path in frame_paths:
+            with Image.open(frame_path).convert("RGB") as img:
+                frame_tensor = transform(img).unsqueeze(0).to(device)
+            feat = backbone(frame_tensor).squeeze(0).cpu()
+            embeddings.append(feat)
+
+        h0 = embeddings[0]
+        l2_vals: List[float] = []
+        cos_vals: List[float] = []
+        for feat in embeddings:
+            diff = feat - h0
+            l2_vals.append(float(diff.norm().item()))
+            cos_vals.append(float(1.0 - F.cosine_similarity(feat.unsqueeze(0), h0.unsqueeze(0)).item()))
+
+        rel_name = traj_path.relative_to(traj_dir)
+        traj_name = rel_name.as_posix().replace('/', '_')
+        csv_path = out_dir / f"{traj_name}_self_distance.csv"
+        with csv_path.open('w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["frame_index", "l2_distance", "cosine_distance"])
+            for idx, (d_l2, d_cos) in enumerate(zip(l2_vals, cos_vals)):
+                writer.writerow([idx, d_l2, d_cos])
+
+        if len(l2_vals) > 1:
+            fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
+            indices = list(range(len(l2_vals)))
+            axes[0].plot(indices, l2_vals, marker='o')
+            axes[0].set_ylabel('L2 distance')
+            axes[0].set_title(f'{rel_name}: frame 0 vs t')
+            axes[0].grid(True, linestyle='--', linewidth=0.4)
+
+            axes[1].plot(indices, cos_vals, marker='o', color='orange')
+            axes[1].set_ylabel('Cosine distance')
+            axes[1].set_xlabel('Frame index t')
+            axes[1].grid(True, linestyle='--', linewidth=0.4)
+
+            fig.tight_layout()
+            fig.savefig(out_dir / f"{traj_name}_self_distance.png", dpi=150)
+            plt.close(fig)
+
+        print(f"[self-distance] processed trajectory {traj_name} ({len(frame_paths)} frames)")
 
 
 def main() -> None:
@@ -159,6 +234,8 @@ def main() -> None:
     out_path = out_dir / fname
     image.save(out_path)
     print(f"Saved rollout grid to {out_path}")
+
+    compute_self_distance_metrics(Path(args.traj_dir), device, out_dir / "self_distance")
 
 
 if __name__ == "__main__":
