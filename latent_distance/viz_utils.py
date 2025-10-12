@@ -1,12 +1,18 @@
 import math
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 
-def save_image_grid(images: Iterable[np.ndarray], titles: Optional[Iterable[str]], out_path: str, ncol: int = 8) -> None:
+def save_image_grid(
+    images: Iterable[np.ndarray],
+    titles: Optional[Iterable[str]],
+    out_path: str,
+    ncol: int = 8,
+    ylabels: Optional[Sequence[str]] = None,
+) -> None:
     images = list(images)
     titles = list(titles) if titles is not None else None
     if titles is not None and len(titles) != len(images):
@@ -17,13 +23,18 @@ def save_image_grid(images: Iterable[np.ndarray], titles: Optional[Iterable[str]
 
     ncol = max(1, min(ncol, len(images)))
     nrow = math.ceil(len(images) / ncol)
+    if ylabels is not None and len(ylabels) != nrow:
+        raise ValueError("ylabels length must match number of rows")
+
     plt.figure(figsize=(1.8 * ncol, 1.8 * nrow))
     for idx, img in enumerate(images):
-        plt.subplot(nrow, ncol, idx + 1)
-        plt.imshow(img)
+        ax = plt.subplot(nrow, ncol, idx + 1)
+        ax.imshow(img)
         if titles is not None:
-            plt.title(titles[idx], fontsize=8)
-        plt.axis('off')
+            ax.set_title(titles[idx], fontsize=8)
+        if ylabels is not None and idx % ncol == 0:
+            ax.set_ylabel(ylabels[idx // ncol], rotation=90, ha='right', va='center', fontsize=9)
+        ax.axis('off')
     plt.tight_layout()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150)

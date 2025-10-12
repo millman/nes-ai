@@ -427,13 +427,11 @@ def run_evals(
             mu_prior, logvar_prior = model.compute_prior(state_prev, state_curr)
             mu_post, _ = model.compute_posterior(state_prev, state_curr, state_next)
             action = mu_post
-            _, delta_feat, pred_feat = model.transition(feat_prev, feat_curr, action)
-            with torch.no_grad():
-                _, _, pred_null = model.transition(feat_prev, feat_curr, mu_prior)
-            action_effect = (pred_feat - pred_null).abs()
+            base_feat, delta_feat, pred_feat = model.transition(feat_prev, feat_curr, action)
+            residual_target = (feat_target - base_feat).abs()
 
             delta_mag = delta_feat.abs().mean().item()
-            effect_mag = action_effect.mean().item()
+            effect_mag = residual_target.mean().item()
             all_action_mag.append(delta_mag)
             all_effect_mag.append(effect_mag)
 
@@ -441,7 +439,7 @@ def run_evals(
                 state_mask = model.state_saliency(feat_prev, feat_curr)
                 action_mask = model.action_saliency(feat_curr, action)
 
-                effect_map = action_effect.pow(2).sum(dim=1, keepdim=True).sqrt()
+                effect_map = residual_target.pow(2).sum(dim=1, keepdim=True).sqrt()
                 denom = effect_map.amax(dim=(2, 3), keepdim=True) + 1e-6
                 effect_map = effect_map / denom
 
@@ -449,10 +447,12 @@ def run_evals(
                 heat_action = _tensor_to_np_heatmap(action_mask, context.shape)
                 heat_effect = _tensor_to_np_heatmap(effect_map, context.shape)
 
-                state_overlays.append(overlay_heatmap(_tensor_to_np_image(context[-1]), heat_state))
-                action_overlays.append(overlay_heatmap(_tensor_to_np_image(context[-1]), heat_action))
-                effect_overlays.append(overlay_heatmap(_tensor_to_np_image(context[-1]), heat_effect))
-                target_imgs.append(_tensor_to_np_image(future[step]))
+                base_state_img = _tensor_to_np_image(context[-1])
+                future_img = _tensor_to_np_image(future[step])
+                state_overlays.append(overlay_heatmap(base_state_img, heat_state))
+                action_overlays.append(overlay_heatmap(future_img, heat_action))
+                effect_overlays.append(overlay_heatmap(future_img, heat_effect))
+                target_imgs.append(future_img)
 
         for step in range(cfg.input_len):
             ctx_imgs.append(_tensor_to_np_image(context[step]))
@@ -461,44 +461,82 @@ def run_evals(
             total_cols = cfg.input_len + vis_steps
             grids: List[np.ndarray] = []
             titles: List[str] = []
+            ylabels = ["groundtruth", "prediction", "state", "action", "cf"]
 
-            # Row 0: raw frames
-            for idx, img in enumerate(ctx_imgs):
-                grids.append(img)
-                titles.append(f"t-{cfg.input_len - idx}")
-            for step in range(vis_steps):
-                grids.append(target_imgs[step])
-                titles.append(f"t+{step+1}")
-
-            # Row 1: state influence
+            # Column labels for time (used only on the top row)
+            col_labels = []
             for idx in range(cfg.input_len):
-                grids.append(ctx_imgs[idx])
-                titles.append("state")
+                offset = cfg.input_len - idx - 1
+                col_labels.append(f"t-{offset}" if offset > 0 else "t")
             for step in range(vis_steps):
-                grids.append(state_overlays[step])
-                titles.append("state")
+                col_labels.append(f"t+{step+1}")
 
-            # Row 2: action saliency
-            for idx in range(cfg.input_len):
-                grids.append(ctx_imgs[idx])
-                titles.append("action")
-            for step in range(vis_steps):
-                grids.append(action_overlays[step])
-                titles.append("action")
+            blank = np.zeros_like(ctx_imgs[0]) if ctx_imgs else None
 
-            # Row 3: cf effect
-            for idx in range(cfg.input_len):
-                grids.append(ctx_imgs[idx])
-                titles.append("cf")
-            for step in range(vis_steps):
-                grids.append(effect_overlays[step])
-                titles.append("cf")
+            row_contents = []
+
+            # Groundtruth row
+            row = []
+            for col in range(total_cols):
+                if col < len(ctx_imgs):
+                    row.append(ctx_imgs[col])
+                else:
+                    row.append(target_imgs[col - len(ctx_imgs)])
+            row_contents.append(row)
+
+            # Prediction row (placeholder)
+            row = []
+            for col in range(total_cols):
+                if col < len(ctx_imgs):
+                    row.append(blank if blank is not None else ctx_imgs[col])
+                else:
+                    row.append(target_imgs[col - len(ctx_imgs)])
+            row_contents.append(row)
+
+            # State row
+            row = []
+            for col in range(total_cols):
+                if col < len(ctx_imgs):
+                    row.append(ctx_imgs[col])
+                else:
+                    idx_local = col - len(ctx_imgs)
+                    row.append(state_overlays[idx_local])
+            row_contents.append(row)
+
+            # Action row
+            row = []
+            for col in range(total_cols):
+                if col < len(ctx_imgs):
+                    row.append(ctx_imgs[col])
+                else:
+                    idx_local = col - len(ctx_imgs)
+                    row.append(action_overlays[idx_local])
+            row_contents.append(row)
+
+            # CF row
+            row = []
+            for col in range(total_cols):
+                if col < len(ctx_imgs):
+                    row.append(ctx_imgs[col])
+                else:
+                    idx_local = col - len(ctx_imgs)
+                    row.append(effect_overlays[idx_local])
+            row_contents.append(row)
+
+            for row_idx, row in enumerate(row_contents):
+                for col_idx, img in enumerate(row):
+                    grids.append(img)
+                    if row_idx == 0:
+                        titles.append(col_labels[col_idx])
+                    else:
+                        titles.append("")
 
             save_image_grid(
                 grids,
                 titles,
                 str(out_dir / f"traj{traj_idx}_start{start}.png"),
                 ncol=total_cols,
+                ylabels=ylabels,
             )
 
         entries.append(1)
@@ -529,7 +567,7 @@ class Args:
     device: Optional[str] = None
 
     input_len: int = 4
-    pred_len: int = 4
+    pred_len: int = 3
     action_dim: int = 32
 
     lambda_recon: float = 1.0
@@ -537,7 +575,6 @@ class Args:
     lambda_action_sal: float = 0.5
     lambda_kl: float = 1e-3
     lambda_sparse: float = 1e-2
-    lambda_action_cf: float = 0.5
 
     eval_every: int = 1
     eval_samples: int = 10
@@ -568,7 +605,6 @@ def train(cfg: Args):
         'recon': [],
         'state_sal': [],
         'action_sal': [],
-        'action_cf': [],
         'kl': [],
         'sparse': [],
     }
@@ -592,7 +628,6 @@ def train(cfg: Args):
             recon_terms = []
             state_terms = []
             action_terms = []
-            action_cf_terms = []
             kl_terms = []
             sparse_terms = []
 
@@ -614,35 +649,30 @@ def train(cfg: Args):
                 action_latent, _ = model.sample_action(mu_post, logvar_post)
 
                 base_feat, delta_feat, pred_feat = model.transition(feat_prev, feat_curr, action_latent)
-                with torch.no_grad():
-                    _, _, pred_null = model.transition(
-                        feat_prev.detach(), feat_curr.detach(), mu_prior.detach()
-                    )
-                action_effect = (pred_feat - pred_null).abs()
+                loss_base_fit = F.mse_loss(base_feat, feat_target)
+                residual_target = (feat_target - base_feat).detach()
+                loss_residual_fit = F.mse_loss(delta_feat, residual_target)
 
-                recon_terms.append(F.mse_loss(pred_feat, feat_target))
+                recon_terms.append(loss_base_fit + loss_residual_fit)
                 kl_terms.append(_kl_divergence(mu_post, logvar_post, mu_prior, logvar_prior).mean())
                 sparse_terms.append(delta_feat.abs().mean())
 
-                loss_base = F.mse_loss(base_feat, feat_target)
                 state_grad = torch.autograd.grad(
-                    loss_base, feat_curr, retain_graph=True, create_graph=False
+                    loss_base_fit, feat_curr, retain_graph=True, create_graph=False
                 )[0].detach()
                 state_target = state_grad.pow(2).sum(dim=1, keepdim=True).sqrt()
                 state_target = state_target / (state_target.amax(dim=(2, 3), keepdim=True) + 1e-6)
                 state_mask = model.state_saliency(feat_prev, feat_curr)
                 state_terms.append(F.mse_loss(state_mask, state_target))
 
-                action_target = action_effect.detach().pow(2).sum(dim=1, keepdim=True).sqrt()
+                action_target = residual_target.pow(2).sum(dim=1, keepdim=True).sqrt()
                 action_target = action_target / (action_target.amax(dim=(2, 3), keepdim=True) + 1e-6)
                 action_mask = model.action_saliency(feat_curr, action_latent)
                 action_terms.append(F.mse_loss(action_mask, action_target))
-                action_cf_terms.append(F.mse_loss(action_effect, delta_feat.abs()))
 
             avg_recon = torch.stack(recon_terms).mean()
             avg_state = torch.stack(state_terms).mean()
             avg_action = torch.stack(action_terms).mean()
-            avg_action_cf = torch.stack(action_cf_terms).mean()
             avg_kl = torch.stack(kl_terms).mean()
             avg_sparse = torch.stack(sparse_terms).mean()
 
@@ -650,7 +680,6 @@ def train(cfg: Args):
                 cfg.lambda_recon * avg_recon
                 + cfg.lambda_state_sal * avg_state
                 + cfg.lambda_action_sal * avg_action
-                + cfg.lambda_action_cf * avg_action_cf
                 + cfg.lambda_kl * avg_kl
                 + cfg.lambda_sparse * avg_sparse
             )
@@ -663,7 +692,6 @@ def train(cfg: Args):
             meter['recon'] += float(avg_recon.detach().cpu())
             meter['state_sal'] += float(avg_state.detach().cpu())
             meter['action_sal'] += float(avg_action.detach().cpu())
-            meter['action_cf'] += float(avg_action_cf.detach().cpu())
             meter['kl'] += float(avg_kl.detach().cpu())
             meter['sparse'] += float(avg_sparse.detach().cpu())
 
@@ -674,7 +702,6 @@ def train(cfg: Args):
         avg_recon = meter['recon'] / denom
         avg_state = meter['state_sal'] / denom
         avg_action = meter['action_sal'] / denom
-        avg_action_cf = meter['action_cf'] / denom
         avg_kl = meter['kl'] / denom
         avg_sparse = meter['sparse'] / denom
 
@@ -682,14 +709,13 @@ def train(cfg: Args):
         loss_hist['recon'].append((epoch, avg_recon))
         loss_hist['state_sal'].append((epoch, avg_state))
         loss_hist['action_sal'].append((epoch, avg_action))
-        loss_hist['action_cf'].append((epoch, avg_action_cf))
         loss_hist['kl'].append((epoch, avg_kl))
         loss_hist['sparse'].append((epoch, avg_sparse))
 
         msg = (
             f"{prefix} loss {avg_total:.4f} | "
             f"recon {avg_recon:.3f} state_sal {avg_state:.3f} action_sal {avg_action:.3f} "
-            f"action_cf {avg_action_cf:.3f} kl {avg_kl:.4f} sparse {avg_sparse:.4f} | "
+            f"kl {avg_kl:.4f} sparse {avg_sparse:.4f} | "
             f"train_time {elapsed:.2f}s"
         )
         print(msg, flush=True)
