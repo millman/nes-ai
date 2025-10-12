@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-Latent action-influence discovery for NES Mario trajectories.
+Latent action-influence discovery for NES Mario trajectories with multi-frame
+context and prediction.
 
-This script mirrors the training/eval pattern used by `latent_distance_causal.py`.
-It learns a state encoder and a latent "action" variable directly from image
-sequences (no ground-truth actions). The model decomposes the next-frame
-prediction into (a) what can already be explained by the current visual state
-and (b) what requires an inferred action impulse. We supervise two saliency
-heads so they highlight, respectively, state-driven evidence and regions most
-altered by the latent action.
+The model ingests a configurable window of past frames and predicts multiple
+future frames by decomposing dynamics into (a) a state-driven head that models
+smooth evolution and (b) an action head that explains residual, intervention-
+like changes. Two saliency heads are trained so they highlight, respectively,
+state-driven evidence and regions most altered by the inferred latent action.
+A counterfactual rollout using the latent prior's mean provides an explicit
+"no-action" baseline for both losses and visualizations.
 
-Outputs include:
-  * latent action embeddings and their sparsity statistics
-  * per-frame heatmaps for action-driven vs. state-driven influence
-  * diagnostic loss plots saved alongside checkpoints
-
-Usage example (mirrors other scripts):
-    python latent_action_influence.py --data-root data.image_distance.train_10_traj \
-        --out-dir out.latent_action_influence --epochs 50
+Example:
+    python latent_action_influence.py \
+        --data-root data.image_distance.train_10_traj \
+        --out-dir out.latent_action_influence \
+        --input-len 4 --pred-len 3
 """
 from __future__ import annotations
 
@@ -54,53 +52,64 @@ from latent_distance.viz_utils import overlay_heatmap, plot_loss_grid, save_imag
 
 
 class ActionInfluenceDataset(Dataset):
-    """Samples 3-frame windows (t-1, t, t+1) for latent action discovery."""
+    """Samples contiguous windows for latent action discovery."""
 
     def __init__(
         self,
         index: TrajectoryIndex,
         image_size: int = 128,
         seed: int = 0,
+        input_len: int = 4,
+        pred_len: int = 3,
     ):
+        if input_len < 2:
+            raise ValueError("input_len must be >= 2 so velocity can be estimated")
+        if pred_len < 1:
+            raise ValueError("pred_len must be >= 1")
+
         self.index = index
         self.image_size = image_size
+        self.input_len = input_len
+        self.pred_len = pred_len
+        self.total_len = input_len + pred_len
         self.rng = random.Random(seed)
         self.tr = transforms.Compose([
             transforms.ToTensor(),
         ])
 
-    def __len__(self) -> int:
-        # define a virtual epoch length proportional to total available windows
-        total = 0
-        for frames in self.index.frames:
-            total += max(0, len(frames) - 2)
-        return max(total, 1)
+        self.windows: List[Tuple[int, int]] = []
+        for traj_idx in range(index.num_traj()):
+            L = index.len_traj(traj_idx)
+            if L < self.total_len:
+                continue
+            for start in range(L - self.total_len + 1):
+                self.windows.append((traj_idx, start))
+        if not self.windows:
+            raise RuntimeError(
+                "No windows available; check data_root, input_len, and pred_len settings."
+            )
 
-    def _load(self, traj_idx: int, t: int) -> Tuple[torch.Tensor, str]:
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def _load(self, traj_idx: int, t: int) -> torch.Tensor:
         path = self.index.get_path(traj_idx, t)
         img = Image.open(path).convert('RGB').resize((self.image_size, self.image_size), Image.BILINEAR)
-        return self.tr(img), str(path)
+        return self.tr(img)
 
-    def __getitem__(self, _: int) -> Dict[str, object]:
-        traj_idx = self.rng.randrange(self.index.num_traj())
-        L = self.index.len_traj(traj_idx)
-        if L < 3:
-            raise RuntimeError("Trajectory too short for 3-frame window")
-        center = self.rng.randrange(1, L - 1)
-        x_prev, path_prev = self._load(traj_idx, center - 1)
-        x_curr, path_curr = self._load(traj_idx, center)
-        x_next, path_next = self._load(traj_idx, center + 1)
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        traj_idx, start = self.windows[idx]
+        frames = []
+        for offset in range(self.total_len):
+            frames.append(self._load(traj_idx, start + offset))
+        stack = torch.stack(frames, dim=0)  # [total_len, 3, H, W]
+        context = stack[: self.input_len]
+        future = stack[self.input_len :]
         return {
-            'x_prev': x_prev,
-            'x_curr': x_curr,
-            'x_next': x_next,
+            'context': context,
+            'future': future,
             'traj_idx': traj_idx,
-            't_prev': center - 1,
-            't_curr': center,
-            't_next': center + 1,
-            'path_prev': path_prev,
-            'path_curr': path_curr,
-            'path_next': path_next,
+            'start': start,
         }
 
 
@@ -234,7 +243,6 @@ class ActionInfluenceModel(nn.Module):
             nn.SiLU(),
             nn.Linear(state_dim, action_dim * 2),
         )
-        # state transition takes current feat and velocity-like difference
         self.state_transition = ConvTransition(in_ch=feat_ch * 2, hidden=feat_ch)
         self.action_decoder = ActionDecoder(feat_ch=feat_ch, action_dim=action_dim)
         self.state_saliency_head = SaliencyHead(in_ch=feat_ch * 2)
@@ -268,7 +276,12 @@ class ActionInfluenceModel(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std, eps
 
-    def transition(self, feat_prev: torch.Tensor, feat_curr: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def transition(
+        self,
+        feat_prev: torch.Tensor,
+        feat_curr: torch.Tensor,
+        action: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         velocity = feat_curr - feat_prev
         base_in = torch.cat([feat_curr, velocity], dim=1)
         base = self.state_transition(base_in)
@@ -282,6 +295,27 @@ class ActionInfluenceModel(nn.Module):
     def state_saliency(self, feat_prev: torch.Tensor, feat_curr: torch.Tensor) -> torch.Tensor:
         velocity = feat_curr - feat_prev
         return self.state_saliency_head(torch.cat([feat_curr, velocity], dim=1))
+
+
+# -----------------------------------------------------------------------------
+# Sequence helpers
+# -----------------------------------------------------------------------------
+
+
+def encode_sequence(
+    model: ActionInfluenceModel,
+    frames: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Encode a [B, L, 3, H, W] tensor into feature maps and state vectors."""
+    B, L, C, H, W = frames.shape
+    flat = frames.view(B * L, C, H, W)
+    _, feats = model.encode(flat)
+    feat_ch, h_feat, w_feat = feats.shape[1:]
+    feats = feats.view(B, L, feat_ch, h_feat, w_feat)
+    states = model.state_vector(feats.view(B * L, feat_ch, h_feat, w_feat))
+    state_dim = states.shape[1]
+    states = states.view(B, L, state_dim)
+    return feats, states
 
 
 # -----------------------------------------------------------------------------
@@ -300,103 +334,180 @@ def _tensor_to_np_heatmap(m: torch.Tensor, target_hw: torch.Size) -> np.ndarray:
     return heat.detach().cpu().squeeze(0).squeeze(0).numpy()
 
 
-def collect_eval_windows(index: TrajectoryIndex) -> List[Tuple[int, int]]:
+def collect_eval_windows(
+    index: TrajectoryIndex,
+    input_len: int,
+    pred_len: int,
+) -> List[Tuple[int, int]]:
     windows = []
+    total = input_len + pred_len
     for traj_idx in range(index.num_traj()):
         L = index.len_traj(traj_idx)
-        for center in range(1, L - 1):
-            windows.append((traj_idx, center))
+        if L < total:
+            continue
+        for start in range(L - total + 1):
+            windows.append((traj_idx, start))
     return windows
 
 
-def load_window(index: TrajectoryIndex, traj_idx: int, center: int, image_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
+def load_window(
+    index: TrajectoryIndex,
+    traj_idx: int,
+    start: int,
+    input_len: int,
+    pred_len: int,
+    image_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, List[str], List[str]]:
+    total = input_len + pred_len
+    frames = []
     paths = []
     tr = transforms.Compose([transforms.ToTensor()])
-    frames = []
-    for offset in (-1, 0, 1):
-        path = index.get_path(traj_idx, center + offset)
+    for offset in range(total):
+        path = index.get_path(traj_idx, start + offset)
         img = Image.open(path).convert('RGB').resize((image_size, image_size), Image.BILINEAR)
         frames.append(tr(img))
         paths.append(str(path))
-    return frames[0], frames[1], frames[2], paths
+    stack = torch.stack(frames, dim=0)
+    context = stack[:input_len]
+    future = stack[input_len:]
+    return context, future, paths[:input_len], paths[input_len:]
 
 
-def run_evals(cfg, model: ActionInfluenceModel, index: TrajectoryIndex, tag: str) -> Dict[str, float]:
+def run_evals(
+    cfg,
+    model: ActionInfluenceModel,
+    index: TrajectoryIndex,
+    tag: str,
+) -> Dict[str, float]:
     model.eval()
     out_dir = Path(cfg.out_dir) / f"eval_{tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rng = random.Random(cfg.seed + 1337)
-    windows = collect_eval_windows(index)
+    windows = collect_eval_windows(index, cfg.input_len, cfg.pred_len)
     rng.shuffle(windows)
     windows = windows[: cfg.eval_samples]
+    vis_steps = min(cfg.pred_len, cfg.vis_steps)
 
     entries = []
-    all_action_mag = []
-    with torch.no_grad():
-        for traj_idx, center in windows:
-            x_prev, x_curr, x_next, paths = load_window(index, traj_idx, center, cfg.image_size)
-            xb_prev = x_prev.unsqueeze(0).to(cfg.device)
-            xb_curr = x_curr.unsqueeze(0).to(cfg.device)
-            xb_next = x_next.unsqueeze(0).to(cfg.device)
+    all_action_mag: List[float] = []
+    all_effect_mag: List[float] = []
 
-            _, feat_prev = model.encode(xb_prev)
-            _, feat_curr = model.encode(xb_curr)
-            _, feat_next = model.encode(xb_next)
+    for traj_idx, start in windows:
+        context, future, ctx_paths, fut_paths = load_window(
+            index, traj_idx, start, cfg.input_len, cfg.pred_len, cfg.image_size
+        )
+        frames = torch.cat([context, future], dim=0).unsqueeze(0).to(cfg.device)
+        with torch.no_grad():
+            feat_seq, state_seq = encode_sequence(model, frames)
 
-            state_prev = model.state_vector(feat_prev)
-            state_curr = model.state_vector(feat_curr)
-            state_next = model.state_vector(feat_next)
+        feat_seq = feat_seq.squeeze(0)
+        state_seq = state_seq.squeeze(0)
+        total_len = cfg.input_len + cfg.pred_len
+
+        state_overlays: List[np.ndarray] = []
+        action_overlays: List[np.ndarray] = []
+        effect_overlays: List[np.ndarray] = []
+        target_imgs: List[np.ndarray] = []
+        ctx_imgs: List[np.ndarray] = []
+
+        for step in range(cfg.pred_len):
+            idx_target = cfg.input_len + step
+            idx_curr = idx_target - 1
+            idx_prev = idx_curr - 1
+
+            feat_prev = feat_seq[idx_prev: idx_prev + 1]
+            feat_curr = feat_seq[idx_curr: idx_curr + 1]
+            feat_target = feat_seq[idx_target: idx_target + 1]
+
+            state_prev = state_seq[idx_prev: idx_prev + 1]
+            state_curr = state_seq[idx_curr: idx_curr + 1]
+            state_next = state_seq[idx_target: idx_target + 1]
 
             mu_prior, logvar_prior = model.compute_prior(state_prev, state_curr)
             mu_post, _ = model.compute_posterior(state_prev, state_curr, state_next)
-            action = mu_post  # deterministic for viz
-            base_feat, delta_feat, pred_feat = model.transition(feat_prev, feat_curr, action)
+            action = mu_post
+            _, delta_feat, pred_feat = model.transition(feat_prev, feat_curr, action)
+            with torch.no_grad():
+                _, _, pred_null = model.transition(feat_prev, feat_curr, mu_prior)
+            action_effect = (pred_feat - pred_null).abs()
 
-            action_mask = model.action_saliency(feat_curr, action)
-            state_mask = model.state_saliency(feat_prev, feat_curr)
+            delta_mag = delta_feat.abs().mean().item()
+            effect_mag = action_effect.mean().item()
+            all_action_mag.append(delta_mag)
+            all_effect_mag.append(effect_mag)
 
-            delta_mag = delta_feat.abs().mean(dim=(1, 2, 3))
-            all_action_mag.append(float(delta_mag.item()))
+            if step < vis_steps:
+                state_mask = model.state_saliency(feat_prev, feat_curr)
+                action_mask = model.action_saliency(feat_curr, action)
 
-            heat_action = _tensor_to_np_heatmap(action_mask, x_curr.shape)
-            heat_state = _tensor_to_np_heatmap(state_mask, x_curr.shape)
-            img_curr = _tensor_to_np_image(x_curr)
-            img_next = _tensor_to_np_image(x_next)
+                effect_map = action_effect.pow(2).sum(dim=1, keepdim=True).sqrt()
+                denom = effect_map.amax(dim=(2, 3), keepdim=True) + 1e-6
+                effect_map = effect_map / denom
 
-            overlay_action = overlay_heatmap(img_curr, heat_action)
-            overlay_state = overlay_heatmap(img_curr, heat_state)
+                heat_state = _tensor_to_np_heatmap(state_mask, context.shape)
+                heat_action = _tensor_to_np_heatmap(action_mask, context.shape)
+                heat_effect = _tensor_to_np_heatmap(effect_map, context.shape)
 
-            entries.append({
-                'traj': traj_idx,
-                'center': center,
-                'path_curr': paths[1],
-                'path_next': paths[2],
-                'img_curr': img_curr,
-                'img_next': img_next,
-                'overlay_action': overlay_action,
-                'overlay_state': overlay_state,
-                'action_mag': float(delta_mag.item()),
-                'prior_std': float((0.5 * logvar_prior).exp().mean().item()),
-            })
+                state_overlays.append(overlay_heatmap(_tensor_to_np_image(context[-1]), heat_state))
+                action_overlays.append(overlay_heatmap(_tensor_to_np_image(context[-1]), heat_action))
+                effect_overlays.append(overlay_heatmap(_tensor_to_np_image(context[-1]), heat_effect))
+                target_imgs.append(_tensor_to_np_image(future[step]))
 
-    if entries:
-        grids = []
-        titles = []
-        for ent in entries:
-            grids.extend([ent['img_curr'], ent['overlay_state'], ent['overlay_action'], ent['img_next']])
-            titles.extend([
-                f"traj{ent['traj']}@t{ent['center']}",
-                "state influence",
-                f"action infl (|Δ|={ent['action_mag']:.3f})",
-                "next frame",
-            ])
-        save_image_grid(grids, titles, str(out_dir / "windows.png"), ncol=4)
+        for step in range(cfg.input_len):
+            ctx_imgs.append(_tensor_to_np_image(context[step]))
+
+        if state_overlays:
+            total_cols = cfg.input_len + vis_steps
+            grids: List[np.ndarray] = []
+            titles: List[str] = []
+
+            # Row 0: raw frames
+            for idx, img in enumerate(ctx_imgs):
+                grids.append(img)
+                titles.append(f"t-{cfg.input_len - idx}")
+            for step in range(vis_steps):
+                grids.append(target_imgs[step])
+                titles.append(f"t+{step+1}")
+
+            # Row 1: state influence
+            for idx in range(cfg.input_len):
+                grids.append(ctx_imgs[idx])
+                titles.append("state")
+            for step in range(vis_steps):
+                grids.append(state_overlays[step])
+                titles.append("state")
+
+            # Row 2: action saliency
+            for idx in range(cfg.input_len):
+                grids.append(ctx_imgs[idx])
+                titles.append("action")
+            for step in range(vis_steps):
+                grids.append(action_overlays[step])
+                titles.append("action")
+
+            # Row 3: cf effect
+            for idx in range(cfg.input_len):
+                grids.append(ctx_imgs[idx])
+                titles.append("cf")
+            for step in range(vis_steps):
+                grids.append(effect_overlays[step])
+                titles.append("cf")
+
+            save_image_grid(
+                grids,
+                titles,
+                str(out_dir / f"traj{traj_idx}_start{start}.png"),
+                ncol=total_cols,
+            )
+
+        entries.append(1)
 
     stats = {
         'eval_samples': len(entries),
         'mean_action_mag': float(np.mean(all_action_mag)) if all_action_mag else 0.0,
         'median_action_mag': float(np.median(all_action_mag)) if all_action_mag else 0.0,
+        'mean_effect_mag': float(np.mean(all_effect_mag)) if all_effect_mag else 0.0,
     }
     return stats
 
@@ -411,12 +522,14 @@ class Args:
     data_root: str = "data.image_distance.train_10_traj"
     out_dir: str = "out.latent_action_influence"
     image_size: int = 128
-    batch_size: int = 16
-    epochs: int = 1000
+    batch_size: int = 8
+    epochs: int = 40
     lr: float = 1e-3
     seed: int = 0
     device: Optional[str] = None
 
+    input_len: int = 4
+    pred_len: int = 4
     action_dim: int = 32
 
     lambda_recon: float = 1.0
@@ -424,23 +537,27 @@ class Args:
     lambda_action_sal: float = 0.5
     lambda_kl: float = 1e-3
     lambda_sparse: float = 1e-2
+    lambda_action_cf: float = 0.5
 
-    eval_every: int = 2
-    eval_samples: int = 12
+    eval_every: int = 1
+    eval_samples: int = 10
+    vis_steps: int = 3
 
 
 def build_loaders(cfg: Args):
-    index = TrajectoryIndex(Path(cfg.data_root), min_len=3)
-    train_ds = ActionInfluenceDataset(index, image_size=cfg.image_size, seed=cfg.seed)
+    index = TrajectoryIndex(Path(cfg.data_root), min_len=cfg.input_len + cfg.pred_len)
+    train_ds = ActionInfluenceDataset(
+        index,
+        image_size=cfg.image_size,
+        seed=cfg.seed,
+        input_len=cfg.input_len,
+        pred_len=cfg.pred_len,
+    )
     train_ld = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=0, drop_last=True)
     return index, train_ld
 
 
 def train(cfg: Args):
-    set_seed(cfg.seed)
-    cfg.device = pick_device(cfg.device)
-    os.makedirs(cfg.out_dir, exist_ok=True)
-
     index, train_ld = build_loaders(cfg)
     model = ActionInfluenceModel(in_ch=3, feat_dim=256, action_dim=cfg.action_dim).to(cfg.device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
@@ -451,6 +568,7 @@ def train(cfg: Args):
         'recon': [],
         'state_sal': [],
         'action_sal': [],
+        'action_cf': [],
         'kl': [],
         'sparse': [],
     }
@@ -465,59 +583,89 @@ def train(cfg: Args):
         for batch in train_ld:
             n_batches += 1
             global_step += 1
-            x_prev = batch['x_prev'].to(cfg.device)
-            x_curr = batch['x_curr'].to(cfg.device)
-            x_next = batch['x_next'].to(cfg.device)
+            context = batch['context'].to(cfg.device)
+            future = batch['future'].to(cfg.device)
 
-            opt.zero_grad(set_to_none=True)
+            frames = torch.cat([context, future], dim=1)
+            feat_seq, state_seq = encode_sequence(model, frames)
 
-            _, feat_prev = model.encode(x_prev)
-            _, feat_curr = model.encode(x_curr)
-            _, feat_next = model.encode(x_next)
+            recon_terms = []
+            state_terms = []
+            action_terms = []
+            action_cf_terms = []
+            kl_terms = []
+            sparse_terms = []
 
-            state_prev = model.state_vector(feat_prev)
-            state_curr = model.state_vector(feat_curr)
-            state_next = model.state_vector(feat_next)
+            for step in range(cfg.pred_len):
+                idx_target = cfg.input_len + step
+                idx_curr = idx_target - 1
+                idx_prev = idx_curr - 1
 
-            mu_prior, logvar_prior = model.compute_prior(state_prev, state_curr)
-            mu_post, logvar_post = model.compute_posterior(state_prev, state_curr, state_next)
-            action_latent, _ = model.sample_action(mu_post, logvar_post)
+                feat_prev = feat_seq[:, idx_prev]
+                feat_curr = feat_seq[:, idx_curr]
+                feat_target = feat_seq[:, idx_target]
 
-            base_feat, delta_feat, pred_feat = model.transition(feat_prev, feat_curr, action_latent)
+                state_prev = state_seq[:, idx_prev]
+                state_curr = state_seq[:, idx_curr]
+                state_next = state_seq[:, idx_target]
 
-            loss_recon = F.mse_loss(pred_feat, feat_next)
-            loss_base = F.mse_loss(base_feat, feat_next)
-            kl = _kl_divergence(mu_post, logvar_post, mu_prior, logvar_prior).mean()
-            loss_sparse = delta_feat.abs().mean()
+                mu_prior, logvar_prior = model.compute_prior(state_prev, state_curr)
+                mu_post, logvar_post = model.compute_posterior(state_prev, state_curr, state_next)
+                action_latent, _ = model.sample_action(mu_post, logvar_post)
 
-            state_grad = torch.autograd.grad(loss_base, feat_curr, retain_graph=True)[0].detach()
-            state_target = state_grad.pow(2).sum(dim=1, keepdim=True).sqrt()
-            state_target = state_target / (state_target.amax(dim=(2, 3), keepdim=True) + 1e-6)
-            state_mask = model.state_saliency(feat_prev, feat_curr)
-            loss_state_sal = F.mse_loss(state_mask, state_target)
+                base_feat, delta_feat, pred_feat = model.transition(feat_prev, feat_curr, action_latent)
+                with torch.no_grad():
+                    _, _, pred_null = model.transition(
+                        feat_prev.detach(), feat_curr.detach(), mu_prior.detach()
+                    )
+                action_effect = (pred_feat - pred_null).abs()
 
-            action_target = delta_feat.pow(2).sum(dim=1, keepdim=True).sqrt()
-            action_target = action_target / (action_target.amax(dim=(2, 3), keepdim=True) + 1e-6)
-            action_mask = model.action_saliency(feat_curr, action_latent)
-            loss_action_sal = F.mse_loss(action_mask, action_target)
+                recon_terms.append(F.mse_loss(pred_feat, feat_target))
+                kl_terms.append(_kl_divergence(mu_post, logvar_post, mu_prior, logvar_prior).mean())
+                sparse_terms.append(delta_feat.abs().mean())
+
+                loss_base = F.mse_loss(base_feat, feat_target)
+                state_grad = torch.autograd.grad(
+                    loss_base, feat_curr, retain_graph=True, create_graph=False
+                )[0].detach()
+                state_target = state_grad.pow(2).sum(dim=1, keepdim=True).sqrt()
+                state_target = state_target / (state_target.amax(dim=(2, 3), keepdim=True) + 1e-6)
+                state_mask = model.state_saliency(feat_prev, feat_curr)
+                state_terms.append(F.mse_loss(state_mask, state_target))
+
+                action_target = action_effect.detach().pow(2).sum(dim=1, keepdim=True).sqrt()
+                action_target = action_target / (action_target.amax(dim=(2, 3), keepdim=True) + 1e-6)
+                action_mask = model.action_saliency(feat_curr, action_latent)
+                action_terms.append(F.mse_loss(action_mask, action_target))
+                action_cf_terms.append(F.mse_loss(action_effect, delta_feat.abs()))
+
+            avg_recon = torch.stack(recon_terms).mean()
+            avg_state = torch.stack(state_terms).mean()
+            avg_action = torch.stack(action_terms).mean()
+            avg_action_cf = torch.stack(action_cf_terms).mean()
+            avg_kl = torch.stack(kl_terms).mean()
+            avg_sparse = torch.stack(sparse_terms).mean()
 
             loss = (
-                cfg.lambda_recon * loss_recon
-                + cfg.lambda_state_sal * loss_state_sal
-                + cfg.lambda_action_sal * loss_action_sal
-                + cfg.lambda_kl * kl
-                + cfg.lambda_sparse * loss_sparse
+                cfg.lambda_recon * avg_recon
+                + cfg.lambda_state_sal * avg_state
+                + cfg.lambda_action_sal * avg_action
+                + cfg.lambda_action_cf * avg_action_cf
+                + cfg.lambda_kl * avg_kl
+                + cfg.lambda_sparse * avg_sparse
             )
+            opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
             meter['total'] += float(loss.detach().cpu())
-            meter['recon'] += float(loss_recon.detach().cpu())
-            meter['state_sal'] += float(loss_state_sal.detach().cpu())
-            meter['action_sal'] += float(loss_action_sal.detach().cpu())
-            meter['kl'] += float(kl.detach().cpu())
-            meter['sparse'] += float(loss_sparse.detach().cpu())
+            meter['recon'] += float(avg_recon.detach().cpu())
+            meter['state_sal'] += float(avg_state.detach().cpu())
+            meter['action_sal'] += float(avg_action.detach().cpu())
+            meter['action_cf'] += float(avg_action_cf.detach().cpu())
+            meter['kl'] += float(avg_kl.detach().cpu())
+            meter['sparse'] += float(avg_sparse.detach().cpu())
 
         denom = max(1, n_batches)
         elapsed = time.time() - t0
@@ -526,6 +674,7 @@ def train(cfg: Args):
         avg_recon = meter['recon'] / denom
         avg_state = meter['state_sal'] / denom
         avg_action = meter['action_sal'] / denom
+        avg_action_cf = meter['action_cf'] / denom
         avg_kl = meter['kl'] / denom
         avg_sparse = meter['sparse'] / denom
 
@@ -533,13 +682,14 @@ def train(cfg: Args):
         loss_hist['recon'].append((epoch, avg_recon))
         loss_hist['state_sal'].append((epoch, avg_state))
         loss_hist['action_sal'].append((epoch, avg_action))
+        loss_hist['action_cf'].append((epoch, avg_action_cf))
         loss_hist['kl'].append((epoch, avg_kl))
         loss_hist['sparse'].append((epoch, avg_sparse))
 
         msg = (
             f"{prefix} loss {avg_total:.4f} | "
             f"recon {avg_recon:.3f} state_sal {avg_state:.3f} action_sal {avg_action:.3f} "
-            f"kl {avg_kl:.4f} sparse {avg_sparse:.4f} | "
+            f"action_cf {avg_action_cf:.3f} kl {avg_kl:.4f} sparse {avg_sparse:.4f} | "
             f"train_time {elapsed:.2f}s"
         )
         print(msg, flush=True)
@@ -560,13 +710,21 @@ def train(cfg: Args):
             print(
                 f"  eval[{epoch}] samples={eval_stats['eval_samples']} "
                 f"mean|Δ|={eval_stats['mean_action_mag']:.4f} "
-                f"median|Δ|={eval_stats['median_action_mag']:.4f}",
+                f"median|Δ|={eval_stats['median_action_mag']:.4f} "
+                f"mean|cf|={eval_stats['mean_effect_mag']:.4f}",
                 flush=True,
             )
 
 
 def main():
     cfg = attach_run_output_dir(tyro.cli(Args))
+
+    set_seed(cfg.seed)
+    cfg.device = pick_device(cfg.device)
+
+    print(f"[Device] {cfg.device} | [Data] {cfg.data_root} | [Out] {cfg.out_dir}", flush=True)
+
+    os.makedirs(cfg.out_dir, exist_ok=True)
     train(cfg)
 
 
