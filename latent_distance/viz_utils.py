@@ -34,7 +34,10 @@ def save_image_grid(
             ax.set_title(titles[idx], fontsize=8)
         if ylabels is not None and idx % ncol == 0:
             ax.set_ylabel(ylabels[idx // ncol], rotation=90, ha='right', va='center', fontsize=9)
-        ax.axis('off')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
     plt.tight_layout()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150)
