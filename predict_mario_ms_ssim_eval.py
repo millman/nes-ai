@@ -70,6 +70,7 @@ class Args:
     out_dir: str = "out.predict_mario_ms_ssim_eval_plus"
     num_samples: int = 8
     max_trajs: Optional[int] = None
+    self_distance_max_trajs: Optional[int] = None
     seed: int = 0
     device: Optional[str] = None
     save_name: Optional[str] = None
@@ -497,16 +498,25 @@ def build_pair_contexts(frames4: torch.Tensor, targets: torch.Tensor, offset: in
 # -----------------------------
 
 @torch.no_grad()
-def compute_self_distance_metrics(traj_dir: Path, device: torch.device, out_dir: Path) -> None:
+def compute_self_distance_metrics(
+    traj_dir: Path,
+    device: torch.device,
+    out_dir: Path,
+    max_trajs: Optional[int] = None,
+) -> None:
     transform = default_transform()
     backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
     backbone.fc = nn.Identity()
     backbone.eval().to(device)
 
     traj_dirs = list_traj_dirs(traj_dir)
+    if max_trajs is not None:
+        traj_dirs = traj_dirs[:max_trajs]
     if not traj_dirs:
         print(f"[self-distance] no trajectory directories found in {traj_dir}")
         return
+
+    print(f"[self-distance] found {len(traj_dirs)} trajectories in {traj_dir}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -725,7 +735,12 @@ def main() -> None:
             break
 
     # Also run original self-distance analysis for convenience
-    compute_self_distance_metrics(Path(args.traj_dir), device, out_dir / "self_distance")
+    compute_self_distance_metrics(
+        Path(args.traj_dir),
+        device,
+        out_dir / "self_distance",
+        max_trajs=args.self_distance_max_trajs,
+    )
 
     print(f"Saved {pair_count} pair panels to {pair_dir}")
 
