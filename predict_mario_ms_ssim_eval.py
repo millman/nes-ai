@@ -256,7 +256,7 @@ def gradcam_distance_heatmap(base: resnet18, a: torch.Tensor, b: torch.Tensor, o
 
 @torch.no_grad()
 def occlusion_sensitivity_map(encoder: PerceptualEncoder, a: torch.Tensor, b: torch.Tensor, k: int = 16, stride: int = 8, fill: float = 0.0) -> torch.Tensor:
-    """Occlusion map showing drop in cosine distance when occluding A's patches."""
+    """Occlusion map of signed cosine-distance change when occluding A's patches."""
     device = a.device
     _, za = encoder(a)
     _, zb = encoder(b)
@@ -269,9 +269,11 @@ def occlusion_sensitivity_map(encoder: PerceptualEncoder, a: torch.Tensor, b: to
             a_occ[..., y:y+k, x:x+k] = fill
             _, za_occ = encoder(a_occ)
             d = cosine_distance(za_occ, zb).item()
-            drop = max(base - d, 0.0)
-            heat[y:y+k, x:x+k] += drop
-    heat = heat / (heat.max() + 1e-8)
+            delta = base - d
+            heat[y:y+k, x:x+k] += delta
+    max_abs = heat.abs().max().item()
+    if max_abs > 0:
+        heat = heat / max_abs
     return heat
 
 @torch.no_grad()
@@ -306,7 +308,14 @@ def _to_pil01(frame: torch.Tensor) -> Image.Image:
     return TF.to_pil_image(vis)
 
 @torch.no_grad()
-def overlay_heatmap(rgb: Image.Image, heat: torch.Tensor, alpha: float = 0.55, cmap: str = 'jet') -> Image.Image:
+def overlay_heatmap(
+    rgb: Image.Image,
+    heat: torch.Tensor,
+    alpha: float = 0.55,
+    cmap: str = 'jet',
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+) -> Image.Image:
     H, W = heat.shape[-2:]
     heat_np = heat.detach().cpu().numpy()
     fig = Figure(figsize=(W / 100, H / 100), dpi=100)
@@ -314,7 +323,7 @@ def overlay_heatmap(rgb: Image.Image, heat: torch.Tensor, alpha: float = 0.55, c
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis('off')
     ax.imshow(rgb)
-    ax.imshow(heat_np, cmap=cmap, alpha=alpha, interpolation='bilinear')
+    ax.imshow(heat_np, cmap=cmap, alpha=alpha, interpolation='bilinear', vmin=vmin, vmax=vmax)
     canvas.draw()
     buf = np.asarray(canvas.buffer_rgba(), dtype=np.uint8)
     data = buf.reshape(H, W, 4)[..., :3]
@@ -636,7 +645,7 @@ def main() -> None:
         b_pil = _to_pil01(img_b.cpu())
         feat_img = overlay_heatmap(a_pil, feat_diff)
         cam_img = overlay_heatmap(a_pil, cam)
-        occl_img = overlay_heatmap(a_pil, occl)
+        occl_img = overlay_heatmap(a_pil, occl, cmap='coolwarm', vmin=-1.0, vmax=1.0)
         fut_img = overlay_heatmap(a_pil, fut)
         ssim_img = overlay_heatmap(a_pil, pair_ssim)
 
