@@ -49,6 +49,7 @@ import tyro
 from PIL import Image, ImageDraw, ImageFont
 from torchvision.models import ResNet18_Weights, resnet18
 from torchvision.models.feature_extraction import create_feature_extractor
+from tqdm import tqdm
 
 from predict_mario_ms_ssim import (
     Mario4to1Dataset,
@@ -509,7 +510,14 @@ def compute_self_distance_metrics(traj_dir: Path, device: torch.device, out_dir:
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for traj_path in traj_dirs:
+    traj_bar = tqdm(
+        traj_dirs,
+        desc="[self-distance] trajectories",
+        unit="traj",
+        total=len(traj_dirs),
+        position=0,
+    )
+    for traj_path in traj_bar:
         states_dir = traj_path / "states"
         if not states_dir.is_dir():
             continue
@@ -518,11 +526,20 @@ def compute_self_distance_metrics(traj_dir: Path, device: torch.device, out_dir:
             continue
 
         embeddings: List[torch.Tensor] = []
-        for frame_path in frame_paths:
+        frame_bar = tqdm(
+            frame_paths,
+            desc=f"Embedding {traj_path.name}",
+            unit="frame",
+            leave=False,
+            total=len(frame_paths),
+            position=1,
+        )
+        for frame_path in frame_bar:
             with Image.open(frame_path).convert("RGB") as img:
                 frame_tensor = transform(img).unsqueeze(0).to(device)
             feat = backbone(frame_tensor).squeeze(0).cpu()
             embeddings.append(feat)
+        frame_bar.close()
 
         h0 = embeddings[0]
         l2_vals: List[float] = []
@@ -558,7 +575,8 @@ def compute_self_distance_metrics(traj_dir: Path, device: torch.device, out_dir:
             fig.savefig(out_dir / f"{traj_name}_self_distance.png", dpi=150)
             plt.close(fig)
 
-        print(f"[self-distance] processed trajectory {traj_name} ({len(frame_paths)} frames)")
+        traj_bar.write(f"[self-distance] processed trajectory {traj_name} ({len(frame_paths)} frames)")
+    traj_bar.close()
 
 # -----------------------------
 # Main
@@ -605,7 +623,12 @@ def main() -> None:
 
     # Iterate samples and build pairs
     pair_count = 0
-    for row_idx, ds_idx in enumerate(indices):
+    sample_total = len(indices)
+    sample_bar = tqdm(indices, desc="Evaluating samples", unit="sample", total=sample_total)
+    for row_idx, ds_idx in enumerate(sample_bar):
+        sample_bar.set_description(
+            f"Evaluating sample {row_idx + 1}/{sample_total} (ds_idx={ds_idx})"
+        )
         x_stack, targets = ds[ds_idx]
         frames4 = x_stack.view(4, 3, *x_stack.shape[-2:]).to(device)
         targets = targets.to(device)
