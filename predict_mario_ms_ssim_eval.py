@@ -561,12 +561,14 @@ def compute_self_distance_metrics(
 
         rel_name = traj_path.relative_to(traj_dir)
         traj_name = rel_name.as_posix().replace('/', '_')
-        csv_path = out_dir / f"{traj_name}_self_distance.csv"
-        with csv_path.open('w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["frame_index", "l2_distance", "cosine_distance"])
-            for idx, (d_l2, d_cos) in enumerate(zip(l2_vals, cos_vals)):
-                writer.writerow([idx, d_l2, d_cos])
+
+        if False:
+            csv_path = out_dir / f"{traj_name}_self_distance.csv"
+            with csv_path.open('w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["frame_index", "l2_distance", "cosine_distance"])
+                for idx, (d_l2, d_cos) in enumerate(zip(l2_vals, cos_vals)):
+                    writer.writerow([idx, d_l2, d_cos])
 
         if len(l2_vals) > 1:
             fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
