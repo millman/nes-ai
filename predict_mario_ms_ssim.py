@@ -30,6 +30,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from torchvision.models import resnet18, ResNet18_Weights
 
+from trajectory_utils import list_state_frames, list_traj_dirs
 
 # --------------------------------------------------------------------------------------
 # Device
@@ -69,13 +70,13 @@ class Mario4to1Dataset(Dataset):
         self.rollout = rollout
         self.index: List[Tuple[List[Path], int]] = []
         traj_count = 0
-        for traj_path in sorted(Path(root_dir).iterdir()):
+        for traj_path in list_traj_dirs(Path(root_dir)):
             if not traj_path.is_dir():
                 continue
             states_dir = traj_path / "states"
             if not states_dir.is_dir():
                 continue
-            files = sorted(states_dir.iterdir())
+            files = list_state_frames(states_dir)
             needed = 4 + self.rollout
             if len(files) < needed:
                 continue

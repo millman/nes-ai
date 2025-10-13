@@ -47,6 +47,8 @@ from PIL import Image, ImageDraw
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from torchvision.models import resnet18, ResNet18_Weights
 
+from trajectory_utils import list_state_frames, list_traj_dirs
+
 # ----------------------------- Device -----------------------------------------
 def pick_device(pref: Optional[str]) -> torch.device:
     if pref:
@@ -169,11 +171,11 @@ class PairDataset(Dataset):
 
         self.trajs: List[List[Path]] = []
         traj_count = 0
-        for traj_path in sorted(Path(root_dir).iterdir()):
+        for traj_path in list_traj_dirs(Path(root_dir)):
             if not traj_path.is_dir(): continue
             states_dir = traj_path / "states"
             if not states_dir.is_dir(): continue
-            files = sorted([p for p in states_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+            files = list_state_frames(states_dir)
             if len(files) < 6:
                 continue
             self.trajs.append(files)

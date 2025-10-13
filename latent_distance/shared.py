@@ -13,6 +13,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from trajectory_utils import list_state_frames, list_traj_dirs
+
 
 def set_seed(seed: int = 0) -> None:
     random.seed(seed)
@@ -25,7 +27,7 @@ class TrajectoryIndex:
     """Index frames across trajectories for random access."""
 
     def __init__(self, data_root: Path, img_suffixes=(".png", ".jpg", ".jpeg"), min_len: int = 2):
-        traj_dirs = sorted([p for p in Path(data_root).iterdir() if p.is_dir()])
+        traj_dirs = list_traj_dirs(Path(data_root))
         if len(traj_dirs) == 0:
             raise RuntimeError(f"No trajectory directories found in {data_root}")
 
@@ -35,7 +37,7 @@ class TrajectoryIndex:
             states_dir = traj_path / "states"
             if not states_dir.is_dir():
                 continue
-            imgs = sorted([p for p in states_dir.iterdir() if p.suffix.lower() in img_suffixes])
+            imgs = list_state_frames(states_dir, img_suffixes)
             if len(imgs) < min_len:
                 continue
             self.traj_paths.append(traj_path)

@@ -22,6 +22,8 @@ from torchvision.models import ResNet18_Weights, resnet18
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
 
+from trajectory_utils import list_state_frames, list_traj_dirs
+
 # Determine compute device (MPS for Mac, else CPU)
 device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
@@ -45,7 +47,7 @@ class MarioTrajectoryDataset(Dataset):
         self.index: List[Tuple[Path, List[Path], np.ndarray, int]] = []
         root = Path(root_dir)
         traj_dirs = set()
-        for t, traj_path in enumerate(tqdm(sorted(root.iterdir()), desc="Scanning trajectories")):
+        for t, traj_path in enumerate(tqdm(list_traj_dirs(root), desc="Scanning trajectories")):
             if max_trajs and t > max_trajs:
                 break
             if not traj_path.is_dir():
@@ -54,7 +56,7 @@ class MarioTrajectoryDataset(Dataset):
             actions_file = traj_path / 'actions.npz'
             if not states.is_dir() or not actions_file.is_file():
                 continue
-            files = sorted(states.iterdir())
+            files = list_state_frames(states)
             # require at least 8 frames for 4 inputs + 4 outputs
             if len(files) < 8:
                 continue

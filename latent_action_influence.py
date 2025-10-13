@@ -383,10 +383,9 @@ def run_evals(
     out_dir = Path(cfg.out_dir) / f"eval_{tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    rng = random.Random(cfg.seed + 1337)
     windows = collect_eval_windows(index, cfg.input_len, cfg.pred_len)
-    rng.shuffle(windows)
-    windows = windows[: cfg.eval_samples]
+    if cfg.eval_samples > 0:
+        windows = windows[: cfg.eval_samples]
     vis_steps = min(cfg.pred_len, cfg.vis_steps)
 
     entries = []
@@ -531,10 +530,13 @@ def run_evals(
                     else:
                         titles.append("")
 
+            chunk_name = f"traj_{traj_idx}_state_{start}_to_{start + cfg.input_len + cfg.pred_len - 1}"
+            traj_dir = out_dir / f"traj_{traj_idx}"
+            traj_dir.mkdir(parents=True, exist_ok=True)
             save_image_grid(
                 grids,
                 titles,
-                str(out_dir / f"traj{traj_idx}_start{start}.png"),
+                str(traj_dir / f"{chunk_name}.png"),
                 ncol=total_cols,
                 ylabels=ylabels,
             )

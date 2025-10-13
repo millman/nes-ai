@@ -57,6 +57,7 @@ from predict_mario_ms_ssim import (
     pick_device,
     unnormalize,
 )
+from trajectory_utils import list_state_frames, list_traj_dirs
 
 # -----------------------------
 # Args
@@ -501,7 +502,7 @@ def compute_self_distance_metrics(traj_dir: Path, device: torch.device, out_dir:
     backbone.fc = nn.Identity()
     backbone.eval().to(device)
 
-    traj_dirs = [p for p in sorted(traj_dir.iterdir()) if p.is_dir()]
+    traj_dirs = list_traj_dirs(traj_dir)
     if not traj_dirs:
         print(f"[self-distance] no trajectory directories found in {traj_dir}")
         return
@@ -512,10 +513,7 @@ def compute_self_distance_metrics(traj_dir: Path, device: torch.device, out_dir:
         states_dir = traj_path / "states"
         if not states_dir.is_dir():
             continue
-        frame_paths = sorted(
-            p for p in states_dir.iterdir()
-            if p.suffix.lower() in {'.png', '.jpg', '.jpeg'}
-        )
+        frame_paths = list_state_frames(states_dir)
         if len(frame_paths) < 2:
             continue
 
