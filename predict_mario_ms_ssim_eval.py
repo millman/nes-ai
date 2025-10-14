@@ -46,11 +46,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 import tyro
-import umap
 from PIL import Image, ImageDraw, ImageFont
 from torchvision.models import ResNet18_Weights, resnet18
 from torchvision.models.feature_extraction import create_feature_extractor
 from tqdm import tqdm
+
+try:
+    import umap  # type: ignore
+except ImportError:  # pragma: no cover
+    umap = None
 
 
 from predict_mario_ms_ssim import (
@@ -60,7 +64,7 @@ from predict_mario_ms_ssim import (
     pick_device,
     unnormalize,
 )
-from trajectory_utils import list_state_frames, list_traj_dirs
+from self_distance_utils import compute_self_distance_results
 
 # -----------------------------
 # Args
@@ -505,19 +509,16 @@ def compute_self_distance_metrics(
     out_dir: Path,
     max_trajs: Optional[int] = None,
 ) -> None:
-    transform = default_transform()
-    backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
-    backbone.fc = nn.Identity()
-    backbone.eval().to(device)
+    results = compute_self_distance_results(
+        traj_dir,
+        device=device,
+        max_trajs=max_trajs,
+        progress=True,
+    )
 
-    traj_dirs = list_traj_dirs(traj_dir)
-    if max_trajs is not None:
-        traj_dirs = traj_dirs[:max_trajs]
-    if not traj_dirs:
+    if not results:
         print(f"[self-distance] no trajectory directories found in {traj_dir}")
         return
-
-    print(f"[self-distance] found {len(traj_dirs)} trajectories in {traj_dir}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -525,77 +526,37 @@ def compute_self_distance_metrics(
     combined_embeddings: List[torch.Tensor] = []
     combined_offsets: List[int] = []
 
-    traj_bar = tqdm(
-        traj_dirs,
-        desc="[self-distance] trajectories",
-        unit="traj",
-        total=len(traj_dirs),
-        position=0,
-    )
-    for traj_path in traj_bar:
-        states_dir = traj_path / "states"
-        if not states_dir.is_dir():
-            continue
-        frame_paths = list_state_frames(states_dir)
-        if len(frame_paths) < 2:
-            continue
-
-        embeddings: List[torch.Tensor] = []
-        frame_bar = tqdm(
-            frame_paths,
-            desc=f"Embedding {traj_path.name}",
-            unit="frame",
-            leave=False,
-            total=len(frame_paths),
-            position=1,
-        )
-        for frame_path in frame_bar:
-            with Image.open(frame_path).convert("RGB") as img:
-                frame_tensor = transform(img).unsqueeze(0).to(device)
-            feat = backbone(frame_tensor).squeeze(0).cpu()
-            embeddings.append(feat)
-            combined_embeddings.append(feat)
-        frame_bar.close()
-
-        h0 = embeddings[0]
-        l2_vals: List[float] = []
-        cos_vals: List[float] = []
-        for feat in embeddings:
-            diff = feat - h0
-            l2_vals.append(float(diff.norm().item()))
-            cos_vals.append(float(1.0 - F.cosine_similarity(feat.unsqueeze(0), h0.unsqueeze(0)).item()))
-
-        rel_name = traj_path.relative_to(traj_dir)
-        traj_name = rel_name.as_posix().replace('/', '_')
-
-        csv_path = out_dir / f"{traj_name}_self_distance.csv"
+    for res in results:
+        csv_path = out_dir / f"{res.traj_name}_self_distance.csv"
         with csv_path.open('w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["frame_index", "l2_distance", "cosine_distance"])
-            for idx, (d_l2, d_cos) in enumerate(zip(l2_vals, cos_vals)):
+            for idx, (d_l2, d_cos) in enumerate(
+                zip(res.l2_distances.tolist(), res.cosine_distances.tolist())
+            ):
                 writer.writerow([idx, d_l2, d_cos])
-                combined_rows.append((traj_name, idx, d_l2, d_cos))
+                combined_rows.append((res.traj_name, idx, d_l2, d_cos))
                 combined_offsets.append(idx)
 
-        if len(l2_vals) > 1:
+        if res.l2_distances.numel() > 1:
+            indices = list(range(res.l2_distances.numel()))
             fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
-            indices = list(range(len(l2_vals)))
-            axes[0].plot(indices, l2_vals, marker='o')
+            axes[0].plot(indices, res.l2_distances.numpy(), marker='o')
             axes[0].set_ylabel('L2 distance')
-            axes[0].set_title(f'{rel_name}: frame 0 vs t')
+            axes[0].set_title(f'{res.traj_name}: frame 0 vs t')
             axes[0].grid(True, linestyle='--', linewidth=0.4)
 
-            axes[1].plot(indices, cos_vals, marker='o')
+            axes[1].plot(indices, res.cosine_distances.numpy(), marker='o')
             axes[1].set_ylabel('Cosine distance')
             axes[1].set_xlabel('Frame index t')
             axes[1].grid(True, linestyle='--', linewidth=0.4)
 
             fig.tight_layout()
-            fig.savefig(out_dir / f"{traj_name}_self_distance.png", dpi=150)
+            fig.savefig(out_dir / f"{res.traj_name}_self_distance.png", dpi=150)
             plt.close(fig)
 
-        traj_bar.write(f"[self-distance] processed trajectory {traj_name} ({len(frame_paths)} frames)")
-    traj_bar.close()
+        combined_embeddings.append(res.embeddings)
+        print(f"[self-distance] processed trajectory {res.traj_name} ({len(res.frame_paths)} frames)")
 
     if combined_rows:
         combined_csv_path = out_dir / "combined_self_distance.csv"
@@ -604,7 +565,6 @@ def compute_self_distance_metrics(
             writer.writerow(["trajectory", "frame_index", "l2_distance", "cosine_distance"])
             writer.writerows(combined_rows)
 
-        # Scatter plots across all trajectories
         frame_indices = [row[1] for row in combined_rows]
         l2_values = [row[2] for row in combined_rows]
         cos_values = [row[3] for row in combined_rows]
@@ -629,8 +589,8 @@ def compute_self_distance_metrics(
         fig.savefig(out_dir / "combined_self_distance_cosine.png", dpi=150)
         plt.close(fig)
 
-        if combined_embeddings:
-            embeds = torch.stack(combined_embeddings).numpy()
+        if umap is not None and combined_embeddings:
+            embeds = torch.cat(combined_embeddings, dim=0).numpy()
             reducer = umap.UMAP(n_neighbors=30, min_dist=0.0, metric="euclidean")
             embeds_2d = reducer.fit_transform(embeds)
             fig, ax = plt.subplots(figsize=(7, 6))
@@ -651,6 +611,9 @@ def compute_self_distance_metrics(
             fig.tight_layout()
             fig.savefig(out_dir / "combined_self_distance_umap.png", dpi=150)
             plt.close(fig)
+        elif umap is None:
+            print("[self-distance] Skipping UMAP plot (umap-learn not installed)")
+
 
 # -----------------------------
 # Main
