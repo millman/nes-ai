@@ -70,7 +70,6 @@ class Args:
     out_dir: str = "out.predict_mario_ms_ssim_eval_plus"
     num_samples: int = 8
     max_trajs: Optional[int] = None
-    self_distance_max_trajs: Optional[int] = None
     seed: int = 0
     device: Optional[str] = None
     save_name: Optional[str] = None
@@ -741,7 +740,7 @@ def main() -> None:
         Path(args.traj_dir),
         device,
         out_dir / "self_distance",
-        max_trajs=args.self_distance_max_trajs,
+        max_trajs=args.max_trajs,
     )
 
     print(f"Saved {pair_count} pair panels to {pair_dir}")
