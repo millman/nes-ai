@@ -46,10 +46,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 import tyro
+import umap
 from PIL import Image, ImageDraw, ImageFont
 from torchvision.models import ResNet18_Weights, resnet18
 from torchvision.models.feature_extraction import create_feature_extractor
 from tqdm import tqdm
+
 
 from predict_mario_ms_ssim import (
     Mario4to1Dataset,
@@ -519,6 +521,10 @@ def compute_self_distance_metrics(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    combined_rows: List[Tuple[str, int, float, float]] = []
+    combined_embeddings: List[torch.Tensor] = []
+    combined_offsets: List[int] = []
+
     traj_bar = tqdm(
         traj_dirs,
         desc="[self-distance] trajectories",
@@ -548,6 +554,7 @@ def compute_self_distance_metrics(
                 frame_tensor = transform(img).unsqueeze(0).to(device)
             feat = backbone(frame_tensor).squeeze(0).cpu()
             embeddings.append(feat)
+            combined_embeddings.append(feat)
         frame_bar.close()
 
         h0 = embeddings[0]
@@ -561,13 +568,14 @@ def compute_self_distance_metrics(
         rel_name = traj_path.relative_to(traj_dir)
         traj_name = rel_name.as_posix().replace('/', '_')
 
-        if False:
-            csv_path = out_dir / f"{traj_name}_self_distance.csv"
-            with csv_path.open('w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(["frame_index", "l2_distance", "cosine_distance"])
-                for idx, (d_l2, d_cos) in enumerate(zip(l2_vals, cos_vals)):
-                    writer.writerow([idx, d_l2, d_cos])
+        csv_path = out_dir / f"{traj_name}_self_distance.csv"
+        with csv_path.open('w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["frame_index", "l2_distance", "cosine_distance"])
+            for idx, (d_l2, d_cos) in enumerate(zip(l2_vals, cos_vals)):
+                writer.writerow([idx, d_l2, d_cos])
+                combined_rows.append((traj_name, idx, d_l2, d_cos))
+                combined_offsets.append(idx)
 
         if len(l2_vals) > 1:
             fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
@@ -588,6 +596,61 @@ def compute_self_distance_metrics(
 
         traj_bar.write(f"[self-distance] processed trajectory {traj_name} ({len(frame_paths)} frames)")
     traj_bar.close()
+
+    if combined_rows:
+        combined_csv_path = out_dir / "combined_self_distance.csv"
+        with combined_csv_path.open('w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["trajectory", "frame_index", "l2_distance", "cosine_distance"])
+            writer.writerows(combined_rows)
+
+        # Scatter plots across all trajectories
+        frame_indices = [row[1] for row in combined_rows]
+        l2_values = [row[2] for row in combined_rows]
+        cos_values = [row[3] for row in combined_rows]
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.scatter(frame_indices, l2_values, s=12, alpha=0.55, edgecolors='none')
+        ax.set_xlabel('Frame index offset from reference (t)')
+        ax.set_ylabel('L2 distance vs frame 0')
+        ax.set_title('Self-distance L2 vs frame offset (all trajectories)')
+        ax.grid(True, linestyle='--', linewidth=0.4, alpha=0.6)
+        fig.tight_layout()
+        fig.savefig(out_dir / "combined_self_distance_l2.png", dpi=150)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.scatter(frame_indices, cos_values, s=12, alpha=0.55, edgecolors='none')
+        ax.set_xlabel('Frame index offset from reference (t)')
+        ax.set_ylabel('Cosine distance vs frame 0')
+        ax.set_title('Self-distance cosine vs frame offset (all trajectories)')
+        ax.grid(True, linestyle='--', linewidth=0.4, alpha=0.6)
+        fig.tight_layout()
+        fig.savefig(out_dir / "combined_self_distance_cosine.png", dpi=150)
+        plt.close(fig)
+
+        if combined_embeddings:
+            embeds = torch.stack(combined_embeddings).numpy()
+            reducer = umap.UMAP(n_neighbors=30, min_dist=0.0, metric="euclidean")
+            embeds_2d = reducer.fit_transform(embeds)
+            fig, ax = plt.subplots(figsize=(7, 6))
+            sc = ax.scatter(
+                embeds_2d[:, 0],
+                embeds_2d[:, 1],
+                c=combined_offsets,
+                cmap='viridis',
+                s=10,
+                alpha=0.7,
+                edgecolors='none',
+            )
+            ax.set_title('UMAP of self-distance embeddings (colored by frame offset)')
+            ax.set_xlabel('UMAP-1')
+            ax.set_ylabel('UMAP-2')
+            cbar = fig.colorbar(sc, ax=ax)
+            cbar.set_label('Frame index offset')
+            fig.tight_layout()
+            fig.savefig(out_dir / "combined_self_distance_umap.png", dpi=150)
+            plt.close(fig)
 
 # -----------------------------
 # Main
