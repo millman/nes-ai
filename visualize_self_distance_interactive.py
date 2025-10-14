@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import csv
+import os
+import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+from string import Template
 
 import numpy as np
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
 import torch
 import tyro
@@ -23,6 +27,38 @@ from self_distance_utils import (
     compute_self_distance_results,
     copy_frames_for_visualization,
 )
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+
+def _set_max_active_levels(levels: int = 1) -> None:
+    """Attempt to call omp_set_max_active_levels to avoid nested warning."""
+    lib_names = [
+        "libomp.dylib",  # macOS (Homebrew/Apple)
+        "libiomp5.dylib",
+        "libomp.so",      # Linux generic
+        "libiomp5.so",
+    ]
+    func = None
+    for name in lib_names:
+        try:
+            lib = ctypes.CDLL(name)
+            func = lib.omp_set_max_active_levels
+            break
+        except OSError:
+            continue
+        except AttributeError:
+            func = None
+            continue
+    if func is None:
+        return
+    try:
+        func.argtypes = [ctypes.c_int]
+        func.restype = None
+        func(levels)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -102,7 +138,15 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
     trajs = np.array([rec["traj"] for rec in records])
 
     scatter_custom = np.array(
-        list(zip(image_paths, trajs, offsets.astype(float), cos_values)),
+        list(
+            zip(
+                image_paths,
+                trajs,
+                offsets.astype(float),
+                l2_values,
+                cos_values,
+            )
+        ),
         dtype=object,
     )
 
@@ -113,46 +157,58 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
     specs = [[{"type": "scatter"} for _ in titles]]
     fig = make_subplots(rows=1, cols=len(titles), subplot_titles=titles, specs=specs)
 
-    hover_template = (
-        "Trajectory: %{customdata[1]}<br>"
-        "Frame offset: %{customdata[2]:.0f}<br>"
-        "L2 distance: %{y:.4f}<br>"
-        "Cosine distance: %{customdata[3]:.4f}<br>"
-        "<img src='%{customdata[0]}' width='160'><extra></extra>"
-    )
+    hover_template = "<extra></extra>"
 
-    fig.add_trace(
-        go.Scatter(
-            x=offsets,
-            y=l2_values,
-            mode='markers',
-            marker=dict(size=6, opacity=0.7, color=offsets, colorscale='Viridis'),
-            customdata=scatter_custom,
-            hovertemplate=hover_template,
-        ),
-        row=1,
-        col=1,
-    )
+    unique_trajs = np.unique(trajs)
+    for traj_name in unique_trajs:
+        mask = trajs == traj_name
+        fig.add_trace(
+            go.Scatter(
+                x=offsets[mask],
+                y=l2_values[mask],
+                mode='markers',
+                name=traj_name,
+                legendgroup=traj_name,
+                marker=dict(
+                    size=6,
+                    opacity=0.7,
+                    color=offsets[mask],
+                    colorscale='Viridis',
+                    showscale=False,
+                ),
+                customdata=scatter_custom[mask],
+                hovertemplate=hover_template,
+            ),
+            row=1,
+            col=1,
+        )
     fig.update_xaxes(title_text='Frame offset from reference (t)', row=1, col=1)
     fig.update_yaxes(title_text='L2 distance vs frame 0', row=1, col=1)
 
     if umap_coords is not None:
-        umap_custom = np.array(
-            list(zip(image_paths, trajs, offsets.astype(float), cos_values)),
-            dtype=object,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=umap_coords[:, 0],
-                y=umap_coords[:, 1],
-                mode='markers',
-                marker=dict(size=6, opacity=0.7, color=offsets, colorscale='Viridis'),
-                customdata=umap_custom,
-                hovertemplate=hover_template,
-            ),
-            row=1,
-            col=2,
-        )
+        for traj_name in unique_trajs:
+            mask = trajs == traj_name
+            fig.add_trace(
+                go.Scatter(
+                    x=umap_coords[mask, 0],
+                    y=umap_coords[mask, 1],
+                    mode='markers',
+                    name=f"{traj_name} (UMAP)",
+                    legendgroup=traj_name,
+                    marker=dict(
+                        size=6,
+                        opacity=0.7,
+                        color=offsets[mask],
+                        colorscale='Viridis',
+                        showscale=False,
+                    ),
+                    customdata=scatter_custom[mask],
+                    hovertemplate=hover_template,
+                    showlegend=False,
+                ),
+                row=1,
+                col=2,
+            )
         fig.update_xaxes(title_text='UMAP-1', row=1, col=2)
         fig.update_yaxes(title_text='UMAP-2', row=1, col=2)
 
@@ -166,6 +222,7 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
 
 
 def main(args: Args) -> None:
+    _set_max_active_levels(1)
     device = pick_device(args.device)
     traj_dir = Path(args.traj_dir)
     out_dir = Path(args.out_dir)
@@ -210,7 +267,97 @@ def main(args: Args) -> None:
     fig = build_fig(records, umap_coords)
     out_dir.mkdir(parents=True, exist_ok=True)
     html_path = out_dir / "self_distance_interactive.html"
-    fig.write_html(html_path, include_plotlyjs='cdn')
+
+    plot_html = pio.to_html(
+        fig,
+        include_plotlyjs='cdn',
+        full_html=False,
+        div_id='self-distance-plot',
+    )
+
+    overlay_html = """
+<div id=\"hover-image\" style=\"position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.98); padding:4px; z-index:1000; max-width:260px;\">
+  <img id=\"hover-image-img\" src=\"\" style=\"width:100%; height:auto; display:block; border-bottom:1px solid #ccc; margin-bottom:4px;\">
+  <div id=\"hover-image-details\" style=\"font-size:12px; line-height:1.4;\"></div>
+</div>
+"""
+
+    script = """
+<script>
+  (function() {
+    var plotDiv = document.getElementById('self-distance-plot');
+    if (!plotDiv) { return; }
+    var hoverDiv = document.getElementById('hover-image');
+    var hoverImg = document.getElementById('hover-image-img');
+    var hoverDetails = document.getElementById('hover-image-details');
+
+    function positionHover(event) {
+      if (!event) { return; }
+      var x = (event.clientX || 0) + 16;
+      var y = (event.clientY || 0) + 16;
+      hoverDiv.style.left = x + 'px';
+      hoverDiv.style.top = y + 'px';
+    }
+
+    plotDiv.on('plotly_hover', function(data) {
+      if (!data || !data.points || !data.points.length) { return; }
+      var point = data.points[0];
+      var custom = point.customdata || [];
+      var imgPath = custom[0];
+      var trajName = custom[1] || '';
+      var frameIdx = custom[2] != null ? custom[2] : '';
+      var l2 = custom[3] != null ? custom[3].toFixed(4) : '';
+      var cos = custom[4] != null ? custom[4].toFixed(4) : '';
+      hoverImg.src = imgPath;
+      hoverDetails.innerHTML =
+        '<strong>' + trajName + '</strong><br>' +
+        'Frame offset: ' + frameIdx + '<br>' +
+        'L2 distance: ' + l2 + '<br>' +
+        'Cosine distance: ' + cos;
+      hoverDiv.style.display = 'block';
+      positionHover(data.event);
+    });
+
+    plotDiv.on('plotly_unhover', function() {
+      hoverDiv.style.display = 'none';
+    });
+
+    plotDiv.on('plotly_relayout', function() {
+      hoverDiv.style.display = 'none';
+    });
+
+    plotDiv.addEventListener('mousemove', function(evt) {
+      if (hoverDiv.style.display === 'block') {
+        positionHover(evt);
+      }
+    });
+  })();
+</script>
+"""
+
+    template = Template("""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Self-distance Interactive Visualization</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0; }
+    #container { padding: 12px; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    $plot
+  </div>
+  $overlay
+  $script
+</body>
+</html>
+""")
+
+    html_path.write_text(
+        template.substitute(plot=plot_html, overlay=overlay_html, script=script)
+    )
     print(f"Saved interactive visualization to {html_path}")
 
 
