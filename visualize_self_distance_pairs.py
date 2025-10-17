@@ -8,7 +8,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import List, Optional, Sequence, Tuple
+from typing import Annotated, List, Optional, Sequence, Tuple
 
 import numpy as np
 import plotly.graph_objects as go
@@ -17,6 +17,7 @@ from plotly.subplots import make_subplots
 import torch
 import tyro
 
+from output_dir_utils import TIMESTAMP_PLACEHOLDER, resolve_output_dir
 from predict_mario_ms_ssim import pick_device
 from self_distance_utils import (
     TrajectorySelfDistance,
@@ -28,10 +29,21 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 
+DEFAULT_OUT_DIR_TEMPLATE = f"out.self_distance_pairs_{TIMESTAMP_PLACEHOLDER}"
+
+
 @dataclass
 class Args:
     traj_dir: str
-    out_dir: str = "out.self_distance_pairs"
+    out_dir: Annotated[
+        str,
+        tyro.conf.arg(
+            help=(
+                "Output directory. Use the 'YYYY-MM-DD_HH-MM-SS' suffix to substitute the current"
+                " timestamp automatically."
+            )
+        ),
+    ] = DEFAULT_OUT_DIR_TEMPLATE
     num_within_pairs: int = 2000
     num_cross_pairs: int = 2000
     max_points: Optional[int] = None
@@ -507,7 +519,10 @@ def main(args: Args) -> None:
     rng = random.Random(args.seed)
     device = pick_device(args.device)
     traj_dir = Path(args.traj_dir)
-    out_dir = Path(args.out_dir)
+    out_dir = resolve_output_dir(
+        args.out_dir,
+        default_template=DEFAULT_OUT_DIR_TEMPLATE,
+    )
     frames_dir = out_dir / "frames"
 
     results = compute_self_distance_results(

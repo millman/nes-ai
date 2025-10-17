@@ -7,7 +7,7 @@ import os
 import ctypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Annotated, List, Optional
 from string import Template
 
 import numpy as np
@@ -23,11 +23,9 @@ try:
 except ImportError:  # pragma: no cover
     umap = None
 
+from output_dir_utils import TIMESTAMP_PLACEHOLDER, resolve_output_dir
 from predict_mario_ms_ssim import pick_device
-from self_distance_utils import (
-    compute_self_distance_results,
-    copy_frames_for_visualization,
-)
+from self_distance_utils import compute_self_distance_results, copy_frames_for_visualization
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -62,10 +60,21 @@ def _set_max_active_levels(levels: int = 1) -> None:
         pass
 
 
+DEFAULT_OUT_DIR_TEMPLATE = f"out.self_distance_interactive_{TIMESTAMP_PLACEHOLDER}"
+
+
 @dataclass
 class Args:
     traj_dir: str
-    out_dir: str = "out.self_distance_interactive"
+    out_dir: Annotated[
+        str,
+        tyro.conf.arg(
+            help=(
+                "Output directory. Use the 'YYYY-MM-DD_HH-MM-SS' suffix to substitute the current"
+                " timestamp automatically."
+            )
+        ),
+    ] = DEFAULT_OUT_DIR_TEMPLATE
     max_trajs: Optional[int] = None
     device: Optional[str] = None
     umap_neighbors: int = 30
@@ -228,7 +237,10 @@ def main(args: Args) -> None:
     _set_max_active_levels(1)
     device = pick_device(args.device)
     traj_dir = Path(args.traj_dir)
-    out_dir = Path(args.out_dir)
+    out_dir = resolve_output_dir(
+        args.out_dir,
+        default_template=DEFAULT_OUT_DIR_TEMPLATE,
+    )
     frames_dir = out_dir / "frames"
 
     results = compute_self_distance_results(
