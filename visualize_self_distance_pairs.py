@@ -35,15 +35,7 @@ DEFAULT_OUT_DIR_TEMPLATE = f"out.self_distance_pairs_{TIMESTAMP_PLACEHOLDER}"
 @dataclass
 class Args:
     traj_dir: str
-    out_dir: Annotated[
-        str,
-        tyro.conf.arg(
-            help=(
-                "Output directory. Use the 'YYYY-MM-DD_HH-MM-SS' suffix to substitute the current"
-                " timestamp automatically."
-            )
-        ),
-    ] = DEFAULT_OUT_DIR_TEMPLATE
+    out_dir: str = DEFAULT_OUT_DIR_TEMPLATE
     max_points: int = 2000
     max_step_gap: Optional[int] = None
     max_trajs: Optional[int] = None

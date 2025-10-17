@@ -17,11 +17,7 @@ import plotly.io as pio
 from plotly.subplots import make_subplots
 import torch
 import tyro
-
-try:
-    import umap  # type: ignore
-except ImportError:  # pragma: no cover
-    umap = None
+import umap
 
 from output_dir_utils import TIMESTAMP_PLACEHOLDER, resolve_output_dir
 from predict_mario_ms_ssim import pick_device
@@ -66,15 +62,7 @@ DEFAULT_OUT_DIR_TEMPLATE = f"out.self_distance_interactive_{TIMESTAMP_PLACEHOLDE
 @dataclass
 class Args:
     traj_dir: str
-    out_dir: Annotated[
-        str,
-        tyro.conf.arg(
-            help=(
-                "Output directory. Use the 'YYYY-MM-DD_HH-MM-SS' suffix to substitute the current"
-                " timestamp automatically."
-            )
-        ),
-    ] = DEFAULT_OUT_DIR_TEMPLATE
+    out_dir: str = DEFAULT_OUT_DIR_TEMPLATE
     max_trajs: Optional[int] = None
     device: Optional[str] = None
     umap_neighbors: int = 30
@@ -268,7 +256,7 @@ def main(args: Args) -> None:
     write_metadata_csv(records, out_dir / "self_distance_records.csv")
 
     umap_coords = None
-    if umap is not None and embed_list:
+    if embed_list:
         embeds = torch.stack(embed_list).numpy()
         reducer = umap.UMAP(
             n_neighbors=args.umap_neighbors,
@@ -276,8 +264,6 @@ def main(args: Args) -> None:
             metric="euclidean",
         )
         umap_coords = reducer.fit_transform(embeds)
-    elif umap is None:
-        print("[warn] umap-learn not installed; skipping UMAP projection")
 
     fig = build_fig(records, umap_coords)
     out_dir.mkdir(parents=True, exist_ok=True)
