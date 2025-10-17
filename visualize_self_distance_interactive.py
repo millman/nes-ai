@@ -11,6 +11,7 @@ from typing import List, Optional
 from string import Template
 
 import numpy as np
+import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
@@ -160,6 +161,11 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
     hover_template = "<extra></extra>"
 
     unique_trajs = np.unique(trajs)
+    palette = px.colors.qualitative.Plotly
+    if len(unique_trajs) > len(palette):
+        repeats = len(unique_trajs) // len(palette) + 1
+        palette = (palette * repeats)[: len(unique_trajs)]
+    color_map = {traj: palette[i] for i, traj in enumerate(unique_trajs)}
     for traj_name in unique_trajs:
         mask = trajs == traj_name
         fig.add_trace(
@@ -172,9 +178,7 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
                 marker=dict(
                     size=6,
                     opacity=0.7,
-                    color=offsets[mask],
-                    colorscale='Viridis',
-                    showscale=False,
+                    color=color_map[traj_name],
                 ),
                 customdata=scatter_custom[mask],
                 hovertemplate=hover_template,
@@ -198,9 +202,7 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
                     marker=dict(
                         size=6,
                         opacity=0.7,
-                        color=offsets[mask],
-                        colorscale='Viridis',
-                        showscale=False,
+                        color=color_map[traj_name],
                     ),
                     customdata=scatter_custom[mask],
                     hovertemplate=hover_template,
@@ -216,6 +218,7 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
         title='Self-distance interactive visualization',
         hovermode='closest',
         template='plotly_white',
+        legend=dict(groupclick='togglegroup'),
     )
 
     return fig
@@ -273,6 +276,8 @@ def main(args: Args) -> None:
         include_plotlyjs='cdn',
         full_html=False,
         div_id='self-distance-plot',
+        default_height='100vh',
+        default_width='100%'
     )
 
     overlay_html = """
@@ -341,8 +346,9 @@ def main(args: Args) -> None:
   <meta charset="utf-8" />
   <title>Self-distance Interactive Visualization</title>
   <style>
-    body { font-family: sans-serif; margin: 0; padding: 0; }
-    #container { padding: 12px; }
+    html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; }
+    #container { height: 100vh; padding: 12px; box-sizing: border-box; }
+    #self-distance-plot { height: 100%; }
   </style>
 </head>
 <body>
