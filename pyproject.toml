@@ -3,4 +3,43 @@ requires = [
     "setuptools",
     "wheel",
     "Cython"
-   ]
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nes-ai"
+version = "0.0.0"
+description = "Research scripts and utilities for NES-based agents."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "Cython",
+    "Pillow",
+    "PyOpenGL",
+    "click",
+    "gymnasium[all]",
+    "gymnasium[atari]",
+    "imagehash",
+    "matplotlib",
+    "numpy",
+    "plotly",
+    "pygame",
+    "pydantic",
+    "python-dotenv",
+    "pytorch-lightning",
+    "sqlitedict",
+    "stable-baselines3",
+    "tensorboard",
+    "tensordict",
+    "termcolor",
+    "timm",
+    "torch",
+    "torcheval",
+    "torchrl",
+    "torchvision",
+    "transformers",
+    "tyro"
+]
+
+[tool.uv]
+dev-dependencies = []
