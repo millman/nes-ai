@@ -34,6 +34,7 @@ class Args:
     out_dir: str = "out.self_distance_pairs"
     num_within_pairs: int = 2000
     num_cross_pairs: int = 2000
+    max_points: Optional[int] = None
     max_step_gap: Optional[int] = None
     max_trajs: Optional[int] = None
     device: Optional[str] = None
@@ -410,8 +411,43 @@ def _build_overlay_script() -> str:
 
     function positionHover(event) {
       if (!event) { return; }
-      var x = (event.clientX || 0) + 16;
-      var y = (event.clientY || 0) + 16;
+      var padding = 16;
+      var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+      var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      var pointX = event.clientX || 0;
+      var pointY = event.clientY || 0;
+
+      // Measure current overlay size; fall back to last known dimensions if needed.
+      var rect = hoverDiv.getBoundingClientRect();
+      var overlayWidth = rect.width || hoverDiv.offsetWidth || 0;
+      var overlayHeight = rect.height || hoverDiv.offsetHeight || 0;
+
+      var x = pointX + padding;
+      var y = pointY + padding;
+
+      // If the overlay would overflow the right edge, place it to the left of the cursor.
+      if (overlayWidth && x + overlayWidth > viewportWidth - 4) {
+        x = pointX - overlayWidth - padding;
+      }
+      // If still overflowing, clamp inside viewport.
+      if (overlayWidth) {
+        x = Math.min(x, viewportWidth - overlayWidth - 4);
+      }
+      if (x < 4) {
+        x = 4;
+      }
+
+      // Adjust vertically if overlay would overflow the bottom edge.
+      if (overlayHeight && y + overlayHeight > viewportHeight - 4) {
+        y = pointY - overlayHeight - padding;
+      }
+      if (overlayHeight) {
+        y = Math.min(y, viewportHeight - overlayHeight - 4);
+      }
+      if (y < 4) {
+        y = 4;
+      }
+
       hoverDiv.style.left = x + 'px';
       hoverDiv.style.top = y + 'px';
     }
@@ -487,15 +523,21 @@ def main(args: Args) -> None:
     copied_paths = copy_frames_for_visualization(results, frames_dir)
     traj_frames = _build_frame_infos(results, copied_paths, out_dir)
 
+    within_target = args.num_within_pairs
+    cross_target = args.num_cross_pairs
+    if args.max_points is not None:
+        within_target = min(within_target, args.max_points)
+        cross_target = min(cross_target, args.max_points)
+
     within_pairs = _sample_within_pairs(
         traj_frames,
-        args.num_within_pairs,
+        within_target,
         args.max_step_gap,
         rng,
     )
     cross_pairs = _sample_cross_pairs(
         traj_frames,
-        args.num_cross_pairs,
+        cross_target,
         rng,
     )
     cross_pairs_sorted = list(
