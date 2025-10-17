@@ -52,7 +52,7 @@ When the user requests that a commit be prepared:
    ```
    git commit -F .agent/commits/<YYYY_MM_DD>.<summary>
    ```
-5. After the user confirms the commit has been created, archive the processed files inside `.agent/prepare/` by moving them to `.agent/committed/`, to avoid reusing them.
+5. After the user confirms the commit has been created, archive the processed files inside `.agent/prepare/` by moving the file to `.agent/committed/`.  Do not change the name when moving the file.
 
 ## Additional Notes
 - Always capture prompts verbatim; do not paraphrase user requests in the `Prompt` blocks.
