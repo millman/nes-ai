@@ -44,9 +44,7 @@ class Args:
             )
         ),
     ] = DEFAULT_OUT_DIR_TEMPLATE
-    num_within_pairs: int = 2000
-    num_cross_pairs: int = 2000
-    max_points: Optional[int] = None
+    max_points: int = 2000
     max_step_gap: Optional[int] = None
     max_trajs: Optional[int] = None
     device: Optional[str] = None
@@ -538,21 +536,15 @@ def main(args: Args) -> None:
     copied_paths = copy_frames_for_visualization(results, frames_dir)
     traj_frames = _build_frame_infos(results, copied_paths, out_dir)
 
-    within_target = args.num_within_pairs
-    cross_target = args.num_cross_pairs
-    if args.max_points is not None:
-        within_target = min(within_target, args.max_points)
-        cross_target = min(cross_target, args.max_points)
-
     within_pairs = _sample_within_pairs(
         traj_frames,
-        within_target,
+        args.max_points,
         args.max_step_gap,
         rng,
     )
     cross_pairs = _sample_cross_pairs(
         traj_frames,
-        cross_target,
+        args.max_points,
         rng,
     )
     cross_pairs_sorted = list(
