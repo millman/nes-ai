@@ -47,12 +47,13 @@ When the user requests that a commit be prepared:
    * <another bullet point of changes from prompt 2>
    * ...
    ```
-3. Materialize the commit message by writing it to `.agent/commits/<YYYY_MM_DD>.<summary>`. Create any missing directories along the way.
-4. Echo a command that the user can paste directly, in the form:
+3. Materialize the commit message by writing it to `.agent/commits/<YYYY_MM_DD>.<summary>`. Create any missing directories along the way. If there is exactly one `.agent/prepare/` file involved, reuse that file's base name (e.g., `.agent/prepare/2024-06-10.simple_change.md` → `.agent/commits/2024-06-10.simple_change`).
+4. Echo a command that the user can paste directly, chaining the commit with moving the generated file into `.agent/committed/` using the same filename. Format:
    ```
-   git commit -F .agent/commits/<YYYY_MM_DD>.<summary>
+   git commit -F .agent/commits/<YYYY_MM_DD>.<summary> && mv .agent/commits/<filename> .agent/committed/<filename>
    ```
-5. After the user confirms the commit has been created, archive the processed files inside `.agent/prepare/` by moving the file to `.agent/committed/`.  Do not change the name when moving the file.
+5. After the user confirms the commit has been created, archive the processed files inside `.agent/prepare/` by moving the file to `.agent/committed/`. Do not change the name when moving the file.
+6. After archiving the prepare files, move the generated commit message from `.agent/commits/` to `.agent/committed/` with the exact same filename.
 
 ## Additional Notes
 - Always capture prompts verbatim; do not paraphrase user requests in the `Prompt` blocks.
