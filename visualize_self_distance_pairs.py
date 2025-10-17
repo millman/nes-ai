@@ -7,7 +7,6 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from string import Template
 from typing import Annotated, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -30,6 +29,132 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 
 DEFAULT_OUT_DIR_TEMPLATE = f"out.self_distance_pairs_{TIMESTAMP_PLACEHOLDER}"
+PLOT_DIV_ID = "pair-distance-plot"
+
+OVERLAY_POST_SCRIPT = f"""
+(function() {{
+  const plotDiv = document.getElementById('{PLOT_DIV_ID}');
+  if (!plotDiv) {{
+    return;
+  }}
+
+  const hoverDiv = document.createElement('div');
+  hoverDiv.id = 'pair-hover';
+  hoverDiv.style.cssText = 'position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.97); padding:6px; z-index:1000; max-width:520px; box-shadow:0 2px 8px rgba(0,0,0,0.15);';
+  hoverDiv.innerHTML = `
+    <div id="pair-hover-title" style="font-weight:600; margin-bottom:4px; font-size:13px;"></div>
+    <div style="display:flex; gap:6px;">
+      <div style="flex:1; min-width:0;">
+        <img id="pair-hover-img-a" src="" style="width:100%; height:auto; display:block; border:1px solid #ccc; background:#f8f8f8;">
+        <div id="pair-hover-meta-a" style="font-size:12px; margin-top:2px; line-height:1.35;"></div>
+      </div>
+      <div style="flex:1; min-width:0;">
+        <img id="pair-hover-img-b" src="" style="width:100%; height:auto; display:block; border:1px solid #ccc; background:#f8f8f8;">
+        <div id="pair-hover-meta-b" style="font-size:12px; margin-top:2px; line-height:1.35;"></div>
+      </div>
+    </div>
+    <div id="pair-hover-info" style="font-size:12px; margin-top:4px; line-height:1.4;"></div>
+  `;
+  document.body.appendChild(hoverDiv);
+
+  const imgA = document.getElementById('pair-hover-img-a');
+  const imgB = document.getElementById('pair-hover-img-b');
+  const metaA = document.getElementById('pair-hover-meta-a');
+  const metaB = document.getElementById('pair-hover-meta-b');
+  const info = document.getElementById('pair-hover-info');
+  const title = document.getElementById('pair-hover-title');
+
+  function positionHover(event) {{
+    if (!event) {{
+      return;
+    }}
+    const padding = 16;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const pointX = event.clientX || 0;
+    const pointY = event.clientY || 0;
+
+    const rect = hoverDiv.getBoundingClientRect();
+    const overlayWidth = rect.width || hoverDiv.offsetWidth || 0;
+    const overlayHeight = rect.height || hoverDiv.offsetHeight || 0;
+
+    let x = pointX + padding;
+    let y = pointY + padding;
+
+    if (overlayWidth && x + overlayWidth > viewportWidth - 4) {{
+      x = pointX - overlayWidth - padding;
+    }}
+    if (overlayWidth) {{
+      x = Math.min(x, viewportWidth - overlayWidth - 4);
+    }}
+    if (x < 4) {{
+      x = 4;
+    }}
+
+    if (overlayHeight && y + overlayHeight > viewportHeight - 4) {{
+      y = pointY - overlayHeight - padding;
+    }}
+    if (overlayHeight) {{
+      y = Math.min(y, viewportHeight - overlayHeight - 4);
+    }}
+    if (y < 4) {{
+      y = 4;
+    }}
+
+    hoverDiv.style.left = x + 'px';
+    hoverDiv.style.top = y + 'px';
+  }}
+
+  plotDiv.on('plotly_hover', function(data) {{
+    if (!data || !data.points || !data.points.length) {{
+      return;
+    }}
+    const point = data.points[0];
+    const custom = point.customdata || [];
+    const imgPathA = custom[0] || '';
+    const imgPathB = custom[1] || '';
+    const trajA = custom[2] || '';
+    const frameA = custom[3] != null ? custom[3] : '';
+    const trajB = custom[4] || '';
+    const frameB = custom[5] != null ? custom[5] : '';
+    const stepGap = custom[6];
+    const predDist = custom[7];
+    const pairType = custom[8] || '';
+    const extra = custom[9] || '';
+
+    imgA.src = imgPathA;
+    imgB.src = imgPathB;
+    metaA.innerHTML = '<strong>' + trajA + '</strong><br>Frame ' + frameA;
+    metaB.innerHTML = '<strong>' + trajB + '</strong><br>Frame ' + frameB;
+
+    const distText = (predDist != null && !isNaN(predDist)) ? Number(predDist).toFixed(4) : '';
+    if (pairType === 'within') {{
+      title.textContent = 'Within-trajectory pair';
+      info.innerHTML = 'Δt = ' + stepGap + '<br>Predicted distance = ' + distText;
+    }} else {{
+      title.textContent = 'Cross-trajectory pair';
+      info.innerHTML = 'Rank = ' + extra + '<br>Predicted distance = ' + distText;
+    }}
+
+    hoverDiv.style.display = 'block';
+    positionHover(data.event);
+  }});
+
+  plotDiv.on('plotly_unhover', function() {{
+    hoverDiv.style.display = 'none';
+  }});
+
+  plotDiv.on('plotly_relayout', function() {{
+    hoverDiv.style.display = 'none';
+  }});
+
+  plotDiv.addEventListener('mousemove', function(evt) {{
+    if (hoverDiv.style.display === 'block') {{
+      positionHover(evt);
+    }}
+  }});
+}})();
+"""
 
 
 @dataclass
@@ -374,135 +499,14 @@ def _build_figure(
         hovermode="closest",
         template="plotly_white",
         legend=dict(groupclick="togglegroup"),
+        hoverlabel=dict(
+            bgcolor="rgba(255,255,255,0.95)",
+            font=dict(color="#1a1a1a", size=12),
+            align="left",
+        ),
     )
     return fig
 
-
-def _build_overlay_html() -> str:
-    return """
-<div id=\"pair-hover\" style=\"position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.97); padding:6px; z-index:1000; max-width:520px; box-shadow:0 2px 8px rgba(0,0,0,0.15);\">
-  <div id=\"pair-hover-title\" style=\"font-weight:600; margin-bottom:4px; font-size:13px;\"></div>
-  <div style=\"display:flex; gap:6px;\">
-    <div style=\"flex:1; min-width:0;\">
-      <img id=\"pair-hover-img-a\" src=\"\" style=\"width:100%; height:auto; display:block; border:1px solid #ccc; background:#f8f8f8;\">
-      <div id=\"pair-hover-meta-a\" style=\"font-size:12px; margin-top:2px; line-height:1.35;\"></div>
-    </div>
-    <div style=\"flex:1; min-width:0;\">
-      <img id=\"pair-hover-img-b\" src=\"\" style=\"width:100%; height:auto; display:block; border:1px solid #ccc; background:#f8f8f8;\">
-      <div id=\"pair-hover-meta-b\" style=\"font-size:12px; margin-top:2px; line-height:1.35;\"></div>
-    </div>
-  </div>
-  <div id=\"pair-hover-info\" style=\"font-size:12px; margin-top:4px; line-height:1.4;\"></div>
-</div>
-"""
-
-
-def _build_overlay_script() -> str:
-    return """
-<script>
-  (function() {
-    var plotDiv = document.getElementById('pair-distance-plot');
-    if (!plotDiv) { return; }
-    var hoverDiv = document.getElementById('pair-hover');
-    var imgA = document.getElementById('pair-hover-img-a');
-    var imgB = document.getElementById('pair-hover-img-b');
-    var metaA = document.getElementById('pair-hover-meta-a');
-    var metaB = document.getElementById('pair-hover-meta-b');
-    var info = document.getElementById('pair-hover-info');
-    var title = document.getElementById('pair-hover-title');
-
-    function positionHover(event) {
-      if (!event) { return; }
-      var padding = 16;
-      var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-      var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-      var pointX = event.clientX || 0;
-      var pointY = event.clientY || 0;
-
-      // Measure current overlay size; fall back to last known dimensions if needed.
-      var rect = hoverDiv.getBoundingClientRect();
-      var overlayWidth = rect.width || hoverDiv.offsetWidth || 0;
-      var overlayHeight = rect.height || hoverDiv.offsetHeight || 0;
-
-      var x = pointX + padding;
-      var y = pointY + padding;
-
-      // If the overlay would overflow the right edge, place it to the left of the cursor.
-      if (overlayWidth && x + overlayWidth > viewportWidth - 4) {
-        x = pointX - overlayWidth - padding;
-      }
-      // If still overflowing, clamp inside viewport.
-      if (overlayWidth) {
-        x = Math.min(x, viewportWidth - overlayWidth - 4);
-      }
-      if (x < 4) {
-        x = 4;
-      }
-
-      // Adjust vertically if overlay would overflow the bottom edge.
-      if (overlayHeight && y + overlayHeight > viewportHeight - 4) {
-        y = pointY - overlayHeight - padding;
-      }
-      if (overlayHeight) {
-        y = Math.min(y, viewportHeight - overlayHeight - 4);
-      }
-      if (y < 4) {
-        y = 4;
-      }
-
-      hoverDiv.style.left = x + 'px';
-      hoverDiv.style.top = y + 'px';
-    }
-
-    plotDiv.on('plotly_hover', function(data) {
-      if (!data || !data.points || !data.points.length) { return; }
-      var point = data.points[0];
-      var custom = point.customdata || [];
-      var imgPathA = custom[0] || '';
-      var imgPathB = custom[1] || '';
-      var trajA = custom[2] || '';
-      var frameA = custom[3] != null ? custom[3] : '';
-      var trajB = custom[4] || '';
-      var frameB = custom[5] != null ? custom[5] : '';
-      var stepGap = custom[6];
-      var predDist = custom[7];
-      var pairType = custom[8] || '';
-      var extra = custom[9] || '';
-
-      imgA.src = imgPathA;
-      imgB.src = imgPathB;
-      metaA.innerHTML = '<strong>' + trajA + '</strong><br>Frame ' + frameA;
-      metaB.innerHTML = '<strong>' + trajB + '</strong><br>Frame ' + frameB;
-
-      var distText = (predDist != null && !isNaN(predDist)) ? predDist.toFixed(4) : '';
-      if (pairType === 'within') {
-        title.textContent = 'Within-trajectory pair';
-        info.innerHTML = 'Δt = ' + stepGap + '<br>Predicted distance = ' + distText;
-      } else {
-        title.textContent = 'Cross-trajectory pair';
-        info.innerHTML = 'Rank = ' + extra + '<br>Predicted distance = ' + distText;
-      }
-
-      hoverDiv.style.display = 'block';
-      positionHover(data.event);
-    });
-
-    plotDiv.on('plotly_unhover', function() {
-      hoverDiv.style.display = 'none';
-    });
-
-    plotDiv.on('plotly_relayout', function() {
-      hoverDiv.style.display = 'none';
-    });
-
-    plotDiv.addEventListener('mousemove', function(evt) {
-      if (hoverDiv.style.display === 'block') {
-        positionHover(evt);
-      }
-    });
-  })();
-</script>
-"""
 
 
 def main(args: Args) -> None:
@@ -602,44 +606,14 @@ def main(args: Args) -> None:
     fig = _build_figure(within_pairs, cross_pairs_sorted)
     out_dir.mkdir(parents=True, exist_ok=True)
     html_path = out_dir / "pair_distance_visualization.html"
-    plot_html = pio.to_html(
-        fig,
+    fig.write_html(
+        html_path,
         include_plotlyjs="cdn",
-        full_html=False,
-        div_id="pair-distance-plot",
+        full_html=True,
         default_height="100vh",
         default_width="100%",
-    )
-
-    template = Template(
-        """<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <title>Within vs cross-trajectory distances</title>
-  <style>
-    html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; }
-    #container { height: 100vh; padding: 12px; box-sizing: border-box; }
-    #pair-distance-plot { height: 100%; }
-  </style>
-</head>
-<body>
-  <div id=\"container\">
-    $plot
-  </div>
-  $overlay
-  $script
-</body>
-</html>
-"""
-    )
-
-    html_path.write_text(
-        template.substitute(
-            plot=plot_html,
-            overlay=_build_overlay_html(),
-            script=_build_overlay_script(),
-        )
+        div_id=PLOT_DIV_ID,
+        post_script=OVERLAY_POST_SCRIPT,
     )
     print(f"Saved interactive visualization to {html_path}")
 

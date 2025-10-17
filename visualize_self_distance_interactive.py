@@ -7,13 +7,11 @@ import os
 import ctypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, List, Optional
-from string import Template
+from typing import List, Optional
 
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import plotly.io as pio
 from plotly.subplots import make_subplots
 import torch
 import tyro
@@ -57,6 +55,99 @@ def _set_max_active_levels(levels: int = 1) -> None:
 
 
 DEFAULT_OUT_DIR_TEMPLATE = f"out.self_distance_interactive_{TIMESTAMP_PLACEHOLDER}"
+PLOT_DIV_ID = "self-distance-plot"
+
+OVERLAY_POST_SCRIPT = f"""
+(function() {{
+  const plotDiv = document.getElementById('{PLOT_DIV_ID}');
+  if (!plotDiv) {{
+    return;
+  }}
+
+  const hoverDiv = document.createElement('div');
+  hoverDiv.id = 'hover-image';
+  hoverDiv.style.cssText = 'position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.98); padding:4px; z-index:1000; max-width:260px;';
+  hoverDiv.innerHTML = `
+    <img id="hover-image-img" src="" style="width:100%; height:auto; display:block; border-bottom:1px solid #ccc; margin-bottom:4px;">
+    <div id="hover-image-details" style="font-size:12px; line-height:1.4;"></div>
+  `;
+  document.body.appendChild(hoverDiv);
+
+  const hoverImg = document.getElementById('hover-image-img');
+  const hoverDetails = document.getElementById('hover-image-details');
+
+  function positionHover(event) {{
+    if (!event) {{
+      return;
+    }}
+    let x = (event.clientX || 0) + 16;
+    let y = (event.clientY || 0) + 16;
+
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const rect = hoverDiv.getBoundingClientRect();
+    const overlayWidth = rect.width || hoverDiv.offsetWidth || 0;
+    const overlayHeight = rect.height || hoverDiv.offsetHeight || 0;
+
+    if (overlayWidth && x + overlayWidth > viewportWidth - 4) {{
+      x = (event.clientX || 0) - overlayWidth - 16;
+    }}
+    if (overlayHeight && y + overlayHeight > viewportHeight - 4) {{
+      y = (event.clientY || 0) - overlayHeight - 16;
+    }}
+
+    if (x < 4) {{
+      x = 4;
+    }}
+    if (y < 4) {{
+      y = 4;
+    }}
+
+    hoverDiv.style.left = x + 'px';
+    hoverDiv.style.top = y + 'px';
+  }}
+
+  plotDiv.on('plotly_hover', function(data) {{
+    if (!data || !data.points || !data.points.length) {{
+      return;
+    }}
+    const point = data.points[0];
+    const custom = point.customdata || [];
+    const imgPath = custom[0];
+    const trajName = custom[1] || '';
+    const frameIdx = custom[2] != null ? custom[2] : '';
+    const l2 = custom[3];
+    const cos = custom[4];
+
+    hoverImg.src = imgPath || '';
+    const l2Text = (l2 != null && !isNaN(l2)) ? Number(l2).toFixed(4) : '';
+    const cosText = (cos != null && !isNaN(cos)) ? Number(cos).toFixed(4) : '';
+    hoverDetails.innerHTML = [
+      '<strong>' + trajName + '</strong>',
+      'Frame offset: ' + frameIdx,
+      'L2 distance: ' + l2Text,
+      'Cosine distance: ' + cosText,
+    ].join('<br>');
+
+    hoverDiv.style.display = 'block';
+    positionHover(data.event);
+  }});
+
+  plotDiv.on('plotly_unhover', function() {{
+    hoverDiv.style.display = 'none';
+  }});
+
+  plotDiv.on('plotly_relayout', function() {{
+    hoverDiv.style.display = 'none';
+  }});
+
+  plotDiv.addEventListener('mousemove', function(evt) {{
+    if (hoverDiv.style.display === 'block') {{
+      positionHover(evt);
+    }}
+  }});
+}})();
+"""
 
 
 @dataclass
@@ -216,6 +307,11 @@ def build_fig(records: List[dict], umap_coords: Optional[np.ndarray]) -> go.Figu
         hovermode='closest',
         template='plotly_white',
         legend=dict(groupclick='togglegroup'),
+        hoverlabel=dict(
+            bgcolor='rgba(255,255,255,0.95)',
+            font=dict(color='#1a1a1a', size=12),
+            align='left',
+        ),
     )
 
     return fig
@@ -269,98 +365,14 @@ def main(args: Args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     html_path = out_dir / "self_distance_interactive.html"
 
-    plot_html = pio.to_html(
-        fig,
+    fig.write_html(
+        html_path,
         include_plotlyjs='cdn',
-        full_html=False,
-        div_id='self-distance-plot',
+        full_html=True,
         default_height='100vh',
-        default_width='100%'
-    )
-
-    overlay_html = """
-<div id=\"hover-image\" style=\"position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.98); padding:4px; z-index:1000; max-width:260px;\">
-  <img id=\"hover-image-img\" src=\"\" style=\"width:100%; height:auto; display:block; border-bottom:1px solid #ccc; margin-bottom:4px;\">
-  <div id=\"hover-image-details\" style=\"font-size:12px; line-height:1.4;\"></div>
-</div>
-"""
-
-    script = """
-<script>
-  (function() {
-    var plotDiv = document.getElementById('self-distance-plot');
-    if (!plotDiv) { return; }
-    var hoverDiv = document.getElementById('hover-image');
-    var hoverImg = document.getElementById('hover-image-img');
-    var hoverDetails = document.getElementById('hover-image-details');
-
-    function positionHover(event) {
-      if (!event) { return; }
-      var x = (event.clientX || 0) + 16;
-      var y = (event.clientY || 0) + 16;
-      hoverDiv.style.left = x + 'px';
-      hoverDiv.style.top = y + 'px';
-    }
-
-    plotDiv.on('plotly_hover', function(data) {
-      if (!data || !data.points || !data.points.length) { return; }
-      var point = data.points[0];
-      var custom = point.customdata || [];
-      var imgPath = custom[0];
-      var trajName = custom[1] || '';
-      var frameIdx = custom[2] != null ? custom[2] : '';
-      var l2 = custom[3] != null ? custom[3].toFixed(4) : '';
-      var cos = custom[4] != null ? custom[4].toFixed(4) : '';
-      hoverImg.src = imgPath;
-      hoverDetails.innerHTML =
-        '<strong>' + trajName + '</strong><br>' +
-        'Frame offset: ' + frameIdx + '<br>' +
-        'L2 distance: ' + l2 + '<br>' +
-        'Cosine distance: ' + cos;
-      hoverDiv.style.display = 'block';
-      positionHover(data.event);
-    });
-
-    plotDiv.on('plotly_unhover', function() {
-      hoverDiv.style.display = 'none';
-    });
-
-    plotDiv.on('plotly_relayout', function() {
-      hoverDiv.style.display = 'none';
-    });
-
-    plotDiv.addEventListener('mousemove', function(evt) {
-      if (hoverDiv.style.display === 'block') {
-        positionHover(evt);
-      }
-    });
-  })();
-</script>
-"""
-
-    template = Template("""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Self-distance Interactive Visualization</title>
-  <style>
-    html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; }
-    #container { height: 100vh; padding: 12px; box-sizing: border-box; }
-    #self-distance-plot { height: 100%; }
-  </style>
-</head>
-<body>
-  <div id="container">
-    $plot
-  </div>
-  $overlay
-  $script
-</body>
-</html>
-""")
-
-    html_path.write_text(
-        template.substitute(plot=plot_html, overlay=overlay_html, script=script)
+        default_width='100%',
+        div_id=PLOT_DIV_ID,
+        post_script=OVERLAY_POST_SCRIPT,
     )
     print(f"Saved interactive visualization to {html_path}")
 

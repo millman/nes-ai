@@ -38,7 +38,8 @@ dependencies = [
     "torchrl",
     "torchvision",
     "transformers",
-    "tyro"
+    "tyro",
+    "umap-learn",
 ]
 
 [tool.uv]
