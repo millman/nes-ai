@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import os
 import ctypes
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -13,6 +14,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from matplotlib import cm
+from PIL import Image
 import torch
 import tyro
 from sklearn.decomposition import FastICA
@@ -59,7 +62,109 @@ SCATTER_DIV_ID = "self-distance-pca-plot"
 AXES_DIV_ID = "self-distance-pca-axes-plot"
 
 
-def _build_axes_overlay_script(div_id: str) -> str:
+def _build_scatter_overlay_script(div_id: str) -> str:
+    return f"""
+(function() {{
+  const plotDiv = document.getElementById('{div_id}');
+  if (!plotDiv) {{
+    return;
+  }}
+
+  let hoverDiv = document.getElementById('{div_id}-hover');
+  if (!hoverDiv) {{
+    hoverDiv = document.createElement('div');
+    hoverDiv.id = '{div_id}-hover';
+    hoverDiv.style.cssText = 'position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.98); padding:4px; z-index:1000; max-width:260px;';
+    hoverDiv.innerHTML = `
+      <img id="{div_id}-hover-img" src="" style="width:100%; height:auto; display:block; border-bottom:1px solid #ccc; margin-bottom:4px;">
+      <div id="{div_id}-hover-details" style="font-size:12px; line-height:1.4;"></div>
+    `;
+    document.body.appendChild(hoverDiv);
+  }}
+
+  const hoverImg = document.getElementById('{div_id}-hover-img');
+  const hoverDetails = document.getElementById('{div_id}-hover-details');
+
+  function positionHover(event) {{
+    if (!event) {{
+      return;
+    }}
+    let x = (event.clientX || 0) + 16;
+    let y = (event.clientY || 0) + 16;
+
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const rect = hoverDiv.getBoundingClientRect();
+    const overlayWidth = rect.width || hoverDiv.offsetWidth || 0;
+    const overlayHeight = rect.height || hoverDiv.offsetHeight || 0;
+
+    if (overlayWidth && x + overlayWidth > viewportWidth - 4) {{
+      x = (event.clientX || 0) - overlayWidth - 16;
+    }}
+    if (overlayHeight && y + overlayHeight > viewportHeight - 4) {{
+      y = (event.clientY || 0) - overlayHeight - 16;
+    }}
+
+    if (x < 4) {{
+      x = 4;
+    }}
+    if (y < 4) {{
+      y = 4;
+    }}
+
+    hoverDiv.style.left = x + 'px';
+    hoverDiv.style.top = y + 'px';
+  }}
+
+  plotDiv.on('plotly_hover', function(data) {{
+    if (!data || !data.points || !data.points.length) {{
+      return;
+    }}
+    const point = data.points[0];
+    const custom = point.customdata || [];
+    const imgPath = custom[0];
+    const trajName = custom[1] || '';
+    const frameIdx = custom[2] != null ? custom[2] : '';
+    const l2 = custom[3];
+    const cos = custom[4];
+
+    if (hoverImg) {{
+      hoverImg.src = imgPath || '';
+    }}
+    if (hoverDetails) {{
+      const l2Text = (l2 != null && !isNaN(l2)) ? Number(l2).toFixed(4) : '';
+      const cosText = (cos != null && !isNaN(cos)) ? Number(cos).toFixed(4) : '';
+      hoverDetails.innerHTML = [
+        '<strong>' + trajName + '</strong>',
+        'Frame offset: ' + frameIdx,
+        'L2 distance: ' + l2Text,
+        'Cosine distance: ' + cosText,
+      ].join('<br>');
+    }}
+
+    hoverDiv.style.display = 'block';
+    positionHover(data.event);
+  }});
+
+  plotDiv.on('plotly_unhover', function() {{
+    hoverDiv.style.display = 'none';
+  }});
+
+  plotDiv.on('plotly_relayout', function() {{
+    hoverDiv.style.display = 'none';
+  }});
+
+  plotDiv.addEventListener('mousemove', function(evt) {{
+    if (hoverDiv.style.display === 'block') {{
+      positionHover(evt);
+    }}
+  }});
+}})();
+"""
+
+
+def _build_axes_overlay_script(div_id: str, value_label: str = "Axis value") -> str:
+    label_js = value_label.replace("'", "\\'")
     return f"""
 (function() {{
   const plotDiv = document.getElementById('{div_id}');
@@ -131,7 +236,7 @@ def _build_axes_overlay_script(div_id: str) -> str:
       hoverMeta.innerHTML = [
         'Frame order: ' + (localIdx != null ? localIdx : ''),
         'Frame offset: ' + (offset != null ? offset : ''),
-        'Axis value: ' + (point.y != null ? Number(point.y).toFixed(4) : ''),
+        '{label_js}: ' + (point.y != null ? Number(point.y).toFixed(4) : ''),
       ].join('<br>');
     }}
 
@@ -155,24 +260,29 @@ def _build_axes_overlay_script(div_id: str) -> str:
 }})();
 """
 
-OVERLAY_POST_SCRIPT = f"""
+
+def _build_rank_overlay_script(div_id: str) -> str:
+    return f"""
 (function() {{
-  const plotDiv = document.getElementById('{SCATTER_DIV_ID}');
+  const plotDiv = document.getElementById('{div_id}');
   if (!plotDiv) {{
     return;
   }}
 
-  const hoverDiv = document.createElement('div');
-  hoverDiv.id = 'hover-image';
-  hoverDiv.style.cssText = 'position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.98); padding:4px; z-index:1000; max-width:260px;';
-  hoverDiv.innerHTML = `
-    <img id="hover-image-img" src="" style="width:100%; height:auto; display:block; border-bottom:1px solid #ccc; margin-bottom:4px;">
-    <div id="hover-image-details" style="font-size:12px; line-height:1.4;"></div>
-  `;
-  document.body.appendChild(hoverDiv);
+  let hoverDiv = document.getElementById('{div_id}-hover');
+  if (!hoverDiv) {{
+    hoverDiv = document.createElement('div');
+    hoverDiv.id = '{div_id}-hover';
+    hoverDiv.style.cssText = 'position:fixed; display:none; pointer-events:none; border:1px solid #999; background:rgba(255,255,255,0.98); padding:6px; z-index:1000; max-width:220px;';
+    hoverDiv.innerHTML = `
+      <img id="{div_id}-hover-img" src="" style="width:100%; height:auto; border-bottom:1px solid #ccc; margin-bottom:4px;">
+      <div id="{div_id}-hover-meta" style="font-size:12px; line-height:1.35;"></div>
+    `;
+    document.body.appendChild(hoverDiv);
+  }}
 
-  const hoverImg = document.getElementById('hover-image-img');
-  const hoverDetails = document.getElementById('hover-image-details');
+  const hoverImg = document.getElementById('{div_id}-hover-img');
+  const hoverMeta = document.getElementById('{div_id}-hover-meta');
 
   function positionHover(event) {{
     if (!event) {{
@@ -211,21 +321,21 @@ OVERLAY_POST_SCRIPT = f"""
     }}
     const point = data.points[0];
     const custom = point.customdata || [];
-    const imgPath = custom[0];
-    const trajName = custom[1] || '';
-    const frameIdx = custom[2] != null ? custom[2] : '';
-    const l2 = custom[3];
-    const cos = custom[4];
+    const traj = custom[0] || '';
+    const frameIdx = custom[1] != null ? custom[1] : '';
+    const imgPath = custom[2];
 
-    hoverImg.src = imgPath || '';
-    const l2Text = (l2 != null && !isNaN(l2)) ? Number(l2).toFixed(4) : '';
-    const cosText = (cos != null && !isNaN(cos)) ? Number(cos).toFixed(4) : '';
-    hoverDetails.innerHTML = [
-      '<strong>' + trajName + '</strong>',
-      'Frame offset: ' + frameIdx,
-      'L2 distance: ' + l2Text,
-      'Cosine distance: ' + cosText,
-    ].join('<br>');
+    if (hoverImg) {{
+      hoverImg.src = imgPath || '';
+    }}
+    if (hoverMeta) {{
+      const rank = (point.x != null && !isNaN(point.x)) ? Math.round(point.x) : '';
+      hoverMeta.innerHTML = [
+        '<strong>' + traj + '</strong>',
+        'Frame index: ' + frameIdx,
+        'Axis value: ' + (point.x != null ? Number(point.x).toFixed(4) : ''),
+      ].join('<br>');
+    }}
 
     hoverDiv.style.display = 'block';
     positionHover(data.event);
@@ -248,6 +358,46 @@ OVERLAY_POST_SCRIPT = f"""
 """
 
 
+def _write_overlay_image(
+    src_path: Path,
+    dest_path: Path,
+    value: float,
+    vmax: float,
+    cmap,
+) -> None:
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(src_path).convert("RGB") as img:
+        base = np.array(img, dtype=np.float32)
+    if vmax <= 0:
+        norm = 0.5
+    else:
+        norm = 0.5 + 0.5 * np.clip(value / vmax, -1.0, 1.0)
+    color = np.array(cmap(norm)[:3]) * 255.0
+    overlay = np.ones_like(base) * color
+    blended = (0.6 * base + 0.4 * overlay).astype(np.uint8)
+    Image.fromarray(blended).save(dest_path)
+
+
+def _create_overlay_series(
+    frame_paths: List[Path],
+    values: np.ndarray,
+    dest_dir: Path,
+    out_dir: Path,
+    cmap,
+) -> List[str]:
+    vmax = float(np.max(np.abs(values))) if values.size else 0.0
+    if vmax <= 0:
+        vmax = 1.0
+    rel_paths: List[str] = []
+    for frame_path, value in zip(frame_paths, values):
+        dest_path = dest_dir / frame_path.name
+        _write_overlay_image(frame_path, dest_path, float(value), vmax, cmap)
+        rel_paths.append(dest_path.relative_to(out_dir).as_posix())
+    return rel_paths
+
+OVERLAY_POST_SCRIPT = _build_scatter_overlay_script(SCATTER_DIV_ID)
+
+
 @dataclass
 class Args:
     traj_dir: str
@@ -257,6 +407,7 @@ class Args:
     n_components: int = 2
     ica_components: Optional[int] = None
     progress: bool = True
+    overlay_outputs: bool = False
 
 
 def build_plot_data(
@@ -471,6 +622,9 @@ def build_axes_fig_for_traj(
     traj_name: str,
     method_label: str,
     max_axes: int = 5,
+    values_matrix: Optional[np.ndarray] = None,
+    image_matrix: Optional[np.ndarray] = None,
+    value_axis_suffix: str = "values",
 ) -> Optional[go.Figure]:
     if coords.size == 0:
         return None
@@ -485,11 +639,14 @@ def build_axes_fig_for_traj(
     traj_indices = np.where(mask)[0]
     order = traj_indices[np.argsort(offsets[traj_indices])]
     ordered_offsets = offsets[order]
-    ordered_images = image_paths[order]
-    rel_image_paths = np.array([f"../{img}" for img in ordered_images], dtype=object)
-    axis_count = min(max_axes, coords.shape[1])
+    axis_source = values_matrix if values_matrix is not None else coords
+    axis_count = min(max_axes, axis_source.shape[1])
     if axis_count == 0:
         return None
+
+    rel_image_paths = np.array([rec["image_path"] for rec in records], dtype=object)
+    base_image_matrix = np.tile(rel_image_paths.reshape(-1, 1), (1, axis_count))
+    image_source = image_matrix if image_matrix is not None else base_image_matrix
 
     fig = make_subplots(
         rows=axis_count,
@@ -497,19 +654,23 @@ def build_axes_fig_for_traj(
         shared_xaxes=False,
         vertical_spacing=0.12,
         subplot_titles=[
-            f"{method_label} axis {idx + 1} distance vs frame order" for idx in range(axis_count)
+            f"{method_label} axis {idx + 1} {value_axis_suffix} vs frame order"
+            for idx in range(axis_count)
         ],
     )
 
     axis_palette = px.colors.qualitative.Safe
     local_frame_indices = np.arange(len(order), dtype=float)
-    axis_custom = np.array(
-        list(zip(ordered_offsets, local_frame_indices, rel_image_paths)),
-        dtype=object,
-    )
 
     for axis_idx in range(axis_count):
-        axis_values = coords[order, axis_idx]
+        axis_values = axis_source[order, axis_idx]
+        ordered_rel_images = np.array(
+            [f"../{path}" for path in image_source[order, axis_idx]], dtype=object
+        )
+        axis_custom = np.array(
+            list(zip(ordered_offsets, local_frame_indices, ordered_rel_images)),
+            dtype=object,
+        )
         color = axis_palette[axis_idx % len(axis_palette)]
         fig.add_trace(
             go.Scatter(
@@ -537,13 +698,106 @@ def build_axes_fig_for_traj(
             col=1,
         )
         fig.update_yaxes(
-            title_text=f'{method_label} axis {axis_idx + 1} value',
+            title_text=f'{method_label} axis {axis_idx + 1} {value_axis_suffix}',
             row=axis_idx + 1,
             col=1,
         )
 
     fig.update_layout(
-        title=f'{traj_name} {method_label} axis distances',
+        title=f'{traj_name} {method_label} axis {value_axis_suffix}',
+        hovermode='closest',
+        template='plotly_white',
+        hoverlabel=dict(
+            bgcolor='rgba(255,255,255,0.95)',
+            font=dict(color='#1a1a1a', size=12),
+            align='left',
+        ),
+    )
+
+    return fig
+
+
+def build_axis_rank_fig(
+    records: List[dict],
+    coords: np.ndarray,
+    method_label: str,
+    max_axes: int = 5,
+) -> Optional[go.Figure]:
+    if coords.size == 0:
+        return None
+
+    axis_count = min(max_axes, coords.shape[1])
+    if axis_count == 0:
+        return None
+
+    trajs = np.array([rec["traj"] for rec in records], dtype=object)
+    frame_indices = np.array([rec["frame_index"] for rec in records], dtype=int)
+    image_paths = np.array([rec["image_path"] for rec in records], dtype=object)
+
+    unique_trajs = np.unique(trajs)
+    palette = px.colors.qualitative.Plotly
+    if len(unique_trajs) > len(palette):
+        repeats = len(unique_trajs) // len(palette) + 1
+        palette = (palette * repeats)[: len(unique_trajs)]
+    color_map = {traj: palette[i] for i, traj in enumerate(unique_trajs)}
+
+    fig = make_subplots(
+        rows=axis_count,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.12,
+        subplot_titles=[
+            f"{method_label} axis {idx + 1} values" for idx in range(axis_count)
+        ],
+    )
+
+    for axis_idx in range(axis_count):
+        axis_values = coords[:, axis_idx]
+        colors = [color_map[traj] for traj in trajs]
+        custom = np.array(
+            list(zip(trajs, frame_indices, image_paths)),
+            dtype=object,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=axis_values,
+                y=np.zeros_like(axis_values, dtype=float),
+                mode='markers',
+                name=f"{method_label} axis {axis_idx + 1}",
+                marker=dict(size=5, opacity=0.8, color=colors),
+                customdata=custom,
+                hovertemplate=(
+                    "Trajectory %{customdata[0]}<br>"
+                    "Frame %{customdata[1]}<br>"
+                    f"{method_label} axis {axis_idx + 1} value %{{x:.4f}}"
+                    "<extra></extra>"
+                ),
+                showlegend=False,
+            ),
+            row=axis_idx + 1,
+            col=1,
+        )
+
+        fig.update_xaxes(
+            title_text=f'{method_label} axis {axis_idx + 1} value',
+            row=axis_idx + 1,
+            col=1,
+        )
+        fig.update_yaxes(
+            title_text='',
+            row=axis_idx + 1,
+            col=1,
+            showticklabels=False,
+        )
+        fig.update_yaxes(
+            range=[-0.5, 0.5],
+            row=axis_idx + 1,
+            col=1,
+        )
+
+    fig.update_layout(
+        title=f'{method_label} axis rankings across trajectories',
         hovermode='closest',
         template='plotly_white',
         hoverlabel=dict(
@@ -592,6 +846,18 @@ def main(args: Args) -> None:
         print("No records generated for visualization")
         return
 
+    traj_to_safe: dict[str, str] = {}
+    traj_to_indices: defaultdict[str, List[int]] = defaultdict(list)
+    for idx, rec in enumerate(records):
+        traj_to_safe.setdefault(rec["traj"], rec["safe_traj"])
+        traj_to_indices[rec["traj"]].append(idx)
+
+    base_rel_paths = np.array([rec["image_path"] for rec in records], dtype=object)
+
+    overlay_frames_dir = out_dir / "frames_overlay"
+    derivative_frames_dir = out_dir / "frames_derivative"
+    overlay_cmap = cm.get_cmap("coolwarm")
+
     write_metadata_csv(records, out_dir / "self_distance_records.csv")
 
     if not embed_list:
@@ -599,6 +865,7 @@ def main(args: Args) -> None:
         return
 
     embeds = torch.stack(embed_list)
+    num_samples = len(records)
     pca_components_for_axes = max(5, args.n_components)
     pca_coords_full, variance_ratio_full = compute_pca(embeds, pca_components_for_axes)
     if pca_coords_full.shape[1] < 2:
@@ -615,6 +882,17 @@ def main(args: Args) -> None:
     else:
         scatter_pca = pca_coords_full[:, :2]
         scatter_variance = variance_ratio_full[:2]
+
+    overlay_enabled = args.overlay_outputs
+    pca_axis_count = min(5, pca_coords_full.shape[1])
+    if overlay_enabled and pca_axis_count > 0:
+        pca_overlay_rel = np.tile(base_rel_paths.reshape(-1, 1), (1, pca_axis_count))
+        pca_deriv_rel = np.tile(base_rel_paths.reshape(-1, 1), (1, pca_axis_count))
+        pca_deriv_matrix = np.zeros((num_samples, pca_axis_count), dtype=float)
+    else:
+        pca_overlay_rel = np.empty((num_samples, 0), dtype=object)
+        pca_deriv_rel = np.empty((num_samples, 0), dtype=object)
+        pca_deriv_matrix = np.empty((num_samples, 0), dtype=float)
 
     ica_coords_full = None
     ica_coords_for_scatter = None
@@ -636,6 +914,22 @@ def main(args: Args) -> None:
         else:
             ica_coords_for_scatter = ica_coords_full[:, :2]
 
+    if ica_coords_full is not None:
+        ica_axis_count = min(5, ica_coords_full.shape[1])
+        if overlay_enabled and ica_axis_count > 0:
+            ica_overlay_rel = np.tile(base_rel_paths.reshape(-1, 1), (1, ica_axis_count))
+            ica_deriv_rel = np.tile(base_rel_paths.reshape(-1, 1), (1, ica_axis_count))
+            ica_deriv_matrix = np.zeros((num_samples, ica_axis_count), dtype=float)
+        else:
+            ica_overlay_rel = np.empty((num_samples, 0), dtype=object)
+            ica_deriv_rel = np.empty((num_samples, 0), dtype=object)
+            ica_deriv_matrix = np.empty((num_samples, 0), dtype=float)
+    else:
+        ica_axis_count = 0
+        ica_overlay_rel = np.empty((num_samples, 0), dtype=object)
+        ica_deriv_rel = np.empty((num_samples, 0), dtype=object)
+        ica_deriv_matrix = np.empty((num_samples, 0), dtype=float)
+
     scatter_fig = build_scatter_fig(
         records,
         scatter_pca,
@@ -656,18 +950,114 @@ def main(args: Args) -> None:
     )
     print(f"Saved PCA and ICA scatter visualization to {scatter_html_path}")
 
-    trajs = [rec["traj"] for rec in records]
-    safe_trajs = [rec["safe_traj"] for rec in records]
-    traj_to_safe = {}
-    for traj_name, safe_name in zip(trajs, safe_trajs):
-        traj_to_safe.setdefault(traj_name, safe_name)
+    pca_rank_fig = build_axis_rank_fig(records, pca_coords_full, "PCA")
+    if pca_rank_fig is not None:
+        pca_rank_path = out_dir / "pca_axis_rankings.html"
+        pca_rank_div = "self-distance-pca-rank-plot"
+        pca_rank_fig.write_html(
+            pca_rank_path,
+            include_plotlyjs='cdn',
+            full_html=True,
+            default_height='100vh',
+            default_width='100%',
+            div_id=pca_rank_div,
+            post_script=_build_rank_overlay_script(pca_rank_div),
+        )
+        print(f"Saved PCA axis rankings to {pca_rank_path}")
+
+    if ica_coords_full is not None:
+        ica_rank_fig = build_axis_rank_fig(records, ica_coords_full, "ICA")
+        if ica_rank_fig is not None:
+            ica_rank_path = out_dir / "ica_axis_rankings.html"
+            ica_rank_div = "self-distance-ica-rank-plot"
+            ica_rank_fig.write_html(
+                ica_rank_path,
+                include_plotlyjs='cdn',
+                full_html=True,
+                default_height='100vh',
+                default_width='100%',
+                div_id=ica_rank_div,
+                post_script=_build_rank_overlay_script(ica_rank_div),
+            )
+            print(f"Saved ICA axis rankings to {ica_rank_path}")
 
     axes_dir = out_dir / "axes_by_traj"
     axes_dir.mkdir(exist_ok=True)
 
     unique_trajs = sorted(traj_to_safe.keys())
     for traj_name in unique_trajs:
+        indices = np.array(traj_to_indices.get(traj_name, []), dtype=int)
+        if indices.size == 0:
+            continue
         safe_name = traj_to_safe[traj_name]
+        order = np.argsort([records[i]["frame_index"] for i in indices])
+        sorted_indices = indices[order]
+        frame_paths_abs = [out_dir / base_rel_paths[idx] for idx in sorted_indices]
+
+        if pca_axis_count > 0:
+            values_matrix = pca_coords_full[sorted_indices, :pca_axis_count]
+            overlay_root = overlay_frames_dir / "pca" / safe_name
+            deriv_root = derivative_frames_dir / "pca" / safe_name
+            for axis_idx in range(pca_axis_count):
+                axis_values = values_matrix[:, axis_idx]
+                axis_overlay_dir = overlay_root / f"axis_{axis_idx + 1}"
+                overlay_rel_list = _create_overlay_series(
+                    frame_paths_abs,
+                    axis_values,
+                    axis_overlay_dir,
+                    out_dir,
+                    overlay_cmap,
+                )
+                for idx_local, record_idx in enumerate(sorted_indices):
+                    pca_overlay_rel[record_idx, axis_idx] = overlay_rel_list[idx_local]
+
+                deriv_values = np.zeros_like(axis_values)
+                if axis_values.size > 1:
+                    deriv_values[1:] = np.diff(axis_values)
+                pca_deriv_matrix[sorted_indices, axis_idx] = deriv_values
+                axis_deriv_dir = deriv_root / f"axis_{axis_idx + 1}"
+                deriv_rel_list = _create_overlay_series(
+                    frame_paths_abs,
+                    deriv_values,
+                    axis_deriv_dir,
+                    out_dir,
+                    overlay_cmap,
+                )
+                for idx_local, record_idx in enumerate(sorted_indices):
+                    pca_deriv_rel[record_idx, axis_idx] = deriv_rel_list[idx_local]
+
+        if ica_axis_count > 0:
+            values_matrix = ica_coords_full[sorted_indices, :ica_axis_count]
+            overlay_root = overlay_frames_dir / "ica" / safe_name
+            deriv_root = derivative_frames_dir / "ica" / safe_name
+            for axis_idx in range(ica_axis_count):
+                axis_values = values_matrix[:, axis_idx]
+                axis_overlay_dir = overlay_root / f"axis_{axis_idx + 1}"
+                overlay_rel_list = _create_overlay_series(
+                    frame_paths_abs,
+                    axis_values,
+                    axis_overlay_dir,
+                    out_dir,
+                    overlay_cmap,
+                )
+                for idx_local, record_idx in enumerate(sorted_indices):
+                    ica_overlay_rel[record_idx, axis_idx] = overlay_rel_list[idx_local]
+
+                deriv_values = np.zeros_like(axis_values)
+                if axis_values.size > 1:
+                    deriv_values[1:] = np.diff(axis_values)
+                ica_deriv_matrix[sorted_indices, axis_idx] = deriv_values
+                axis_deriv_dir = deriv_root / f"axis_{axis_idx + 1}"
+                deriv_rel_list = _create_overlay_series(
+                    frame_paths_abs,
+                    deriv_values,
+                    axis_deriv_dir,
+                    out_dir,
+                    overlay_cmap,
+                )
+                for idx_local, record_idx in enumerate(sorted_indices):
+                    ica_deriv_rel[record_idx, axis_idx] = deriv_rel_list[idx_local]
+
         pca_fig = build_axes_fig_for_traj(
             records,
             pca_coords_full,
@@ -687,6 +1077,51 @@ def main(args: Args) -> None:
                 post_script=_build_axes_overlay_script(pca_div_id),
             )
             print(f"Saved {traj_name} PCA axes visualization to {pca_path}")
+
+        if pca_axis_count > 0:
+            pca_overlay_fig = build_axes_fig_for_traj(
+                records,
+                pca_coords_full,
+                traj_name,
+                "PCA",
+                image_matrix=pca_overlay_rel,
+            )
+            if pca_overlay_fig is not None:
+                pca_overlay_path = axes_dir / f"{safe_name}_pca_overlay_axes.html"
+                pca_overlay_div = f"{AXES_DIV_ID}-{safe_name}-pca-overlay"
+                pca_overlay_fig.write_html(
+                    pca_overlay_path,
+                    include_plotlyjs='cdn',
+                    full_html=True,
+                    default_height='90vh',
+                    default_width='100%',
+                    div_id=pca_overlay_div,
+                    post_script=_build_axes_overlay_script(pca_overlay_div),
+                )
+                print(f"Saved {traj_name} PCA overlay axes visualization to {pca_overlay_path}")
+
+            pca_deriv_fig = build_axes_fig_for_traj(
+                records,
+                pca_coords_full,
+                traj_name,
+                "PCA",
+                values_matrix=pca_deriv_matrix,
+                image_matrix=pca_deriv_rel,
+                value_axis_suffix="Δ values",
+            )
+            if pca_deriv_fig is not None:
+                pca_deriv_path = axes_dir / f"{safe_name}_pca_derivative_axes.html"
+                pca_deriv_div = f"{AXES_DIV_ID}-{safe_name}-pca-derivative"
+                pca_deriv_fig.write_html(
+                    pca_deriv_path,
+                    include_plotlyjs='cdn',
+                    full_html=True,
+                    default_height='90vh',
+                    default_width='100%',
+                    div_id=pca_deriv_div,
+                    post_script=_build_axes_overlay_script(pca_deriv_div, value_label="Δ axis value"),
+                )
+                print(f"Saved {traj_name} PCA derivative axes visualization to {pca_deriv_path}")
 
         if ica_coords_full is not None:
             ica_fig = build_axes_fig_for_traj(
@@ -708,6 +1143,51 @@ def main(args: Args) -> None:
                     post_script=_build_axes_overlay_script(ica_div_id),
                 )
                 print(f"Saved {traj_name} ICA axes visualization to {ica_path}")
+
+            if ica_axis_count > 0:
+                ica_overlay_fig = build_axes_fig_for_traj(
+                    records,
+                    ica_coords_full,
+                    traj_name,
+                    "ICA",
+                    image_matrix=ica_overlay_rel,
+                )
+                if ica_overlay_fig is not None:
+                    ica_overlay_path = axes_dir / f"{safe_name}_ica_overlay_axes.html"
+                    ica_overlay_div = f"{AXES_DIV_ID}-{safe_name}-ica-overlay"
+                    ica_overlay_fig.write_html(
+                        ica_overlay_path,
+                        include_plotlyjs='cdn',
+                        full_html=True,
+                        default_height='90vh',
+                        default_width='100%',
+                        div_id=ica_overlay_div,
+                        post_script=_build_axes_overlay_script(ica_overlay_div),
+                    )
+                    print(f"Saved {traj_name} ICA overlay axes visualization to {ica_overlay_path}")
+
+                ica_deriv_fig = build_axes_fig_for_traj(
+                    records,
+                    ica_coords_full,
+                    traj_name,
+                    "ICA",
+                    values_matrix=ica_deriv_matrix,
+                    image_matrix=ica_deriv_rel,
+                    value_axis_suffix="Δ values",
+                )
+                if ica_deriv_fig is not None:
+                    ica_deriv_path = axes_dir / f"{safe_name}_ica_derivative_axes.html"
+                    ica_deriv_div = f"{AXES_DIV_ID}-{safe_name}-ica-derivative"
+                    ica_deriv_fig.write_html(
+                        ica_deriv_path,
+                        include_plotlyjs='cdn',
+                        full_html=True,
+                        default_height='90vh',
+                        default_width='100%',
+                        div_id=ica_deriv_div,
+                        post_script=_build_axes_overlay_script(ica_deriv_div, value_label="Δ axis value"),
+                    )
+                    print(f"Saved {traj_name} ICA derivative axes visualization to {ica_deriv_path}")
 
 
 if __name__ == "__main__":
