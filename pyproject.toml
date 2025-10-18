@@ -28,6 +28,7 @@ dependencies = [
     "python-dotenv",
     "pytorch-lightning",
     "sqlitedict",
+    "scikit-learn",
     "stable-baselines3",
     "tensorboard",
     "tensordict",
