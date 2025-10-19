@@ -67,6 +67,8 @@ class MultiHeadPredictor(nn.Module):
         self.latent_norm = nn.LayerNorm(latent_dim)
         self.latent_to_bottleneck: Optional[nn.Linear] = None
         self._latent_hw: Optional[Tuple[int, int]] = None
+        self._skip_shapes: Optional[dict[str, Tuple[int, int, int]]] = None
+        self._input_hw: Optional[Tuple[int, int]] = None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, _, H, W = x.shape
@@ -78,6 +80,13 @@ class MultiHeadPredictor(nn.Module):
         bottleneck = self.seed(f5)
         pooled = self.pool(bottleneck).view(B, -1)
         latent = self.latent_norm(self.latent_fc(pooled))
+        self._skip_shapes = {
+            "f1": (f1.shape[1], f1.shape[2], f1.shape[3]),
+            "f2": (f2.shape[1], f2.shape[2], f2.shape[3]),
+            "f3": (f3.shape[1], f3.shape[2], f3.shape[3]),
+            "f4": (f4.shape[1], f4.shape[2], f4.shape[3]),
+        }
+        self._input_hw = (H, W)
 
         # Prediction branch (uses skips as usual)
         d4 = self.up4(bottleneck, f4)
@@ -94,10 +103,14 @@ class MultiHeadPredictor(nn.Module):
             self.latent_to_bottleneck = nn.Linear(latent.shape[1], 512 * h5 * w5).to(latent.device)
             self._latent_hw = (h5, w5)
         bottleneck_lat = self.latent_to_bottleneck(latent).view(B, 512, h5, w5)
-        zero4 = torch.zeros_like(f4)
-        zero3 = torch.zeros_like(f3)
-        zero2 = torch.zeros_like(f2)
-        zero1 = torch.zeros_like(f1)
+        def make_zero(key: str) -> torch.Tensor:
+            c, h, w = self._skip_shapes[key]
+            return torch.zeros((B, c, h, w), device=bottleneck_lat.device, dtype=bottleneck_lat.dtype)
+
+        zero4 = make_zero("f4")
+        zero3 = make_zero("f3")
+        zero2 = make_zero("f2")
+        zero1 = make_zero("f1")
         d4_recon = self.up4(bottleneck_lat, zero4)
         d3_recon = self.up3(d4_recon, zero3)
         d2_recon = self.up2(d3_recon, zero2)
@@ -106,6 +119,32 @@ class MultiHeadPredictor(nn.Module):
         if recon.shape[-2:] != (H, W):
             recon = F.interpolate(recon, size=(H, W), mode="bilinear", align_corners=False)
         return recon, preds, latent
+
+    def decode_from_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        if self.latent_to_bottleneck is None or self._latent_hw is None or self._skip_shapes is None:
+            raise RuntimeError("Model decoder not initialized. Run a forward pass first.")
+        h5, w5 = self._latent_hw
+        B = latent.shape[0]
+        device = latent.device
+        dtype = latent.dtype
+        bottleneck_lat = self.latent_to_bottleneck(latent).view(B, 512, h5, w5)
+
+        def make_zero(key: str) -> torch.Tensor:
+            c, h, w = self._skip_shapes[key]
+            return torch.zeros((B, c, h, w), device=device, dtype=dtype)
+
+        zero4 = make_zero("f4")
+        zero3 = make_zero("f3")
+        zero2 = make_zero("f2")
+        zero1 = make_zero("f1")
+        d4_recon = self.up4(bottleneck_lat, zero4)
+        d3_recon = self.up3(d4_recon, zero3)
+        d2_recon = self.up2(d3_recon, zero2)
+        d1_recon = self.up1(d2_recon, zero1)
+        recon = self.recon_head(d1_recon)
+        if self._input_hw is not None and recon.shape[-2:] != self._input_hw:
+            recon = F.interpolate(recon, size=self._input_hw, mode="bilinear", align_corners=False)
+        return recon
 
 # -----------------------------------------------------------------------------
 # Logging helpers
