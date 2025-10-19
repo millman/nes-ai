@@ -65,6 +65,8 @@ class MultiHeadPredictor(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.latent_fc = nn.Linear(512, latent_dim)
         self.latent_norm = nn.LayerNorm(latent_dim)
+        self.latent_to_bottleneck: Optional[nn.Linear] = None
+        self._latent_hw: Optional[Tuple[int, int]] = None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, _, H, W = x.shape
@@ -76,17 +78,33 @@ class MultiHeadPredictor(nn.Module):
         bottleneck = self.seed(f5)
         pooled = self.pool(bottleneck).view(B, -1)
         latent = self.latent_norm(self.latent_fc(pooled))
+
+        # Prediction branch (uses skips as usual)
         d4 = self.up4(bottleneck, f4)
         d3 = self.up3(d4, f3)
         d2 = self.up2(d3, f2)
         d1 = self.up1(d2, f1)
-        recon = self.recon_head(d1)
         preds = self.pred_head(d1)
-        if recon.shape[-2:] != (H, W):
-            recon = F.interpolate(recon, size=(H, W), mode="bilinear", align_corners=False)
         if preds.shape[-2:] != (H, W):
             preds = F.interpolate(preds, size=(H, W), mode="bilinear", align_corners=False)
         preds = preds.view(B, self.rollout, 3, H, W)
+        # ensure reconstruction head only sees latent-derived features
+        h5, w5 = f5.shape[-2:]
+        if self.latent_to_bottleneck is None or self._latent_hw != (h5, w5):
+            self.latent_to_bottleneck = nn.Linear(latent.shape[1], 512 * h5 * w5).to(latent.device)
+            self._latent_hw = (h5, w5)
+        bottleneck_lat = self.latent_to_bottleneck(latent).view(B, 512, h5, w5)
+        zero4 = torch.zeros_like(f4)
+        zero3 = torch.zeros_like(f3)
+        zero2 = torch.zeros_like(f2)
+        zero1 = torch.zeros_like(f1)
+        d4_recon = self.up4(bottleneck_lat, zero4)
+        d3_recon = self.up3(d4_recon, zero3)
+        d2_recon = self.up2(d3_recon, zero2)
+        d1_recon = self.up1(d2_recon, zero1)
+        recon = self.recon_head(d1_recon)
+        if recon.shape[-2:] != (H, W):
+            recon = F.interpolate(recon, size=(H, W), mode="bilinear", align_corners=False)
         return recon, preds, latent
 
 # -----------------------------------------------------------------------------
