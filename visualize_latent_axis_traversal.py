@@ -95,12 +95,15 @@ OVERLAY_SCRIPT = """
 })();
 """
 
+DEFAULT_OUT_DIR_TEMPLATE = f"out.latent_axis_traversal_{TIMESTAMP_PLACEHOLDER}"
+
+
 @dataclass
 class Args:
     traj_dir: str = "data.image_distance.train_levels_1_2"
     model_checkpoint: str = "out.predict_mario_multi/run__2025-10-18_19-20-20/checkpoint.pt"
-    out_dir: str = f"out.latent_axis_traversal_{TIMESTAMP_PLACEHOLDER}"
-    rollout_steps: int = 1
+    out_dir: str = DEFAULT_OUT_DIR_TEMPLATE
+    rollout_steps: int = 4
     max_trajs: Optional[int] = None
     max_samples: Optional[int] = 2048
     axis_count: int = 5
@@ -108,13 +111,20 @@ class Args:
     samples_per_anchor: int = 10
     device: Optional[str] = None
     random_state: int = 0
+    allow_incompatible_checkpoints: bool = False
 
 
-def load_latents(args: Args, device: torch.device) -> tuple[np.ndarray, List[dict], MultiHeadPredictor]:
+def load_latents(args: Args, device: torch.device, out_dir: Path) -> tuple[np.ndarray, List[dict], MultiHeadPredictor]:
     dataset = Mario4to1Dataset(args.traj_dir, max_trajs=args.max_trajs, rollout=args.rollout_steps)
     model = MultiHeadPredictor(rollout=args.rollout_steps).to(device)
     state = torch.load(args.model_checkpoint, map_location=device)
-    model.load_state_dict(state["model"] if isinstance(state, dict) and "model" in state else state)
+    state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
+    missing, unexpected = model.load_state_dict(state_dict, strict=not args.allow_incompatible_checkpoints)
+    if args.allow_incompatible_checkpoints:
+        if missing:
+            print(f"[warn] Missing keys when loading model: {missing}")
+        if unexpected:
+            print(f"[warn] Unexpected keys ignored: {unexpected}")
     model.eval()
 
     latents: List[np.ndarray] = []
@@ -193,8 +203,8 @@ def save_gif(frames: List[Image.Image], path: Path, duration: int = 120) -> None
 
 def main(args: Args) -> None:
     device = pick_device(args.device)
-    out_dir = resolve_output_dir(args.out_dir)
-    latents, samples, model = load_latents(args, device)
+    out_dir = resolve_output_dir(args.out_dir, default_template=DEFAULT_OUT_DIR_TEMPLATE)
+    latents, samples, model = load_latents(args, device, out_dir)
     print(f"Collected {latents.shape[0]} latent vectors")
 
     axis_count = min(args.axis_count, latents.shape[1])
@@ -204,9 +214,8 @@ def main(args: Args) -> None:
     traversal_dir = out_dir / "traversals"
     traversal_dir.mkdir(parents=True, exist_ok=True)
 
-    # Precompute trajectory colors
-    trajectories = [Path(info["target_path"]).parents[1].name for info in samples]
-    unique_trajs = sorted(set(trajectories))
+    traj_names = [Path(info["target_path"]).parents[1].name for info in samples]
+    unique_trajs = sorted(set(traj_names))
     palette = go.Figure().layout.colorway or ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
     color_map = {traj: palette[i % len(palette)] for i, traj in enumerate(unique_trajs)}
 
@@ -215,25 +224,6 @@ def main(args: Args) -> None:
 
     for axis_idx in range(axis_count):
         axis_values = components[:, axis_idx]
-        colors = [color_map[t] for t in trajectories]
-        custom_base = np.stack([
-            np.array([str(samples[i]["target_path"]) for i in range(len(samples))], dtype=object),
-            np.array([''] * len(samples), dtype=object),
-            axis_values], axis=-1)
-
-        fig.add_trace(
-            go.Scatter(
-                x=axis_values,
-                y=np.zeros_like(axis_values),
-                mode='markers',
-                marker=dict(size=5, color=colors, opacity=0.45),
-                showlegend=False,
-                customdata=custom_base,
-                hovertemplate="Trajectory %{customdata[0]}<br>Axis value %{x:.4f}<extra></extra>",
-            ),
-            row=axis_idx + 1,
-            col=1,
-        )
 
         anchor_indices = select_anchor_indices(axis_values, args.anchors_per_axis)
         anchor_values = axis_values[anchor_indices]
@@ -243,10 +233,12 @@ def main(args: Args) -> None:
         bounds[sorted_idx] = bounds_sorted
 
         anchor_custom = []
+        anchor_colors = []
         for local_idx, sample_idx in enumerate(anchor_indices):
             base_components = components[sample_idx].copy()
             lower, upper = bounds[local_idx]
             samples_vals = np.linspace(lower, upper, args.samples_per_anchor)
+
             traversal_samples = []
             for val in samples_vals:
                 s_new = base_components.copy()
@@ -257,6 +249,14 @@ def main(args: Args) -> None:
             frames = decode_frames(model, traversal_arr, device)
 
             axis_dir = traversal_dir / f"axis_{axis_idx + 1}"
+            sample_dir = axis_dir / f"anchor_{local_idx + 1}_frames"
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            sample_images = []
+            for idx_sample, frame_img in enumerate(frames):
+                frame_path = sample_dir / f"sample_{idx_sample:03d}.png"
+                frame_img.save(frame_path)
+                sample_images.append(frame_path.relative_to(out_dir).as_posix())
+
             gif_path = axis_dir / f"anchor_{local_idx + 1}.gif"
             save_gif(frames, gif_path)
 
@@ -264,6 +264,8 @@ def main(args: Args) -> None:
             anchor_copy = axis_dir / f"anchor_{local_idx + 1}_frame.png"
             anchor_copy.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(anchor_src, anchor_copy)
+            traj_name = anchor_src.parents[1].name
+            anchor_colors.append(color_map[traj_name])
 
             anchor_custom.append([
                 anchor_copy.relative_to(out_dir).as_posix(),
@@ -271,13 +273,32 @@ def main(args: Args) -> None:
                 anchor_values[local_idx],
             ])
 
+            sample_custom = np.zeros((len(frames), 3), dtype=object)
+            sample_custom[:, 0] = sample_images
+            sample_custom[:, 1] = gif_path.relative_to(out_dir).as_posix()
+            sample_custom[:, 2] = samples_vals
+
+            fig.add_trace(
+                go.Scatter(
+                    x=samples_vals,
+                    y=np.zeros_like(samples_vals),
+                    mode='markers',
+                    marker=dict(size=6, color=color_map[traj_name], symbol='circle-open'),
+                    showlegend=False,
+                    customdata=sample_custom,
+                    hovertemplate="Traversal frame %{customdata[0]}<br>Axis value %{customdata[2]:.4f}<extra></extra>",
+                ),
+                row=axis_idx + 1,
+                col=1,
+            )
+
         anchor_custom = np.array(anchor_custom, dtype=object)
         fig.add_trace(
             go.Scatter(
                 x=anchor_values,
                 y=np.zeros_like(anchor_values),
                 mode='markers',
-                marker=dict(size=10, color='black', symbol='diamond'),
+                marker=dict(size=10, color=anchor_colors, symbol='diamond'),
                 name=f"Axis {axis_idx + 1} anchors",
                 customdata=anchor_custom,
                 hovertemplate="Anchor frame %{customdata[0]}<br>Axis value %{x:.4f}<extra></extra>",
