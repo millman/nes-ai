@@ -207,9 +207,12 @@ def main(args: Args) -> None:
     latents, samples, model = load_latents(args, device, out_dir)
     print(f"Collected {latents.shape[0]} latent vectors")
 
-    axis_count = min(args.axis_count, latents.shape[1])
+    latent_shape = latents.shape[1:]
+    latents_flat = latents.reshape(latents.shape[0], -1)
+
+    axis_count = min(args.axis_count, latents_flat.shape[1])
     ica = FastICA(n_components=axis_count, random_state=args.random_state)
-    components = ica.fit_transform(latents)
+    components = ica.fit_transform(latents_flat)
 
     traversal_dir = out_dir / "traversals"
     traversal_dir.mkdir(parents=True, exist_ok=True)
@@ -244,6 +247,7 @@ def main(args: Args) -> None:
                 s_new = base_components.copy()
                 s_new[axis_idx] = val
                 latent_new = ica.inverse_transform(s_new.reshape(1, -1))[0]
+                latent_new = latent_new.reshape(latent_shape)
                 traversal_samples.append(latent_new)
             traversal_arr = np.stack(traversal_samples, axis=0)
             frames = decode_frames(model, traversal_arr, device)
