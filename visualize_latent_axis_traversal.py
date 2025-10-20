@@ -101,7 +101,7 @@ DEFAULT_OUT_DIR_TEMPLATE = f"out.latent_axis_traversal_{TIMESTAMP_PLACEHOLDER}"
 @dataclass
 class Args:
     traj_dir: str = "data.image_distance.train_levels_1_2"
-    model_checkpoint: str = "out.predict_mario_multi/run__2025-10-18_19-20-20/checkpoint.pt"
+    model_checkpoint: str = "out.predict_mario_multi/run__2025-10-19_17-00-49/checkpoint.pt"
     out_dir: str = DEFAULT_OUT_DIR_TEMPLATE
     rollout_steps: int = 4
     max_trajs: Optional[int] = None

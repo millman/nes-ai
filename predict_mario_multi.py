@@ -50,11 +50,11 @@ class MultiHeadPredictor(nn.Module):
         weights = ResNet18_Weights.DEFAULT
         backbone = resnet18(weights=weights)
         backbone.conv1 = nn.Conv2d(12, 64, 7, stride=2, padding=3, bias=False)
-        self.enc1 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)
-        self.enc2 = nn.Sequential(backbone.maxpool, backbone.layer1)
-        self.enc3 = backbone.layer2
-        self.enc4 = backbone.layer3
-        self.enc5 = backbone.layer4
+        self.enc1 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)  # (B,64,H/2,W/2)
+        self.enc2 = nn.Sequential(backbone.maxpool, backbone.layer1)            # (B,64,H/4,W/4)
+        self.enc3 = backbone.layer2                                            # (B,128,H/8,W/8)
+        self.enc4 = backbone.layer3                                            # (B,256,H/16,W/16)
+        self.enc5 = backbone.layer4                                            # (B,512,H/32,W/32)
         self.seed = ConvBlock(512, 512)
         self.up4 = Up(512, 256, 256)
         self.up3 = Up(256, 128, 128)
@@ -65,28 +65,62 @@ class MultiHeadPredictor(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.latent_fc = nn.Linear(512, latent_dim)
         self.latent_norm = nn.LayerNorm(latent_dim)
-        self.latent_to_bottleneck: Optional[nn.Linear] = None
-        self._latent_hw: Optional[Tuple[int, int]] = None
-        self._skip_shapes: Optional[dict[str, Tuple[int, int, int]]] = None
-        self._input_hw: Optional[Tuple[int, int]] = None
+        self._latent_hw: Optional[Tuple[int, int]] = (7, 7)
+        self.latent_to_bottleneck = nn.Linear(latent_dim, 512 * self._latent_hw[0] * self._latent_hw[1])
+        self._skip_shapes: dict[str, Tuple[int, int, int]] = {
+            "f1": (64, 112, 112),
+            "f2": (64, 56, 56),
+            "f3": (128, 28, 28),
+            "f4": (256, 14, 14),
+        }
+        self._input_hw: Tuple[int, int] = (224, 224)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, _, H, W = x.shape
+        if (H, W) != self._input_hw:
+            raise RuntimeError(f"Expected input spatial size {self._input_hw}, got {(H, W)}")
         f1 = self.enc1(x)
         f2 = self.enc2(f1)
         f3 = self.enc3(f2)
         f4 = self.enc4(f3)
         f5 = self.enc5(f4)
+        expected_shapes = {
+            "f1": (64, H // 2, W // 2),
+            "f2": (64, H // 4, W // 4),
+            "f3": (128, H // 8, W // 8),
+            "f4": (256, H // 16, W // 16),
+            "f5": (512, H // 32, W // 32),
+        }
+        actual_shapes = {
+            "f1": f1.shape[1:],
+            "f2": f2.shape[1:],
+            "f3": f3.shape[1:],
+            "f4": f4.shape[1:],
+            "f5": f5.shape[1:],
+        }
+        for key, expected in expected_shapes.items():
+            if actual_shapes[key] != expected:
+                raise RuntimeError(f"Expected {key} shape {expected}, got {actual_shapes[key]}")
         bottleneck = self.seed(f5)
         pooled = self.pool(bottleneck).view(B, -1)
         latent = self.latent_norm(self.latent_fc(pooled))
-        self._skip_shapes = {
-            "f1": (f1.shape[1], f1.shape[2], f1.shape[3]),
-            "f2": (f2.shape[1], f2.shape[2], f2.shape[3]),
-            "f3": (f3.shape[1], f3.shape[2], f3.shape[3]),
-            "f4": (f4.shape[1], f4.shape[2], f4.shape[3]),
+        if (H, W) != self._input_hw:
+            raise RuntimeError(f"Expected input spatial size {self._input_hw}, got {(H, W)}")
+        expected_shapes = {
+            "f1": (64, H // 2, W // 2),
+            "f2": (64, H // 4, W // 4),
+            "f3": (128, H // 8, W // 8),
+            "f4": (256, H // 16, W // 16),
         }
-        self._input_hw = (H, W)
+        actual_shapes = {
+            "f1": f1.shape[1:],
+            "f2": f2.shape[1:],
+            "f3": f3.shape[1:],
+            "f4": f4.shape[1:],
+        }
+        for key, expected in expected_shapes.items():
+            if actual_shapes[key] != expected:
+                raise RuntimeError(f"Expected {key} shape {expected}, got {actual_shapes[key]}")
 
         # Prediction branch (uses skips as usual)
         d4 = self.up4(bottleneck, f4)
@@ -99,9 +133,10 @@ class MultiHeadPredictor(nn.Module):
         preds = preds.view(B, self.rollout, 3, H, W)
         # ensure reconstruction head only sees latent-derived features
         h5, w5 = f5.shape[-2:]
-        if self.latent_to_bottleneck is None or self._latent_hw != (h5, w5):
-            self.latent_to_bottleneck = nn.Linear(latent.shape[1], 512 * h5 * w5).to(latent.device)
-            self._latent_hw = (h5, w5)
+        if (h5, w5) != self._latent_hw:
+            raise RuntimeError(
+                f"Expected encoder bottleneck spatial size {self._latent_hw}, got {(h5, w5)}"
+            )
         bottleneck_lat = self.latent_to_bottleneck(latent).view(B, 512, h5, w5)
         def make_zero(key: str) -> torch.Tensor:
             c, h, w = self._skip_shapes[key]
@@ -121,8 +156,8 @@ class MultiHeadPredictor(nn.Module):
         return recon, preds, latent
 
     def decode_from_latent(self, latent: torch.Tensor) -> torch.Tensor:
-        if self.latent_to_bottleneck is None or self._latent_hw is None or self._skip_shapes is None:
-            raise RuntimeError("Model decoder not initialized. Run a forward pass first.")
+        if self._skip_shapes is None or self._input_hw is None:
+            raise RuntimeError("Decoder skip shapes unavailable. Run a forward pass first to capture them.")
         h5, w5 = self._latent_hw
         B = latent.shape[0]
         device = latent.device
