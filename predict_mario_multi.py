@@ -11,6 +11,7 @@ The encoder learns a latent embedding that supports both tasks. Use
 from __future__ import annotations
 
 import csv
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.fft as fft
 from torch.utils.data import DataLoader, RandomSampler
 import torchvision.transforms as T
 from torchvision.models import resnet18, ResNet18_Weights
@@ -38,6 +40,57 @@ from predict_mario_ms_ssim import (
     INV_STD,
     unnormalize,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def grad_l2_norm(parameters) -> float:
+    """Compute the L2 norm of gradients for the provided parameters."""
+    total = 0.0
+    for param in parameters:
+        if param.grad is None:
+            continue
+        total += float(param.grad.detach().pow(2).sum().item())
+    return total ** 0.5
+
+
+def latent_summary(latent: torch.Tensor) -> dict[str, float]:
+    """Return lightweight stats for a latent batch."""
+    lat = latent.detach()
+    return {
+        "mean": float(lat.mean().item()),
+        "std": float(lat.std(unbiased=False).item()),
+        "min": float(lat.min().item()),
+        "max": float(lat.max().item()),
+    }
+
+
+def compute_high_freq_energy(img: torch.Tensor, low_freq_ratio: float = 0.25) -> float:
+    """Estimate per-batch high-frequency energy via FFT.
+
+    Args:
+        img: Tensor shaped (B, C, H, W).
+        low_freq_ratio: Fraction of the shorter side treated as low-frequency radius.
+    """
+    if img.dim() != 4:
+        raise ValueError("Expected 4D tensor for frequency energy computation")
+    if not 0.0 < low_freq_ratio < 1.0:
+        raise ValueError("low_freq_ratio must lie in (0, 1)")
+    B, C, H, W = img.shape
+    if H < 2 or W < 2:
+        return 0.0
+    freq = fft.fftshift(fft.fftn(img.float(), dim=(-2, -1)), dim=(-2, -1))
+    cy, cx = H // 2, W // 2
+    radius = max(1, int(min(H, W) * low_freq_ratio * 0.5))
+    mask = torch.ones((H, W), device=img.device, dtype=torch.bool)
+    y0, y1 = max(0, cy - radius), min(H, cy + radius)
+    x0, x1 = max(0, cx - radius), min(W, cx + radius)
+    mask[y0:y1, x0:x1] = False
+    energy = freq.abs().mean(dim=1)
+    masked = energy[:, mask]
+    if masked.numel() == 0:
+        return 0.0
+    return float(masked.mean().item())
 
 # -----------------------------------------------------------------------------
 # Model
@@ -62,11 +115,9 @@ class MultiHeadPredictor(nn.Module):
         self.up1 = Up(64, 64, 64)
         self.recon_head = nn.Conv2d(64, 3, 1)
         self.pred_head = nn.Conv2d(64, rollout * 3, 1)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.latent_fc = nn.Linear(512, latent_dim)
-        self.latent_norm = nn.LayerNorm(latent_dim)
-        self._latent_hw: Optional[Tuple[int, int]] = (7, 7)
-        self.latent_to_bottleneck = nn.Linear(latent_dim, 512 * self._latent_hw[0] * self._latent_hw[1])
+        self.latent_conv = nn.Conv2d(512, latent_dim, 1)
+        self.latent_norm = nn.Identity()
+        self.latent_to_bottleneck = nn.Conv2d(latent_dim, 512, 1)
         self._skip_shapes: dict[str, Tuple[int, int, int]] = {
             "f1": (64, 112, 112),
             "f2": (64, 56, 56),
@@ -102,8 +153,8 @@ class MultiHeadPredictor(nn.Module):
             if actual_shapes[key] != expected:
                 raise RuntimeError(f"Expected {key} shape {expected}, got {actual_shapes[key]}")
         bottleneck = self.seed(f5)
-        pooled = self.pool(bottleneck).view(B, -1)
-        latent = self.latent_norm(self.latent_fc(pooled))
+        latent_spatial = self.latent_norm(self.latent_conv(bottleneck))
+        latent = latent_spatial
         if (H, W) != self._input_hw:
             raise RuntimeError(f"Expected input spatial size {self._input_hw}, got {(H, W)}")
         expected_shapes = {
@@ -132,12 +183,8 @@ class MultiHeadPredictor(nn.Module):
             preds = F.interpolate(preds, size=(H, W), mode="bilinear", align_corners=False)
         preds = preds.view(B, self.rollout, 3, H, W)
         # ensure reconstruction head only sees latent-derived features
-        h5, w5 = f5.shape[-2:]
-        if (h5, w5) != self._latent_hw:
-            raise RuntimeError(
-                f"Expected encoder bottleneck spatial size {self._latent_hw}, got {(h5, w5)}"
-            )
-        bottleneck_lat = self.latent_to_bottleneck(latent).view(B, 512, h5, w5)
+        h5, w5 = latent.shape[-2:]
+        bottleneck_lat = self.latent_to_bottleneck(latent)
         def make_zero(key: str) -> torch.Tensor:
             c, h, w = self._skip_shapes[key]
             return torch.zeros((B, c, h, w), device=bottleneck_lat.device, dtype=bottleneck_lat.dtype)
@@ -158,11 +205,12 @@ class MultiHeadPredictor(nn.Module):
     def decode_from_latent(self, latent: torch.Tensor) -> torch.Tensor:
         if self._skip_shapes is None or self._input_hw is None:
             raise RuntimeError("Decoder skip shapes unavailable. Run a forward pass first to capture them.")
-        h5, w5 = self._latent_hw
+        if latent.dim() != 4:
+            raise ValueError("Expected latent tensor with shape (B, C, H, W)")
         B = latent.shape[0]
         device = latent.device
         dtype = latent.dtype
-        bottleneck_lat = self.latent_to_bottleneck(latent).view(B, 512, h5, w5)
+        bottleneck_lat = self.latent_to_bottleneck(latent)
 
         def make_zero(key: str) -> torch.Tensor:
             c, h, w = self._skip_shapes[key]
@@ -283,17 +331,24 @@ class Args:
     l1_weight: float = 0.1
     latent_dim: int = 256
     teacher_forcing_prob: float = 0.5
+    log_every: int = 10
+    log_debug_every: int = 50
+    log_grad_norms: bool = True
+    log_latent_stats: bool = True
+    log_frequency_energy: bool = False
+    low_freq_ratio: float = 0.25
 
 
 def main() -> None:
     args = tyro.cli(Args)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     if not (0.0 <= args.teacher_forcing_prob <= 1.0):
         raise ValueError("teacher_forcing_prob must be in [0,1]")
     device = pick_device(args.device)
-    print(f"[Device] {device}")
+    logger.info("Using device: %s", device)
 
     dataset = Mario4to1Dataset(args.traj_dir, max_trajs=args.max_trajs, rollout=args.rollout_steps)
-    print(f"Dataset: {len(dataset)} samples")
+    logger.info("Dataset size: %d", len(dataset))
     sampler = RandomSampler(dataset, replacement=False,
                             num_samples=args.steps_per_epoch * args.batch_size)
     loader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler,
@@ -338,20 +393,57 @@ def main() -> None:
             loss = recon_loss + pred_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            next_step = global_step + 1
+            debug_due = args.log_debug_every > 0 and next_step % args.log_debug_every == 0
+            if debug_due:
+                debug_pieces: List[str] = []
+                if args.log_grad_norms:
+                    grad_recon = grad_l2_norm(model.recon_head.parameters())
+                    grad_pred = grad_l2_norm(model.pred_head.parameters())
+                    grad_shared = grad_l2_norm(model.seed.parameters())
+                    debug_pieces.append(
+                        f"grad_l2(recon={grad_recon:.3e}, pred={grad_pred:.3e}, shared={grad_shared:.3e})"
+                    )
+                if args.log_latent_stats:
+                    stats = latent_summary(latent)
+                    debug_pieces.append(
+                        "latent(mean={mean:.4f}, std={std:.4f}, min={min:.4f}, max={max:.4f})".format(**stats)
+                    )
+                if args.log_frequency_energy:
+                    with torch.no_grad():
+                        recon_hf = compute_high_freq_energy(recon_pred.detach(), args.low_freq_ratio)
+                        target_hf = compute_high_freq_energy(recon_target.detach(), args.low_freq_ratio)
+                        preds_view = preds.detach().reshape(-1, preds.size(-3), preds.size(-2), preds.size(-1))
+                        targets_view = yb.detach().reshape(-1, yb.size(-3), yb.size(-2), yb.size(-1))
+                        pred_hf = compute_high_freq_energy(preds_view, args.low_freq_ratio)
+                        rollout_hf = compute_high_freq_energy(targets_view, args.low_freq_ratio)
+                    debug_pieces.append(
+                        f"hf(recon={recon_hf:.4f}/{target_hf:.4f}, pred={pred_hf:.4f}/{rollout_hf:.4f})"
+                    )
+                if debug_pieces:
+                    logger.info("[step %06d] diagnostics | %s", next_step, " | ".join(debug_pieces))
+
             optimizer.step()
 
-            global_step += 1
+            global_step = next_step
             loss_hist.append((global_step, float(loss.item())))
 
-            if global_step % 10 == 0:
+            if args.log_every > 0 and global_step % args.log_every == 0:
                 elapsed = (time.monotonic() - start_time) / 60
-                print(
-                    f"[ep {epoch:03d}] step {global_step:06d} | "
-                    f"loss={loss.item():.4f} | recon(ms={recon_ms.item():.4f}, l1={recon_l1.item():.4f}) "
-                    f"pred(ms={pred_ms.item():.4f}, l1={pred_l1.item():.4f}) | elapsed={elapsed:.2f} min"
+                logger.info(
+                    "[ep %03d] step %06d | loss=%.4f | recon(ms=%.4f, l1=%.4f) "
+                    "pred(ms=%.4f, l1=%.4f) | elapsed=%.2f min",
+                    epoch,
+                    global_step,
+                    loss.item(),
+                    recon_ms.item(),
+                    recon_l1.item(),
+                    pred_ms.item(),
+                    pred_l1.item(),
+                    elapsed,
                 )
 
-            if global_step % args.save_every == 0:
+            if args.save_every > 0 and global_step % args.save_every == 0:
                 with torch.no_grad():
                     context = xb.view(xb.size(0), 4, 3, preds.size(-2), preds.size(-1))
                     save_multi_samples(context.cpu(), recon_pred.cpu(), preds.cpu(), yb.cpu(),
@@ -360,12 +452,12 @@ def main() -> None:
                 torch.save({"epoch": epoch, "step": global_step, "model": model.state_dict()},
                            run_dir / "checkpoint.pt")
 
-        print(f"[ep {epoch:03d}] done.")
+        logger.info("[ep %03d] done.", epoch)
 
     write_loss_csv(loss_hist, run_dir)
     torch.save({"epoch": epoch, "step": global_step, "model": model.state_dict()},
                run_dir / "final.pt")
-    print("Training complete.")
+    logger.info("Training complete.")
 
 if __name__ == "__main__":
     main()
