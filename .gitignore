@@ -1,5 +1,6 @@
 caches
 lightning_logs
+uv.lock
 
 nes/cycore/*.html
 
@@ -158,3 +159,6 @@ dmypy.json
 # Cython objects
 /nes/cycore/*.c
 /nes/cycore/*.so
+
+# Agent files
+.agent
