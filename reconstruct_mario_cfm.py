@@ -482,6 +482,8 @@ class Args:
     pca_std_multiplier: float = 2.0
     pca_traverse_steps: int = 5
     seed: int = 42
+    resume_checkpoint: Optional[str] = None
+    checkpoint_every: int = 50  # 0 disables intermediate checkpointing
 
 
 def main() -> None:
@@ -520,16 +522,68 @@ def main() -> None:
     )
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = Path(args.out_dir) / f"run__{timestamp}"
+    default_run_dir = Path(args.out_dir) / f"run__{timestamp}"
+    run_dir = default_run_dir
+
+    if args.resume_checkpoint:
+        resume_path = Path(args.resume_checkpoint).resolve()
+        if resume_path.parent.name == "checkpoints":
+            resume_run_dir = resume_path.parent.parent
+        else:
+            resume_run_dir = resume_path.parent
+        if resume_run_dir.is_dir():
+            run_dir = resume_run_dir
+
     samples_dir = run_dir / "samples"
     metrics_dir = run_dir / "metrics"
+    checkpoints_dir = run_dir / "checkpoints"
     samples_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     loss_hist: List[Tuple[int, float]] = []
+    start_epoch = 0
     global_step = 0
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume_checkpoint:
+        ckpt_path = Path(args.resume_checkpoint)
+        if not ckpt_path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device)
+        logger.info("Resuming from checkpoint: %s", ckpt_path)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_epoch = int(ckpt.get("epoch", 0))
+        global_step = int(ckpt.get("step", 0))
+        loss_hist = list(ckpt.get("loss_hist", []))
+
+    if start_epoch >= args.epochs:
+        logger.warning(
+            "Start epoch %d is >= target epochs %d; nothing to train.", start_epoch, args.epochs
+        )
+        write_loss_csv(loss_hist, metrics_dir)
+        torch.save({
+            "epoch": start_epoch,
+            "step": global_step,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "loss_hist": loss_hist,
+        }, run_dir / "final.pt")
+        return
+
+    final_epoch = start_epoch
+
+    def save_checkpoint(path: Path, epoch_val: int, step_val: int) -> None:
+        payload = {
+            "epoch": epoch_val,
+            "step": step_val,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "loss_hist": loss_hist,
+        }
+        torch.save(payload, path)
+
+    for epoch in range(start_epoch + 1, args.epochs + 1):
         model.train()
         for xb, _ in loader:
             xb = xb.to(device)
@@ -623,10 +677,15 @@ def main() -> None:
                             multipliers,
                             out_path,
                             device,
-                        )
+                    )
                 plot_loss(loss_hist, metrics_dir, global_step)
                 model.train()
 
+            if args.checkpoint_every > 0 and global_step % args.checkpoint_every == 0:
+                ckpt_name = f"step_{global_step:06d}.pt"
+                save_checkpoint(checkpoints_dir / ckpt_name, epoch, global_step)
+
+        final_epoch = epoch
         # Recreate sampler each epoch to avoid exhaustion with replacement=False fallback.
         sampler = RandomSampler(dataset, replacement=True, num_samples=num_samples)
         loader = DataLoader(
@@ -638,6 +697,7 @@ def main() -> None:
         )
 
     write_loss_csv(loss_hist, metrics_dir)
+    save_checkpoint(run_dir / "final.pt", final_epoch, global_step)
     logger.info("Training finished. Artifacts written to %s", run_dir)
 
 
