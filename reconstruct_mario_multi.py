@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Latent-only Mario frame reconstruction with object segmentation readout.
+"""Slot-based Mario frame reconstruction with learned object masks.
 
-This script trains an object-centric autoencoder on NES Mario frames. During
-training we feed 4 sequential frames so the encoder can see temporal context,
-while the decoder is forced to reconstruct each frame using only per-frame
-latents (no encoder skip connections). The model disentangles a small set of
-object slots whose soft segmentation maps are used both to compose the base
-image and to visualize the learned prototypes.
+This script trains a slot attention autoencoder on NES Mario frames. The
+encoder observes a sequence of frames to stabilise slot discovery, but the
+slot-conditioned decoder reconstructs each frame independently. Each slot
+produces an RGBA canvas that is alpha-composited to obtain the final image,
+which naturally yields a segmentation mask per slot.
 """
 from __future__ import annotations
 
 import csv
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +26,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 import torchvision.transforms as T
-from torchvision.models import resnet18, ResNet18_Weights
 import tyro
 
 from predict_mario_ms_ssim import (
@@ -45,7 +44,6 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 
 def pixel_transform() -> T.Compose:
-    """Return a transform that preserves the native 240x224 resolution."""
     mean = INV_MEAN.tolist()
     std = INV_STD.tolist()
     return T.Compose([
@@ -55,8 +53,6 @@ def pixel_transform() -> T.Compose:
 
 
 class MarioSequentialDataset(Dataset):
-    """Slide a fixed-length window of sequential frames for reconstruction."""
-
     def __init__(self, root_dir: str, sequence_len: int = 4,
                  transform: Optional[T.Compose] = None,
                  max_trajs: Optional[int] = None) -> None:
@@ -92,202 +88,255 @@ class MarioSequentialDataset(Dataset):
         for offset in range(self.sequence_len):
             with Image.open(files[start + offset]).convert("RGB") as img:
                 frames.append(self.transform(img))
-        return torch.stack(frames, dim=0)  # (T,3,H,W)
+        return torch.stack(frames, dim=0)
 
 
 # -----------------------------------------------------------------------------
-# Model
+# Slot Attention modules
 # -----------------------------------------------------------------------------
 
-class UpDecoderBlock(nn.Module):
-    """Nearest-neighbor upsample + conv stack to keep edges crisp."""
-
-    def __init__(self, c_in: int, c_out: int, groups: int = 8) -> None:
+class Encoder(nn.Module):
+    def __init__(self, in_channels: int = 3, hidden_size: int = 128) -> None:
         super().__init__()
-        norm_groups = groups if c_out % groups == 0 else 1
-        self.block = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(c_in, c_out, kernel_size=3, padding=1),
-            nn.GroupNorm(norm_groups, c_out),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(c_out, c_out, kernel_size=3, padding=1),
-            nn.GroupNorm(norm_groups, c_out),
-            nn.SiLU(inplace=True),
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 64, 5, stride=2, padding=2),
+            nn.GroupNorm(8, 64),
+            nn.SiLU(),
+            nn.Conv2d(64, 128, 5, stride=2, padding=2),
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),
+            nn.Conv2d(128, hidden_size, 3, stride=2, padding=1),
+            nn.GroupNorm(8, hidden_size),
+            nn.SiLU(),
+            nn.Conv2d(hidden_size, hidden_size, 3, stride=1, padding=1),
+            nn.GroupNorm(8, hidden_size),
+            nn.SiLU(),
         )
+        self.pos_embed = PositionalEmbedding(hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
+        feat = self.net(x)
+        feat = self.pos_embed(feat)
+        B, C, H, W = feat.shape
+        return feat.view(B, C, H * W).permute(0, 2, 1)  # (B, N, C)
 
 
-class MarioObjectReconstructor(nn.Module):
-    """Encode frames and reconstruct via slot-based palettes and residuals."""
-
-    def __init__(self, latent_dim: int = 256, num_objects: int = 16) -> None:
+class PositionalEmbedding(nn.Module):
+    def __init__(self, dim: int) -> None:
         super().__init__()
-        weights = ResNet18_Weights.DEFAULT
-        backbone = resnet18(weights=weights)
-        backbone.fc = nn.Identity()
-        self.enc1 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)  # /2
-        self.enc2 = nn.Sequential(backbone.maxpool, backbone.layer1)            # /4
-        self.enc3 = backbone.layer2                                            # /8
-        self.enc4 = backbone.layer3                                            # /16 (15x14 from 240x224)
-        self.latent_proj = nn.Conv2d(256, latent_dim, kernel_size=1)
-        self.latent_norm = nn.GroupNorm(1, latent_dim)
+        self.linear = nn.Linear(4, dim)
 
-        self.dec1 = UpDecoderBlock(latent_dim, 256)
-        self.dec2 = UpDecoderBlock(256, 128)
-        self.dec3 = UpDecoderBlock(128, 64)
-        self.dec4 = UpDecoderBlock(64, 64)
-        self.seg_head = nn.Conv2d(64, num_objects, kernel_size=1)
-        self.residual_head = nn.Sequential(
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(32, 3, kernel_size=1),
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = feat.shape
+        ys = torch.linspace(-1, 1, steps=H, device=feat.device, dtype=feat.dtype)
+        xs = torch.linspace(-1, 1, steps=W, device=feat.device, dtype=feat.dtype)
+        yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([xx, yy, xx**2, yy**2], dim=0)
+        coords = coords.unsqueeze(0).expand(B, -1, -1, -1)
+        coords = self.linear(coords.permute(0, 2, 3, 1))
+        return feat + coords.permute(0, 3, 1, 2)
+
+
+class SlotAttention(nn.Module):
+    def __init__(self, dim: int, num_slots: int, iters: int = 3,
+                 slot_dim: int = 128, mlp_hidden: int = 256) -> None:
+        super().__init__()
+        self.dim = dim
+        self.num_slots = num_slots
+        self.iters = iters
+        self.scale = (slot_dim) ** -0.5
+
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, slot_dim))
+        self.slots_sigma = nn.Parameter(torch.randn(1, 1, slot_dim))
+
+        self.to_q = nn.Linear(slot_dim, slot_dim, bias=False)
+        self.to_k = nn.Linear(dim, slot_dim, bias=False)
+        self.to_v = nn.Linear(dim, slot_dim, bias=False)
+        self.gru = nn.GRUCell(slot_dim, slot_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(slot_dim, mlp_hidden),
+            nn.SiLU(),
+            nn.Linear(mlp_hidden, slot_dim),
         )
-        self.object_palette = nn.Parameter(torch.randn(num_objects, 3))
-        self.num_objects = num_objects
-        self.latent_dim = latent_dim
-        # NES frames arrive as (H=224, W=240); latent grid matches encoder downsampling.
-        self._latent_hw = (14, 15)
-        self._target_hw = (224, 240)
+        self.norm_inputs = nn.LayerNorm(dim)
+        self.norm_slots = nn.LayerNorm(slot_dim)
+        self.norm_mlp = nn.LayerNorm(slot_dim)
 
-    # Encoder -----------------------------------------------------------------
-    def encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
-        """Encode (B,3,H,W) frames into spatial latents."""
-        if frames.dim() != 4:
-            raise ValueError("Expected frames with shape (B,3,H,W)")
-        f1 = self.enc1(frames)
-        f2 = self.enc2(f1)
-        f3 = self.enc3(f2)
-        f4 = self.enc4(f3)
-        latent = self.latent_norm(self.latent_proj(f4))
-        return latent
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        B, N, D = inputs.shape
+        inputs = self.norm_inputs(inputs)
+        k = self.to_k(inputs)
+        v = self.to_v(inputs)
 
-    # Decoder -----------------------------------------------------------------
-    def _decode_latent_map(self, latent: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if latent.shape[-2:] != self._latent_hw:
-            latent = F.interpolate(latent, size=self._latent_hw, mode="nearest")
-        x = self.dec1(latent)
-        x = self.dec2(x)
-        x = self.dec3(x)
-        x = self.dec4(x)
-        if x.shape[-2:] != self._target_hw:
-            x = F.interpolate(x, size=self._target_hw, mode="nearest")
-        seg_logits = self.seg_head(x)
-        seg_probs = seg_logits.softmax(dim=1)
-        palette = self.object_palette.view(1, self.num_objects, 3, 1, 1)
-        palette_base = (seg_probs.unsqueeze(2) * palette).sum(dim=1)
-        residual = self.residual_head(x)
-        recon = palette_base + residual
-        return recon, seg_logits, palette_base, residual
+        mu = self.slots_mu.expand(B, self.num_slots, -1)
+        sigma = F.softplus(self.slots_sigma) + 1e-6
+        slots = mu + sigma * torch.randn_like(mu)
 
-    def decode_from_latent(self, latent: torch.Tensor) -> torch.Tensor:
-        recon, _, _, _ = self._decode_latent_map(latent)
-        return recon
+        for _ in range(self.iters):
+            slots_prev = slots
+            q = self.to_q(self.norm_slots(slots))
+            attn_logits = torch.einsum('bid,bjd->bij', q, k) * self.scale
+            attn = attn_logits.softmax(dim=1)  # slots attend to inputs
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
+            updates = torch.einsum('bjd,bij->bid', v, attn)
+            slots = self.gru(updates.reshape(-1, updates.shape[-1]),
+                             slots_prev.reshape(-1, slots_prev.shape[-1]))
+            slots = slots.reshape(B, self.num_slots, -1)
+            slots = slots + self.mlp(self.norm_mlp(slots))
+        return slots
 
-    # Full forward ------------------------------------------------------------
-    def forward(self, frames: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Reconstruct each frame independently without encoder skips.
 
-        Args:
-            frames: Tensor shaped (B,T,3,H,W).
-        Returns:
-            recon:     (B,T,3,H,W)
-            seg_logits:(B,T,num_objects,H,W)
-            palette:   (num_objects,3)
-            residual:  (B,T,3,H,W) residual contribution
-            latents:   (B,T,latent_dim,15,14)
-        """
+class SpatialBroadcastDecoder(nn.Module):
+    def __init__(self, slot_dim: int, hidden_channels: int = 128,
+                 out_hw: Tuple[int, int] = (224, 240),
+                 base_hw: Optional[Tuple[int, int]] = None) -> None:
+        super().__init__()
+        self.out_hw = out_hw
+        if base_hw is None:
+            self.base_hw = (max(8, out_hw[0] // 8), max(8, out_hw[1] // 8))
+        else:
+            self.base_hw = base_hw
+
+        in_ch = slot_dim + 2
+        self.input_proj = nn.Sequential(
+            nn.Conv2d(in_ch, hidden_channels, 3, padding=1),
+            nn.GroupNorm(8, hidden_channels),
+            nn.SiLU(),
+        )
+        self.block1 = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.GroupNorm(8, hidden_channels),
+            nn.SiLU(),
+        )
+        self.block2 = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels // 2, 3, padding=1),
+            nn.GroupNorm(8, hidden_channels // 2),
+            nn.SiLU(),
+        )
+        self.block3 = nn.Sequential(
+            nn.Conv2d(hidden_channels // 2, hidden_channels // 2, 3, padding=1),
+            nn.GroupNorm(8, hidden_channels // 2),
+            nn.SiLU(),
+        )
+        self.final_conv = nn.Conv2d(hidden_channels // 2, 4, 1)
+
+    def forward(self, slots: torch.Tensor, temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, S, D = slots.shape
+        H, W = self.out_hw
+        h0, w0 = self.base_hw
+        yy = torch.linspace(-1, 1, h0, device=slots.device, dtype=slots.dtype)
+        xx = torch.linspace(-1, 1, w0, device=slots.device, dtype=slots.dtype)
+        grid_y, grid_x = torch.meshgrid(yy, xx, indexing="ij")
+        coord = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).unsqueeze(0)
+        coord = coord.expand(B, S, -1, -1, -1)
+
+        slots = slots.view(B, S, D, 1, 1).expand(-1, -1, -1, h0, w0)
+        x = torch.cat([slots, coord], dim=2).view(B * S, D + 2, h0, w0)
+        x = self.input_proj(x)
+        x = self.block1(x)
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        x = self.block2(x)
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        x = self.block3(x)
+        if x.shape[-2] < H or x.shape[-1] < W:
+            x = F.interpolate(x, size=(H, W), mode="bilinear", align_corners=False)
+        else:
+            x = x[:, :, :H, :W]
+        decoded = self.final_conv(x).view(B, S, 4, H, W)
+        rgb = torch.tanh(decoded[:, :, :3])
+        alpha = decoded[:, :, 3:4]
+        attn = (alpha / max(temperature, 1e-3)).softmax(dim=1)
+        recon = (rgb * attn).sum(dim=1)
+        return recon, attn, rgb
+
+
+class MarioSlotReconstructor(nn.Module):
+    def __init__(self, num_slots: int = 6, slot_dim: int = 128,
+                 encoder_hidden: int = 128, attn_iters: int = 2,
+                 decoder_channels: int = 64) -> None:
+        super().__init__()
+        self.encoder = Encoder(3, encoder_hidden)
+        self.slot_attention = SlotAttention(encoder_hidden, num_slots,
+                                            iters=attn_iters, slot_dim=slot_dim,
+                                            mlp_hidden=slot_dim * 2)
+        self.decoder = SpatialBroadcastDecoder(slot_dim, decoder_channels)
+        self.num_slots = num_slots
+        self.slot_dim = slot_dim
+        self.img_hw = (224, 240)
+
+    def forward(self, frames: torch.Tensor, temperature: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if frames.dim() != 5:
             raise ValueError("Expected frames with shape (B,T,3,H,W)")
         B, T, C, H, W = frames.shape
         flat = frames.view(B * T, C, H, W)
-        latent = self.encode_frames(flat)
-        recon, seg_logits, palette_base, residual = self._decode_latent_map(latent)
-        recon = recon.view(B, T, 3, self._target_hw[0], self._target_hw[1])
-        seg_logits = seg_logits.view(B, T, self.num_objects, self._target_hw[0], self._target_hw[1])
-        palette_base = palette_base.view(B, T, 3, self._target_hw[0], self._target_hw[1])
-        residual = residual.view(B, T, 3, self._target_hw[0], self._target_hw[1])
-        latents = latent.view(B, T, self.latent_dim, *self._latent_hw)
-        return recon, seg_logits, palette_base, residual, latents
+        feats = self.encoder(flat)
+        slots = self.slot_attention(feats)
+        recon, attn, rgb = self.decoder(slots, temperature=temperature)
+        recon = recon.view(B, T, 3, H, W)
+        attn = attn.view(B, T, self.num_slots, H, W)
+        rgb = rgb.view(B, T, self.num_slots, 3, H, W)
+        slots = slots.view(B, T, self.num_slots, self.slot_dim)
+        return recon, attn, rgb, slots
 
-    @torch.no_grad()
-    def objects_palette(self) -> torch.Tensor:
-        """Return current object palette in normalized RGB space (num_objects,3)."""
-        return self.object_palette.detach().clone()
+    def decode_from_slots(self, slots: torch.Tensor) -> torch.Tensor:
+        B, T, S, D = slots.shape
+        recon, _, _ = self.decoder(slots.view(B * T, S, D))
+        return recon.view(B, T, 3, *self.img_hw)
 
 
 # -----------------------------------------------------------------------------
-# Logging helpers
+# Visualisation helpers
 # -----------------------------------------------------------------------------
 
 def tensor_to_pil(img: torch.Tensor) -> Image.Image:
-    """Convert normalized (3,H,W) tensor to a PIL image."""
     if img.dim() != 3:
         raise ValueError("Expected (3,H,W) tensor")
     img = img.unsqueeze(0)
     img = unnormalize(img)[0].clamp(0, 1)
-    arr = (img.mul(255).round().byte().cpu().permute(1, 2, 0).numpy())
-    return Image.fromarray(arr, mode="RGB")
+    arr = (img.mul(255).round().byte().permute(1, 2, 0).cpu().numpy())
+    return Image.fromarray(arr)
 
 
-def segmentation_to_pil(seg_logits: torch.Tensor, palette: Optional[np.ndarray] = None) -> Image.Image:
-    """Visualize segmentation logits (num_objects,H,W) as a colored mask."""
-    if seg_logits.dim() != 3:
-        raise ValueError("Expected (num_objects,H,W) logits")
-    seg_idx = seg_logits.argmax(dim=0).cpu().numpy().astype(np.int32)
-    num_objects = seg_logits.shape[0]
-    if palette is None:
-        cmap = plt.get_cmap("tab20")
-        base_colors = (np.array([cmap(i % cmap.N)[:3] for i in range(num_objects)]) * 255).astype(np.uint8)
-    else:
-        base_colors = palette.astype(np.uint8)
-    color_img = base_colors[seg_idx]
-    return Image.fromarray(color_img, mode="RGB")
+def segmentation_to_pil(weights: torch.Tensor) -> Image.Image:
+    if weights.dim() != 3:
+        raise ValueError("Expected (S,H,W)")
+    seg_idx = weights.argmax(dim=0).cpu().numpy().astype(np.int32)
+    cmap = plt.get_cmap("tab20")
+    colors = (np.array([cmap(i % cmap.N)[:3] for i in range(weights.shape[0])]) * 255).astype(np.uint8)
+    return Image.fromarray(colors[seg_idx])
 
 
-def save_samples(frames: torch.Tensor, recon: torch.Tensor, seg_logits: torch.Tensor,
-                 out_dir: Path, step: int, max_items: int = 3) -> None:
+def slot_rgb_to_pil(rgb: torch.Tensor) -> Image.Image:
+    arr = rgb.detach().cpu().clamp(-1, 1)
+    arr = ((arr + 1) * 0.5 * 255).permute(1, 2, 0).byte().numpy()
+    return Image.fromarray(arr)
+
+
+def save_samples(frames: torch.Tensor, recon: torch.Tensor, attn: torch.Tensor,
+                 slot_rgb: torch.Tensor, out_dir: Path, step: int,
+                 max_items: int = 3, slots_per_row: int = 4) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     B, T = frames.shape[0], frames.shape[1]
     rows = min(B, max_items)
     for i in range(rows):
         panes: List[Image.Image] = []
         for t in range(T):
-            original = tensor_to_pil(frames[i, t])
-            reconstructed = tensor_to_pil(recon[i, t])
-            seg_img = segmentation_to_pil(seg_logits[i, t])
-            panes.extend([original, reconstructed, seg_img])
+            orig = tensor_to_pil(frames[i, t])
+            rec = tensor_to_pil(recon[i, t])
+            mask = segmentation_to_pil(attn[i, t])
+            panes.extend([orig, rec, mask])
+            slot_weights = attn[i, t].view(attn.shape[2], -1).mean(dim=1)
+            topk = torch.topk(slot_weights, k=min(slots_per_row, attn.shape[2])).indices
+            for idx in topk:
+                panes.append(slot_rgb_to_pil(slot_rgb[i, t, idx]))
         w, h = panes[0].size
-        cols = 3
+        cols = 3 + min(slots_per_row, attn.shape[2])
         canvas = Image.new("RGB", (cols * w, T * h))
         for idx, pane in enumerate(panes):
             col = idx % cols
             row = idx // cols
             canvas.paste(pane, (col * w, row * h))
         canvas.save(out_dir / f"sample_step_{step:06d}_idx_{i}.png")
-
-
-def save_palette_image(palette: torch.Tensor, out_dir: Path, step: int) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    palette = palette.detach().cpu()
-    mean = INV_MEAN.view(1, 3)
-    std = INV_STD.view(1, 3)
-    rgb = ((palette * std) + mean).clamp(0, 1)
-    tiles: List[Image.Image] = []
-    for color in rgb:
-        arr = (color.clamp(0, 1).numpy() * 255).astype(np.uint8)
-        patch = np.ones((32, 32, 3), dtype=np.uint8) * arr[None, None, :]
-        tiles.append(Image.fromarray(patch, mode="RGB"))
-    cols = 8
-    rows = int(np.ceil(len(tiles) / cols))
-    tile_w, tile_h = tiles[0].size
-    canvas = Image.new("RGB", (cols * tile_w, rows * tile_h))
-    for idx, tile in enumerate(tiles):
-        r = idx // cols
-        c = idx % cols
-        canvas.paste(tile, (c * tile_w, r * tile_h))
-    canvas.save(out_dir / f"palette_step_{step:06d}.png")
 
 
 def write_loss_csv(hist: List[Tuple[int, float]], out_dir: Path) -> None:
@@ -319,28 +368,32 @@ def plot_loss(hist: List[Tuple[int, float]], out_dir: Path, step: int) -> None:
 @dataclass
 class Args:
     traj_dir: str = "data.image_distance.train_levels_1_2"
-    out_dir: str = "out.reconstruct_mario_multi"
-    batch_size: int = 16
+    out_dir: str = "out.reconstruct_mario_slots"
+    batch_size: int = 4
     lr: float = 1e-4
     epochs: int = 1000
     steps_per_epoch: int = 100
-    num_frames: int = 4
+    num_frames: int = 2
     max_trajs: Optional[int] = None
     save_every: int = 50
     log_every: int = 10
     log_debug_every: int = 50
     num_workers: int = 0
     device: Optional[str] = None
-    latent_dim: int = 256
-    num_objects: int = 16
     ms_weight: float = 1.0
     l1_weight: float = 0.1
-    entropy_weight: float = 0.001
-    residual_l2_weight: float = 0.0005
+    slot_count: int = 6
+    slot_dim: int = 128
+    slot_iters: int = 2
+    decoder_channels: int = 64
+    slot_entropy_weight: float = 0.0
+    slot_temperature: float = 1.0
+    slot_temperature_min: float = 0.3
+    slot_temperature_decay: float = 5e-4
 
 
-def latent_summary(latent: torch.Tensor) -> dict[str, float]:
-    lat = latent.detach()
+def latent_summary(slots: torch.Tensor) -> dict[str, float]:
+    lat = slots.detach()
     return {
         "mean": float(lat.mean().item()),
         "std": float(lat.std(unbiased=False).item()),
@@ -364,14 +417,15 @@ def main() -> None:
     loader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler,
                         num_workers=args.num_workers)
 
-    model = MarioObjectReconstructor(args.latent_dim, args.num_objects).to(device)
+    model = MarioSlotReconstructor(args.slot_count, args.slot_dim,
+                                   encoder_hidden=args.slot_dim,
+                                   attn_iters=args.slot_iters,
+                                   decoder_channels=args.decoder_channels).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     run_dir = Path(args.out_dir) / f"run__{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     samples_dir = run_dir / "samples"
-    palette_dir = run_dir / "palettes"
     samples_dir.mkdir(parents=True, exist_ok=True)
-    palette_dir.mkdir(parents=True, exist_ok=True)
 
     loss_hist: List[Tuple[int, float]] = []
     global_step = 0
@@ -380,29 +434,34 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         model.train()
         for xb in loader:
-            xb = xb.to(device)  # (B,T,3,H,W)
-            recon, seg_logits, palette_base, residual, latents = model(xb)
+            xb = xb.to(device)
+            current_temp = max(
+                args.slot_temperature * math.exp(-args.slot_temperature_decay * max(global_step, 0)),
+                args.slot_temperature_min,
+            )
+            recon, attn, slot_rgb, slots = model(xb, temperature=current_temp)
 
-            ms_terms: List[torch.Tensor] = []
-            l1_terms: List[torch.Tensor] = []
-            for t in range(xb.shape[1]):
-                ms_terms.append(ms_ssim_loss(recon[:, t], xb[:, t]))
-                l1_terms.append(F.l1_loss(recon[:, t], xb[:, t]))
+            ms_terms = [ms_ssim_loss(recon[:, t], xb[:, t]) for t in range(xb.shape[1])]
+            l1_terms = [F.l1_loss(recon[:, t], xb[:, t]) for t in range(xb.shape[1])]
             ms_loss = torch.stack(ms_terms).mean()
             l1_loss = torch.stack(l1_terms).mean()
             loss = args.ms_weight * ms_loss + args.l1_weight * l1_loss
 
-            if args.entropy_weight > 0.0:
-                seg_probs = seg_logits.softmax(dim=2)
-                entropy = -(seg_probs * (seg_probs.clamp_min(1e-8).log())).sum(dim=2).mean()
-                loss = loss + args.entropy_weight * entropy
-
-            if args.residual_l2_weight > 0.0:
-                residual_penalty = residual.pow(2).mean()
-                loss = loss + args.residual_l2_weight * residual_penalty
+            slot_entropy = torch.tensor(0.0, device=device)
+            if args.slot_entropy_weight > 0.0:
+                pixel_entropy = -(attn.clamp_min(1e-8).log() * attn).sum(dim=2)
+                slot_entropy = pixel_entropy.mean()
+                loss = loss + args.slot_entropy_weight * slot_entropy
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            proto_grad = float(0.0)
+            decoder_grads: List[torch.Tensor] = []
+            for param in model.decoder.parameters():
+                if param.grad is not None:
+                    decoder_grads.append(param.grad.detach().abs().mean())
+            if decoder_grads:
+                proto_grad = float(torch.stack(decoder_grads).mean().item())
             optimizer.step()
 
             global_step += 1
@@ -411,24 +470,35 @@ def main() -> None:
             if args.log_every > 0 and global_step % args.log_every == 0:
                 elapsed = (time.monotonic() - start_time) / 60
                 logger.info(
-                    "[ep %03d] step %06d | loss=%.4f | ms=%.4f | l1=%.4f | elapsed=%.2f min",
+                    "[ep %03d] step %06d | loss=%.4f | ms=%.4f | l1=%.4f | slot_ent=%.4f | temp=%.3f | grad=%.6e | elapsed=%.2f min",
                     epoch,
                     global_step,
                     loss.item(),
                     ms_loss.item(),
                     l1_loss.item(),
+                    slot_entropy.item() if isinstance(slot_entropy, torch.Tensor) else float(slot_entropy),
+                    current_temp,
+                    proto_grad,
                     elapsed,
                 )
 
             if args.log_debug_every > 0 and global_step % args.log_debug_every == 0:
-                stats = latent_summary(latents)
-                logger.info("[step %06d] latent stats | mean=%.4f std=%.4f min=%.4f max=%.4f",
-                            global_step, stats["mean"], stats["std"], stats["min"], stats["max"])
+                stats = latent_summary(slots)
+                attn_mass = attn.mean(dim=(0, 1, 3, 4))
+                logger.info(
+                    "[step %06d] slots | mean=%.4f std=%.4f min=%.4f max=%.4f | attn_mass=%s",
+                    global_step,
+                    stats["mean"],
+                    stats["std"],
+                    stats["min"],
+                    stats["max"],
+                    ",".join(f"{m:.3f}" for m in attn_mass.tolist()),
+                )
 
             if args.save_every > 0 and global_step % args.save_every == 0:
                 with torch.no_grad():
-                    save_samples(xb.cpu(), recon.cpu(), seg_logits.cpu(), samples_dir, global_step)
-                    save_palette_image(model.objects_palette(), palette_dir, global_step)
+                    save_samples(xb.cpu(), recon.cpu(), attn.cpu(), slot_rgb.cpu(),
+                                 samples_dir, global_step)
                 plot_loss(loss_hist, run_dir, global_step)
                 torch.save({"epoch": epoch, "step": global_step, "model": model.state_dict()},
                            run_dir / "checkpoint.pt")
