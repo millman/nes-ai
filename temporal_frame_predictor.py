@@ -589,7 +589,7 @@ class Args:
     recon_l1_weight: float = 0.1
     pred_ms_weight: float = 1.0
     pred_l1_weight: float = 0.1
-    alpha_entropy_weight: float = 0.01
+    slot_diversity_weight: float = 0.1  # Encourage using all slots
 
     # Training
     alpha_temperature: float = 1.0
@@ -666,21 +666,30 @@ def main() -> None:
             pred_l1_loss = F.l1_loss(outputs['pred_frame'], xb[:, 4])
             pred_loss = args.pred_ms_weight * pred_ms_loss + args.pred_l1_weight * pred_l1_loss
 
-            # Alpha entropy regularization (encourage confident assignments)
-            alpha_entropy = torch.tensor(0.0, device=device)
-            if args.alpha_entropy_weight > 0.0:
-                alpha = outputs['recon_alpha'][:, 0]  # (B, N, H, W)
-                pixel_entropy = -(alpha.clamp_min(1e-8).log() * alpha).sum(dim=1)
-                alpha_entropy = pixel_entropy.mean()
+            # Slot diversity loss (encourage balanced slot usage)
+            slot_diversity = torch.tensor(0.0, device=device)
+            if args.slot_diversity_weight > 0.0:
+                # Average alpha across spatial dimensions: (B, num_slots, H, W) → (B, num_slots)
+                alpha = outputs['recon_alpha'][:, 0]  # (B, num_slots, H, W)
+                slot_usage = alpha.mean(dim=[2, 3])  # (B, num_slots)
+
+                # We want uniform usage across slots (1/num_slots for each)
+                # Use KL divergence from uniform distribution
+                uniform_target = torch.ones_like(slot_usage) / slot_usage.shape[1]
+                # Add small epsilon for numerical stability
+                slot_usage_safe = slot_usage.clamp_min(1e-8)
+                # KL(uniform || slot_usage) = sum(uniform * log(uniform / slot_usage))
+                kl_div = (uniform_target * (uniform_target / slot_usage_safe).log()).sum(dim=1).mean()
+                slot_diversity = kl_div
 
             # Total loss (staged training)
             if global_step < args.recon_only_steps:
                 # Stage 1: Only reconstruction
-                loss = recon_loss + args.alpha_entropy_weight * alpha_entropy
+                loss = recon_loss + args.slot_diversity_weight * slot_diversity
                 pred_loss_val = torch.tensor(0.0)  # Don't backprop prediction
             else:
                 # Stage 2: Reconstruction + Prediction
-                loss = recon_loss + pred_loss + args.alpha_entropy_weight * alpha_entropy
+                loss = recon_loss + pred_loss + args.slot_diversity_weight * slot_diversity
                 pred_loss_val = pred_loss
 
             # Backward pass
@@ -696,14 +705,14 @@ def main() -> None:
                 elapsed = (time.monotonic() - start_time) / 60
                 stage = "RECON" if global_step < args.recon_only_steps else "FULL"
                 logger.info(
-                    "[%s] [ep %03d] step %06d | total=%.4f | recon=%.4f | pred=%.4f | alpha_ent=%.4f | temp=%.3f | elapsed=%.2f min",
+                    "[%s] [ep %03d] step %06d | total=%.4f | recon=%.4f | pred=%.4f | slot_div=%.4f | temp=%.3f | elapsed=%.2f min",
                     stage,
                     epoch,
                     global_step,
                     loss.item(),
                     recon_loss.item(),
                     pred_loss_val.item(),
-                    alpha_entropy.item(),
+                    slot_diversity.item(),
                     current_temp,
                     elapsed,
                 )
