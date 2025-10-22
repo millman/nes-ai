@@ -346,35 +346,25 @@ def collect_latents(
     return torch.cat(latents, dim=0)[:max_samples]
 
 
-def compute_pca_direction(latents: torch.Tensor, q: int = 4) -> Tuple[torch.Tensor, float]:
-    """Return the top PCA direction and its projection std."""
+def compute_pca_components(
+    latents: torch.Tensor, n_components: int
+) -> Tuple[List[torch.Tensor], List[float]]:
+    """Return the top PCA directions along with their projection std devs."""
+    if latents.dim() != 2:
+        raise ValueError("Expected 2D latent matrix")
     centered = latents - latents.mean(dim=0, keepdim=True)
-    q = min(q, centered.shape[1])
-    U, S, V = torch.pca_lowrank(centered, q=q)
-    direction = V[:, 0]
-    projections = centered @ direction
-    std = float(projections.std(unbiased=False).item())
-    if std == 0.0:
-        std = 1.0
-    return direction, std
-
-
-@torch.no_grad()
-def decode_traversals(
-    model: CFMAutoencoder,
-    base_latents: torch.Tensor,
-    direction: torch.Tensor,
-    deltas: Sequence[float],
-    device: torch.device,
-) -> List[torch.Tensor]:
-    outputs: List[torch.Tensor] = []
-    direction = direction.to(device)
-    base_latents = base_latents.to(device)
-    for delta in deltas:
-        shifted = base_latents + delta * direction
-        decoded = model.decode(shifted).cpu()
-        outputs.append(decoded)
-    return outputs
+    max_components = min(n_components, centered.shape[1])
+    if max_components == 0:
+        raise ValueError("No components available for PCA traversal")
+    _, _, V = torch.pca_lowrank(centered, q=max_components)
+    projections = centered @ V[:, :max_components]
+    directions: List[torch.Tensor] = []
+    stds: List[float] = []
+    for idx in range(max_components):
+        directions.append(V[:, idx])
+        std = float(projections[:, idx].std(unbiased=False).item())
+        stds.append(1.0 if std == 0.0 else std)
+    return directions, stds
 
 
 def to_image(tensor: torch.Tensor) -> Image.Image:
@@ -386,34 +376,54 @@ def to_image(tensor: torch.Tensor) -> Image.Image:
     return to_pil(img.cpu())
 
 
-def save_reconstruction_grid(
-    inputs: torch.Tensor,
-    recon: torch.Tensor,
-    traversals: Sequence[torch.Tensor],
-    deltas: Sequence[float],
+@torch.no_grad()
+def save_pca_traversal_grid(
+    model: CFMAutoencoder,
+    input_frame: torch.Tensor,
+    recon_frame: torch.Tensor,
+    latent: torch.Tensor,
+    directions: Sequence[torch.Tensor],
+    stds: Sequence[float],
+    multipliers: torch.Tensor,
     out_path: Path,
+    device: torch.device,
 ) -> None:
+    """Save a grid showing PCA traversals for a single sample."""
+    if not directions:
+        raise ValueError("No PCA directions provided")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    rows = inputs.shape[0]
-    traversals_cpu = [t.cpu() for t in traversals]
-    columns = 2 + len(traversals_cpu)
-    tile_w, tile_h = inputs.shape[-1], inputs.shape[-2]
-    canvas = Image.new("RGB", (columns * tile_w, rows * tile_h), color=(0, 0, 0))
+    base_img = to_image(input_frame)
+    recon_img = to_image(recon_frame)
+    tile_w, tile_h = base_img.size
+    num_rows = len(directions)
+    num_cols = 1 + multipliers.shape[0]
+    canvas = Image.new("RGB", (num_cols * tile_w, num_rows * tile_h), color=(0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
-    headers = ["input", "recon"] + [f"Δ={delta:.2f}" for delta in deltas]
+    latent_device = latent.to(device)
+    multipliers_cpu = multipliers.cpu()
 
-    for r in range(rows):
-        y = r * tile_h
-        tiles = [to_image(inputs[r]), to_image(recon[r])]
-        for seq in traversals_cpu:
-            tiles.append(to_image(seq[r]))
-        for c, tile in enumerate(tiles):
-            x = c * tile_w
+    for row_idx, (direction, std) in enumerate(zip(directions, stds), start=1):
+        y = (row_idx - 1) * tile_h
+        # First column: source frame
+        canvas.paste(base_img, (0, y))
+        draw.rectangle([4, y + 4, tile_w - 4, y + 28], outline=(255, 255, 0))
+        draw.text((8, y + 8), f"PC{row_idx}", fill=(255, 255, 0))
+
+        direction_device = direction.to(device)
+        for col_idx, mult in enumerate(multipliers_cpu, start=1):
+            x = col_idx * tile_w
+            delta = float(mult.item() * std)
+            if abs(mult.item()) < 1e-6:
+                tile = recon_img
+            else:
+                shifted = latent_device + delta * direction_device
+                decoded = model.decode(shifted.unsqueeze(0)).cpu()[0]
+                tile = to_image(decoded)
             canvas.paste(tile, (x, y))
-            label = headers[c]
-            draw.rectangle([x, y, x + tile_w, y + 20], fill=(0, 0, 0))
-            draw.text((x + 4, y + 2), label, fill=(255, 255, 0))
+            if row_idx == 1:
+                draw.rectangle([x + 4, 4, x + tile_w - 4, 28], outline=(255, 255, 0))
+                draw.text((x + 8, 8), f"Δ={mult.item():.2f}", fill=(255, 255, 0))
     canvas.save(out_path)
 
 
@@ -585,27 +595,35 @@ def main() -> None:
                     max_samples=args.pca_sample_size,
                     batch_size=args.pca_batch_size,
                 )
-                direction, proj_std = compute_pca_direction(latents_for_pca)
-                multipliers = torch.linspace(
-                    -args.pca_std_multiplier,
-                    args.pca_std_multiplier,
-                    steps=args.pca_traverse_steps,
+                directions, stds = compute_pca_components(
+                    latents_for_pca, n_components=5
                 )
-                deltas = [float(m.item() * proj_std) for m in multipliers if not math.isclose(m.item(), 0.0, abs_tol=1e-6)]
-                traversal_tensors = decode_traversals(
-                    model,
-                    latent_batch,
-                    direction,
-                    deltas,
-                    device,
-                )
-                save_reconstruction_grid(
-                    batch,
-                    recon_batch,
-                    traversal_tensors,
-                    deltas,
-                    samples_dir / f"recon_step_{global_step:06d}.png",
-                )
+                if not directions:
+                    logger.warning("Skipping PCA traversal: no directions available.")
+                else:
+                    steps = args.pca_traverse_steps
+                    if steps % 2 == 0:
+                        steps += 1
+                    multipliers = torch.linspace(
+                        -1.0,
+                        1.0,
+                        steps=steps,
+                    ) * args.pca_std_multiplier
+                    for idx in range(batch.shape[0]):
+                        out_path = samples_dir / (
+                            f"pca_step_{global_step:06d}_idx_{idx}.png"
+                        )
+                        save_pca_traversal_grid(
+                            model,
+                            batch[idx],
+                            recon_batch[idx],
+                            latent_batch[idx],
+                            directions,
+                            stds,
+                            multipliers,
+                            out_path,
+                            device,
+                        )
                 plot_loss(loss_hist, metrics_dir, global_step)
                 model.train()
 
