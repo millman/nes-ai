@@ -7,12 +7,14 @@ be used to resume training runs.
 """
 from __future__ import annotations
 
+import logging
 import random
 import csv
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
+import time
 
 import matplotlib.pyplot as plt
 import torch
@@ -31,6 +33,43 @@ from PIL import Image
 
 from predict_mario_ms_ssim import default_transform, pick_device, unnormalize
 from trajectory_utils import list_state_frames, list_traj_dirs
+
+
+SCRIPT_START_TIME = time.time()
+
+
+class _ElapsedTimeFormatter(logging.Formatter):
+    """Inject elapsed wall-clock time since process start into log records."""
+
+    def __init__(self, *args: object, start_time: float, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._start_time = start_time
+
+    def format(self, record: logging.LogRecord) -> str:
+        elapsed_seconds = record.created - self._start_time
+        record.elapsed = f"{elapsed_seconds:9.2f}s"
+        try:
+            return super().format(record)
+        finally:
+            # Clean up to avoid leaking the custom attribute outside this formatter.
+            del record.elapsed
+
+
+def _get_logger() -> logging.Logger:
+    logger = logging.getLogger("reconstruct_mario_pretrained")
+    if logger.handlers:
+        return logger
+    handler = logging.StreamHandler()
+    formatter = _ElapsedTimeFormatter(
+        "%(asctime)s [Δ%(elapsed)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        start_time=SCRIPT_START_TIME,
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    return logger
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +406,7 @@ def main() -> None:
     if cfg.resume_tag not in {"last", "best", "final"}:
         raise ValueError("resume_tag must be one of {'last', 'best', 'final'}.")
 
+    logger = _get_logger()
     seed_everything(cfg.seed)
     device = pick_device(cfg.device)
     dataset = MarioFrameDataset(Path(cfg.traj_root), max_trajs=cfg.max_trajs)
@@ -460,7 +500,9 @@ def main() -> None:
                     trainer.save_checkpoint(checkpoint_paths[trainer.name]["best"])
             if cfg.log_every > 0 and current_step % cfg.log_every == 0:
                 loss_str = ", ".join(f"{name}: {losses[name]:.4f}" for name in losses)
-                print(f"[step {current_step:05d}] {loss_str}")
+                logger.info("[step %05d] %s", current_step, loss_str)
+                plot_loss_histories(trainers, metrics_dir / "decoder_losses.png")
+                write_loss_histories(trainers, metrics_dir)
             if current_step % cfg.vis_every == 0 or current_step == target_step:
                 step_tag = f"step_{current_step:05d}"
                 fixed_recons = [
@@ -482,7 +524,7 @@ def main() -> None:
                     out_path=rolling_samples_dir / f"{step_tag}.png",
                 )
     else:
-        print("train_steps is 0; skipping decoder optimisation.")
+        logger.info("train_steps is 0; skipping decoder optimisation.")
         step_tag = f"step_{target_step:05d}"
         fixed_recons = [
             (trainer.name, trainer.reconstruct(vis_batch_device)) for trainer in trainers
