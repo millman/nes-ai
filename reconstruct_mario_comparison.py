@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Reconstruct NES Mario frames with frozen ImageNet encoders and learned decoders.
+"""Compare NES Mario frame reconstruction across pretrained and lightweight models.
 
-Each pretrained backbone keeps a dedicated decoder that trains in lock-step with
-the others. Checkpoints track the last, best, and final decoder weights and can
-be used to resume training runs.
+Frozen ImageNet encoders pair with learned decoders while a fast autoencoder
+trains end-to-end using a focal L1 objective to highlight small, hard examples.
 """
 from __future__ import annotations
 
@@ -13,7 +12,7 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import time
 
 import matplotlib.pyplot as plt
@@ -25,8 +24,10 @@ import torchvision.transforms as T
 from torchvision.models import (
     ResNet50_Weights,
     ConvNeXt_Base_Weights,
+    VGG16_Weights,
     convnext_base,
     resnet50,
+    vgg16,
 )
 import tyro
 from PIL import Image
@@ -56,7 +57,7 @@ class _ElapsedTimeFormatter(logging.Formatter):
 
 
 def _get_logger() -> logging.Logger:
-    logger = logging.getLogger("reconstruct_mario_pretrained")
+    logger = logging.getLogger("reconstruct_mario_comparison")
     if logger.handlers:
         return logger
     handler = logging.StreamHandler()
@@ -137,8 +138,6 @@ def sample_random_batch(dataset: MarioFrameDataset, count: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Model components
 # ---------------------------------------------------------------------------
-# Model components
-# ---------------------------------------------------------------------------
 
 
 class UpBlock(nn.Module):
@@ -188,6 +187,217 @@ class Decoder(nn.Module):
         if out.shape[-2:] != (224, 224):
             out = F.interpolate(out, size=(224, 224), mode="bilinear", align_corners=False)
         return out
+
+
+class DownBlock(nn.Module):
+    """Strided contraction block that preserves channel locality."""
+
+    def __init__(self, in_ch: int, out_ch: int) -> None:
+        super().__init__()
+        groups = 8 if out_ch % 8 == 0 else 1
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(groups, out_ch),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, out_ch),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class LightweightAutoencoder(nn.Module):
+    """Compact encoder/decoder that trains quickly on a single GPU."""
+
+    def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
+        super().__init__()
+        if base_channels % 8 != 0:
+            raise ValueError("base_channels must be divisible by 8 for GroupNorm stability.")
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(8, base_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.down1 = DownBlock(base_channels, base_channels * 2)
+        self.down2 = DownBlock(base_channels * 2, base_channels * 3)
+        self.down3 = DownBlock(base_channels * 3, latent_channels)
+        groups = 8 if latent_channels % 8 == 0 else 1
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(latent_channels, latent_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.up1 = UpBlock(latent_channels, base_channels * 3)
+        self.up2 = UpBlock(base_channels * 3, base_channels * 2)
+        self.up3 = UpBlock(base_channels * 2, base_channels)
+        self.head = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels // 2, 3, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h0 = self.stem(x)
+        h1 = self.down1(h0)
+        h2 = self.down2(h1)
+        h3 = self.down3(h2)
+        b = self.bottleneck(h3)
+        u1 = self.up1(b) + h2
+        u2 = self.up2(u1) + h1
+        u3 = self.up3(u2) + h0
+        out = self.head(u3)
+        if out.shape[-2:] != x.shape[-2:]:
+            out = F.interpolate(out, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        return out
+
+
+class TextureAwareAutoencoder(nn.Module):
+    """Higher-capacity autoencoder tuned for style and patch contrastive training."""
+
+    def __init__(self, base_channels: int = 64, latent_channels: int = 192) -> None:
+        super().__init__()
+        if base_channels % 8 != 0:
+            raise ValueError("base_channels must be divisible by 8 for GroupNorm stability.")
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(8, base_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.down1 = DownBlock(base_channels, base_channels * 2)
+        self.down2 = DownBlock(base_channels * 2, base_channels * 3)
+        self.down3 = DownBlock(base_channels * 3, base_channels * 4)
+        self.down4 = DownBlock(base_channels * 4, latent_channels)
+        groups = 8 if latent_channels % 8 == 0 else 1
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(latent_channels, latent_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.up1 = UpBlock(latent_channels, base_channels * 4)
+        self.up2 = UpBlock(base_channels * 4, base_channels * 3)
+        self.up3 = UpBlock(base_channels * 3, base_channels * 2)
+        self.up4 = UpBlock(base_channels * 2, base_channels)
+        self.head = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels // 2, 3, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h0 = self.stem(x)
+        h1 = self.down1(h0)
+        h2 = self.down2(h1)
+        h3 = self.down3(h2)
+        h4 = self.down4(h3)
+        b = self.bottleneck(h4)
+        u1 = self.up1(b) + h3
+        u2 = self.up2(u1) + h2
+        u3 = self.up3(u2) + h1
+        u4 = self.up4(u3) + h0
+        out = self.head(u4)
+        if out.shape[-2:] != x.shape[-2:]:
+            out = F.interpolate(out, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        return out
+
+
+class FocalL1Loss(nn.Module):
+    """Pixel-wise focal weighting applied to an L1 reconstruction objective."""
+
+    def __init__(self, gamma: float = 2.0, max_weight: float = 5.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if gamma <= 0:
+            raise ValueError("gamma must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.gamma = gamma
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        l1 = torch.abs(input - target)
+        norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        weight = torch.pow(l1 / norm, self.gamma).clamp(max=self.max_weight)
+        loss = weight * l1
+        return loss.mean()
+
+
+def _gram_matrix(feat: torch.Tensor) -> torch.Tensor:
+    b, c, h, w = feat.shape
+    feature = feat.view(b, c, h * w)
+    gram = torch.bmm(feature, feature.transpose(1, 2))
+    return gram / (c * h * w)
+
+
+def _style_loss(
+    pred_feats: Sequence[torch.Tensor],
+    target_feats: Sequence[torch.Tensor],
+) -> torch.Tensor:
+    losses = []
+    for pred, target in zip(pred_feats, target_feats):
+        gram_pred = _gram_matrix(pred)
+        gram_target = _gram_matrix(target)
+        losses.append(F.l1_loss(gram_pred, gram_target))
+    if not losses:
+        raise ValueError("No feature maps provided to style loss.")
+    return torch.stack(losses).mean()
+
+
+def _patch_contrastive_loss(
+    pred_feat: torch.Tensor,
+    target_feat: torch.Tensor,
+    *,
+    temperature: float,
+    max_patches: int,
+) -> torch.Tensor:
+    b, c, h, w = pred_feat.shape
+    pred_flat = pred_feat.permute(0, 2, 3, 1).reshape(-1, c)
+    target_flat = target_feat.permute(0, 2, 3, 1).reshape(-1, c)
+    total_patches = pred_flat.shape[0]
+    if total_patches == 0:
+        raise ValueError("Feature map contains no patches for contrastive loss.")
+    if max_patches <= 0:
+        raise ValueError("max_patches must be positive.")
+    if total_patches <= max_patches:
+        indices = torch.arange(total_patches, device=pred_feat.device)
+    else:
+        indices = torch.randperm(total_patches, device=pred_feat.device)[:max_patches]
+    pred_emb = F.normalize(pred_flat[indices], dim=-1)
+    target_emb = F.normalize(target_flat[indices], dim=-1)
+    logits = pred_emb @ target_emb.t()
+    logits = logits / temperature
+    labels = torch.arange(pred_emb.shape[0], device=pred_feat.device)
+    loss_fw = F.cross_entropy(logits, labels)
+    loss_bw = F.cross_entropy(logits.t(), labels)
+    return 0.5 * (loss_fw + loss_bw)
+
+
+class StyleFeatureExtractor(nn.Module):
+    """Frozen VGG16 feature pyramid used for style and contrastive objectives."""
+
+    def __init__(self, layers: Sequence[int]) -> None:
+        super().__init__()
+        if not layers:
+            raise ValueError("At least one layer index must be specified for feature extraction.")
+        max_idx = max(layers)
+        backbone = vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES).features
+        self.layers = nn.ModuleList(backbone[: max_idx + 1])
+        self.selected_layers = set(layers)
+        for param in self.layers.parameters():
+            param.requires_grad_(False)
+        self.eval()
+
+    def forward(self, x: torch.Tensor) -> Dict[int, torch.Tensor]:
+        features: Dict[int, torch.Tensor] = {}
+        out = x
+        for idx, layer in enumerate(self.layers):
+            out = layer(out)
+            if idx in self.selected_layers:
+                features[idx] = out
+            if len(features) == len(self.selected_layers):
+                break
+        return features
 
 
 @torch.no_grad()
@@ -291,6 +501,192 @@ class ReconstructionTrainer:
         self.best_loss = state.get("best_loss")
 
 
+class AutoencoderTrainer:
+    """Trainable encoder/decoder pair driven by focal L1 loss."""
+
+    def __init__(
+        self,
+        name: str,
+        model: nn.Module,
+        *,
+        device: torch.device,
+        lr: float,
+        weight_decay: float = 1e-4,
+        loss_fn: Optional[nn.Module] = None,
+    ) -> None:
+        self.name = name
+        self.device = device
+        self.model = model.to(device)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=lr, weight_decay=weight_decay
+        )
+        self.loss_fn = loss_fn or FocalL1Loss()
+        self.history: List[Tuple[int, float]] = []
+        self.global_step = 0
+        self.best_loss: Optional[float] = None
+
+    def step(self, batch: torch.Tensor) -> Tuple[float, bool]:
+        self.model.train()
+        self.feature_extractor.eval()
+        recon = self.model(batch)
+        loss = self.loss_fn(recon, batch)
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        self.optimizer.step()
+        self.global_step += 1
+        loss_val = float(loss.detach().item())
+        self.history.append((self.global_step, loss_val))
+        improved = self.best_loss is None or loss_val < self.best_loss
+        if improved:
+            self.best_loss = loss_val
+        return loss_val, improved
+
+    @torch.no_grad()
+    def reconstruct(self, batch: torch.Tensor) -> torch.Tensor:
+        was_training = self.model.training
+        self.model.eval()
+        recon = self.model(batch.to(self.device))
+        if was_training:
+            self.model.train()
+        return recon.cpu()
+
+    def state_dict(self) -> dict:
+        return {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "history": self.history,
+            "global_step": self.global_step,
+            "name": self.name,
+            "best_loss": self.best_loss,
+        }
+
+    def save_checkpoint(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.state_dict(), path)
+
+    def load_state_dict(self, state: dict, *, lr: Optional[float] = None) -> None:
+        self.model.load_state_dict(state["model"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        if lr is not None:
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
+        self.history = state.get("history", [])
+        self.global_step = state.get("global_step", 0)
+        self.best_loss = state.get("best_loss")
+
+
+class StyleContrastTrainer:
+    """Autoencoder trained with Gram style loss and patchwise contrastive loss."""
+
+    def __init__(
+        self,
+        name: str,
+        model: nn.Module,
+        feature_extractor: StyleFeatureExtractor,
+        *,
+        device: torch.device,
+        lr: float,
+        style_layers: Sequence[int],
+        patch_layer: int,
+        style_weight: float,
+        contrast_weight: float,
+        contrast_temperature: float,
+        contrast_patches: int,
+        reconstruction_weight: float = 0.0,
+        reconstruction_loss: Optional[nn.Module] = None,
+    ) -> None:
+        self.name = name
+        self.device = device
+        self.model = model.to(device)
+        self.feature_extractor = feature_extractor.to(device)
+        self.style_layers = list(style_layers)
+        self.patch_layer = patch_layer
+        missing = set(self.style_layers + [self.patch_layer]) - feature_extractor.selected_layers
+        if missing:
+            raise ValueError(f"Feature extractor does not provide layers: {sorted(missing)}")
+        self.feature_extractor.eval()
+        self.style_weight = style_weight
+        self.contrast_weight = contrast_weight
+        self.contrast_temperature = contrast_temperature
+        self.contrast_patches = contrast_patches
+        if self.contrast_temperature <= 0:
+            raise ValueError("contrast_temperature must be positive.")
+        if self.contrast_patches <= 0:
+            raise ValueError("contrast_patches must be positive.")
+        self.reconstruction_weight = reconstruction_weight
+        self.reconstruction_loss = reconstruction_loss or nn.L1Loss()
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
+        self.history: List[Tuple[int, float]] = []
+        self.global_step = 0
+        self.best_loss: Optional[float] = None
+
+    def step(self, batch: torch.Tensor) -> Tuple[float, bool]:
+        self.model.train()
+        recon = self.model(batch)
+        pred_feats = self.feature_extractor(recon)
+        with torch.no_grad():
+            target_feats = self.feature_extractor(batch)
+        style_pred = [pred_feats[idx] for idx in self.style_layers]
+        style_target = [target_feats[idx] for idx in self.style_layers]
+        style_loss = _style_loss(style_pred, style_target) * self.style_weight
+        contrast_loss = _patch_contrastive_loss(
+            pred_feats[self.patch_layer],
+            target_feats[self.patch_layer],
+            temperature=self.contrast_temperature,
+            max_patches=self.contrast_patches,
+        ) * self.contrast_weight
+        total_loss = style_loss + contrast_loss
+        if self.reconstruction_weight > 0.0:
+            recon_loss = self.reconstruction_loss(recon, batch) * self.reconstruction_weight
+            total_loss = total_loss + recon_loss
+        self.optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        self.optimizer.step()
+        self.global_step += 1
+        loss_val = float(total_loss.detach().item())
+        self.history.append((self.global_step, loss_val))
+        improved = self.best_loss is None or loss_val < self.best_loss
+        if improved:
+            self.best_loss = loss_val
+        return loss_val, improved
+
+    @torch.no_grad()
+    def reconstruct(self, batch: torch.Tensor) -> torch.Tensor:
+        was_training = self.model.training
+        self.model.eval()
+        recon = self.model(batch.to(self.device))
+        if was_training:
+            self.model.train()
+        return recon.cpu()
+
+    def state_dict(self) -> dict:
+        return {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "history": self.history,
+            "global_step": self.global_step,
+            "name": self.name,
+            "best_loss": self.best_loss,
+        }
+
+    def save_checkpoint(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.state_dict(), path)
+
+    def load_state_dict(self, state: dict, *, lr: Optional[float] = None) -> None:
+        self.model.load_state_dict(state["model"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        if lr is not None:
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
+        self.history = state.get("history", [])
+        self.global_step = state.get("global_step", 0)
+        self.best_loss = state.get("best_loss")
+
+
+Trainer = ReconstructionTrainer | AutoencoderTrainer | StyleContrastTrainer
+
+
 # ---------------------------------------------------------------------------
 # Visualisation helpers
 # ---------------------------------------------------------------------------
@@ -328,7 +724,7 @@ def save_recon_grid(
     plt.close(fig)
 
 
-def plot_loss_histories(trainers: Sequence[ReconstructionTrainer], out_path: Path) -> None:
+def plot_loss_histories(trainers: Sequence[Trainer], out_path: Path) -> None:
     plt.figure(figsize=(8, 5))
     for trainer in trainers:
         if not trainer.history:
@@ -336,8 +732,8 @@ def plot_loss_histories(trainers: Sequence[ReconstructionTrainer], out_path: Pat
         steps, losses = zip(*trainer.history)
         plt.plot(steps, losses, label=trainer.name)
     plt.xlabel("Step")
-    plt.ylabel("L1 loss")
-    plt.title("Decoder training losses")
+    plt.ylabel("Reconstruction loss")
+    plt.title("Model comparison losses")
     plt.legend()
     plt.grid(True, alpha=0.3)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,7 +741,7 @@ def plot_loss_histories(trainers: Sequence[ReconstructionTrainer], out_path: Pat
     plt.close()
 
 
-def write_loss_histories(trainers: Sequence[ReconstructionTrainer], out_dir: Path) -> None:
+def write_loss_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for trainer in trainers:
         history_path = out_dir / f"{trainer.name}_loss.csv"
@@ -364,7 +760,7 @@ def write_loss_histories(trainers: Sequence[ReconstructionTrainer], out_dir: Pat
 @dataclass
 class Config:
     traj_root: Path = Path("data.image_distance.train_levels_1_2")
-    out_dir: Path = Path("out.reconstruct_mario_pretrained")
+    out_dir: Path = Path("out.reconstruct_mario_comparison")
     max_trajs: Optional[int] = None
     batch_size: int = 16
     num_workers: int = 0
@@ -377,6 +773,13 @@ class Config:
     seed: int = 0
     resume_dir: Optional[Path] = None
     resume_tag: str = "last"
+    style_weight: float = 1.0
+    contrast_weight: float = 1.0
+    contrast_temperature: float = 0.07
+    contrast_patches: int = 256
+    reconstruction_weight: float = 0.0
+    style_layers: Tuple[int, ...] = (3, 8, 15)
+    patch_layer: int = 22
 
 
 def seed_everything(seed: int) -> None:
@@ -386,14 +789,33 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def build_trainers(device: torch.device, lr: float) -> List[ReconstructionTrainer]:
+def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
     resnet_enc = _resnet_encoder(ResNet50_Weights.IMAGENET1K_V2)
     convnext_enc = _convnext_encoder(ConvNeXt_Base_Weights.IMAGENET1K_V1)
     resnet_dec = Decoder(2048)
     convnext_dec = Decoder(1024)
+    autoencoder = LightweightAutoencoder()
+    texture_autoencoder = TextureAwareAutoencoder()
+    feature_layers = sorted(set(cfg.style_layers + (cfg.patch_layer,)))
+    feature_extractor = StyleFeatureExtractor(feature_layers)
     return [
-        ReconstructionTrainer("resnet50", resnet_enc, resnet_dec, device=device, lr=lr),
-        ReconstructionTrainer("convnext_base", convnext_enc, convnext_dec, device=device, lr=lr),
+        ReconstructionTrainer("resnet50", resnet_enc, resnet_dec, device=device, lr=cfg.lr),
+        ReconstructionTrainer("convnext_base", convnext_enc, convnext_dec, device=device, lr=cfg.lr),
+        AutoencoderTrainer("focal_autoencoder", autoencoder, device=device, lr=cfg.lr),
+        StyleContrastTrainer(
+            "style_contrast_autoencoder",
+            texture_autoencoder,
+            feature_extractor,
+            device=device,
+            lr=cfg.lr,
+            style_layers=cfg.style_layers,
+            patch_layer=cfg.patch_layer,
+            style_weight=cfg.style_weight,
+            contrast_weight=cfg.contrast_weight,
+            contrast_temperature=cfg.contrast_temperature,
+            contrast_patches=cfg.contrast_patches,
+            reconstruction_weight=cfg.reconstruction_weight,
+        ),
     ]
 
 
@@ -429,7 +851,7 @@ def main() -> None:
     fixed_samples_dir.mkdir(parents=True, exist_ok=True)
     rolling_samples_dir.mkdir(parents=True, exist_ok=True)
 
-    trainers = build_trainers(device, cfg.lr)
+    trainers = build_trainers(cfg, device)
     checkpoint_paths: dict[str, dict[str, Path]] = {}
 
     for trainer in trainers:
