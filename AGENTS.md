@@ -58,3 +58,4 @@ When the user requests that a commit be prepared:
 - Always capture prompts verbatim; do not paraphrase user requests in the `Prompt` blocks.
 - Keep change summaries short and action-oriented.
 - Include prompts that clarified requirements or triggered follow-up adjustments if those instructions influenced the final code.
+- When a changes file covers work that was planned across earlier prompts, include those prior prompts as well—provided they are relevant to the current edits and have not already been logged elsewhere.

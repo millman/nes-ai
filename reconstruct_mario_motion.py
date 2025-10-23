@@ -741,7 +741,7 @@ def collect_latents(
 
 def compute_pca_components(
     latents: torch.Tensor, n_components: int
-) -> Tuple[List[torch.Tensor], List[float]]:
+) -> Tuple[List[torch.Tensor], List[float], List[torch.Tensor]]:
     if latents.dim() != 2:
         raise ValueError("Expected latent matrix with shape (N, D)")
     centered = latents - latents.mean(dim=0, keepdim=True)
@@ -752,11 +752,14 @@ def compute_pca_components(
     projections = centered @ V[:, :max_components]
     directions: List[torch.Tensor] = []
     stds: List[float] = []
+    projection_samples: List[torch.Tensor] = []
     for idx in range(max_components):
         directions.append(V[:, idx])
-        std = float(projections[:, idx].std(unbiased=False).item())
+        comp_proj = projections[:, idx].detach().cpu()
+        std = float(comp_proj.std(unbiased=False).item())
         stds.append(1.0 if std == 0.0 else std)
-    return directions, stds
+        projection_samples.append(comp_proj)
+    return directions, stds, projection_samples
 
 
 def to_image(tensor: torch.Tensor) -> Image.Image:
@@ -773,7 +776,7 @@ def motion_to_image(mask: torch.Tensor, *, cmap: str = "magma") -> Image.Image:
     cmap_fn = plt.get_cmap(cmap)
     rgba = cmap_fn(mask_np)
     rgba_img = (rgba * 255.0).astype(np.uint8)
-    pil_img = Image.fromarray(rgba_img, mode="RGBA")
+    pil_img = Image.fromarray(rgba_img, "RGBA")
     return pil_img.convert("RGB")
 
 
@@ -831,7 +834,8 @@ def save_pca_traversal_grid(
     latent: torch.Tensor,
     directions: Sequence[torch.Tensor],
     stds: Sequence[float],
-    multipliers: torch.Tensor,
+    percent_levels: Sequence[float],
+    projections: Sequence[torch.Tensor],
     out_path: Path,
     device: torch.device,
 ) -> None:
@@ -841,32 +845,65 @@ def save_pca_traversal_grid(
     base_img = to_image(target_frame)
     tile_w, tile_h = base_img.size
     num_rows = len(directions)
-    num_cols = multipliers.shape[0] + 1
+    num_cols = len(percent_levels) + 1
     canvas = Image.new("RGB", (num_cols * tile_w, num_rows * tile_h), color=(0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
     latent_device = latent.to(device)
     motion_present_device = motion_present.unsqueeze(0).to(device)
     motion_prior_device = motion_prior.unsqueeze(0).to(device)
+    percent_list = [float(p) for p in percent_levels]
+    label_height = 24
 
-    for row_idx, (direction, std) in enumerate(zip(directions, stds)):
+    for row_idx, (direction, std, comp_proj) in enumerate(
+        zip(directions, stds, projections)
+    ):
         y = row_idx * tile_h
         canvas.paste(base_img, (0, y))
+        draw.rectangle([4, y + 4, tile_w - 4, y + 28], outline=(255, 255, 0))
         draw.text((8, y + 8), f"PC{row_idx + 1}", fill=(255, 255, 0))
+        draw.rectangle(
+            [0, y + tile_h - label_height, tile_w, y + tile_h],
+            fill=(0, 0, 0),
+        )
+        draw.text(
+            (6, y + tile_h - label_height + 4),
+            "+0.000 (+0%)",
+            fill=(255, 255, 0),
+        )
+
         direction_device = direction.to(device)
-        for col_idx, mult in enumerate(multipliers, start=1):
+        comp_proj_float = comp_proj.to(dtype=torch.float32)
+        for col_idx, percent in enumerate(percent_list, start=1):
             x = col_idx * tile_w
-            delta = float(mult.item() * std)
-            shifted = latent_device + delta * direction_device
-            decoded = model.decode(
-                shifted.unsqueeze(0),
-                motion_present=motion_present_device,
-                motion_prior=motion_prior_device,
-            ).cpu()[0]
+            if abs(percent) < 1e-6:
+                delta = 0.0
+                decoded = model.decode(
+                    latent_device.unsqueeze(0),
+                    motion_present=motion_present_device,
+                    motion_prior=motion_prior_device,
+                ).cpu()[0]
+            else:
+                q = 0.5 + 0.5 * percent
+                q = max(0.0, min(1.0, q))
+                delta = float(torch.quantile(comp_proj_float, q))
+                shifted = latent_device + delta * direction_device
+                decoded = model.decode(
+                    shifted.unsqueeze(0),
+                    motion_present=motion_present_device,
+                    motion_prior=motion_prior_device,
+                ).cpu()[0]
             tile = to_image(decoded)
             canvas.paste(tile, (x, y))
-            if row_idx == 0:
-                draw.text((x + 8, 8), f"Δ={mult.item():.2f}", fill=(255, 255, 0))
+            draw.rectangle(
+                [x, y + tile_h - label_height, x + tile_w, y + tile_h],
+                fill=(0, 0, 0),
+            )
+            draw.text(
+                (x + 6, y + tile_h - label_height + 4),
+                f"{delta:+.3f} ({percent*100:+.0f}%)",
+                fill=(255, 255, 0),
+            )
     canvas.save(out_path)
 
 
@@ -906,7 +943,7 @@ class Args:
     weight_decay: float = 1e-4
     epochs: int = 200
     steps_per_epoch: int = 100
-    latent_dim: int = 256
+    latent_dim: int = 1024
     sequence_len: int = 4
     lambda_recon: float = 1.0
     lambda_cfm: float = 0.1
@@ -934,7 +971,7 @@ class Args:
     pca_traverse_steps: int = 5
     seed: int = 42
     resume_checkpoint: Optional[str] = None
-    checkpoint_every: int = 50
+    checkpoint_every: int = 50  # 0 disables periodic last-checkpoint updates
 
 
 def main() -> None:
@@ -983,6 +1020,16 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     default_run_dir = Path(args.out_dir) / f"run__{timestamp}"
     run_dir = default_run_dir
+
+    if args.resume_checkpoint:
+        resume_path = Path(args.resume_checkpoint).resolve()
+        if resume_path.parent.name == "checkpoints":
+            resume_run_dir = resume_path.parent.parent
+        else:
+            resume_run_dir = resume_path.parent
+        if resume_run_dir.is_dir():
+            run_dir = resume_run_dir
+
     metrics_dir = run_dir / "metrics"
     samples_dir = run_dir / "samples"
     checkpoints_dir = run_dir / "checkpoints"
@@ -993,8 +1040,12 @@ def main() -> None:
     global_step = 0
     start_epoch = 0
     loss_hist: List[Tuple[int, float]] = []
+    best_metric = float("inf")
 
-    def save_checkpoint(path: Path, epoch_val: int, step_val: int) -> None:
+    checkpoint_last_path = checkpoints_dir / "checkpoint_last.pt"
+    checkpoint_best_path = checkpoints_dir / "checkpoint_best.pt"
+
+    def save_checkpoint(path: Path, epoch_val: int, step_val: int, best_val: float) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "args": args,
@@ -1003,6 +1054,7 @@ def main() -> None:
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "loss_hist": loss_hist,
+            "best_metric": best_val,
         }
         torch.save(payload, path)
 
@@ -1016,6 +1068,7 @@ def main() -> None:
         loss_hist = payload.get("loss_hist", [])
         start_epoch = payload.get("epoch", 0)
         global_step = payload.get("step", 0)
+        best_metric = float(payload.get("best_metric", best_metric))
         logger.info("Resumed from %s (epoch %d, step %d)", ckpt_path, start_epoch, global_step)
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
@@ -1088,7 +1141,8 @@ def main() -> None:
             optimizer.step()
 
             global_step += 1
-            loss_hist.append((global_step, float(total_loss.item())))
+            total_value = float(total_loss.item())
+            loss_hist.append((global_step, total_value))
 
             if global_step % args.log_every == 0:
                 stats = latent_summary(latent)
@@ -1097,7 +1151,7 @@ def main() -> None:
                     "motion_bce=%.4f prior=%.4f cfm=%.4f ms=%.4f l1=%.4f latent_std=%.3f",
                     epoch,
                     global_step,
-                    float(total_loss.item()),
+                    total_value,
                     float(recon_loss.item()),
                     float(weighted_l1.item()),
                     float(motion_bce.item()),
@@ -1144,17 +1198,23 @@ def main() -> None:
                     max_samples=args.pca_sample_size,
                     batch_size=args.pca_batch_size,
                 )
-                directions, stds = compute_pca_components(
+                directions, stds, proj_samples = compute_pca_components(
                     latents_for_pca, n_components=5
                 )
                 steps = args.pca_traverse_steps
                 if steps % 2 == 0:
                     steps += 1
-                multipliers = torch.linspace(
-                    -1.0,
-                    1.0,
+                max_percent = math.erf(
+                    abs(float(args.pca_std_multiplier)) / math.sqrt(2.0)
+                )
+                if max_percent <= 0.0:
+                    max_percent = 1.0
+                max_percent = min(max_percent, 1.0)
+                percent_levels = torch.linspace(
+                    -max_percent,
+                    max_percent,
                     steps=steps,
-                ) * args.pca_std_multiplier
+                )
 
                 for idx_vis, idx_dataset in enumerate(sample_indices):
                     seq_vis, target_vis, motion_vis, _ = dataset[idx_dataset]
@@ -1181,16 +1241,26 @@ def main() -> None:
                             latent_vis[idx_vis],
                             directions,
                             stds,
-                            multipliers,
+                            percent_levels.tolist(),
+                            proj_samples,
                             pca_path,
                             device,
                         )
                 plot_loss(loss_hist, metrics_dir, global_step)
                 model.train()
 
-            if args.checkpoint_every > 0 and global_step % args.checkpoint_every == 0:
-                ckpt_name = f"step_{global_step:06d}.pt"
-                save_checkpoint(checkpoints_dir / ckpt_name, epoch, global_step)
+            updated_best = False
+            if total_value < best_metric:
+                best_metric = total_value
+                save_checkpoint(checkpoint_best_path, epoch, global_step, best_metric)
+                updated_best = True
+
+            save_last = updated_best or (
+                args.checkpoint_every > 0
+                and global_step % args.checkpoint_every == 0
+            )
+            if save_last:
+                save_checkpoint(checkpoint_last_path, epoch, global_step, best_metric)
 
         sampler = RandomSampler(dataset, replacement=True, num_samples=num_samples)
         loader = DataLoader(
@@ -1202,7 +1272,7 @@ def main() -> None:
         )
 
     write_loss_csv(loss_hist, metrics_dir)
-    save_checkpoint(run_dir / "final.pt", args.epochs, global_step)
+    save_checkpoint(run_dir / "final.pt", args.epochs, global_step, best_metric)
     logger.info("Training finished. Artifacts written to %s", run_dir)
 
 
