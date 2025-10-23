@@ -488,7 +488,7 @@ class Args:
     batch_size: int = 32
     lr: float = 3e-4
     weight_decay: float = 1e-4
-    epochs: int = 200
+    epochs: int = 1000
     steps_per_epoch: int = 100
     latent_dim: int = 1024
     lambda_recon: float = 1.0

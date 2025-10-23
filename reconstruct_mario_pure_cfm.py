@@ -264,7 +264,7 @@ class Args:
     batch_size: int = 12
     lr: float = 3e-4
     weight_decay: float = 1e-4
-    epochs: int = 200
+    epochs: int = 1000
     steps_per_epoch: int = 100
     context_len: int = 4
     target_len: int = 4
