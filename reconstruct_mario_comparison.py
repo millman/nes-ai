@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 import time
+import textwrap
 
 import matplotlib.pyplot as plt
 import torch
@@ -38,6 +39,38 @@ from trajectory_utils import list_state_frames, list_traj_dirs
 
 
 SCRIPT_START_TIME = time.time()
+
+MODEL_DISPLAY_NAMES: Dict[str, str] = {
+    "resnet50": "ResNet-50 (MSE)",
+    "convnext_base": "ConvNeXt-Base (MSE)",
+    "l1_autoencoder": "Autoencoder (L1)",
+    "mse_autoencoder": "Autoencoder (MSE)",
+    "focal_autoencoder": "Autoencoder (Focal L1)",
+    "smoothl1_autoencoder": "Autoencoder (Smooth L1)",
+    "cauchy_autoencoder": "Autoencoder (Cauchy)",
+    "style_contrast_autoencoder": "Autoencoder (Style + PatchNCE)",
+    "msssim_autoencoder": "Autoencoder (MS-SSIM)",
+    "focal_msssim_autoencoder": "Autoencoder (Focal MS-SSIM)",
+}
+
+
+def _display_name(name: str) -> str:
+    return MODEL_DISPLAY_NAMES.get(name, name)
+
+
+def _flatten_named_parameters(module: nn.Module) -> List[Tuple[str, int]]:
+    params: List[Tuple[str, int]] = []
+    for name, param in module.named_parameters():
+        params.append((name, param.numel()))
+    return params
+
+
+def _summarize_parameters(name: str, module: nn.Module, *, logger: logging.Logger) -> None:
+    entries = _flatten_named_parameters(module)
+    total = sum(count for _, count in entries)
+    logger.info("%s parameters: %d", _display_name(name), total)
+    for entry_name, count in entries:
+        logger.info("    %s: %d", entry_name, count)
 
 
 class _ElapsedTimeFormatter(logging.Formatter):
@@ -452,6 +485,21 @@ class FocalMSSSIMLoss(nn.Module):
         return (weight * losses).mean()
 
 
+class CauchyLoss(nn.Module):
+    """Robust loss based on the negative log-likelihood of the Cauchy distribution."""
+
+    def __init__(self, sigma: float = 0.1, eps: float = 1e-6) -> None:
+        super().__init__()
+        if sigma <= 0:
+            raise ValueError("sigma must be positive.")
+        self.sigma = sigma
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        diff = (input - target) / self.sigma
+        return torch.log1p(diff.pow(2)).mean().clamp_min(self.eps)
+
+
 def _compute_shared_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
     with torch.no_grad():
         l1 = F.l1_loss(pred, target).item()
@@ -604,7 +652,7 @@ class ReconstructionTrainer:
         self.encoder = encoder.to(device)
         self.decoder = decoder.to(device)
         self.optimizer = torch.optim.Adam(self.decoder.parameters(), lr=lr)
-        self.loss_fn = nn.L1Loss()
+        self.loss_fn = nn.MSELoss()
         self.history: List[Tuple[int, float]] = []
         self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
@@ -877,15 +925,6 @@ def save_recon_grid(
     *,
     out_path: Path,
 ) -> None:
-    name_map = {
-        "resnet50": "ResNet-50 (L1)",
-        "convnext_base": "ConvNeXt-Base (L1)",
-        "mse_autoencoder": "Autoencoder (MSE)",
-        "focal_autoencoder": "Autoencoder (Focal L1)",
-        "style_contrast_autoencoder": "Autoencoder (Style + PatchNCE)",
-        "msssim_autoencoder": "Autoencoder (MS-SSIM)",
-        "focal_msssim_autoencoder": "Autoencoder (Focal MS-SSIM)",
-    }
     rows = inputs.shape[0]
     cols = 1 + len(reconstructions)
     fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
@@ -893,7 +932,7 @@ def save_recon_grid(
         axes = axes[None, :]
     unnorm_inputs = unnormalize(inputs)
     unnorm_recons = [(name, unnormalize(tensor)) for name, tensor in reconstructions]
-    col_titles = ["Input"] + [name_map.get(name, name) for name, _ in unnorm_recons]
+    col_titles = ["Input"] + [_display_name(name) for name, _ in unnorm_recons]
     for col, title in enumerate(col_titles):
         axes[0, col].set_title(title)
     for row in range(rows):
@@ -914,10 +953,11 @@ def plot_loss_histories(trainers: Sequence[Trainer], out_path: Path) -> None:
         if not trainer.history:
             continue
         steps, losses = zip(*trainer.history)
-        plt.plot(steps, losses, label=trainer.name)
+        plt.plot(steps, losses, label=_display_name(trainer.name))
     plt.xlabel("Step")
     plt.ylabel("Reconstruction loss")
-    plt.title("Model comparison losses")
+    plt.title("Model comparison losses (log scale)")
+    plt.yscale("log")
     plt.legend()
     plt.grid(True, alpha=0.3)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -970,10 +1010,11 @@ def plot_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) -> 
             continue
         steps = [item[0] for item in history]
         l1_values = [item[1]["l1"] for item in history]
-        plt.plot(steps, l1_values, label=trainer.name)
+        plt.plot(steps, l1_values, label=_display_name(trainer.name))
     plt.xlabel("Step")
     plt.ylabel("L1 (shared metric)")
-    plt.title("Shared L1 metric")
+    plt.title("Shared L1 metric (log scale)")
+    plt.yscale("log")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.savefig(out_dir / "shared_l1.png", dpi=150, bbox_inches="tight")
@@ -987,7 +1028,7 @@ def plot_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) -> 
             continue
         steps = [item[0] for item in history]
         ms_values = [item[1]["ms_ssim"] for item in history]
-        plt.plot(steps, ms_values, label=trainer.name)
+        plt.plot(steps, ms_values, label=_display_name(trainer.name))
     plt.xlabel("Step")
     plt.ylabel("MS-SSIM (shared metric)")
     plt.title("Shared MS-SSIM metric")
@@ -1027,11 +1068,14 @@ class Config:
     patch_layer: int = 22
     enable_resnet50: bool = True
     enable_convnext_base: bool = True
+    enable_l1_autoencoder: bool = False
+    enable_smoothl1_autoencoder: bool = True
     enable_mse_autoencoder: bool = True
-    enable_focal_autoencoder: bool = True
-    enable_style_contrast_autoencoder: bool = True
+    enable_focal_autoencoder: bool = False
+    enable_style_contrast_autoencoder: bool = False
+    enable_cauchy_autoencoder: bool = True
     enable_msssim_autoencoder: bool = True
-    enable_focal_msssim_autoencoder: bool = True
+    enable_focal_msssim_autoencoder: bool = False
 
 
 def seed_everything(seed: int) -> None:
@@ -1068,6 +1112,28 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 loss_fn=nn.MSELoss(),
             )
         )
+    if cfg.enable_l1_autoencoder:
+        l1_model = LightweightAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "l1_autoencoder",
+                l1_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.L1Loss(),
+            )
+        )
+    if cfg.enable_smoothl1_autoencoder:
+        smooth_model = LightweightAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "smoothl1_autoencoder",
+                smooth_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
     if cfg.enable_focal_autoencoder:
         autoencoder = LightweightAutoencoder()
         trainers.append(AutoencoderTrainer("focal_autoencoder", autoencoder, device=device, lr=cfg.lr))
@@ -1089,6 +1155,17 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 contrast_temperature=cfg.contrast_temperature,
                 contrast_patches=cfg.contrast_patches,
                 reconstruction_weight=cfg.reconstruction_weight,
+            )
+        )
+    if cfg.enable_cauchy_autoencoder:
+        cauchy_model = LightweightAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "cauchy_autoencoder",
+                cauchy_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=CauchyLoss(),
             )
         )
     if cfg.enable_msssim_autoencoder:
@@ -1151,6 +1228,17 @@ def main() -> None:
     rolling_samples_dir.mkdir(parents=True, exist_ok=True)
 
     trainers = build_trainers(cfg, device)
+    logger.info("Parameter summary:")
+    for trainer in trainers:
+        if isinstance(trainer, ReconstructionTrainer):
+            module = trainer.decoder
+        elif isinstance(trainer, AutoencoderTrainer):
+            module = trainer.model
+        elif isinstance(trainer, StyleContrastTrainer):
+            module = trainer.model
+        else:
+            continue
+        _summarize_parameters(trainer.name, module, logger=logger)
     checkpoint_paths: dict[str, dict[str, Path]] = {}
 
     for trainer in trainers:
@@ -1214,8 +1302,11 @@ def main() -> None:
             batch = batch.to(device, non_blocking=True)
             losses: dict[str, float] = {}
             shared_metrics_step: dict[str, Dict[str, float]] = {}
+            timing: dict[str, float] = {}
             for trainer in trainers:
+                step_start = time.perf_counter()
                 loss, improved, shared = trainer.step(batch)
+                timing[trainer.name] = time.perf_counter() - step_start
                 losses[trainer.name] = loss
                 shared_metrics_step[trainer.name] = shared
                 trainer.save_checkpoint(checkpoint_paths[trainer.name]["last"])
@@ -1228,11 +1319,20 @@ def main() -> None:
                     f"MS {shared_metrics_step[name]['ms_ssim']:.4f}"
                     for name in shared_metrics_step
                 )
-                logger.info("[step %05d] %s | Shared %s", current_step, loss_str, metric_str)
+                timing_str = ", ".join(
+                    f"{_display_name(name)}: {timing[name]*1000:.1f}ms" for name in timing
+                )
+                logger.info(
+                    "[step %05d] %s | Shared %s",
+                    current_step,
+                    loss_str,
+                    metric_str,
+                )
+                logger.info("[step %05d] Timing %s", current_step, timing_str)
                 plot_loss_histories(trainers, metrics_dir / "decoder_losses.png")
                 write_loss_histories(trainers, metrics_dir)
                 write_shared_metric_histories(trainers, metrics_dir)
-                plot_shared_metric_histories(trainers, metrics_dir / "shared_metrics.png")
+                plot_shared_metric_histories(trainers, metrics_dir)
             if current_step % cfg.vis_every == 0 or current_step == target_step:
                 step_tag = f"step_{current_step:05d}"
                 fixed_recons = [
@@ -1278,7 +1378,7 @@ def main() -> None:
     plot_loss_histories(trainers, metrics_dir / "decoder_losses.png")
     write_loss_histories(trainers, metrics_dir)
     write_shared_metric_histories(trainers, metrics_dir)
-    plot_shared_metric_histories(trainers, metrics_dir / "shared_metrics.png")
+    plot_shared_metric_histories(trainers, metrics_dir)
     for trainer in trainers:
         paths = checkpoint_paths[trainer.name]
         trainer.save_checkpoint(paths["last"])
