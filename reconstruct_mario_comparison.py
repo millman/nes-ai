@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Compare NES Mario frame reconstruction across pretrained and lightweight models.
+"""Compare NES Mario frame reconstruction across multiple encoder/decoder strategies.
 
-Frozen ImageNet encoders pair with learned decoders while a fast autoencoder
-trains end-to-end using a focal L1 objective to highlight small, hard examples.
+Frozen ImageNet encoders pair with learned decoders while several lightweight
+autoencoders explore focal L1, pure MS-SSIM, focal MS-SSIM, and style/contrastive
+objectives; each branch can be enabled or disabled individually for ablations.
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ from torchvision.models import (
 import tyro
 from PIL import Image
 
-from predict_mario_ms_ssim import default_transform, pick_device, unnormalize
+from predict_mario_ms_ssim import default_transform, ms_ssim_loss, pick_device, unnormalize
 from trajectory_utils import list_state_frames, list_traj_dirs
 
 
@@ -203,6 +204,9 @@ class DownBlock(nn.Module):
             nn.GroupNorm(groups, out_ch),
             nn.SiLU(inplace=True),
         )
+        # Shape summary for DownBlock:
+        #   input  -> (B, in_ch,  H,  W)
+        #   output -> (B, out_ch, H/2, W/2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -219,10 +223,10 @@ class LightweightAutoencoder(nn.Module):
             nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
             nn.GroupNorm(8, base_channels),
             nn.SiLU(inplace=True),
-        )
-        self.down1 = DownBlock(base_channels, base_channels * 2)
-        self.down2 = DownBlock(base_channels * 2, base_channels * 3)
-        self.down3 = DownBlock(base_channels * 3, latent_channels)
+        )  # -> (B, base_channels, 224, 224)
+        self.down1 = DownBlock(base_channels, base_channels * 2)    # -> (B, base_channels*2, 112, 112)
+        self.down2 = DownBlock(base_channels * 2, base_channels * 3)  # -> (B, base_channels*3, 56, 56)
+        self.down3 = DownBlock(base_channels * 3, latent_channels)  # -> (B, latent_channels, 28, 28)
         groups = 8 if latent_channels % 8 == 0 else 1
         self.bottleneck = nn.Sequential(
             nn.Conv2d(latent_channels, latent_channels, kernel_size=3, padding=1),
@@ -240,9 +244,9 @@ class LightweightAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h0 = self.stem(x)
-        h1 = self.down1(h0)
-        h2 = self.down2(h1)
-        h3 = self.down3(h2)
+        h1 = self.down1(h0)  # (B, base_channels*2, 112, 112)
+        h2 = self.down2(h1)  # (B, base_channels*3, 56, 56)
+        h3 = self.down3(h2)  # (B, latent_channels, 28, 28)
         b = self.bottleneck(h3)
         u1 = self.up1(b) + h2
         u2 = self.up2(u1) + h1
@@ -264,11 +268,11 @@ class TextureAwareAutoencoder(nn.Module):
             nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
             nn.GroupNorm(8, base_channels),
             nn.SiLU(inplace=True),
-        )
-        self.down1 = DownBlock(base_channels, base_channels * 2)
-        self.down2 = DownBlock(base_channels * 2, base_channels * 3)
-        self.down3 = DownBlock(base_channels * 3, base_channels * 4)
-        self.down4 = DownBlock(base_channels * 4, latent_channels)
+        )  # -> (B, base_channels, 224, 224)
+        self.down1 = DownBlock(base_channels, base_channels * 2)      # -> (B, base_channels*2, 112, 112)
+        self.down2 = DownBlock(base_channels * 2, base_channels * 3)  # -> (B, base_channels*3, 56, 56)
+        self.down3 = DownBlock(base_channels * 3, base_channels * 4)  # -> (B, base_channels*4, 28, 28)
+        self.down4 = DownBlock(base_channels * 4, latent_channels)    # -> (B, latent_channels, 14, 14)
         groups = 8 if latent_channels % 8 == 0 else 1
         self.bottleneck = nn.Sequential(
             nn.Conv2d(latent_channels, latent_channels, kernel_size=3, padding=1),
@@ -287,10 +291,10 @@ class TextureAwareAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h0 = self.stem(x)
-        h1 = self.down1(h0)
-        h2 = self.down2(h1)
-        h3 = self.down3(h2)
-        h4 = self.down4(h3)
+        h1 = self.down1(h0)  # (B, base_channels*2, 112, 112)
+        h2 = self.down2(h1)  # (B, base_channels*3, 56, 56)
+        h3 = self.down3(h2)  # (B, base_channels*4, 28, 28)
+        h4 = self.down4(h3)  # (B, latent_channels, 14, 14)
         b = self.bottleneck(h4)
         u1 = self.up1(b) + h3
         u2 = self.up2(u1) + h2
@@ -300,6 +304,20 @@ class TextureAwareAutoencoder(nn.Module):
         if out.shape[-2:] != x.shape[-2:]:
             out = F.interpolate(out, size=x.shape[-2:], mode="bilinear", align_corners=False)
         return out
+
+
+class MSSSIMAutoencoder(LightweightAutoencoder):
+    """Variant tuned for pure MS-SSIM optimisation."""
+
+    def __init__(self) -> None:
+        super().__init__(base_channels=40, latent_channels=120)
+
+
+class FocalMSSSIMAutoencoder(TextureAwareAutoencoder):
+    """Higher-capacity variant for focal MS-SSIM training."""
+
+    def __init__(self) -> None:
+        super().__init__(base_channels=72, latent_channels=224)
 
 
 class FocalL1Loss(nn.Module):
@@ -321,6 +339,124 @@ class FocalL1Loss(nn.Module):
         weight = torch.pow(l1 / norm, self.gamma).clamp(max=self.max_weight)
         loss = weight * l1
         return loss.mean()
+
+
+def _build_gaussian_window(
+    window_size: int,
+    sigma: float,
+    channels: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    coords = torch.arange(window_size, device=device, dtype=dtype) - window_size // 2
+    gauss = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    gauss = (gauss / gauss.sum()).unsqueeze(0)
+    window_2d = (gauss.t() @ gauss).unsqueeze(0).unsqueeze(0)
+    return window_2d.expand(channels, 1, window_size, window_size).contiguous()
+
+
+def _ssim_components_full(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    window: torch.Tensor,
+    *,
+    data_range: float = 1.0,
+    k1: float = 0.01,
+    k2: float = 0.03,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    padding = window.shape[-1] // 2
+    mu_x = F.conv2d(x, window, padding=padding, groups=x.shape[1])
+    mu_y = F.conv2d(y, window, padding=padding, groups=y.shape[1])
+    mu_x_sq = mu_x.pow(2)
+    mu_y_sq = mu_y.pow(2)
+    mu_xy = mu_x * mu_y
+    sigma_x_sq = F.conv2d(x * x, window, padding=padding, groups=x.shape[1]) - mu_x_sq
+    sigma_y_sq = F.conv2d(y * y, window, padding=padding, groups=y.shape[1]) - mu_y_sq
+    sigma_xy = F.conv2d(x * y, window, padding=padding, groups=x.shape[1]) - mu_xy
+    c1 = (k1 * data_range) ** 2
+    c2 = (k2 * data_range) ** 2
+    numerator = (2 * mu_xy + c1) * (2 * sigma_xy + c2)
+    denominator = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
+    ssim_map = numerator / denominator
+    cs_map = (2 * sigma_xy + c2) / (sigma_x_sq + sigma_y_sq + c2)
+    ssim_val = ssim_map.mean(dim=(1, 2, 3))
+    cs_val = cs_map.mean(dim=(1, 2, 3))
+    return ssim_val, cs_val
+
+
+def ms_ssim_per_sample(
+    x_hat_norm: torch.Tensor,
+    x_true_norm: torch.Tensor,
+    *,
+    weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if weights is None:
+        weights = torch.tensor(
+            [0.0448, 0.2856, 0.3001, 0.2363, 0.1333],
+            device=x_hat_norm.device,
+            dtype=x_hat_norm.dtype,
+        )
+    xh = unnormalize(x_hat_norm)
+    xt = unnormalize(x_true_norm)
+    window_size = 11
+    sigma = 1.5
+    channels = xh.shape[1]
+    window = _build_gaussian_window(window_size, sigma, channels, xh.device, xh.dtype)
+    levels = weights.shape[0]
+    mssim: List[torch.Tensor] = []
+    mcs: List[torch.Tensor] = []
+    x_scaled = xh
+    y_scaled = xt
+    for _ in range(levels):
+        ssim_val, cs_val = _ssim_components_full(x_scaled, y_scaled, window)
+        mssim.append(ssim_val)
+        mcs.append(cs_val)
+        x_scaled = F.avg_pool2d(x_scaled, kernel_size=2, stride=2)
+        y_scaled = F.avg_pool2d(y_scaled, kernel_size=2, stride=2)
+    mssim_tensor = torch.stack(mssim, dim=0)
+    mcs_tensor = torch.stack(mcs[:-1], dim=0)
+    eps = torch.finfo(mssim_tensor.dtype).eps
+    mssim_tensor = mssim_tensor.clamp(min=eps, max=1.0)
+    mcs_tensor = mcs_tensor.clamp(min=eps, max=1.0)
+    pow1 = weights[:-1].unsqueeze(1)
+    pow2 = weights[-1]
+    ms_prod = torch.prod(mcs_tensor ** pow1, dim=0) * (mssim_tensor[-1] ** pow2)
+    return ms_prod
+
+
+class MSSSIMLoss(nn.Module):
+    """Wrapper that returns the mean MS-SSIM reconstruction loss."""
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return ms_ssim_loss(input, target)
+
+
+class FocalMSSSIMLoss(nn.Module):
+    """Apply focal reweighting to per-sample MS-SSIM losses."""
+
+    def __init__(self, gamma: float = 2.0, max_weight: float = 5.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if gamma <= 0:
+            raise ValueError("gamma must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.gamma = gamma
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        scores = ms_ssim_per_sample(input, target)
+        losses = 1.0 - scores
+        norm = losses.detach().mean().clamp_min(self.eps)
+        weight = torch.pow(losses / norm, self.gamma).clamp(max=self.max_weight)
+        return (weight * losses).mean()
+
+
+def _compute_shared_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
+    with torch.no_grad():
+        l1 = F.l1_loss(pred, target).item()
+        ms = float(ms_ssim_per_sample(pred, target).mean().item())
+    return {"l1": l1, "ms_ssim": ms}
 
 
 def _gram_matrix(feat: torch.Tensor) -> torch.Tensor:
@@ -383,6 +519,16 @@ class StyleFeatureExtractor(nn.Module):
         max_idx = max(layers)
         backbone = vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES).features
         self.layers = nn.ModuleList(backbone[: max_idx + 1])
+        # Representative VGG16 feature map sizes (B, C, H, W):
+        #   0 conv1_1 -> (B, 64, 224, 224)
+        #   1 relu    -> (B, 64, 224, 224)
+        #   3 conv1_2 -> (B, 64, 224, 224)
+        #   4 relu    -> (B, 64, 224, 224)
+        #   5 pool1   -> (B, 64, 112, 112)
+        #   8 conv2_2 -> (B, 128,112,112)
+        #  15 conv3_3 -> (B, 256,56,56)
+        #  22 conv4_3 -> (B, 512,28,28)
+        #  29 conv5_3 -> (B, 512,14,14)
         self.selected_layers = set(layers)
         for param in self.layers.parameters():
             param.requires_grad_(False)
@@ -404,6 +550,14 @@ class StyleFeatureExtractor(nn.Module):
 def _resnet_encoder(weights: ResNet50_Weights) -> nn.Module:
     model = resnet50(weights=weights)
     layers = list(model.children())[:-2]  # drop avgpool + fc
+    # Spatial/channel progression:
+    #  input      -> (B, 3,   224, 224)
+    #  conv1      -> (B, 64,  112, 112)
+    #  maxpool    -> (B, 64,   56,  56)
+    #  layer1     -> (B, 256,  56,  56)
+    #  layer2     -> (B, 512,  28,  28)
+    #  layer3     -> (B, 1024, 14,  14)
+    #  layer4     -> (B, 2048,  7,   7)  <-- returned feature map
     encoder = nn.Sequential(*layers)
     encoder.eval()
     for param in encoder.parameters():
@@ -414,7 +568,14 @@ def _resnet_encoder(weights: ResNet50_Weights) -> nn.Module:
 @torch.no_grad()
 def _convnext_encoder(weights: ConvNeXt_Base_Weights) -> nn.Module:
     model = convnext_base(weights=weights)
-    encoder = model.features  # (B,1024,7,7)
+    encoder = model.features  # last block yields (B,1024,7,7)
+    # Spatial/channel progression of ConvNeXt-Base stages:
+    #  input      -> (B,   3, 224, 224)
+    #  stem       -> (B, 128, 112, 112)
+    #  stage1     -> (B, 256, 112, 112)
+    #  stage2     -> (B, 512,  56,  56)
+    #  stage3     -> (B,1024,  28,  28)
+    #  stage4     -> (B,1024,   7,   7)  <-- returned feature map
     encoder.eval()
     for param in encoder.parameters():
         param.requires_grad_(False)
@@ -445,10 +606,11 @@ class ReconstructionTrainer:
         self.optimizer = torch.optim.Adam(self.decoder.parameters(), lr=lr)
         self.loss_fn = nn.L1Loss()
         self.history: List[Tuple[int, float]] = []
+        self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
         self.best_loss: Optional[float] = None
 
-    def step(self, batch: torch.Tensor) -> Tuple[float, bool]:
+    def step(self, batch: torch.Tensor) -> Tuple[float, bool, Dict[str, float]]:
         self.decoder.train()
         with torch.no_grad():
             feats = self.encoder(batch)
@@ -460,10 +622,12 @@ class ReconstructionTrainer:
         self.global_step += 1
         loss_val = float(loss.detach().item())
         self.history.append((self.global_step, loss_val))
+        metrics = _compute_shared_metrics(recon.detach(), batch)
+        self.shared_history.append((self.global_step, metrics))
         improved = self.best_loss is None or loss_val < self.best_loss
         if improved:
             self.best_loss = loss_val
-        return loss_val, improved
+        return loss_val, improved, metrics
 
     @torch.no_grad()
     def reconstruct(self, batch: torch.Tensor) -> torch.Tensor:
@@ -481,6 +645,7 @@ class ReconstructionTrainer:
             "decoder": self.decoder.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "history": self.history,
+            "shared_history": self.shared_history,
             "global_step": self.global_step,
             "name": self.name,
             "best_loss": self.best_loss,
@@ -497,6 +662,7 @@ class ReconstructionTrainer:
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
         self.history = state.get("history", [])
+        self.shared_history = state.get("shared_history", [])
         self.global_step = state.get("global_step", 0)
         self.best_loss = state.get("best_loss")
 
@@ -522,12 +688,12 @@ class AutoencoderTrainer:
         )
         self.loss_fn = loss_fn or FocalL1Loss()
         self.history: List[Tuple[int, float]] = []
+        self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
         self.best_loss: Optional[float] = None
 
-    def step(self, batch: torch.Tensor) -> Tuple[float, bool]:
+    def step(self, batch: torch.Tensor) -> Tuple[float, bool, Dict[str, float]]:
         self.model.train()
-        self.feature_extractor.eval()
         recon = self.model(batch)
         loss = self.loss_fn(recon, batch)
         self.optimizer.zero_grad(set_to_none=True)
@@ -536,10 +702,12 @@ class AutoencoderTrainer:
         self.global_step += 1
         loss_val = float(loss.detach().item())
         self.history.append((self.global_step, loss_val))
+        metrics = _compute_shared_metrics(recon.detach(), batch)
+        self.shared_history.append((self.global_step, metrics))
         improved = self.best_loss is None or loss_val < self.best_loss
         if improved:
             self.best_loss = loss_val
-        return loss_val, improved
+        return loss_val, improved, metrics
 
     @torch.no_grad()
     def reconstruct(self, batch: torch.Tensor) -> torch.Tensor:
@@ -555,6 +723,7 @@ class AutoencoderTrainer:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "history": self.history,
+            "shared_history": self.shared_history,
             "global_step": self.global_step,
             "name": self.name,
             "best_loss": self.best_loss,
@@ -571,6 +740,7 @@ class AutoencoderTrainer:
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
         self.history = state.get("history", [])
+        self.shared_history = state.get("shared_history", [])
         self.global_step = state.get("global_step", 0)
         self.best_loss = state.get("best_loss")
 
@@ -617,10 +787,11 @@ class StyleContrastTrainer:
         self.reconstruction_loss = reconstruction_loss or nn.L1Loss()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         self.history: List[Tuple[int, float]] = []
+        self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
         self.best_loss: Optional[float] = None
 
-    def step(self, batch: torch.Tensor) -> Tuple[float, bool]:
+    def step(self, batch: torch.Tensor) -> Tuple[float, bool, Dict[str, float]]:
         self.model.train()
         recon = self.model(batch)
         pred_feats = self.feature_extractor(recon)
@@ -645,10 +816,12 @@ class StyleContrastTrainer:
         self.global_step += 1
         loss_val = float(total_loss.detach().item())
         self.history.append((self.global_step, loss_val))
+        metrics = _compute_shared_metrics(recon.detach(), batch)
+        self.shared_history.append((self.global_step, metrics))
         improved = self.best_loss is None or loss_val < self.best_loss
         if improved:
             self.best_loss = loss_val
-        return loss_val, improved
+        return loss_val, improved, metrics
 
     @torch.no_grad()
     def reconstruct(self, batch: torch.Tensor) -> torch.Tensor:
@@ -664,6 +837,7 @@ class StyleContrastTrainer:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "history": self.history,
+            "shared_history": self.shared_history,
             "global_step": self.global_step,
             "name": self.name,
             "best_loss": self.best_loss,
@@ -680,6 +854,7 @@ class StyleContrastTrainer:
             for group in self.optimizer.param_groups:
                 group["lr"] = lr
         self.history = state.get("history", [])
+        self.shared_history = state.get("shared_history", [])
         self.global_step = state.get("global_step", 0)
         self.best_loss = state.get("best_loss")
 
@@ -702,6 +877,15 @@ def save_recon_grid(
     *,
     out_path: Path,
 ) -> None:
+    name_map = {
+        "resnet50": "ResNet-50 (L1)",
+        "convnext_base": "ConvNeXt-Base (L1)",
+        "mse_autoencoder": "Autoencoder (MSE)",
+        "focal_autoencoder": "Autoencoder (Focal L1)",
+        "style_contrast_autoencoder": "Autoencoder (Style + PatchNCE)",
+        "msssim_autoencoder": "Autoencoder (MS-SSIM)",
+        "focal_msssim_autoencoder": "Autoencoder (Focal MS-SSIM)",
+    }
     rows = inputs.shape[0]
     cols = 1 + len(reconstructions)
     fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
@@ -709,7 +893,7 @@ def save_recon_grid(
         axes = axes[None, :]
     unnorm_inputs = unnormalize(inputs)
     unnorm_recons = [(name, unnormalize(tensor)) for name, tensor in reconstructions]
-    col_titles = ["Input"] + [name for name, _ in unnorm_recons]
+    col_titles = ["Input"] + [name_map.get(name, name) for name, _ in unnorm_recons]
     for col, title in enumerate(col_titles):
         axes[0, col].set_title(title)
     for row in range(rows):
@@ -752,6 +936,67 @@ def write_loss_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
                 writer.writerow([step, loss])
 
 
+def write_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for trainer in trainers:
+        history = getattr(trainer, "shared_history", [])
+        if not history:
+            continue
+        history_path = out_dir / f"{trainer.name}_shared_metrics.csv"
+        with history_path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["step", "l1", "ms_ssim"])
+            for step, metrics in history:
+                writer.writerow(
+                    [
+                        step,
+                        metrics.get("l1"),
+                        metrics.get("ms_ssim"),
+                    ]
+                )
+
+
+def plot_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
+    has_data = any(getattr(trainer, "shared_history", []) for trainer in trainers)
+    if not has_data:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Plot L1
+    plt.figure(figsize=(8, 5))
+    for trainer in trainers:
+        history = getattr(trainer, "shared_history", [])
+        if not history:
+            continue
+        steps = [item[0] for item in history]
+        l1_values = [item[1]["l1"] for item in history]
+        plt.plot(steps, l1_values, label=trainer.name)
+    plt.xlabel("Step")
+    plt.ylabel("L1 (shared metric)")
+    plt.title("Shared L1 metric")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig(out_dir / "shared_l1.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+    # Plot MS-SSIM
+    plt.figure(figsize=(8, 5))
+    for trainer in trainers:
+        history = getattr(trainer, "shared_history", [])
+        if not history:
+            continue
+        steps = [item[0] for item in history]
+        ms_values = [item[1]["ms_ssim"] for item in history]
+        plt.plot(steps, ms_values, label=trainer.name)
+    plt.xlabel("Step")
+    plt.ylabel("MS-SSIM (shared metric)")
+    plt.title("Shared MS-SSIM metric")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig(out_dir / "shared_ms_ssim.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -764,9 +1009,9 @@ class Config:
     max_trajs: Optional[int] = None
     batch_size: int = 16
     num_workers: int = 0
-    train_steps: int = 10_000
-    log_every: int = 20
-    vis_every: int = 100
+    train_steps: int = 1_000
+    log_every: int = 10
+    vis_every: int = 50
     vis_rows: int = 6
     lr: float = 1e-4
     device: Optional[str] = None
@@ -780,6 +1025,13 @@ class Config:
     reconstruction_weight: float = 0.0
     style_layers: Tuple[int, ...] = (3, 8, 15)
     patch_layer: int = 22
+    enable_resnet50: bool = True
+    enable_convnext_base: bool = True
+    enable_mse_autoencoder: bool = True
+    enable_focal_autoencoder: bool = True
+    enable_style_contrast_autoencoder: bool = True
+    enable_msssim_autoencoder: bool = True
+    enable_focal_msssim_autoencoder: bool = True
 
 
 def seed_everything(seed: int) -> None:
@@ -790,33 +1042,80 @@ def seed_everything(seed: int) -> None:
 
 
 def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
-    resnet_enc = _resnet_encoder(ResNet50_Weights.IMAGENET1K_V2)
-    convnext_enc = _convnext_encoder(ConvNeXt_Base_Weights.IMAGENET1K_V1)
-    resnet_dec = Decoder(2048)
-    convnext_dec = Decoder(1024)
-    autoencoder = LightweightAutoencoder()
-    texture_autoencoder = TextureAwareAutoencoder()
-    feature_layers = sorted(set(cfg.style_layers + (cfg.patch_layer,)))
-    feature_extractor = StyleFeatureExtractor(feature_layers)
-    return [
-        ReconstructionTrainer("resnet50", resnet_enc, resnet_dec, device=device, lr=cfg.lr),
-        ReconstructionTrainer("convnext_base", convnext_enc, convnext_dec, device=device, lr=cfg.lr),
-        AutoencoderTrainer("focal_autoencoder", autoencoder, device=device, lr=cfg.lr),
-        StyleContrastTrainer(
-            "style_contrast_autoencoder",
-            texture_autoencoder,
-            feature_extractor,
-            device=device,
-            lr=cfg.lr,
-            style_layers=cfg.style_layers,
-            patch_layer=cfg.patch_layer,
-            style_weight=cfg.style_weight,
-            contrast_weight=cfg.contrast_weight,
-            contrast_temperature=cfg.contrast_temperature,
-            contrast_patches=cfg.contrast_patches,
-            reconstruction_weight=cfg.reconstruction_weight,
-        ),
-    ]
+    trainers: List[Trainer] = []
+    if cfg.enable_resnet50:
+        resnet_enc = _resnet_encoder(ResNet50_Weights.IMAGENET1K_V2)
+        resnet_dec = Decoder(2048)
+        trainers.append(
+            ReconstructionTrainer("resnet50", resnet_enc, resnet_dec, device=device, lr=cfg.lr)
+        )
+    if cfg.enable_convnext_base:
+        convnext_enc = _convnext_encoder(ConvNeXt_Base_Weights.IMAGENET1K_V1)
+        convnext_dec = Decoder(1024)
+        trainers.append(
+            ReconstructionTrainer(
+                "convnext_base", convnext_enc, convnext_dec, device=device, lr=cfg.lr
+            )
+        )
+    if cfg.enable_mse_autoencoder:
+        mse_model = LightweightAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "mse_autoencoder",
+                mse_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.MSELoss(),
+            )
+        )
+    if cfg.enable_focal_autoencoder:
+        autoencoder = LightweightAutoencoder()
+        trainers.append(AutoencoderTrainer("focal_autoencoder", autoencoder, device=device, lr=cfg.lr))
+    if cfg.enable_style_contrast_autoencoder:
+        texture_autoencoder = TextureAwareAutoencoder()
+        feature_layers = sorted(set(cfg.style_layers + (cfg.patch_layer,)))
+        feature_extractor = StyleFeatureExtractor(feature_layers)
+        trainers.append(
+            StyleContrastTrainer(
+                "style_contrast_autoencoder",
+                texture_autoencoder,
+                feature_extractor,
+                device=device,
+                lr=cfg.lr,
+                style_layers=cfg.style_layers,
+                patch_layer=cfg.patch_layer,
+                style_weight=cfg.style_weight,
+                contrast_weight=cfg.contrast_weight,
+                contrast_temperature=cfg.contrast_temperature,
+                contrast_patches=cfg.contrast_patches,
+                reconstruction_weight=cfg.reconstruction_weight,
+            )
+        )
+    if cfg.enable_msssim_autoencoder:
+        msssim_model = MSSSIMAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "msssim_autoencoder",
+                msssim_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=MSSSIMLoss(),
+            )
+        )
+    if cfg.enable_focal_msssim_autoencoder:
+        focal_msssim_model = FocalMSSSIMAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "focal_msssim_autoencoder",
+                focal_msssim_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=FocalMSSSIMLoss(),
+            )
+        )
+    if not trainers:
+        raise ValueError("No trainers enabled. Enable at least one model to proceed.")
+    return trainers
 
 
 def main() -> None:
@@ -914,17 +1213,26 @@ def main() -> None:
                 batch, _ = next(data_iterator)
             batch = batch.to(device, non_blocking=True)
             losses: dict[str, float] = {}
+            shared_metrics_step: dict[str, Dict[str, float]] = {}
             for trainer in trainers:
-                loss, improved = trainer.step(batch)
+                loss, improved, shared = trainer.step(batch)
                 losses[trainer.name] = loss
+                shared_metrics_step[trainer.name] = shared
                 trainer.save_checkpoint(checkpoint_paths[trainer.name]["last"])
                 if improved:
                     trainer.save_checkpoint(checkpoint_paths[trainer.name]["best"])
             if cfg.log_every > 0 and current_step % cfg.log_every == 0:
                 loss_str = ", ".join(f"{name}: {losses[name]:.4f}" for name in losses)
-                logger.info("[step %05d] %s", current_step, loss_str)
+                metric_str = ", ".join(
+                    f"{name}: L1 {shared_metrics_step[name]['l1']:.4f}, "
+                    f"MS {shared_metrics_step[name]['ms_ssim']:.4f}"
+                    for name in shared_metrics_step
+                )
+                logger.info("[step %05d] %s | Shared %s", current_step, loss_str, metric_str)
                 plot_loss_histories(trainers, metrics_dir / "decoder_losses.png")
                 write_loss_histories(trainers, metrics_dir)
+                write_shared_metric_histories(trainers, metrics_dir)
+                plot_shared_metric_histories(trainers, metrics_dir / "shared_metrics.png")
             if current_step % cfg.vis_every == 0 or current_step == target_step:
                 step_tag = f"step_{current_step:05d}"
                 fixed_recons = [
@@ -969,6 +1277,8 @@ def main() -> None:
 
     plot_loss_histories(trainers, metrics_dir / "decoder_losses.png")
     write_loss_histories(trainers, metrics_dir)
+    write_shared_metric_histories(trainers, metrics_dir)
+    plot_shared_metric_histories(trainers, metrics_dir / "shared_metrics.png")
     for trainer in trainers:
         paths = checkpoint_paths[trainer.name]
         trainer.save_checkpoint(paths["last"])
