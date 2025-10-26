@@ -63,6 +63,7 @@ class TrainConfig:
     device: str = "auto"
     lambda_recon: float = 1.0
     lambda_latent: float = 1.0
+    lambda_pred: float = 1.0
     vis_every: int = 50
     checkpoint_every: int = 50
     resume: bool = False
@@ -278,54 +279,70 @@ class ActionEncoder(nn.Module):
         return self.net(actions)
 
 
-class TemporalAttentionAggregator(nn.Module):
-    def __init__(self, latent_dim: int, action_embed_dim: int, num_heads: int = 4) -> None:
+class TemporalSpatialAggregator(nn.Module):
+    def __init__(self, latent_dim: int, action_embed_dim: int) -> None:
         super().__init__()
-        self.token_proj = nn.Linear(latent_dim + action_embed_dim, latent_dim)
-        self.query_proj = nn.Linear(latent_dim, latent_dim)
-        self.key_proj = nn.Linear(latent_dim, latent_dim)
-        self.value_proj = nn.Linear(latent_dim, latent_dim)
-        self.attn = nn.MultiheadAttention(latent_dim, num_heads=num_heads, batch_first=True)
-        self.context_token = nn.Parameter(torch.zeros(1, 1, latent_dim))
-        self.post = nn.Sequential(
-            nn.LayerNorm(latent_dim),
-            nn.Linear(latent_dim, latent_dim),
+        if action_embed_dim != latent_dim:
+            raise ValueError("Action embedding dimension must match latent dimension.")
+        groups = 8 if latent_dim % 8 == 0 else 1
+        self.latent_proj = nn.Sequential(
+            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_dim),
             nn.SiLU(inplace=True),
-            nn.Linear(latent_dim, latent_dim),
+            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_dim),
+            nn.SiLU(inplace=True),
+        )
+        self.weight_net = nn.Sequential(
+            nn.Linear(latent_dim * 2, latent_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(latent_dim, 1),
         )
 
     def forward(
         self,
-        latent_vectors: torch.Tensor,
+        latent_maps: torch.Tensor,
         action_embeddings: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        tokens = torch.cat([latent_vectors, action_embeddings], dim=-1)
-        tokens = self.token_proj(tokens)
-        query = self.context_token.expand(tokens.shape[0], -1, -1)
-        q = self.query_proj(query)
-        k = self.key_proj(tokens)
-        v = self.value_proj(tokens)
-        context, weights = self.attn(q, k, v)
-        fused = self.post(context.squeeze(1))
-        return fused, weights
+        if latent_maps.dim() != 5:
+            raise ValueError(f"Expected 5D latent tensor, got shape {tuple(latent_maps.shape)}")
+        batch, steps, channels, height, width = latent_maps.shape
+        if action_embeddings.shape[:2] != (batch, steps):
+            raise ValueError(
+                f"Action embeddings shape {tuple(action_embeddings.shape)} does not match latent sequence {(batch, steps)}"
+            )
+        if action_embeddings.shape[-1] != channels:
+            raise ValueError(
+                f"Expected action embedding dimension {channels}, got {action_embeddings.shape[-1]}"
+            )
+
+        flat = latent_maps.reshape(batch * steps, channels, height, width)
+        processed = self.latent_proj(flat).reshape(batch, steps, channels, height, width)
+        step_features = processed.mean(dim=(3, 4))
+        weight_inputs = torch.cat([step_features, action_embeddings], dim=-1)
+        logits = self.weight_net(weight_inputs).squeeze(-1)
+        attn_weights = torch.softmax(logits, dim=1)
+        fused = (processed * attn_weights.reshape(batch, steps, 1, 1, 1)).sum(dim=1)
+        return fused, attn_weights
 
 
 class NextLatentPredictor(nn.Module):
-    def __init__(self, latent_dim: int, latent_hw: Tuple[int, int]) -> None:
+    def __init__(self, latent_dim: int) -> None:
         super().__init__()
-        h, w = latent_hw
-        hidden = latent_dim * 2
-        self.latent_dim = latent_dim
-        self.latent_hw = latent_hw
+        hidden_channels = latent_dim * 2
+        hidden_groups = 8 if hidden_channels % 8 == 0 else 1
+        output_groups = 8 if latent_dim % 8 == 0 else 1
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, hidden),
+            nn.Conv2d(latent_dim, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(hidden_groups, hidden_channels),
             nn.SiLU(inplace=True),
-            nn.Linear(hidden, latent_dim * h * w),
+            nn.Conv2d(hidden_channels, latent_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(output_groups, latent_dim),
         )
 
-    def forward(self, context: torch.Tensor) -> torch.Tensor:
-        flat = self.net(context)
-        return flat.view(context.shape[0], self.latent_dim, *self.latent_hw)
+    def forward(self, context_map: torch.Tensor) -> torch.Tensor:
+        refined = self.net(context_map)
+        return context_map + refined
 
 
 @dataclass
@@ -345,33 +362,27 @@ class MarioSequencePredictor(nn.Module):
         base_channels: int = 48,
         latent_channels: int = 128,
         image_hw: Tuple[int, int] = (224, 224),
-        num_heads: int = 4,
     ) -> None:
         super().__init__()
         self.image_hw = image_hw
         self.encoder = FrameEncoder(base_channels=base_channels, latent_channels=latent_channels)
         self.decoder = LatentDecoder(latent_channels=latent_channels, base_channels=base_channels)
         self.action_encoder = ActionEncoder(action_dim, embed_dim=latent_channels)
-        latent_hw = (image_hw[0] // 8, image_hw[1] // 8)
-        self.aggregator = TemporalAttentionAggregator(
+        self.aggregator = TemporalSpatialAggregator(
             latent_dim=latent_channels,
             action_embed_dim=latent_channels,
-            num_heads=num_heads,
         )
-        self.predictor = NextLatentPredictor(latent_dim=latent_channels, latent_hw=latent_hw)
+        self.predictor = NextLatentPredictor(latent_dim=latent_channels)
         self.recon_loss_fn = nn.SmoothL1Loss()
         self.latent_loss_fn = nn.SmoothL1Loss()
 
-    def encode_frames(self, frames: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
         batch, steps, _, _, _ = frames.shape
-        spatial, pooled = [], []
+        spatial = []
         for t in range(steps):
-            latent, vec = self.encoder(frames[:, t])
+            latent, _ = self.encoder(frames[:, t])
             spatial.append(latent)
-            pooled.append(vec)
-        spatial_tensor = torch.stack(spatial, dim=1)
-        pooled_tensor = torch.stack(pooled, dim=1)
-        return spatial_tensor, pooled_tensor
+        return torch.stack(spatial, dim=1)
 
     def forward(
         self,
@@ -381,17 +392,17 @@ class MarioSequencePredictor(nn.Module):
         next_frame: Optional[torch.Tensor] = None,
         decode_recon: bool = True,
     ) -> ModelOutputs:
-        latent_maps, latent_vecs = self.encode_frames(frames)
+        latent_maps = self.encode_frames(frames)
         action_embeddings = self.action_encoder(actions)
-        context_vec, attn_weights = self.aggregator(latent_vecs, action_embeddings)
-        predicted_latent = self.predictor(context_vec)
+        context_map, attn_weights = self.aggregator(latent_maps, action_embeddings)
+        predicted_latent = self.predictor(context_map)
         predicted_frame = self.decoder(predicted_latent, target_hw=self.image_hw)
         recon = None
         if decode_recon:
             b, steps, c, h, w = latent_maps.shape
-            flat = latent_maps.view(b * steps, c, h, w)
+            flat = latent_maps.reshape(b * steps, c, h, w)
             decoded = self.decoder(flat, target_hw=self.image_hw)
-            recon = decoded.view(b, steps, 3, *self.image_hw)
+            recon = decoded.reshape(b, steps, 3, *self.image_hw)
         encoded_next_latent = None
         if next_frame is not None:
             encoded_next_latent, _ = self.encoder(next_frame)
@@ -411,6 +422,7 @@ class MarioSequencePredictor(nn.Module):
         target_frame: torch.Tensor,
         lambda_recon: float = 1.0,
         lambda_latent: float = 1.0,
+        lambda_pred: float = 1.0,
     ) -> Dict[str, torch.Tensor]:
         if outputs.input_reconstructions is None:
             raise ValueError("Reconstruction logits not computed.")
@@ -420,15 +432,21 @@ class MarioSequencePredictor(nn.Module):
         latent_loss = self.latent_loss_fn(
             outputs.predicted_latent, outputs.encoded_next_latent.detach()
         )
-        total = lambda_recon * recon_loss + lambda_latent * latent_loss
+        pred_loss = self.recon_loss_fn(outputs.predicted_frame, target_frame.contiguous())
+        total = (
+            lambda_recon * recon_loss
+            + lambda_latent * latent_loss
+            + lambda_pred * pred_loss
+        )
         return {
             "total": total,
             "recon": recon_loss,
             "latent": latent_loss,
+            "pred": pred_loss,
         }
 
 
-LOSS_COLUMNS = ["step", "total", "recon", "latent"]
+LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred"]
 
 
 def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
@@ -447,7 +465,7 @@ def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
     steps = [entry["step"] for entry in history]
 
     plt.figure(figsize=(8, 5))
-    for label in ("total", "recon", "latent"):
+    for label in ("total", "recon", "latent", "pred"):
         plt.plot(steps, [entry[label] for entry in history], label=label)
     plt.xlabel("Step")
     plt.ylabel("Loss")
@@ -740,7 +758,7 @@ def train(config: TrainConfig) -> None:
     )
     for epoch in range(start_epoch, config.epochs):
         model.train()
-        running = {"total": 0.0, "recon": 0.0, "latent": 0.0}
+        running = {"total": 0.0, "recon": 0.0, "latent": 0.0, "pred": 0.0}
         for batch_idx, batch in enumerate(train_loader):
             inputs = batch["inputs"].to(device)
             actions = batch["actions"].to(device)
@@ -755,6 +773,7 @@ def train(config: TrainConfig) -> None:
                     target_frame=target_frame,
                     lambda_recon=config.lambda_recon,
                     lambda_latent=config.lambda_latent,
+                    lambda_pred=config.lambda_pred,
                 )
             scaler.scale(losses["total"]).backward()
             scaler.step(optimizer)
@@ -763,16 +782,18 @@ def train(config: TrainConfig) -> None:
             running["total"] += losses["total"].item()
             running["recon"] += losses["recon"].item()
             running["latent"] += losses["latent"].item()
+            running["pred"] += losses["pred"].item()
 
             current_step = global_step + 1
             if config.log_every > 0 and current_step % config.log_every == 0:
                 logger.info(
-                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f",
+                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f",
                     epoch,
                     current_step,
                     losses["total"].item(),
                     losses["recon"].item(),
                     losses["latent"].item(),
+                    losses["pred"].item(),
                 )
             loss_history.append(
                 {
@@ -780,6 +801,7 @@ def train(config: TrainConfig) -> None:
                     "total": float(losses["total"].item()),
                     "recon": float(losses["recon"].item()),
                     "latent": float(losses["latent"].item()),
+                    "pred": float(losses["pred"].item()),
                 }
             )
             if config.checkpoint_every > 0 and current_step % config.checkpoint_every == 0:
@@ -805,11 +827,12 @@ def train(config: TrainConfig) -> None:
         steps_in_epoch = len(train_loader)
         avg_total = running["total"] / steps_in_epoch
         logger.info(
-            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f",
+            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f",
             epoch,
             avg_total,
             running["recon"] / steps_in_epoch,
             running["latent"] / steps_in_epoch,
+            running["pred"] / steps_in_epoch,
         )
 
         if avg_total < best_loss:
