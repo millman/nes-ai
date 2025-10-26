@@ -93,7 +93,7 @@ class MarioSequenceDataset(Dataset):
         self.entries: List[Tuple[List[Path], np.ndarray, int]] = []
         self.action_dim: Optional[int] = None
         traj_map = list_trajectories(self.root_dir)
-        traj_items = sorted(traj_map.items())
+        traj_items = list(traj_map.items())
         if max_trajs is not None:
             traj_items = traj_items[:max_trajs]
         for traj_name, frames in traj_items:
@@ -164,6 +164,7 @@ class MarioSequenceDataset(Dataset):
         future_labels = [
             short_traj_state_label(str(frame_paths[start + 4 + i])) for i in range(4)
         ]
+
         return {
             "inputs": torch.stack(inputs, dim=0),
             "future_frames": torch.stack(futures, dim=0),
@@ -568,8 +569,31 @@ def render_visualization_grid(
     )
     input_labels_batch = batch.get("input_labels")
     future_labels_batch = batch.get("future_labels")
-    input_labels = input_labels_batch[0] if input_labels_batch is not None else None
-    future_labels = future_labels_batch[0] if future_labels_batch is not None else None
+
+    def _labels_for_sample(label_batch: Optional[List[List[str]]], sample_idx: int) -> Optional[List[str]]:
+        """Return labels for the given sample.
+
+        `label_batch` is expected to be a list (length M) of per-frame label sequences,
+        each sequence containing N string labels; after PyTorch collation this corresponds
+        to shape M×N (e.g., `[('traj_2/state_4', ...), ('traj_2/state_5', ...), ...]`).
+        We select the sample at `sample_idx` by reading the same position across each
+        sequence. Assertions guard against unexpected schema drift.
+        """
+
+        if label_batch is None:
+            return None
+        assert isinstance(label_batch, (list, tuple)) and label_batch, "Expected non-empty label batch"
+        first = label_batch[0]
+        assert isinstance(first, (list, tuple)), "Label batch should contain per-frame sequences"
+        sequence_length = len(first)
+        for seq in label_batch:
+            assert isinstance(seq, (list, tuple)) and len(seq) == sequence_length, "Label sequences misaligned"
+        if sample_idx >= sequence_length:
+            return None
+        return [str(seq[sample_idx]) for seq in label_batch]
+
+    input_labels = _labels_for_sample(input_labels_batch, 0)
+    future_labels = _labels_for_sample(future_labels_batch, 0)
     action_template = torch.zeros_like(actions[:, :1])
     with torch.no_grad():
         outputs = model(inputs, actions, next_frame=future_frames[:, 0])
