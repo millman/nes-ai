@@ -13,11 +13,13 @@ best/last/final checkpoints, scalar loss plotting, and visual grid summaries.
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import math
 import random
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -26,11 +28,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset, random_split
 import tyro
+from torchvision.models import ResNet18_Weights
+from torchvision.transforms import Normalize
 
-from predict_mario_ms_ssim import default_transform, pick_device, unnormalize
+from predict_mario_ms_ssim import pick_device, unnormalize
+from recon.data import list_trajectories, load_frame_as_tensor, short_traj_state_label
 from super_mario_env import _describe_controller_vector
 
 
@@ -61,7 +65,7 @@ class TrainConfig:
     lambda_latent: float = 1.0
     vis_every: int = 50
     checkpoint_every: int = 50
-    resume: bool = True
+    resume: bool = False
     max_trajs: Optional[int] = None
     log_every: int = 50
     mixed_precision: bool = False
@@ -79,25 +83,27 @@ class MarioSequenceDataset(Dataset):
         self,
         root_dir: Path,
         *,
-        transform=default_transform(),
+        image_hw: Tuple[int, int],
+        normalize: Optional[Normalize] = None,
         max_trajs: Optional[int] = None,
     ) -> None:
         self.root_dir = Path(root_dir)
-        self.transform = transform
+        self.image_hw = image_hw
+        self.normalize = normalize
         self.entries: List[Tuple[List[Path], np.ndarray, int]] = []
         self.action_dim: Optional[int] = None
-        self.image_hw: Optional[Tuple[int, int]] = None
-        traj_dirs = list(sorted(self.root_dir.glob("traj_*")))
+        traj_map = list_trajectories(self.root_dir)
+        traj_items = sorted(traj_map.items())
         if max_trajs is not None:
-            traj_dirs = traj_dirs[:max_trajs]
-        for traj_dir in traj_dirs:
-            states_dir = traj_dir / "states"
-            actions_path = traj_dir / "actions.npz"
-            if not states_dir.is_dir() or not actions_path.is_file():
-                continue
-            frames = sorted(states_dir.glob("*.png"))
+            traj_items = traj_items[:max_trajs]
+        for traj_name, frames in traj_items:
+            actions_path = (self.root_dir / traj_name) / "actions.npz"
+
+            assert actions_path.is_file(), f"Not a file: {actions_path}"
+
             if len(frames) < 8:
                 continue
+
             with np.load(actions_path) as data:
                 if "actions" in data.files:
                     actions = data["actions"]
@@ -111,14 +117,14 @@ class MarioSequenceDataset(Dataset):
                 actions = actions[1:]
             if actions.shape[0] != len(frames):
                 raise ValueError(
-                    f"Action count {actions.shape[0]} mismatch with frames {len(frames)} in {traj_dir}"
+                    f"Action count {actions.shape[0]} mismatch with frames {len(frames)} in {actions_path.parent}"
                 )
             actions = actions.astype(np.float32)
             if self.action_dim is None:
                 self.action_dim = actions.shape[1]
             elif actions.shape[1] != self.action_dim:
                 raise ValueError(
-                    f"Inconsistent action dimensions: expected {self.action_dim}, got {actions.shape[1]} in {traj_dir}"
+                    f"Inconsistent action dimensions: expected {self.action_dim}, got {actions.shape[1]} in {actions_path.parent}"
                 )
             for start in range(len(frames) - 7):
                 self.entries.append((frames, actions, start))
@@ -128,24 +134,43 @@ class MarioSequenceDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entries)
 
-    def _load_frame(self, path: Path) -> torch.Tensor:
-        with Image.open(path).convert("RGB") as img:
-            tensor = self.transform(img)
-        if self.image_hw is None:
-            self.image_hw = tensor.shape[-2:]
-        return tensor
-
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         frame_paths, actions, start = self.entries[idx]
-        inputs = [self._load_frame(frame_paths[start + i]) for i in range(4)]
-        futures = [self._load_frame(frame_paths[start + 4 + i]) for i in range(4)]
+        inputs = []
+        futures = []
+        for i in range(4):
+            frame = load_frame_as_tensor(
+                frame_paths[start + i],
+                size=self.image_hw,
+                normalize=None,
+            )
+            if self.normalize is not None:
+                frame = self.normalize(frame)
+            inputs.append(frame)
+        for i in range(4):
+            frame = load_frame_as_tensor(
+                frame_paths[start + 4 + i],
+                size=self.image_hw,
+                normalize=None,
+            )
+            if self.normalize is not None:
+                frame = self.normalize(frame)
+            futures.append(frame)
         input_actions = actions[start : start + 4]
         future_actions = actions[start + 4 : start + 8]
+        input_labels = [
+            short_traj_state_label(str(frame_paths[start + i])) for i in range(4)
+        ]
+        future_labels = [
+            short_traj_state_label(str(frame_paths[start + 4 + i])) for i in range(4)
+        ]
         return {
             "inputs": torch.stack(inputs, dim=0),
             "future_frames": torch.stack(futures, dim=0),
             "actions": torch.from_numpy(input_actions),
             "future_actions": torch.from_numpy(future_actions),
+            "input_labels": input_labels,
+            "future_labels": future_labels,
         }
 
 
@@ -402,15 +427,70 @@ class MarioSequencePredictor(nn.Module):
         }
 
 
+LOSS_COLUMNS = ["step", "total", "recon", "latent"]
+
+
+def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(LOSS_COLUMNS)
+        for entry in history:
+            writer.writerow([entry[col] for col in LOSS_COLUMNS])
+
+
+def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
+    if not history:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    steps = [entry["step"] for entry in history]
+
+    plt.figure(figsize=(8, 5))
+    for label in ("total", "recon", "latent"):
+        plt.plot(steps, [entry[label] for entry in history], label=label)
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    plt.yscale("log")
+    plt.title("Loss Curves")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "loss_curves.png", dpi=200)
+    plt.close()
+
+
 def _ensure_dirs(config: TrainConfig) -> Dict[str, Path]:
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_dir = config.output_dir / "checkpoints"
+    run_dir: Path
+    if config.resume:
+        existing_runs = sorted(
+            [
+                p
+                for p in config.output_dir.iterdir()
+                if p.is_dir() and p.name[0].isdigit()
+            ],
+            reverse=True,
+        )
+        if existing_runs:
+            run_dir = existing_runs[0]
+        else:
+            run_dir = config.output_dir / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            run_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        run_dir = config.output_dir / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
-    plots_dir = config.output_dir / "plots"
+    plots_dir = run_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
-    vis_dir = config.output_dir / "visualizations"
+    vis_dir = run_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
-    return {"checkpoints": ckpt_dir, "plots": plots_dir, "visualizations": vis_dir}
+    return {
+        "run": run_dir,
+        "checkpoints": ckpt_dir,
+        "plots": plots_dir,
+        "visualizations": vis_dir,
+    }
 
 
 def save_checkpoint(
@@ -450,8 +530,17 @@ def load_checkpoint(
 
 
 def _tensor_to_image(img: torch.Tensor) -> np.ndarray:
+    """Convert a (C, H, W) tensor to (H, W, C) numpy array for matplotlib."""
+    if img.dim() != 3:
+        raise ValueError(f"Expected (C,H,W) tensor, got shape {tuple(img.shape)}")
+    # img: (C, H, W)
     with torch.no_grad():
         data = unnormalize(img.cpu()).clamp(0.0, 1.0)
+    # unnormalize returns (1, C, H, W), squeeze the batch dimension
+    assert data.dim() == 4, f"Expected dim size 4, got {data.dim()}"
+    assert data.shape[0] == 1, f"Expected batch size 1, got {data.shape[0]}"
+    data = data.squeeze(0)  # (C, H, W)
+    # data: (C, H, W) -> (H, W, C)
     return data.permute(1, 2, 0).numpy()
 
 
@@ -467,12 +556,20 @@ def render_visualization_grid(
     output_path: Path,
 ) -> None:
     model.eval()
-    raw_input_actions = batch["actions"][0].cpu().numpy()
-    raw_future_actions = batch.get("future_actions")
-    raw_future_actions = raw_future_actions[0].cpu().numpy() if raw_future_actions is not None else None
     inputs = batch["inputs"][0].unsqueeze(0).to(device)
     actions = batch["actions"][0].unsqueeze(0).to(device)
     future_frames = batch["future_frames"][0].unsqueeze(0).to(device)
+    raw_input_actions = batch["actions"][0].cpu().numpy()
+    raw_future_actions_tensor = batch.get("future_actions")
+    raw_future_actions = (
+        raw_future_actions_tensor[0].cpu().numpy()
+        if raw_future_actions_tensor is not None
+        else None
+    )
+    input_labels_batch = batch.get("input_labels")
+    future_labels_batch = batch.get("future_labels")
+    input_labels = input_labels_batch[0] if input_labels_batch is not None else None
+    future_labels = future_labels_batch[0] if future_labels_batch is not None else None
     action_template = torch.zeros_like(actions[:, :1])
     with torch.no_grad():
         outputs = model(inputs, actions, next_frame=future_frames[:, 0])
@@ -492,12 +589,22 @@ def render_visualization_grid(
 
     for i in range(4):
         axes[0, i].imshow(_tensor_to_image(inputs[0, i]))
+        labels = []
+        if input_labels is not None and i < len(input_labels):
+            labels.append(str(input_labels[i]))
         if i < raw_input_actions.shape[0]:
-            axes[0, i].set_title(_action_desc(raw_input_actions[i]), fontsize=8)
+            labels.append(_action_desc(raw_input_actions[i]))
+        if labels:
+            axes[0, i].set_title("\n".join(labels), fontsize=8)
     for i in range(4):
         axes[0, 4 + i].imshow(_tensor_to_image(future_frames[0, i]))
+        labels = []
+        if future_labels is not None and i < len(future_labels):
+            labels.append(str(future_labels[i]))
         if raw_future_actions is not None and i < raw_future_actions.shape[0]:
-            axes[0, 4 + i].set_title(_action_desc(raw_future_actions[i]), fontsize=8)
+            labels.append(_action_desc(raw_future_actions[i]))
+        if labels:
+            axes[0, 4 + i].set_title("\n".join(labels), fontsize=8)
 
     # Row 2: reconstructed inputs
     if recon is not None:
@@ -527,32 +634,16 @@ def render_visualization_grid(
     plt.close(fig)
 
 
-def plot_losses(history: List[Dict[str, float]], path: Path) -> None:
-    if not history:
-        return
-    steps = [entry["step"] for entry in history]
-    totals = [entry["total"] for entry in history]
-    recon = [entry["recon"] for entry in history]
-    latent = [entry["latent"] for entry in history]
-    plt.figure(figsize=(8, 5))
-    plt.plot(steps, totals, label="total")
-    plt.plot(steps, recon, label="recon")
-    plt.plot(steps, latent, label="latent")
-    plt.xlabel("Step")
-    plt.ylabel("Loss")
-    plt.title("Training Loss")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=200)
-    plt.close()
-
-
 def prepare_dataloaders(config: TrainConfig) -> Tuple[DataLoader, Optional[DataLoader], MarioSequenceDataset]:
-    dataset = MarioSequenceDataset(config.data_root, max_trajs=config.max_trajs)
-    if dataset.image_hw is None:
-        sample = dataset[0]
-        dataset.image_hw = tuple(sample["inputs"].shape[-2:])
+    mean = (0.485, 0.456, 0.406)
+    std = (0.229, 0.224, 0.225)
+    normalize = Normalize(mean=mean, std=std)
+    dataset = MarioSequenceDataset(
+        config.data_root,
+        image_hw=config.image_hw,
+        normalize=normalize,
+        max_trajs=config.max_trajs,
+    )
     generator = torch.Generator().manual_seed(config.seed)
     if config.val_fraction <= 0.0 or len(dataset) < 10:
         train_dataset = dataset
@@ -585,6 +676,8 @@ def prepare_dataloaders(config: TrainConfig) -> Tuple[DataLoader, Optional[DataL
 def train(config: TrainConfig) -> None:
     set_seed(config.seed)
     dirs = _ensure_dirs(config)
+    run_dir = dirs["run"]
+    logger.info("Writing outputs to %s", run_dir)
     train_loader, val_loader, full_dataset = prepare_dataloaders(config)
     device_pref = None
     if config.device is not None and str(config.device).lower() != "auto":
@@ -660,9 +753,9 @@ def train(config: TrainConfig) -> None:
             loss_history.append(
                 {
                     "step": current_step,
-                    "total": losses["total"].item(),
-                    "recon": losses["recon"].item(),
-                    "latent": losses["latent"].item(),
+                    "total": float(losses["total"].item()),
+                    "recon": float(losses["recon"].item()),
+                    "latent": float(losses["latent"].item()),
                 }
             )
             if config.checkpoint_every > 0 and current_step % config.checkpoint_every == 0:
@@ -676,6 +769,9 @@ def train(config: TrainConfig) -> None:
                     loss_history,
                 )
             if config.vis_every > 0 and current_step % config.vis_every == 0:
+                plot_loss_curves(loss_history, dirs["plots"])
+                write_loss_csv(loss_history, dirs["plots"] / "loss_history.csv")
+
                 vis_batch = batch
                 vis_path = dirs["visualizations"] / f"step_{current_step:06d}.png"
                 render_visualization_grid(model, vis_batch, device, vis_path)
@@ -724,11 +820,13 @@ def train(config: TrainConfig) -> None:
         best_loss,
         loss_history,
     )
-    plot_losses(loss_history, dirs["plots"] / "loss_curve.png")
+    plot_loss_curves(loss_history, dirs["plots"])
+    write_loss_csv(loss_history, dirs["plots"] / "loss_history.csv")
     config_payload = {
         key: str(value) if isinstance(value, Path) else value for key, value in vars(config).items()
     }
-    with (config.output_dir / "config.json").open("w") as fp:
+    config_payload["run_dir"] = str(run_dir)
+    with (run_dir / "config.json").open("w") as fp:
         json.dump(config_payload, fp, indent=2)
     logger.info("Training complete.")
 
