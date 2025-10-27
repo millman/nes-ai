@@ -64,6 +64,7 @@ class TrainConfig:
     lambda_recon: float = 1.0
     lambda_latent: float = 1.0
     lambda_pred: float = 1.0
+    lambda_residual: float = 1.0
     vis_every: int = 50
     checkpoint_every: int = 50
     resume: bool = False
@@ -326,32 +327,83 @@ class TemporalSpatialAggregator(nn.Module):
         return fused, attn_weights
 
 
-class NextLatentPredictor(nn.Module):
+class ResidualLatentPredictor(nn.Module):
     def __init__(self, latent_dim: int) -> None:
         super().__init__()
+        self.latent_dim = latent_dim
         hidden_channels = latent_dim * 2
         hidden_groups = 8 if hidden_channels % 8 == 0 else 1
         output_groups = 8 if latent_dim % 8 == 0 else 1
         self.net = nn.Sequential(
-            nn.Conv2d(latent_dim, hidden_channels, kernel_size=3, padding=1),
+            nn.Conv2d(latent_dim * 2, hidden_channels, kernel_size=3, padding=1),
             nn.GroupNorm(hidden_groups, hidden_channels),
             nn.SiLU(inplace=True),
             nn.Conv2d(hidden_channels, latent_dim, kernel_size=3, padding=1),
             nn.GroupNorm(output_groups, latent_dim),
         )
 
-    def forward(self, context_map: torch.Tensor) -> torch.Tensor:
-        refined = self.net(context_map)
-        return context_map + refined
+    def forward(
+        self,
+        initial_latent: torch.Tensor,
+        future_action_embeddings: Optional[torch.Tensor],
+        *,
+        steps: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if initial_latent.dim() != 4:
+            raise ValueError(
+                f"Expected initial latent of shape (B,C,H,W), got {tuple(initial_latent.shape)}"
+            )
+        batch, channels, height, width = initial_latent.shape
+        if channels != self.latent_dim:
+            raise ValueError(
+                f"Initial latent channel count {channels} does not match configured {self.latent_dim}"
+            )
+        if future_action_embeddings is not None:
+            if future_action_embeddings.dim() != 3:
+                raise ValueError(
+                    f"Expected future action embeddings (B,T,C), got {tuple(future_action_embeddings.shape)}"
+                )
+            if future_action_embeddings.shape[0] != batch:
+                raise ValueError(
+                    "Future action embedding batch dimension mismatch."
+                )
+            if future_action_embeddings.shape[2] != self.latent_dim:
+                raise ValueError(
+                    "Future action embedding dimension must equal latent dimension."
+                )
+            rollout_steps = future_action_embeddings.shape[1]
+            action_embeddings = future_action_embeddings
+        else:
+            if steps is None:
+                raise ValueError("Number of rollout steps must be specified when action embeddings are None.")
+            rollout_steps = steps
+            action_embeddings = initial_latent.new_zeros(batch, rollout_steps, self.latent_dim)
+
+        if rollout_steps <= 0:
+            raise ValueError("Rollout steps must be positive.")
+
+        latents: List[torch.Tensor] = []
+        residuals: List[torch.Tensor] = []
+        current = initial_latent
+        for t in range(rollout_steps):
+            action_map = action_embeddings[:, t].unsqueeze(-1).unsqueeze(-1).expand(-1, -1, height, width)
+            residual = self.net(torch.cat([current, action_map], dim=1))
+            current = current + residual
+            latents.append(current)
+            residuals.append(residual)
+
+        return torch.stack(latents, dim=1), torch.stack(residuals, dim=1)
 
 
 @dataclass
 class ModelOutputs:
-    predicted_frame: torch.Tensor
-    predicted_latent: torch.Tensor
-    encoded_next_latent: Optional[torch.Tensor]
-    attention_weights: Optional[torch.Tensor]
+    predicted_frames: torch.Tensor
+    predicted_latents: torch.Tensor
+    predicted_residuals: torch.Tensor
+    context_latent: torch.Tensor
     input_reconstructions: Optional[torch.Tensor]
+    encoded_future_latents: Optional[torch.Tensor]
+    attention_weights: Optional[torch.Tensor]
 
 
 class MarioSequencePredictor(nn.Module):
@@ -372,9 +424,10 @@ class MarioSequencePredictor(nn.Module):
             latent_dim=latent_channels,
             action_embed_dim=latent_channels,
         )
-        self.predictor = NextLatentPredictor(latent_dim=latent_channels)
+        self.predictor = ResidualLatentPredictor(latent_dim=latent_channels)
         self.recon_loss_fn = nn.SmoothL1Loss()
         self.latent_loss_fn = nn.SmoothL1Loss()
+        self.residual_loss_fn = nn.MSELoss()
 
     def encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
         batch, steps, _, _, _ = frames.shape
@@ -389,29 +442,50 @@ class MarioSequencePredictor(nn.Module):
         frames: torch.Tensor,
         actions: torch.Tensor,
         *,
-        next_frame: Optional[torch.Tensor] = None,
+        future_frames: Optional[torch.Tensor] = None,
+        future_actions: Optional[torch.Tensor] = None,
         decode_recon: bool = True,
     ) -> ModelOutputs:
         latent_maps = self.encode_frames(frames)
         action_embeddings = self.action_encoder(actions)
         context_map, attn_weights = self.aggregator(latent_maps, action_embeddings)
-        predicted_latent = self.predictor(context_map)
-        predicted_frame = self.decoder(predicted_latent, target_hw=self.image_hw)
+        rollout_steps: Optional[int] = None
+        future_action_embeddings = None
+        if future_actions is not None:
+            future_action_embeddings = self.action_encoder(future_actions)
+            rollout_steps = future_action_embeddings.shape[1]
+        if rollout_steps is None and future_frames is not None:
+            rollout_steps = future_frames.shape[1]
+        if rollout_steps is None:
+            rollout_steps = frames.shape[1]
+        predicted_latents, predicted_residuals = self.predictor(
+            context_map,
+            future_action_embeddings,
+            steps=rollout_steps,
+        )
+        batch, rollout_steps, channels, height, width = predicted_latents.shape
+        decoded = self.decoder(
+            predicted_latents.reshape(batch * rollout_steps, channels, height, width),
+            target_hw=self.image_hw,
+        )
+        predicted_frames = decoded.reshape(batch, rollout_steps, 3, *self.image_hw)
         recon = None
         if decode_recon:
-            b, steps, c, h, w = latent_maps.shape
-            flat = latent_maps.reshape(b * steps, c, h, w)
+            b, input_steps, c, h, w = latent_maps.shape
+            flat = latent_maps.reshape(b * input_steps, c, h, w)
             decoded = self.decoder(flat, target_hw=self.image_hw)
-            recon = decoded.reshape(b, steps, 3, *self.image_hw)
-        encoded_next_latent = None
-        if next_frame is not None:
-            encoded_next_latent, _ = self.encoder(next_frame)
+            recon = decoded.reshape(b, input_steps, 3, *self.image_hw)
+        encoded_future_latents = None
+        if future_frames is not None:
+            encoded_future_latents = self.encode_frames(future_frames)
         return ModelOutputs(
-            predicted_frame=predicted_frame,
-            predicted_latent=predicted_latent,
-            encoded_next_latent=encoded_next_latent,
-            attention_weights=attn_weights,
+            predicted_frames=predicted_frames,
+            predicted_latents=predicted_latents,
+            predicted_residuals=predicted_residuals,
+            context_latent=context_map,
             input_reconstructions=recon,
+            encoded_future_latents=encoded_future_latents,
+            attention_weights=attn_weights,
         )
 
     def compute_losses(
@@ -419,34 +493,66 @@ class MarioSequencePredictor(nn.Module):
         outputs: ModelOutputs,
         *,
         input_frames: torch.Tensor,
-        target_frame: torch.Tensor,
+        target_frames: torch.Tensor,
         lambda_recon: float = 1.0,
         lambda_latent: float = 1.0,
         lambda_pred: float = 1.0,
+        lambda_residual: float = 1.0,
     ) -> Dict[str, torch.Tensor]:
         if outputs.input_reconstructions is None:
             raise ValueError("Reconstruction logits not computed.")
         recon_loss = self.recon_loss_fn(outputs.input_reconstructions, input_frames)
-        if outputs.encoded_next_latent is None:
-            raise ValueError("Encoded next-frame latent required for latent loss.")
+        if outputs.encoded_future_latents is None:
+            raise ValueError("Encoded future latents required for sequence losses.")
+        target_latents = outputs.encoded_future_latents.detach()
+        predicted_latents = outputs.predicted_latents
+        if predicted_latents.shape != target_latents.shape:
+            raise ValueError(
+                f"Predicted latents shape {tuple(predicted_latents.shape)} does not match targets {tuple(target_latents.shape)}"
+            )
         latent_loss = self.latent_loss_fn(
-            outputs.predicted_latent, outputs.encoded_next_latent.detach()
+            predicted_latents.reshape(-1, *predicted_latents.shape[2:]),
+            target_latents.reshape(-1, *target_latents.shape[2:]),
         )
-        pred_loss = self.recon_loss_fn(outputs.predicted_frame, target_frame.contiguous())
+        target_frames = target_frames.contiguous()
+        if outputs.predicted_frames.shape != target_frames.shape:
+            raise ValueError(
+                f"Predicted frames shape {tuple(outputs.predicted_frames.shape)} does not match targets {tuple(target_frames.shape)}"
+            )
+        pred_loss = self.recon_loss_fn(
+            outputs.predicted_frames.reshape(-1, *outputs.predicted_frames.shape[2:]),
+            target_frames.reshape(-1, *target_frames.shape[2:]),
+        )
+        prev_latents = torch.cat(
+            [outputs.context_latent.detach().unsqueeze(1), target_latents[:, :-1]],
+            dim=1,
+        )
+        target_residuals = target_latents - prev_latents
+        predicted_residuals = outputs.predicted_residuals
+        if predicted_residuals.shape != target_residuals.shape:
+            raise ValueError(
+                f"Predicted residuals shape {tuple(predicted_residuals.shape)} does not match targets {tuple(target_residuals.shape)}"
+            )
+        residual_loss = self.residual_loss_fn(
+            predicted_residuals.reshape(-1, *predicted_residuals.shape[2:]),
+            target_residuals.reshape(-1, *target_residuals.shape[2:]),
+        )
         total = (
             lambda_recon * recon_loss
             + lambda_latent * latent_loss
             + lambda_pred * pred_loss
+            + lambda_residual * residual_loss
         )
         return {
             "total": total,
             "recon": recon_loss,
             "latent": latent_loss,
             "pred": pred_loss,
+            "residual": residual_loss,
         }
 
 
-LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred"]
+LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred", "residual"]
 
 
 def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
@@ -465,7 +571,7 @@ def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
     steps = [entry["step"] for entry in history]
 
     plt.figure(figsize=(8, 5))
-    for label in ("total", "recon", "latent", "pred"):
+    for label in ("total", "recon", "latent", "pred", "residual"):
         plt.plot(steps, [entry[label] for entry in history], label=label)
     plt.xlabel("Step")
     plt.ylabel("Loss")
@@ -579,12 +685,18 @@ def render_visualization_grid(
     actions = batch["actions"][0].unsqueeze(0).to(device)
     future_frames = batch["future_frames"][0].unsqueeze(0).to(device)
     raw_input_actions = batch["actions"][0].cpu().numpy()
-    raw_future_actions_tensor = batch.get("future_actions")
-    raw_future_actions = (
-        raw_future_actions_tensor[0].cpu().numpy()
-        if raw_future_actions_tensor is not None
-        else None
-    )
+    future_actions_tensor = batch.get("future_actions")
+    if future_actions_tensor is not None:
+        future_actions = future_actions_tensor[0].unsqueeze(0).to(device)
+        raw_future_actions = future_actions_tensor[0].cpu().numpy()
+    else:
+        steps = future_frames.shape[1]
+        future_actions = torch.zeros(
+            (1, steps, actions.shape[-1]),
+            dtype=actions.dtype,
+            device=device,
+        )
+        raw_future_actions = None
     input_labels_batch = batch.get("input_labels")
     future_labels_batch = batch.get("future_labels")
 
@@ -612,25 +724,47 @@ def render_visualization_grid(
 
     input_labels = _labels_for_sample(input_labels_batch, 0)
     future_labels = _labels_for_sample(future_labels_batch, 0)
-    action_template = torch.zeros_like(actions[:, :1])
-    with torch.no_grad():
-        outputs = model(inputs, actions, next_frame=future_frames[:, 0])
-        predicted_frame = outputs.predicted_frame
-        recon = outputs.input_reconstructions
+    inputs = inputs.clone().detach().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    outputs = model(
+        inputs,
+        actions,
+        future_frames=future_frames,
+        future_actions=future_actions,
+    )
+    predicted_frames = outputs.predicted_frames
+    recon = outputs.input_reconstructions
+    prediction_loss = F.smooth_l1_loss(predicted_frames, future_frames, reduction="sum")
+    prediction_loss.backward()
+    saliency = inputs.grad.detach().abs().sum(dim=2)
+    model.zero_grad(set_to_none=True)
 
-    hw = model.image_hw
-    fig, axes = plt.subplots(3, 8, figsize=(16, 6))
+    with torch.no_grad():
+        predicted_frames = predicted_frames.detach()
+        if recon is not None:
+            recon = recon.detach()
+        saliency_flat = saliency.flatten(start_dim=2)
+        max_vals = saliency_flat.max(dim=2, keepdim=True).values
+        saliency_normalized = saliency_flat / (max_vals + 1e-8)
+        saliency_maps = saliency_normalized.reshape_as(saliency).squeeze(0)
+        input_imgs = inputs.detach()
+
+    context_steps = inputs.shape[1]
+    target_steps = future_frames.shape[1]
+    rollout_steps = predicted_frames.shape[1]
+    columns = 8
+    fig, axes = plt.subplots(4, columns, figsize=(16, 9))
     for ax_row in axes:
         for ax in ax_row:
             ax.axis("off")
 
-    # Row 1: ground-truth inputs and targets
+    # Row 1: sequential frames (context + ground-truth futures)
     def _action_desc(action_vec: np.ndarray) -> str:
         binarized = (action_vec > 0.5).astype(np.uint8)
         return _describe_controller_vector(binarized)
 
-    for i in range(4):
-        axes[0, i].imshow(_tensor_to_image(inputs[0, i]))
+    for i in range(context_steps):
+        axes[0, i].imshow(_tensor_to_image(input_imgs[0, i]))
         labels = []
         if input_labels is not None and i < len(input_labels):
             labels.append(str(input_labels[i]))
@@ -638,39 +772,51 @@ def render_visualization_grid(
             labels.append(_action_desc(raw_input_actions[i]))
         if labels:
             axes[0, i].set_title("\n".join(labels), fontsize=8)
-    for i in range(4):
-        axes[0, 4 + i].imshow(_tensor_to_image(future_frames[0, i]))
+
+    for i in range(min(target_steps, columns - context_steps)):
+        target_idx = i
+        axes[0, context_steps + i].imshow(_tensor_to_image(future_frames[0, target_idx]))
         labels = []
         if future_labels is not None and i < len(future_labels):
             labels.append(str(future_labels[i]))
         if raw_future_actions is not None and i < raw_future_actions.shape[0]:
             labels.append(_action_desc(raw_future_actions[i]))
         if labels:
-            axes[0, 4 + i].set_title("\n".join(labels), fontsize=8)
+            axes[0, context_steps + i].set_title("\n".join(labels), fontsize=8)
+    for col in range(context_steps + min(target_steps, columns - context_steps), columns):
+        axes[0, col].imshow(_blank_image(model.image_hw))
 
-    # Row 2: reconstructed inputs
-    if recon is not None:
-        for i in range(4):
+    # Row 2: reconstructed context frames, followed by blanks
+    for i in range(context_steps):
+        if recon is not None:
             axes[1, i].imshow(_tensor_to_image(recon[0, i]))
-    for i in range(4, 8):
-        axes[1, i].imshow(_blank_image(hw))
+        else:
+            axes[1, i].imshow(_blank_image(model.image_hw))
+    for i in range(columns - context_steps):
+        axes[1, context_steps + i].imshow(_blank_image(model.image_hw))
 
-    # Row 3: autoregressive predictions
-    window_frames = inputs.clone()
-    window_actions = actions.clone()
-    preds: List[torch.Tensor] = []
-    with torch.no_grad():
-        for step in range(4):
-            roll = model(window_frames, window_actions, decode_recon=False)
-            preds.append(roll.predicted_frame[0])
-            window_frames = torch.cat([window_frames[:, 1:], roll.predicted_frame.unsqueeze(1)], dim=1)
-            zero_action = torch.zeros_like(action_template)
-            window_actions = torch.cat([window_actions[:, 1:], zero_action], dim=1)
-    for i in range(4):
-        axes[2, i].imshow(_blank_image(hw))
-    for i, pred in enumerate(preds):
-        axes[2, 4 + i].imshow(_tensor_to_image(pred))
+    # Row 3: predictions (last four columns), first four blanks
+    for i in range(context_steps):
+        axes[2, i].imshow(_blank_image(model.image_hw))
+    for i in range(min(rollout_steps, columns - context_steps)):
+        axes[2, context_steps + i].imshow(_tensor_to_image(predicted_frames[0, i]))
 
+    # Row 4: saliency overlays on context frames, then blanks
+    cmap = plt.get_cmap("magma")
+    for i in range(min(context_steps, saliency_maps.shape[0])):
+        axes[3, i].imshow(_tensor_to_image(input_imgs[0, i]))
+        if saliency_maps.shape[0] > i:
+            axes[3, i].imshow(
+                saliency_maps[i].cpu().numpy(),
+                cmap=cmap,
+                alpha=0.6,
+                vmin=0.0,
+                vmax=1.0,
+            )
+    for i in range(columns - context_steps):
+        axes[3, context_steps + i].imshow(_blank_image(model.image_hw))
+
+    fig.suptitle("Inputs, targets, predictions, and saliency (rows 1-4)", fontsize=12)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -758,22 +904,28 @@ def train(config: TrainConfig) -> None:
     )
     for epoch in range(start_epoch, config.epochs):
         model.train()
-        running = {"total": 0.0, "recon": 0.0, "latent": 0.0, "pred": 0.0}
+        running = {"total": 0.0, "recon": 0.0, "latent": 0.0, "pred": 0.0, "residual": 0.0}
         for batch_idx, batch in enumerate(train_loader):
             inputs = batch["inputs"].to(device)
             actions = batch["actions"].to(device)
             future = batch["future_frames"].to(device)
-            target_frame = future[:, 0]
+            future_actions = batch["future_actions"].to(device)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast(enabled=config.mixed_precision):
-                outputs = model(inputs, actions, next_frame=target_frame)
+                outputs = model(
+                    inputs,
+                    actions,
+                    future_frames=future,
+                    future_actions=future_actions,
+                )
                 losses = model.compute_losses(
                     outputs,
                     input_frames=inputs,
-                    target_frame=target_frame,
+                    target_frames=future,
                     lambda_recon=config.lambda_recon,
                     lambda_latent=config.lambda_latent,
                     lambda_pred=config.lambda_pred,
+                    lambda_residual=config.lambda_residual,
                 )
             scaler.scale(losses["total"]).backward()
             scaler.step(optimizer)
@@ -783,17 +935,19 @@ def train(config: TrainConfig) -> None:
             running["recon"] += losses["recon"].item()
             running["latent"] += losses["latent"].item()
             running["pred"] += losses["pred"].item()
+            running["residual"] += losses["residual"].item()
 
             current_step = global_step + 1
             if config.log_every > 0 and current_step % config.log_every == 0:
                 logger.info(
-                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f",
+                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f residual %.4f",
                     epoch,
                     current_step,
                     losses["total"].item(),
                     losses["recon"].item(),
                     losses["latent"].item(),
                     losses["pred"].item(),
+                    losses["residual"].item(),
                 )
             loss_history.append(
                 {
@@ -802,6 +956,7 @@ def train(config: TrainConfig) -> None:
                     "recon": float(losses["recon"].item()),
                     "latent": float(losses["latent"].item()),
                     "pred": float(losses["pred"].item()),
+                    "residual": float(losses["residual"].item()),
                 }
             )
             if config.checkpoint_every > 0 and current_step % config.checkpoint_every == 0:
@@ -827,12 +982,13 @@ def train(config: TrainConfig) -> None:
         steps_in_epoch = len(train_loader)
         avg_total = running["total"] / steps_in_epoch
         logger.info(
-            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f",
+            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f avg_residual %.4f",
             epoch,
             avg_total,
             running["recon"] / steps_in_epoch,
             running["latent"] / steps_in_epoch,
             running["pred"] / steps_in_epoch,
+            running["residual"] / steps_in_epoch,
         )
 
         if avg_total < best_loss:
