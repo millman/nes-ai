@@ -21,7 +21,7 @@ import random
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -65,6 +65,7 @@ class TrainConfig:
     lambda_latent: float = 1.0
     lambda_pred: float = 1.0
     lambda_residual: float = 1.0
+    lambda_latent_cosine: float = 1.0
     vis_every: int = 50
     checkpoint_every: int = 50
     resume: bool = False
@@ -194,21 +195,35 @@ class DownBlock(nn.Module):
         return self.net(x)
 
 
+def _group_norm(num_channels: int) -> nn.GroupNorm:
+    groups = 8 if num_channels % 8 == 0 else 1
+    return nn.GroupNorm(groups, num_channels)
+
+
 class UpBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int) -> None:
+    def __init__(self, in_ch: int, skip_ch: int, out_ch: int) -> None:
         super().__init__()
-        groups = 8 if out_ch % 8 == 0 else 1
-        self.net = nn.Sequential(
-            nn.ConvTranspose2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1),
-            nn.GroupNorm(groups, out_ch),
+        self.skip_ch = skip_ch
+        self.up = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2)
+        fuse_in = out_ch + skip_ch
+        self.fuse = nn.Sequential(
+            nn.Conv2d(fuse_in, out_ch, kernel_size=3, padding=1),
+            _group_norm(out_ch),
             nn.SiLU(inplace=True),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, out_ch),
+            _group_norm(out_ch),
             nn.SiLU(inplace=True),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+    def forward(self, x: torch.Tensor, skip: Optional[torch.Tensor]) -> torch.Tensor:
+        x = self.up(x)
+        if skip is None:
+            skip = x.new_zeros(x.shape[0], self.skip_ch, *x.shape[-2:])
+        else:
+            if skip.shape[-2:] != x.shape[-2:]:
+                skip = F.interpolate(skip, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        x = torch.cat([x, skip], dim=1)
+        return self.fuse(x)
 
 
 class FrameEncoder(nn.Module):
@@ -234,35 +249,72 @@ class FrameEncoder(nn.Module):
         )
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
 
-    def forward(self, frame: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, frame: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         h0 = self.stem(frame)
         h1 = self.down1(h0)
         h2 = self.down2(h1)
         h3 = self.down3(h2)
         latent = self.bottleneck(h3)
         pooled = self.pool(latent).flatten(1)
-        return latent, pooled
+        # h0, h1, h2 correspond to resolutions H, H/2, and H/4 respectively.
+        skips = (h0, h1, h2)
+        return latent, pooled, skips
 
 
 class LatentDecoder(nn.Module):
     def __init__(self, latent_channels: int = 128, base_channels: int = 48) -> None:
         super().__init__()
-        self.up1 = UpBlock(latent_channels, base_channels * 3)
-        self.up2 = UpBlock(base_channels * 3, base_channels * 2)
-        self.up3 = UpBlock(base_channels * 2, base_channels)
+        self.up_bottom = UpBlock(latent_channels, base_channels * 3, base_channels * 3)
+        self.up_mid = UpBlock(base_channels * 3, base_channels * 2, base_channels * 2)
+        self.up_top = UpBlock(base_channels * 2, base_channels, base_channels)
         self.head = nn.Sequential(
             nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
             nn.SiLU(inplace=True),
             nn.Conv2d(base_channels // 2, 3, kernel_size=1),
         )
 
-    def forward(self, latent: torch.Tensor, *, target_hw: Tuple[int, int]) -> torch.Tensor:
-        h = self.up1(latent)
-        h = self.up2(h)
-        h = self.up3(h)
+    def forward(
+        self,
+        latents: torch.Tensor,
+        skip_pyramids: Sequence[Optional[torch.Tensor]],
+        *,
+        target_hw: Tuple[int, int],
+    ) -> torch.Tensor:
+        """
+        latents: (B,C,H,W) or (B,T,C,H,W)
+        skip_pyramids: iterable matching encoder skip order (h0, h1, h2)
+                       shaped like latents (broadcastable along batch/temporal dims).
+        """
+        if latents.dim() == 5:
+            b, t, c, h, w = latents.shape
+            latents_flat = latents.reshape(b * t, c, h, w)
+            skips_flat: List[Optional[torch.Tensor]] = []
+            for skip in skip_pyramids:
+                if skip is None:
+                    skips_flat.append(None)
+                else:
+                    skips_flat.append(skip.reshape(b * t, skip.shape[2], skip.shape[3], skip.shape[4]))
+        else:
+            latents_flat = latents
+            skips_flat = []
+            for skip in skip_pyramids:
+                skips_flat.append(skip)
+
+        # Expecting skip order [h0, h1, h2] (shallow -> deep)
+        skip_h0 = skips_flat[0] if len(skips_flat) > 0 else None
+        skip_h1 = skips_flat[1] if len(skips_flat) > 1 else None
+        skip_h2 = skips_flat[2] if len(skips_flat) > 2 else None
+
+        h = self.up_bottom(latents_flat, skip_h2)
+        h = self.up_mid(h, skip_h1)
+        h = self.up_top(h, skip_h0)
         frame = self.head(h)
         if frame.shape[-2:] != target_hw:
             frame = F.interpolate(frame, size=target_hw, mode="bilinear", align_corners=False)
+        if latents.dim() == 5:
+            frame = frame.reshape(b, t, 3, *target_hw)
         return frame
 
 
@@ -303,8 +355,9 @@ class TemporalSpatialAggregator(nn.Module):
     def forward(
         self,
         latent_maps: torch.Tensor,
+        skip_pyramids: Sequence[torch.Tensor],
         action_embeddings: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...], torch.Tensor]:
         if latent_maps.dim() != 5:
             raise ValueError(f"Expected 5D latent tensor, got shape {tuple(latent_maps.shape)}")
         batch, steps, channels, height, width = latent_maps.shape
@@ -323,8 +376,16 @@ class TemporalSpatialAggregator(nn.Module):
         weight_inputs = torch.cat([step_features, action_embeddings], dim=-1)
         logits = self.weight_net(weight_inputs).squeeze(-1)
         attn_weights = torch.softmax(logits, dim=1)
-        fused = (processed * attn_weights.reshape(batch, steps, 1, 1, 1)).sum(dim=1)
-        return fused, attn_weights
+        weight_view = attn_weights.reshape(batch, steps, 1, 1, 1)
+        fused = (processed * weight_view).sum(dim=1)
+        fused_skips: List[torch.Tensor] = []
+        for level_feats in skip_pyramids:
+            if level_feats.dim() != 5:
+                raise ValueError(
+                    f"Expected skip pyramid tensor with 5 dimensions, got {tuple(level_feats.shape)}"
+                )
+            fused_skips.append((level_feats * weight_view).sum(dim=1))
+        return fused, tuple(fused_skips), attn_weights
 
 
 class ResidualLatentPredictor(nn.Module):
@@ -334,9 +395,19 @@ class ResidualLatentPredictor(nn.Module):
         hidden_channels = latent_dim * 2
         hidden_groups = 8 if hidden_channels % 8 == 0 else 1
         output_groups = 8 if latent_dim % 8 == 0 else 1
-        self.net = nn.Sequential(
+        self.input_proj = nn.Sequential(
             nn.Conv2d(latent_dim * 2, hidden_channels, kernel_size=3, padding=1),
             nn.GroupNorm(hidden_groups, hidden_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.residual_block = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(hidden_groups, hidden_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(hidden_groups, hidden_channels),
+        )
+        self.output_proj = nn.Sequential(
             nn.SiLU(inplace=True),
             nn.Conv2d(hidden_channels, latent_dim, kernel_size=3, padding=1),
             nn.GroupNorm(output_groups, latent_dim),
@@ -387,7 +458,11 @@ class ResidualLatentPredictor(nn.Module):
         current = initial_latent
         for t in range(rollout_steps):
             action_map = action_embeddings[:, t].unsqueeze(-1).unsqueeze(-1).expand(-1, -1, height, width)
-            residual = self.net(torch.cat([current, action_map], dim=1))
+            fused = torch.cat([current, action_map], dim=1)
+            hidden = self.input_proj(fused)
+            block_out = self.residual_block(hidden)
+            hidden = hidden + block_out
+            residual = self.output_proj(hidden)
             current = current + residual
             latents.append(current)
             residuals.append(residual)
@@ -426,16 +501,29 @@ class MarioSequencePredictor(nn.Module):
         )
         self.predictor = ResidualLatentPredictor(latent_dim=latent_channels)
         self.recon_loss_fn = nn.SmoothL1Loss()
-        self.latent_loss_fn = nn.SmoothL1Loss()
+        self.latent_loss_fn = nn.MSELoss()
         self.residual_loss_fn = nn.MSELoss()
 
-    def encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
+    def encode_frames(
+        self, frames: torch.Tensor
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         batch, steps, _, _, _ = frames.shape
-        spatial = []
+        latents: List[torch.Tensor] = []
+        skip_levels: Optional[List[List[torch.Tensor]]] = None
         for t in range(steps):
-            latent, _ = self.encoder(frames[:, t])
-            spatial.append(latent)
-        return torch.stack(spatial, dim=1)
+            latent, _, skips = self.encoder(frames[:, t])
+            latents.append(latent)
+            if skip_levels is None:
+                skip_levels = [[] for _ in range(len(skips))]
+            for level, feat in enumerate(skips):
+                skip_levels[level].append(feat)
+        stacked_latents = torch.stack(latents, dim=1)
+        skip_pyramids: Tuple[torch.Tensor, ...]
+        if skip_levels is None:
+            skip_pyramids = tuple()
+        else:
+            skip_pyramids = tuple(torch.stack(level_feats, dim=1) for level_feats in skip_levels)
+        return stacked_latents, skip_pyramids
 
     def forward(
         self,
@@ -446,9 +534,11 @@ class MarioSequencePredictor(nn.Module):
         future_actions: Optional[torch.Tensor] = None,
         decode_recon: bool = True,
     ) -> ModelOutputs:
-        latent_maps = self.encode_frames(frames)
+        latent_maps, skip_pyramids = self.encode_frames(frames)
         action_embeddings = self.action_encoder(actions)
-        context_map, attn_weights = self.aggregator(latent_maps, action_embeddings)
+        context_map, context_skips, attn_weights = self.aggregator(
+            latent_maps, skip_pyramids, action_embeddings
+        )
         rollout_steps: Optional[int] = None
         future_action_embeddings = None
         if future_actions is not None:
@@ -463,21 +553,25 @@ class MarioSequencePredictor(nn.Module):
             future_action_embeddings,
             steps=rollout_steps,
         )
-        batch, rollout_steps, channels, height, width = predicted_latents.shape
-        decoded = self.decoder(
-            predicted_latents.reshape(batch * rollout_steps, channels, height, width),
+        context_skip_sequence = tuple(
+            skip.unsqueeze(1).expand(-1, rollout_steps, -1, -1, -1) for skip in context_skips
+        )
+        predicted_frames = self.decoder(
+            predicted_latents,
+            context_skip_sequence,
             target_hw=self.image_hw,
         )
-        predicted_frames = decoded.reshape(batch, rollout_steps, 3, *self.image_hw)
         recon = None
         if decode_recon:
-            b, input_steps, c, h, w = latent_maps.shape
-            flat = latent_maps.reshape(b * input_steps, c, h, w)
-            decoded = self.decoder(flat, target_hw=self.image_hw)
-            recon = decoded.reshape(b, input_steps, 3, *self.image_hw)
+            recon = self.decoder(
+                latent_maps,
+                skip_pyramids,
+                target_hw=self.image_hw,
+            )
         encoded_future_latents = None
         if future_frames is not None:
-            encoded_future_latents = self.encode_frames(future_frames)
+            future_latent_maps, _ = self.encode_frames(future_frames)
+            encoded_future_latents = future_latent_maps
         return ModelOutputs(
             predicted_frames=predicted_frames,
             predicted_latents=predicted_latents,
@@ -498,6 +592,7 @@ class MarioSequencePredictor(nn.Module):
         lambda_latent: float = 1.0,
         lambda_pred: float = 1.0,
         lambda_residual: float = 1.0,
+        lambda_latent_cosine: float = 1.0,
     ) -> Dict[str, torch.Tensor]:
         if outputs.input_reconstructions is None:
             raise ValueError("Reconstruction logits not computed.")
@@ -537,11 +632,18 @@ class MarioSequencePredictor(nn.Module):
             predicted_residuals.reshape(-1, *predicted_residuals.shape[2:]),
             target_residuals.reshape(-1, *target_residuals.shape[2:]),
         )
+        cosine_loss = predicted_latents.new_zeros(())
+        if lambda_latent_cosine > 0.0:
+            pred_flat = predicted_latents.reshape(predicted_latents.shape[0], predicted_latents.shape[1], -1)
+            target_flat = target_latents.reshape(target_latents.shape[0], target_latents.shape[1], -1)
+            cosine = F.cosine_similarity(pred_flat, target_flat, dim=-1)
+            cosine_loss = (1.0 - cosine).mean()
         total = (
             lambda_recon * recon_loss
             + lambda_latent * latent_loss
             + lambda_pred * pred_loss
             + lambda_residual * residual_loss
+            + lambda_latent_cosine * cosine_loss
         )
         return {
             "total": total,
@@ -549,10 +651,11 @@ class MarioSequencePredictor(nn.Module):
             "latent": latent_loss,
             "pred": pred_loss,
             "residual": residual_loss,
+            "latent_cosine": cosine_loss,
         }
 
 
-LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred", "residual"]
+LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred", "residual", "latent_cosine"]
 
 
 def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
@@ -571,7 +674,7 @@ def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
     steps = [entry["step"] for entry in history]
 
     plt.figure(figsize=(8, 5))
-    for label in ("total", "recon", "latent", "pred", "residual"):
+    for label in ("total", "recon", "latent", "pred", "residual", "latent_cosine"):
         plt.plot(steps, [entry[label] for entry in history], label=label)
     plt.xlabel("Step")
     plt.ylabel("Loss")
@@ -904,7 +1007,14 @@ def train(config: TrainConfig) -> None:
     )
     for epoch in range(start_epoch, config.epochs):
         model.train()
-        running = {"total": 0.0, "recon": 0.0, "latent": 0.0, "pred": 0.0, "residual": 0.0}
+        running = {
+            "total": 0.0,
+            "recon": 0.0,
+            "latent": 0.0,
+            "pred": 0.0,
+            "residual": 0.0,
+            "latent_cosine": 0.0,
+        }
         for batch_idx, batch in enumerate(train_loader):
             inputs = batch["inputs"].to(device)
             actions = batch["actions"].to(device)
@@ -926,6 +1036,7 @@ def train(config: TrainConfig) -> None:
                     lambda_latent=config.lambda_latent,
                     lambda_pred=config.lambda_pred,
                     lambda_residual=config.lambda_residual,
+                    lambda_latent_cosine=config.lambda_latent_cosine,
                 )
             scaler.scale(losses["total"]).backward()
             scaler.step(optimizer)
@@ -936,11 +1047,12 @@ def train(config: TrainConfig) -> None:
             running["latent"] += losses["latent"].item()
             running["pred"] += losses["pred"].item()
             running["residual"] += losses["residual"].item()
+            running["latent_cosine"] += losses["latent_cosine"].item()
 
             current_step = global_step + 1
             if config.log_every > 0 and current_step % config.log_every == 0:
                 logger.info(
-                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f residual %.4f",
+                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f residual %.4f latent_cos %.4f",
                     epoch,
                     current_step,
                     losses["total"].item(),
@@ -948,6 +1060,7 @@ def train(config: TrainConfig) -> None:
                     losses["latent"].item(),
                     losses["pred"].item(),
                     losses["residual"].item(),
+                    losses["latent_cosine"].item(),
                 )
             loss_history.append(
                 {
@@ -957,6 +1070,7 @@ def train(config: TrainConfig) -> None:
                     "latent": float(losses["latent"].item()),
                     "pred": float(losses["pred"].item()),
                     "residual": float(losses["residual"].item()),
+                    "latent_cosine": float(losses["latent_cosine"].item()),
                 }
             )
             if config.checkpoint_every > 0 and current_step % config.checkpoint_every == 0:
@@ -982,13 +1096,14 @@ def train(config: TrainConfig) -> None:
         steps_in_epoch = len(train_loader)
         avg_total = running["total"] / steps_in_epoch
         logger.info(
-            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f avg_residual %.4f",
+            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f avg_residual %.4f avg_latent_cos %.4f",
             epoch,
             avg_total,
             running["recon"] / steps_in_epoch,
             running["latent"] / steps_in_epoch,
             running["pred"] / steps_in_epoch,
             running["residual"] / steps_in_epoch,
+            running["latent_cosine"] / steps_in_epoch,
         )
 
         if avg_total < best_loss:
