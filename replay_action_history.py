@@ -198,10 +198,10 @@ def main():
 
         world = get_world(ram)
         level = get_level(ram)
+        x = get_x_pos(ram)
+        y = get_y_pos(ram)
 
         if args.debug_frames:
-            x = get_x_pos(ram)
-            y = get_y_pos(ram)
             print(f"step: {i}, world={world} level={level} x={x} y={y}")
 
         if stop_after_world_level is not None and (world, level) != stop_after_world_level:
@@ -211,7 +211,8 @@ def main():
         # Get the state before we apply an action.
         if args.dump_trajectories:
             obs = first_env._get_obs()
-            trajectory_store.record_state_action(obs, action)
+            info = {'world': world, 'level': level, 'x': x, 'y': y}
+            trajectory_store.record_state_action(obs, action, info)
 
         # Execute action.
         _next_obs, reward, termination, truncation, info = envs.step((action,))

@@ -848,12 +848,22 @@ class TrajectoryStore:
         self.traj_id = 0
         self.states = []
         self.actions = []
+        self.infos = {}
 
-    def record_state_action(self, state: NdArrayRGB8, action: NdArrayUint8):
+    def record_state_action(self, state: NdArrayRGB8, action: NdArrayUint8, info: dict[str, Any]):
         expected_shape = (224, 240, 3)
         assert state.shape == expected_shape, f"Unexpected state shape: {state.shape} != {expected_shape}"
+
         self.states.append(state.copy())
-        self.actions.append(action)
+        self.actions.append(action.copy())
+
+        if not self.infos:
+            for k, v in info.items():
+                self.infos[k] = []
+
+        assert self.infos.keys() == info.keys(), f"Mismatched keys: {self.infos.keys()} != {self.infos[0].keys()}"
+        for k, v in info.items():
+            self.infos[k].append(v)
 
     def save(self, traj_subdir: str | None = None):
         if not traj_subdir:
@@ -861,10 +871,12 @@ class TrajectoryStore:
 
         dump_states_dir = self.dump_dir / traj_subdir / 'states'
         dump_actions_path = self.dump_dir / traj_subdir / 'actions.npz'
+        dump_infos_path = self.dump_dir / traj_subdir / 'infos.npz'
 
         print(f"Writing trajectory[{self.traj_id}] (#={len(self.actions)}) to: {self.dump_dir}")
         print(f"  {dump_states_dir}")
         print(f"  {dump_actions_path}")
+        print(f"  {dump_infos_path}")
 
         # Create a new directory for each trajectory.
         dump_states_dir.mkdir(parents=True, exist_ok=True)
@@ -878,9 +890,13 @@ class TrajectoryStore:
         # Dump action (controller).
         np.savez(dump_actions_path, self.actions)
 
+        # Dump info metadata.
+        np.savez(dump_infos_path, **self.infos)
+
         # Clear states, but leave frame counter in-tact.
         self.states = []
         self.actions = []
+        self.infos = {}
         self.traj_id += 1
 
 
@@ -1101,7 +1117,8 @@ def main():
         # Save current state and action that will be applied (i.e. state-action pair).
         if args.dump_trajectories:
             first_env_next_obs = next_obs[0]
-            trajectory_store.record_state_action(first_env_next_obs, controller)
+            info = {'world': world, 'level': level, 'x': x, 'y': y, 'screen_x': screen_x}
+            trajectory_store.record_state_action(first_env_next_obs, controller, info)
 
         # Execute action.
         next_obs, reward, termination, truncation, info = envs.step((controller,))
