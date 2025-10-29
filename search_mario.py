@@ -1540,6 +1540,7 @@ def main():
             # Reload and re-initialize.
             nes.load(save_info.save_state)
             ram = nes.ram()
+            next_obs = (first_env._get_obs(),)
 
             # Restore controller to what it was at the point of saving.  The user may have been pressing something here.
             controller[:] = nes.controller1.is_pressed[:]
