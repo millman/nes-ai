@@ -65,7 +65,8 @@ class TrainConfig:
     lambda_latent: float = 1.0
     lambda_pred: float = 1.0
     lambda_residual: float = 1.0
-    lambda_latent_cosine: float = 1.0
+    lambda_latent_cosine: float = 0.5
+    lambda_skipless: float = 0.5
     vis_every: int = 50
     checkpoint_every: int = 50
     resume: bool = False
@@ -476,6 +477,7 @@ class ModelOutputs:
     predicted_latents: torch.Tensor
     predicted_residuals: torch.Tensor
     context_latent: torch.Tensor
+    input_latents: torch.Tensor
     input_reconstructions: Optional[torch.Tensor]
     encoded_future_latents: Optional[torch.Tensor]
     attention_weights: Optional[torch.Tensor]
@@ -577,6 +579,7 @@ class MarioSequencePredictor(nn.Module):
             predicted_latents=predicted_latents,
             predicted_residuals=predicted_residuals,
             context_latent=context_map,
+            input_latents=latent_maps,
             input_reconstructions=recon,
             encoded_future_latents=encoded_future_latents,
             attention_weights=attn_weights,
@@ -593,10 +596,26 @@ class MarioSequencePredictor(nn.Module):
         lambda_pred: float = 1.0,
         lambda_residual: float = 1.0,
         lambda_latent_cosine: float = 1.0,
+        lambda_skipless: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         if outputs.input_reconstructions is None:
             raise ValueError("Reconstruction logits not computed.")
         recon_loss = self.recon_loss_fn(outputs.input_reconstructions, input_frames)
+        skipless_loss = torch.zeros_like(recon_loss)
+        if lambda_skipless > 0.0:
+            if outputs.input_latents is None:
+                raise ValueError("Input latents required for skipless loss.")
+            b, steps, _, _, _ = outputs.input_latents.shape
+            skipless_terms = []
+            for t in range(steps):
+                decoded = self.decoder(
+                    outputs.input_latents[:, t],
+                    (),
+                    target_hw=self.image_hw,
+                ).contiguous()
+                target = input_frames[:, t].contiguous()
+                skipless_terms.append(self.recon_loss_fn(decoded, target))
+            skipless_loss = torch.stack(skipless_terms).mean()
         if outputs.encoded_future_latents is None:
             raise ValueError("Encoded future latents required for sequence losses.")
         target_latents = outputs.encoded_future_latents.detach()
@@ -644,6 +663,7 @@ class MarioSequencePredictor(nn.Module):
             + lambda_pred * pred_loss
             + lambda_residual * residual_loss
             + lambda_latent_cosine * cosine_loss
+            + lambda_skipless * skipless_loss
         )
         return {
             "total": total,
@@ -652,10 +672,11 @@ class MarioSequencePredictor(nn.Module):
             "pred": pred_loss,
             "residual": residual_loss,
             "latent_cosine": cosine_loss,
+            "skipless": skipless_loss,
         }
 
 
-LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred", "residual", "latent_cosine"]
+LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred", "residual", "latent_cosine", "skipless"]
 
 
 def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
@@ -674,7 +695,7 @@ def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
     steps = [entry["step"] for entry in history]
 
     plt.figure(figsize=(8, 5))
-    for label in ("total", "recon", "latent", "pred", "residual", "latent_cosine"):
+    for label in ("total", "recon", "latent", "pred", "residual", "latent_cosine", "skipless"):
         plt.plot(steps, [entry[label] for entry in history], label=label)
     plt.xlabel("Step")
     plt.ylabel("Loss")
@@ -844,6 +865,11 @@ def render_visualization_grid(
 
     with torch.no_grad():
         predicted_frames = predicted_frames.detach()
+        predicted_skipless = model.decoder(
+            outputs.predicted_latents.detach(),
+            (),
+            target_hw=model.image_hw,
+        ).detach()
         if recon is not None:
             recon = recon.detach()
         saliency_flat = saliency.flatten(start_dim=2)
@@ -856,7 +882,8 @@ def render_visualization_grid(
     target_steps = future_frames.shape[1]
     rollout_steps = predicted_frames.shape[1]
     columns = 8
-    fig, axes = plt.subplots(4, columns, figsize=(16, 9))
+    rows = 5
+    fig, axes = plt.subplots(rows, columns, figsize=(16, 11))
     for ax_row in axes:
         for ax in ax_row:
             ax.axis("off")
@@ -919,7 +946,19 @@ def render_visualization_grid(
     for i in range(columns - context_steps):
         axes[3, context_steps + i].imshow(_blank_image(model.image_hw))
 
-    fig.suptitle("Inputs, targets, predictions, and saliency (rows 1-4)", fontsize=12)
+    # Row 5: predictions decoded without skip connections
+    for i in range(context_steps):
+        axes[4, i].imshow(_blank_image(model.image_hw))
+    skipless_count = min(rollout_steps, columns - context_steps)
+    for i in range(skipless_count):
+        axes[4, context_steps + i].imshow(_tensor_to_image(predicted_skipless[0, i]))
+    for col in range(context_steps + skipless_count, columns):
+        axes[4, col].imshow(_blank_image(model.image_hw))
+
+    fig.suptitle(
+        "Inputs, targets, predictions, saliency, and skipless decodes (rows 1-5)",
+        fontsize=12,
+    )
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -1014,6 +1053,7 @@ def train(config: TrainConfig) -> None:
             "pred": 0.0,
             "residual": 0.0,
             "latent_cosine": 0.0,
+            "skipless": 0.0,
         }
         for batch_idx, batch in enumerate(train_loader):
             inputs = batch["inputs"].to(device)
@@ -1037,6 +1077,7 @@ def train(config: TrainConfig) -> None:
                     lambda_pred=config.lambda_pred,
                     lambda_residual=config.lambda_residual,
                     lambda_latent_cosine=config.lambda_latent_cosine,
+                    lambda_skipless=config.lambda_skipless,
                 )
             scaler.scale(losses["total"]).backward()
             scaler.step(optimizer)
@@ -1048,11 +1089,12 @@ def train(config: TrainConfig) -> None:
             running["pred"] += losses["pred"].item()
             running["residual"] += losses["residual"].item()
             running["latent_cosine"] += losses["latent_cosine"].item()
+            running["skipless"] += losses["skipless"].item()
 
             current_step = global_step + 1
             if config.log_every > 0 and current_step % config.log_every == 0:
                 logger.info(
-                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f residual %.4f latent_cos %.4f",
+                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f residual %.4f latent_cos %.4f skipless %.4f",
                     epoch,
                     current_step,
                     losses["total"].item(),
@@ -1061,6 +1103,7 @@ def train(config: TrainConfig) -> None:
                     losses["pred"].item(),
                     losses["residual"].item(),
                     losses["latent_cosine"].item(),
+                    losses["skipless"].item(),
                 )
             loss_history.append(
                 {
@@ -1071,6 +1114,7 @@ def train(config: TrainConfig) -> None:
                     "pred": float(losses["pred"].item()),
                     "residual": float(losses["residual"].item()),
                     "latent_cosine": float(losses["latent_cosine"].item()),
+                    "skipless": float(losses["skipless"].item()),
                 }
             )
             if config.checkpoint_every > 0 and current_step % config.checkpoint_every == 0:
@@ -1096,7 +1140,7 @@ def train(config: TrainConfig) -> None:
         steps_in_epoch = len(train_loader)
         avg_total = running["total"] / steps_in_epoch
         logger.info(
-            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f avg_residual %.4f avg_latent_cos %.4f",
+            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f avg_residual %.4f avg_latent_cos %.4f avg_skipless %.4f",
             epoch,
             avg_total,
             running["recon"] / steps_in_epoch,
@@ -1104,6 +1148,7 @@ def train(config: TrainConfig) -> None:
             running["pred"] / steps_in_epoch,
             running["residual"] / steps_in_epoch,
             running["latent_cosine"] / steps_in_epoch,
+            running["skipless"] / steps_in_epoch,
         )
 
         if avg_total < best_loss:
