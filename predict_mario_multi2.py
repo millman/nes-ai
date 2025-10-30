@@ -41,6 +41,16 @@ from super_mario_env import _describe_controller_vector
 logger = logging.getLogger(__name__)
 
 
+def _normalize_latent_tensor(tensor: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """L2-normalise over spatial/channel axes while preserving batch/sequence dims."""
+    if tensor.dim() < 3:
+        raise ValueError(f"Expected at least 3 dims for latent tensor, got {tuple(tensor.shape)}")
+    flat = tensor.flatten(start_dim=-3)
+    norms = flat.norm(dim=-1, keepdim=True).clamp_min(eps)
+    normalized = flat / norms
+    return normalized.view_as(tensor)
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -67,6 +77,13 @@ class TrainConfig:
     lambda_residual: float = 1.0
     lambda_latent_cosine: float = 0.5
     lambda_skipless: float = 0.5
+    lambda_skip: float = 0.5
+    context_steps: int = 8
+    future_steps: int = 8
+    encode_chunk: int = 4
+    decode_chunk: int = 4
+    base_channels: int = 32
+    latent_channels: int = 96
     vis_every: int = 50
     checkpoint_every: int = 50
     resume: bool = False
@@ -78,6 +95,18 @@ class TrainConfig:
     def __post_init__(self) -> None:
         self.data_root = Path(self.data_root)
         self.output_dir = Path(self.output_dir)
+        if self.base_channels % 8 != 0:
+            raise ValueError("base_channels must be divisible by 8 for GroupNorm compatibility.")
+        if self.latent_channels % 8 != 0:
+            raise ValueError("latent_channels must be divisible by 8 for GroupNorm compatibility.")
+        if self.context_steps <= 0 or self.future_steps <= 0:
+            raise ValueError("context_steps and future_steps must be positive.")
+        if self.encode_chunk <= 0 or self.decode_chunk <= 0:
+            raise ValueError("encode_chunk and decode_chunk must be positive.")
+        if self.encode_chunk > self.context_steps:
+            self.encode_chunk = self.context_steps
+        if self.decode_chunk > self.future_steps:
+            self.decode_chunk = self.future_steps
 
 
 class MarioSequenceDataset(Dataset):
@@ -88,11 +117,15 @@ class MarioSequenceDataset(Dataset):
         root_dir: Path,
         *,
         image_hw: Tuple[int, int],
+        context_steps: int,
+        future_steps: int,
         normalize: Optional[Normalize] = None,
         max_trajs: Optional[int] = None,
     ) -> None:
         self.root_dir = Path(root_dir)
         self.image_hw = image_hw
+        self.context_steps = int(context_steps)
+        self.future_steps = int(future_steps)
         self.normalize = normalize
         self.entries: List[Tuple[List[Path], np.ndarray, int]] = []
         self.action_dim: Optional[int] = None
@@ -105,7 +138,8 @@ class MarioSequenceDataset(Dataset):
 
             assert actions_path.is_file(), f"Not a file: {actions_path}"
 
-            if len(frames) < 8:
+            min_frames = self.context_steps + self.future_steps
+            if len(frames) < min_frames:
                 continue
 
             with np.load(actions_path) as data:
@@ -130,7 +164,7 @@ class MarioSequenceDataset(Dataset):
                 raise ValueError(
                     f"Inconsistent action dimensions: expected {self.action_dim}, got {actions.shape[1]} in {actions_path.parent}"
                 )
-            for start in range(len(frames) - 7):
+            for start in range(len(frames) - (min_frames - 1)):
                 self.entries.append((frames, actions, start))
         if not self.entries:
             raise RuntimeError(f"No valid trajectories under {self.root_dir}")
@@ -142,7 +176,7 @@ class MarioSequenceDataset(Dataset):
         frame_paths, actions, start = self.entries[idx]
         inputs = []
         futures = []
-        for i in range(4):
+        for i in range(self.context_steps):
             frame = load_frame_as_tensor(
                 frame_paths[start + i],
                 size=self.image_hw,
@@ -151,22 +185,22 @@ class MarioSequenceDataset(Dataset):
             if self.normalize is not None:
                 frame = self.normalize(frame)
             inputs.append(frame)
-        for i in range(4):
+        for i in range(self.future_steps):
             frame = load_frame_as_tensor(
-                frame_paths[start + 4 + i],
+                frame_paths[start + self.context_steps + i],
                 size=self.image_hw,
                 normalize=None,
             )
             if self.normalize is not None:
                 frame = self.normalize(frame)
             futures.append(frame)
-        input_actions = actions[start : start + 4]
-        future_actions = actions[start + 4 : start + 8]
+        input_actions = actions[start : start + self.context_steps]
+        future_actions = actions[start + self.context_steps : start + self.context_steps + self.future_steps]
         input_labels = [
-            short_traj_state_label(str(frame_paths[start + i])) for i in range(4)
+            short_traj_state_label(str(frame_paths[start + i])) for i in range(self.context_steps)
         ]
         future_labels = [
-            short_traj_state_label(str(frame_paths[start + 4 + i])) for i in range(4)
+            short_traj_state_label(str(frame_paths[start + self.context_steps + i])) for i in range(self.future_steps)
         ]
 
         return {
@@ -230,7 +264,7 @@ class UpBlock(nn.Module):
 class FrameEncoder(nn.Module):
     """Shared encoder inspired by LightweightAutoencoder."""
 
-    def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
+    def __init__(self, base_channels: int = 32, latent_channels: int = 96) -> None:
         super().__init__()
         if base_channels % 8 != 0:
             raise ValueError("base_channels must be divisible by 8")
@@ -258,14 +292,14 @@ class FrameEncoder(nn.Module):
         h2 = self.down2(h1)
         h3 = self.down3(h2)
         latent = self.bottleneck(h3)
-        pooled = self.pool(latent).flatten(1)
+        pooled = self.pool(_normalize_latent_tensor(latent)).flatten(1)
         # h0, h1, h2 correspond to resolutions H, H/2, and H/4 respectively.
         skips = (h0, h1, h2)
         return latent, pooled, skips
 
 
 class LatentDecoder(nn.Module):
-    def __init__(self, latent_channels: int = 128, base_channels: int = 48) -> None:
+    def __init__(self, latent_channels: int = 96, base_channels: int = 32) -> None:
         super().__init__()
         self.up_bottom = UpBlock(latent_channels, base_channels * 3, base_channels * 3)
         self.up_mid = UpBlock(base_channels * 3, base_channels * 2, base_channels * 2)
@@ -373,7 +407,8 @@ class TemporalSpatialAggregator(nn.Module):
 
         flat = latent_maps.reshape(batch * steps, channels, height, width)
         processed = self.latent_proj(flat).reshape(batch, steps, channels, height, width)
-        step_features = processed.mean(dim=(3, 4))
+        processed_norm = _normalize_latent_tensor(processed)
+        step_features = processed_norm.mean(dim=(3, 4))
         weight_inputs = torch.cat([step_features, action_embeddings], dim=-1)
         logits = self.weight_net(weight_inputs).squeeze(-1)
         attn_weights = torch.softmax(logits, dim=1)
@@ -389,10 +424,12 @@ class TemporalSpatialAggregator(nn.Module):
         return fused, tuple(fused_skips), attn_weights
 
 
-class ResidualLatentPredictor(nn.Module):
-    def __init__(self, latent_dim: int) -> None:
+class MultiScaleResidualPredictor(nn.Module):
+    def __init__(self, latent_dim: int, skip_dims: Sequence[int]) -> None:
         super().__init__()
         self.latent_dim = latent_dim
+        self.skip_dims = tuple(int(d) for d in skip_dims)
+
         hidden_channels = latent_dim * 2
         hidden_groups = 8 if hidden_channels % 8 == 0 else 1
         output_groups = 8 if latent_dim % 8 == 0 else 1
@@ -414,35 +451,52 @@ class ResidualLatentPredictor(nn.Module):
             nn.GroupNorm(output_groups, latent_dim),
         )
 
+        self.latent_to_skip = nn.ModuleList(
+            nn.Conv2d(latent_dim, skip_dim, kernel_size=1) for skip_dim in self.skip_dims
+        )
+        self.skip_action_proj = nn.ModuleList(
+            nn.Linear(latent_dim, skip_dim) for skip_dim in self.skip_dims
+        )
+        self.skip_blocks = nn.ModuleList(
+            nn.Sequential(
+                nn.Conv2d(skip_dim * 3, skip_dim, kernel_size=3, padding=1),
+                _group_norm(skip_dim),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(skip_dim, skip_dim, kernel_size=3, padding=1),
+                _group_norm(skip_dim),
+            )
+            for skip_dim in self.skip_dims
+        )
+
     def forward(
         self,
         initial_latent: torch.Tensor,
+        initial_skips: Sequence[torch.Tensor],
         future_action_embeddings: Optional[torch.Tensor],
         *,
         steps: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, ...]]:
         if initial_latent.dim() != 4:
             raise ValueError(
                 f"Expected initial latent of shape (B,C,H,W), got {tuple(initial_latent.shape)}"
             )
+        if len(initial_skips) != len(self.skip_dims):
+            raise ValueError("Initial skip pyramid count mismatch.")
         batch, channels, height, width = initial_latent.shape
         if channels != self.latent_dim:
             raise ValueError(
                 f"Initial latent channel count {channels} does not match configured {self.latent_dim}"
             )
+
         if future_action_embeddings is not None:
             if future_action_embeddings.dim() != 3:
                 raise ValueError(
                     f"Expected future action embeddings (B,T,C), got {tuple(future_action_embeddings.shape)}"
                 )
             if future_action_embeddings.shape[0] != batch:
-                raise ValueError(
-                    "Future action embedding batch dimension mismatch."
-                )
+                raise ValueError("Future action embedding batch dimension mismatch.")
             if future_action_embeddings.shape[2] != self.latent_dim:
-                raise ValueError(
-                    "Future action embedding dimension must equal latent dimension."
-                )
+                raise ValueError("Future action embedding dimension must equal latent dimension.")
             rollout_steps = future_action_embeddings.shape[1]
             action_embeddings = future_action_embeddings
         else:
@@ -454,21 +508,49 @@ class ResidualLatentPredictor(nn.Module):
         if rollout_steps <= 0:
             raise ValueError("Rollout steps must be positive.")
 
+        current_latent = initial_latent
+        current_norm = _normalize_latent_tensor(current_latent)
+        current_skips = [skip for skip in initial_skips]
+
         latents: List[torch.Tensor] = []
         residuals: List[torch.Tensor] = []
-        current = initial_latent
+        skip_sequences: List[List[torch.Tensor]] = [[] for _ in self.skip_dims]
+
         for t in range(rollout_steps):
-            action_map = action_embeddings[:, t].unsqueeze(-1).unsqueeze(-1).expand(-1, -1, height, width)
-            fused = torch.cat([current, action_map], dim=1)
+            action_vec = action_embeddings[:, t]
+            action_map = action_vec.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, height, width)
+            fused = torch.cat([current_norm, action_map], dim=1)
             hidden = self.input_proj(fused)
             block_out = self.residual_block(hidden)
             hidden = hidden + block_out
-            residual = self.output_proj(hidden)
-            current = current + residual
-            latents.append(current)
-            residuals.append(residual)
+            delta = self.output_proj(hidden)
+            updated_latent = current_latent + delta
+            updated_norm = _normalize_latent_tensor(updated_latent)
 
-        return torch.stack(latents, dim=1), torch.stack(residuals, dim=1)
+            latents.append(updated_latent)
+            residuals.append(updated_norm - current_norm)
+
+            next_skips: List[torch.Tensor] = []
+            for idx, skip_dim in enumerate(self.skip_dims):
+                skip_feat = current_skips[idx]
+                if skip_feat.dim() != 4:
+                    raise ValueError("Skip tensor must have 4 dimensions.")
+                skip_h, skip_w = skip_feat.shape[-2:]
+                latent_down = self.latent_to_skip[idx](
+                    F.interpolate(updated_latent, size=(skip_h, skip_w), mode="bilinear", align_corners=False)
+                )
+                action_skip = self.skip_action_proj[idx](action_vec).view(batch, skip_dim, 1, 1).expand(-1, -1, skip_h, skip_w)
+                skip_input = torch.cat([skip_feat, latent_down, action_skip], dim=1)
+                skip_delta = self.skip_blocks[idx](skip_input)
+                next_skip = skip_feat + skip_delta
+                next_skips.append(next_skip)
+                skip_sequences[idx].append(next_skip)
+            current_latent = updated_latent
+            current_norm = updated_norm
+            current_skips = next_skips
+
+        stacked_skips = tuple(torch.stack(level_seq, dim=1) for level_seq in skip_sequences)
+        return torch.stack(latents, dim=1), torch.stack(residuals, dim=1), stacked_skips
 
 
 @dataclass
@@ -476,10 +558,13 @@ class ModelOutputs:
     predicted_frames: torch.Tensor
     predicted_latents: torch.Tensor
     predicted_residuals: torch.Tensor
+    predicted_skips: Tuple[torch.Tensor, ...]
     context_latent: torch.Tensor
+    context_skips: Tuple[torch.Tensor, ...]
     input_latents: torch.Tensor
     input_reconstructions: Optional[torch.Tensor]
     encoded_future_latents: Optional[torch.Tensor]
+    encoded_future_skips: Optional[Tuple[torch.Tensor, ...]]
     attention_weights: Optional[torch.Tensor]
 
 
@@ -488,12 +573,14 @@ class MarioSequencePredictor(nn.Module):
         self,
         action_dim: int,
         *,
-        base_channels: int = 48,
-        latent_channels: int = 128,
+        base_channels: int = 32,
+        latent_channels: int = 96,
         image_hw: Tuple[int, int] = (224, 224),
+        decode_chunk: int = 4,
     ) -> None:
         super().__init__()
         self.image_hw = image_hw
+        self.decode_chunk = max(1, int(decode_chunk))
         self.encoder = FrameEncoder(base_channels=base_channels, latent_channels=latent_channels)
         self.decoder = LatentDecoder(latent_channels=latent_channels, base_channels=base_channels)
         self.action_encoder = ActionEncoder(action_dim, embed_dim=latent_channels)
@@ -501,10 +588,42 @@ class MarioSequencePredictor(nn.Module):
             latent_dim=latent_channels,
             action_embed_dim=latent_channels,
         )
-        self.predictor = ResidualLatentPredictor(latent_dim=latent_channels)
+        self.skip_dims = (base_channels, base_channels * 2, base_channels * 3)
+        self.predictor = MultiScaleResidualPredictor(latent_dim=latent_channels, skip_dims=self.skip_dims)
         self.recon_loss_fn = nn.SmoothL1Loss()
         self.latent_loss_fn = nn.MSELoss()
         self.residual_loss_fn = nn.MSELoss()
+
+    def _decode_sequence(
+        self,
+        latents: torch.Tensor,
+        skip_pyramids: Sequence[Optional[torch.Tensor]],
+        *,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        if latents.dim() != 5:
+            return self.decoder(latents, skip_pyramids, target_hw=self.image_hw)
+        steps = latents.shape[1]
+        if chunk_size <= 0 or chunk_size >= steps:
+            return self.decoder(latents, skip_pyramids, target_hw=self.image_hw)
+        outputs: List[torch.Tensor] = []
+        for start in range(0, steps, chunk_size):
+            end = min(start + chunk_size, steps)
+            chunk_latents = latents[:, start:end]
+            chunk_skips: List[Optional[torch.Tensor]] = []
+            for skip in skip_pyramids:
+                if skip is None:
+                    chunk_skips.append(None)
+                else:
+                    chunk_skips.append(skip[:, start:end])
+            outputs.append(
+                self.decoder(
+                    chunk_latents,
+                    chunk_skips,
+                    target_hw=self.image_hw,
+                )
+            )
+        return torch.cat(outputs, dim=1)
 
     def encode_frames(
         self, frames: torch.Tensor
@@ -550,38 +669,41 @@ class MarioSequencePredictor(nn.Module):
             rollout_steps = future_frames.shape[1]
         if rollout_steps is None:
             rollout_steps = frames.shape[1]
-        predicted_latents, predicted_residuals = self.predictor(
+        predicted_latents, predicted_residuals, predicted_skips = self.predictor(
             context_map,
+            context_skips,
             future_action_embeddings,
             steps=rollout_steps,
         )
-        context_skip_sequence = tuple(
-            skip.unsqueeze(1).expand(-1, rollout_steps, -1, -1, -1) for skip in context_skips
-        )
-        predicted_frames = self.decoder(
+        predicted_frames = self._decode_sequence(
             predicted_latents,
-            context_skip_sequence,
-            target_hw=self.image_hw,
+            predicted_skips,
+            chunk_size=self.decode_chunk,
         )
         recon = None
         if decode_recon:
-            recon = self.decoder(
+            recon = self._decode_sequence(
                 latent_maps,
                 skip_pyramids,
-                target_hw=self.image_hw,
+                chunk_size=self.decode_chunk,
             )
         encoded_future_latents = None
+        encoded_future_skips: Optional[Tuple[torch.Tensor, ...]] = None
         if future_frames is not None:
-            future_latent_maps, _ = self.encode_frames(future_frames)
+            future_latent_maps, future_skip_pyramids = self.encode_frames(future_frames)
             encoded_future_latents = future_latent_maps
+            encoded_future_skips = future_skip_pyramids
         return ModelOutputs(
             predicted_frames=predicted_frames,
             predicted_latents=predicted_latents,
             predicted_residuals=predicted_residuals,
+            predicted_skips=predicted_skips,
             context_latent=context_map,
+            context_skips=context_skips,
             input_latents=latent_maps,
             input_reconstructions=recon,
             encoded_future_latents=encoded_future_latents,
+            encoded_future_skips=encoded_future_skips,
             attention_weights=attn_weights,
         )
 
@@ -597,6 +719,7 @@ class MarioSequencePredictor(nn.Module):
         lambda_residual: float = 1.0,
         lambda_latent_cosine: float = 1.0,
         lambda_skipless: float = 0.0,
+        lambda_skip: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         if outputs.input_reconstructions is None:
             raise ValueError("Reconstruction logits not computed.")
@@ -618,14 +741,14 @@ class MarioSequencePredictor(nn.Module):
             skipless_loss = torch.stack(skipless_terms).mean()
         if outputs.encoded_future_latents is None:
             raise ValueError("Encoded future latents required for sequence losses.")
-        target_latents = outputs.encoded_future_latents.detach()
-        predicted_latents = outputs.predicted_latents
-        if predicted_latents.shape != target_latents.shape:
+        target_latents = _normalize_latent_tensor(outputs.encoded_future_latents.detach())
+        predicted_latents_norm = _normalize_latent_tensor(outputs.predicted_latents)
+        if predicted_latents_norm.shape != target_latents.shape:
             raise ValueError(
-                f"Predicted latents shape {tuple(predicted_latents.shape)} does not match targets {tuple(target_latents.shape)}"
+                f"Predicted latents shape {tuple(predicted_latents_norm.shape)} does not match targets {tuple(target_latents.shape)}"
             )
         latent_loss = self.latent_loss_fn(
-            predicted_latents.reshape(-1, *predicted_latents.shape[2:]),
+            predicted_latents_norm.reshape(-1, *predicted_latents_norm.shape[2:]),
             target_latents.reshape(-1, *target_latents.shape[2:]),
         )
         target_frames = target_frames.contiguous()
@@ -637,10 +760,8 @@ class MarioSequencePredictor(nn.Module):
             outputs.predicted_frames.reshape(-1, *outputs.predicted_frames.shape[2:]),
             target_frames.reshape(-1, *target_frames.shape[2:]),
         )
-        prev_latents = torch.cat(
-            [outputs.context_latent.detach().unsqueeze(1), target_latents[:, :-1]],
-            dim=1,
-        )
+        prev_context = _normalize_latent_tensor(outputs.context_latent.detach().unsqueeze(1))
+        prev_latents = torch.cat([prev_context, target_latents[:, :-1]], dim=1)
         target_residuals = target_latents - prev_latents
         predicted_residuals = outputs.predicted_residuals
         if predicted_residuals.shape != target_residuals.shape:
@@ -651,12 +772,31 @@ class MarioSequencePredictor(nn.Module):
             predicted_residuals.reshape(-1, *predicted_residuals.shape[2:]),
             target_residuals.reshape(-1, *target_residuals.shape[2:]),
         )
-        cosine_loss = predicted_latents.new_zeros(())
+        cosine_loss = predicted_latents_norm.new_zeros(())
         if lambda_latent_cosine > 0.0:
-            pred_flat = predicted_latents.reshape(predicted_latents.shape[0], predicted_latents.shape[1], -1)
+            pred_flat = predicted_latents_norm.reshape(predicted_latents_norm.shape[0], predicted_latents_norm.shape[1], -1)
             target_flat = target_latents.reshape(target_latents.shape[0], target_latents.shape[1], -1)
-            cosine = F.cosine_similarity(pred_flat, target_flat, dim=-1)
+            cosine = F.cosine_similarity(pred_flat, target_flat, dim=-1, eps=1e-6)
             cosine_loss = (1.0 - cosine).mean()
+        skip_loss = predicted_latents_norm.new_zeros(())
+        if lambda_skip > 0.0:
+            if outputs.predicted_skips is None or outputs.encoded_future_skips is None:
+                raise ValueError("Skip supervision requested but skip tensors are unavailable.")
+            if len(outputs.predicted_skips) != len(outputs.encoded_future_skips):
+                raise ValueError("Predicted skip pyramid count does not match targets.")
+            skip_terms = []
+            for pred_skip, target_skip in zip(outputs.predicted_skips, outputs.encoded_future_skips):
+                if pred_skip.shape != target_skip.shape:
+                    raise ValueError(
+                        f"Predicted skip shape {tuple(pred_skip.shape)} does not match targets {tuple(target_skip.shape)}"
+                    )
+                skip_terms.append(
+                    self.recon_loss_fn(
+                        pred_skip.reshape(-1, *pred_skip.shape[2:]),
+                        target_skip.detach().reshape(-1, *target_skip.shape[2:]),
+                    )
+                )
+            skip_loss = torch.stack(skip_terms).mean()
         total = (
             lambda_recon * recon_loss
             + lambda_latent * latent_loss
@@ -664,6 +804,7 @@ class MarioSequencePredictor(nn.Module):
             + lambda_residual * residual_loss
             + lambda_latent_cosine * cosine_loss
             + lambda_skipless * skipless_loss
+            + lambda_skip * skip_loss
         )
         return {
             "total": total,
@@ -673,10 +814,11 @@ class MarioSequencePredictor(nn.Module):
             "residual": residual_loss,
             "latent_cosine": cosine_loss,
             "skipless": skipless_loss,
+            "skip": skip_loss,
         }
 
 
-LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred", "residual", "latent_cosine", "skipless"]
+LOSS_COLUMNS = ["step", "total", "recon", "latent", "pred", "residual", "latent_cosine", "skipless", "skip"]
 
 
 def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
@@ -685,7 +827,7 @@ def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
         writer = csv.writer(f)
         writer.writerow(LOSS_COLUMNS)
         for entry in history:
-            writer.writerow([entry[col] for col in LOSS_COLUMNS])
+            writer.writerow([entry.get(col, float("nan")) for col in LOSS_COLUMNS])
 
 
 def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
@@ -695,8 +837,8 @@ def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
     steps = [entry["step"] for entry in history]
 
     plt.figure(figsize=(8, 5))
-    for label in ("total", "recon", "latent", "pred", "residual", "latent_cosine", "skipless"):
-        plt.plot(steps, [entry[label] for entry in history], label=label)
+    for label in ("total", "recon", "latent", "pred", "residual", "latent_cosine", "skipless", "skip"):
+        plt.plot(steps, [entry.get(label, float("nan")) for entry in history], label=label)
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
@@ -865,10 +1007,10 @@ def render_visualization_grid(
 
     with torch.no_grad():
         predicted_frames = predicted_frames.detach()
-        predicted_skipless = model.decoder(
+        predicted_skipless = model._decode_sequence(
             outputs.predicted_latents.detach(),
             (),
-            target_hw=model.image_hw,
+            chunk_size=model.decode_chunk,
         ).detach()
         if recon is not None:
             recon = recon.detach()
@@ -881,9 +1023,11 @@ def render_visualization_grid(
     context_steps = inputs.shape[1]
     target_steps = future_frames.shape[1]
     rollout_steps = predicted_frames.shape[1]
-    columns = 8
+    prediction_columns = max(target_steps, rollout_steps, 1)
+    columns = max(context_steps + prediction_columns, context_steps + 1)
     rows = 5
-    fig, axes = plt.subplots(rows, columns, figsize=(16, 11))
+    fig_width = max(16, columns * 2)
+    fig, axes = plt.subplots(rows, columns, figsize=(fig_width, 11))
     for ax_row in axes:
         for ax in ax_row:
             ax.axis("off")
@@ -893,7 +1037,7 @@ def render_visualization_grid(
         binarized = (action_vec > 0.5).astype(np.uint8)
         return _describe_controller_vector(binarized)
 
-    for i in range(context_steps):
+    for i in range(min(context_steps, columns)):
         axes[0, i].imshow(_tensor_to_image(input_imgs[0, i]))
         labels = []
         if input_labels is not None and i < len(input_labels):
@@ -903,37 +1047,39 @@ def render_visualization_grid(
         if labels:
             axes[0, i].set_title("\n".join(labels), fontsize=8)
 
-    for i in range(min(target_steps, columns - context_steps)):
+    prediction_offset = context_steps
+    slot_capacity = columns - prediction_offset
+    for i in range(min(target_steps, slot_capacity)):
         target_idx = i
-        axes[0, context_steps + i].imshow(_tensor_to_image(future_frames[0, target_idx]))
+        axes[0, prediction_offset + i].imshow(_tensor_to_image(future_frames[0, target_idx]))
         labels = []
         if future_labels is not None and i < len(future_labels):
             labels.append(str(future_labels[i]))
         if raw_future_actions is not None and i < raw_future_actions.shape[0]:
             labels.append(_action_desc(raw_future_actions[i]))
         if labels:
-            axes[0, context_steps + i].set_title("\n".join(labels), fontsize=8)
-    for col in range(context_steps + min(target_steps, columns - context_steps), columns):
+            axes[0, prediction_offset + i].set_title("\n".join(labels), fontsize=8)
+    for col in range(prediction_offset + min(target_steps, slot_capacity), columns):
         axes[0, col].imshow(_blank_image(model.image_hw))
 
     # Row 2: reconstructed context frames, followed by blanks
-    for i in range(context_steps):
-        if recon is not None:
+    for i in range(min(context_steps, columns)):
+        if recon is not None and i < recon.shape[1]:
             axes[1, i].imshow(_tensor_to_image(recon[0, i]))
         else:
             axes[1, i].imshow(_blank_image(model.image_hw))
     for i in range(columns - context_steps):
         axes[1, context_steps + i].imshow(_blank_image(model.image_hw))
 
-    # Row 3: predictions (last four columns), first four blanks
-    for i in range(context_steps):
+    # Row 3: predictions occupy slots after context
+    for i in range(min(context_steps, columns)):
         axes[2, i].imshow(_blank_image(model.image_hw))
-    for i in range(min(rollout_steps, columns - context_steps)):
-        axes[2, context_steps + i].imshow(_tensor_to_image(predicted_frames[0, i]))
+    for i in range(min(rollout_steps, slot_capacity)):
+        axes[2, prediction_offset + i].imshow(_tensor_to_image(predicted_frames[0, i]))
 
     # Row 4: saliency overlays on context frames, then blanks
     cmap = plt.get_cmap("magma")
-    for i in range(min(context_steps, saliency_maps.shape[0])):
+    for i in range(min(context_steps, saliency_maps.shape[0], columns)):
         axes[3, i].imshow(_tensor_to_image(input_imgs[0, i]))
         if saliency_maps.shape[0] > i:
             axes[3, i].imshow(
@@ -947,7 +1093,7 @@ def render_visualization_grid(
         axes[3, context_steps + i].imshow(_blank_image(model.image_hw))
 
     # Row 5: predictions decoded without skip connections
-    for i in range(context_steps):
+    for i in range(min(context_steps, columns)):
         axes[4, i].imshow(_blank_image(model.image_hw))
     skipless_count = min(rollout_steps, columns - context_steps)
     for i in range(skipless_count):
@@ -971,6 +1117,8 @@ def prepare_dataloaders(config: TrainConfig) -> Tuple[DataLoader, Optional[DataL
     dataset = MarioSequenceDataset(
         config.data_root,
         image_hw=config.image_hw,
+        context_steps=config.context_steps,
+        future_steps=config.future_steps,
         normalize=normalize,
         max_trajs=config.max_trajs,
     )
@@ -1018,9 +1166,10 @@ def train(config: TrainConfig) -> None:
     action_dim = full_dataset.action_dim or 1
     model = MarioSequencePredictor(
         action_dim=action_dim,
-        base_channels=48,
-        latent_channels=128,
+        base_channels=config.base_channels,
+        latent_channels=config.latent_channels,
         image_hw=image_hw,
+        decode_chunk=config.decode_chunk,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
@@ -1054,6 +1203,7 @@ def train(config: TrainConfig) -> None:
             "residual": 0.0,
             "latent_cosine": 0.0,
             "skipless": 0.0,
+            "skip": 0.0,
         }
         for batch_idx, batch in enumerate(train_loader):
             inputs = batch["inputs"].to(device)
@@ -1078,6 +1228,7 @@ def train(config: TrainConfig) -> None:
                     lambda_residual=config.lambda_residual,
                     lambda_latent_cosine=config.lambda_latent_cosine,
                     lambda_skipless=config.lambda_skipless,
+                    lambda_skip=config.lambda_skip,
                 )
             scaler.scale(losses["total"]).backward()
             scaler.step(optimizer)
@@ -1090,11 +1241,12 @@ def train(config: TrainConfig) -> None:
             running["residual"] += losses["residual"].item()
             running["latent_cosine"] += losses["latent_cosine"].item()
             running["skipless"] += losses["skipless"].item()
+            running["skip"] += losses["skip"].item()
 
             current_step = global_step + 1
             if config.log_every > 0 and current_step % config.log_every == 0:
                 logger.info(
-                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f residual %.4f latent_cos %.4f skipless %.4f",
+                    "Epoch %d Step %d | total %.4f recon %.4f latent %.4f pred %.4f residual %.4f latent_cos %.4f skipless %.4f skip %.4f",
                     epoch,
                     current_step,
                     losses["total"].item(),
@@ -1104,6 +1256,7 @@ def train(config: TrainConfig) -> None:
                     losses["residual"].item(),
                     losses["latent_cosine"].item(),
                     losses["skipless"].item(),
+                    losses["skip"].item(),
                 )
             loss_history.append(
                 {
@@ -1115,6 +1268,7 @@ def train(config: TrainConfig) -> None:
                     "residual": float(losses["residual"].item()),
                     "latent_cosine": float(losses["latent_cosine"].item()),
                     "skipless": float(losses["skipless"].item()),
+                    "skip": float(losses["skip"].item()),
                 }
             )
             if config.checkpoint_every > 0 and current_step % config.checkpoint_every == 0:
@@ -1140,7 +1294,7 @@ def train(config: TrainConfig) -> None:
         steps_in_epoch = len(train_loader)
         avg_total = running["total"] / steps_in_epoch
         logger.info(
-            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f avg_residual %.4f avg_latent_cos %.4f avg_skipless %.4f",
+            "Epoch %d complete | avg_total %.4f avg_recon %.4f avg_latent %.4f avg_pred %.4f avg_residual %.4f avg_latent_cos %.4f avg_skipless %.4f avg_skip %.4f",
             epoch,
             avg_total,
             running["recon"] / steps_in_epoch,
@@ -1149,6 +1303,7 @@ def train(config: TrainConfig) -> None:
             running["residual"] / steps_in_epoch,
             running["latent_cosine"] / steps_in_epoch,
             running["skipless"] / steps_in_epoch,
+            running["skip"] / steps_in_epoch,
         )
 
         if avg_total < best_loss:
