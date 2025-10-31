@@ -165,11 +165,11 @@ class MarioSequenceDataset(Dataset):
 
 
 class SimpleFrameEncoder(nn.Module):
-    """Simple CNN encoder: image → latent vector."""
+    """Simple CNN encoder: image → spatial latent map."""
 
-    def __init__(self, latent_dim: int = 256):
+    def __init__(self, latent_channels: int = 256):
         super().__init__()
-        self.latent_dim = latent_dim
+        self.latent_channels = latent_channels
 
         # Input: (3, 224, 224)
         self.net = nn.Sequential(
@@ -188,21 +188,14 @@ class SimpleFrameEncoder(nn.Module):
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
 
-            # → (512, 14, 14)
-            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(512),
+            # → (latent_channels, 14, 14)
+            nn.Conv2d(256, latent_channels, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(latent_channels),
             nn.ReLU(inplace=True),
-
-            # Global average pooling → (512,)
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-
-            # → (latent_dim,)
-            nn.Linear(512, latent_dim),
         )
 
     def forward(self, frame: torch.Tensor) -> torch.Tensor:
-        # frame: (B, 3, H, W) → (B, latent_dim)
+        # frame: (B, 3, H, W) → (B, latent_channels, 14, 14)
         return self.net(frame)
 
 
@@ -223,45 +216,67 @@ class SimpleActionEncoder(nn.Module):
 
 
 class SimpleTemporalAggregator(nn.Module):
-    """Combine frame+action pairs across time."""
+    """Combine frame+action pairs across time using spatial features."""
 
-    def __init__(self, latent_dim: int):
+    def __init__(self, latent_channels: int, action_embed_dim: int):
         super().__init__()
-        # Simple: just average the combined embeddings
-        self.combine = nn.Linear(latent_dim * 2, latent_dim)
+        self.latent_channels = latent_channels
+        self.action_embed_dim = action_embed_dim
+
+        # Project action embedding to spatial maps
+        # Then combine with frame features
+        combined_channels = latent_channels + action_embed_dim
+        self.combine = nn.Sequential(
+            nn.Conv2d(combined_channels, latent_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(latent_channels),
+            nn.ReLU(inplace=True),
+        )
 
     def forward(
         self,
         frame_latents: torch.Tensor,
         action_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        # frame_latents: (B, 4, latent_dim)
-        # action_embeddings: (B, 4, latent_dim)
+        # frame_latents: (B, 4, C, H, W)
+        # action_embeddings: (B, 4, action_dim)
 
-        # Combine frame + action for each timestep
-        combined = torch.cat([frame_latents, action_embeddings], dim=-1)  # (B, 4, 2*latent_dim)
-        combined = self.combine(combined)  # (B, 4, latent_dim)
+        batch_size, num_frames, channels, height, width = frame_latents.shape
 
-        # Average across time
-        context = combined.mean(dim=1)  # (B, latent_dim)
+        # Process each timestep
+        combined_features = []
+        for t in range(num_frames):
+            frame_feat = frame_latents[:, t]  # (B, C, H, W)
+            action_vec = action_embeddings[:, t]  # (B, action_dim)
+
+            # Broadcast action to spatial dimensions
+            action_map = action_vec.view(batch_size, -1, 1, 1).expand(-1, -1, height, width)  # (B, action_dim, H, W)
+
+            # Concatenate frame features + action map
+            fused = torch.cat([frame_feat, action_map], dim=1)  # (B, C+action_dim, H, W)
+
+            # Process through conv
+            combined = self.combine(fused)  # (B, C, H, W)
+            combined_features.append(combined)
+
+        # Stack and average across time
+        stacked = torch.stack(combined_features, dim=1)  # (B, 4, C, H, W)
+        context = stacked.mean(dim=1)  # (B, C, H, W)
 
         return context
 
 
 class SimpleFrameDecoder(nn.Module):
-    """Simple transposed CNN decoder: latent → image."""
+    """Simple transposed CNN decoder: spatial latent → image."""
 
-    def __init__(self, latent_dim: int = 256, image_hw: Tuple[int, int] = (224, 224)):
+    def __init__(self, latent_channels: int = 256, image_hw: Tuple[int, int] = (224, 224)):
         super().__init__()
         self.image_hw = image_hw
 
-        # Start from latent vector
-        self.fc = nn.Linear(latent_dim, 512 * 14 * 14)
-
+        # Input: (latent_channels, 14, 14)
         # Upsample with transposed convolutions
         self.net = nn.Sequential(
-            # (512, 14, 14) → (256, 28, 28)
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
+            # (latent_channels, 14, 14) → (256, 28, 28)
+            nn.ConvTranspose2d(latent_channels, 256, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
 
@@ -280,10 +295,8 @@ class SimpleFrameDecoder(nn.Module):
         )
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
-        # latent: (B, latent_dim) → (B, 3, H, W)
-        h = self.fc(latent)  # (B, 512*14*14)
-        h = h.view(-1, 512, 14, 14)  # (B, 512, 14, 14)
-        frame = self.net(h)  # (B, 3, 224, 224)
+        # latent: (B, latent_channels, 14, 14) → (B, 3, H, W)
+        frame = self.net(latent)  # (B, 3, 224, 224)
 
         # Ensure correct size
         if frame.shape[-2:] != self.image_hw:
@@ -293,22 +306,22 @@ class SimpleFrameDecoder(nn.Module):
 
 
 class SimpleNextFramePredictor(nn.Module):
-    """Simple next-frame predictor."""
+    """Simple next-frame predictor with spatial latents."""
 
     def __init__(
         self,
         action_dim: int,
-        latent_dim: int = 256,
+        latent_channels: int = 256,
         image_hw: Tuple[int, int] = (224, 224),
     ):
         super().__init__()
         self.image_hw = image_hw
-        self.latent_dim = latent_dim
+        self.latent_channels = latent_channels
 
-        self.frame_encoder = SimpleFrameEncoder(latent_dim)
-        self.action_encoder = SimpleActionEncoder(action_dim, latent_dim)
-        self.aggregator = SimpleTemporalAggregator(latent_dim)
-        self.decoder = SimpleFrameDecoder(latent_dim, image_hw)
+        self.frame_encoder = SimpleFrameEncoder(latent_channels)
+        self.action_encoder = SimpleActionEncoder(action_dim, latent_channels)
+        self.aggregator = SimpleTemporalAggregator(latent_channels, latent_channels)
+        self.decoder = SimpleFrameDecoder(latent_channels, image_hw)
 
     def forward(
         self,
@@ -320,24 +333,24 @@ class SimpleNextFramePredictor(nn.Module):
 
         batch_size, num_frames = context_frames.shape[:2]
 
-        # Encode each frame
+        # Encode each frame to spatial latents
         frame_latents = []
         for t in range(num_frames):
-            latent = self.frame_encoder(context_frames[:, t])  # (B, latent_dim)
+            latent = self.frame_encoder(context_frames[:, t])  # (B, latent_channels, 14, 14)
             frame_latents.append(latent)
-        frame_latents = torch.stack(frame_latents, dim=1)  # (B, 4, latent_dim)
+        frame_latents = torch.stack(frame_latents, dim=1)  # (B, 4, latent_channels, 14, 14)
 
         # Encode each action
         action_embeddings = []
         for t in range(num_frames):
-            emb = self.action_encoder(context_actions[:, t])  # (B, latent_dim)
+            emb = self.action_encoder(context_actions[:, t])  # (B, latent_channels)
             action_embeddings.append(emb)
-        action_embeddings = torch.stack(action_embeddings, dim=1)  # (B, 4, latent_dim)
+        action_embeddings = torch.stack(action_embeddings, dim=1)  # (B, 4, latent_channels)
 
-        # Aggregate
-        context = self.aggregator(frame_latents, action_embeddings)  # (B, latent_dim)
+        # Aggregate across time
+        context = self.aggregator(frame_latents, action_embeddings)  # (B, latent_channels, 14, 14)
 
-        # Decode
+        # Decode to next frame
         next_frame = self.decoder(context)  # (B, 3, H, W)
 
         return next_frame
@@ -366,12 +379,15 @@ def _ensure_dirs(config: TrainConfig) -> Dict[str, Path]:
     plots_dir.mkdir(exist_ok=True)
     vis_dir = run_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
+    debug_dir = run_dir / "debug"
+    debug_dir.mkdir(exist_ok=True)
 
     return {
         "run": run_dir,
         "checkpoints": ckpt_dir,
         "plots": plots_dir,
         "visualizations": vis_dir,
+        "debug": debug_dir,
     }
 
 
@@ -501,6 +517,64 @@ def render_visualization_grid(
     plt.close(fig)
 
 
+def render_debug_batch(
+    model: SimpleNextFramePredictor,
+    batch: Dict[str, torch.Tensor],
+    pred_frame: torch.Tensor,
+    device: torch.device,
+    output_path: Path,
+    step: int,
+    loss_value: float,
+    grad_norm: float,
+) -> None:
+    """
+    Debug visualization showing all samples in the batch that caused issues.
+    Shows context, target, and prediction side-by-side for each sample.
+    """
+    model.eval()
+
+    context_frames = batch["context_frames"].to(device)  # (B, 4, 3, H, W)
+    future_frames = batch["future_frames"].to(device)  # (B, 4, 3, H, W)
+    pred_frame_vis = pred_frame.detach()  # (B, 3, H, W)
+
+    batch_size = min(context_frames.shape[0], 8)  # Show up to 8 samples
+
+    # Create visualization: batch_size rows × 6 columns
+    # Cols: context[0], context[1], context[2], context[3], target, prediction
+    fig, axes = plt.subplots(batch_size, 6, figsize=(12, 2 * batch_size))
+    if batch_size == 1:
+        axes = axes.reshape(1, -1)
+
+    for ax_row in axes:
+        for ax in ax_row:
+            ax.axis("off")
+
+    for b in range(batch_size):
+        # Show 4 context frames
+        for i in range(4):
+            axes[b, i].imshow(_tensor_to_image(context_frames[b, i]))
+            if b == 0:
+                axes[b, i].set_title(f"Ctx {i}", fontsize=8)
+
+        # Show target (first future frame)
+        axes[b, 4].imshow(_tensor_to_image(future_frames[b, 0]))
+        if b == 0:
+            axes[b, 4].set_title("Target", fontsize=8)
+
+        # Show prediction
+        axes[b, 5].imshow(_tensor_to_image(pred_frame_vis[b]))
+        if b == 0:
+            axes[b, 5].set_title("Pred", fontsize=8)
+
+    fig.suptitle(
+        f"Debug Batch - Step {step} | Loss: {loss_value:.4f} | Grad Norm: {grad_norm:.4f}",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
     """Write loss history to CSV file."""
     if not history:
@@ -599,7 +673,7 @@ def train(config: TrainConfig) -> None:
 
     model = SimpleNextFramePredictor(
         action_dim=action_dim,
-        latent_dim=config.latent_dim,
+        latent_channels=config.latent_dim,
         image_hw=config.image_hw,
     ).to(device)
 
@@ -615,6 +689,10 @@ def train(config: TrainConfig) -> None:
     global_step = 0
     best_loss = math.inf
     loss_history: List[Dict[str, float]] = []
+
+    # Track gradient norms for spike detection
+    recent_grad_norms: List[float] = []
+    max_recent_grad_window = 50
 
     if config.resume:
         last_ckpt = dirs["checkpoints"] / "last.pt"
@@ -652,26 +730,128 @@ def train(config: TrainConfig) -> None:
                 pred_frame = model(context_frames, context_actions)  # (B, 3, H, W)
                 loss = loss_fn(pred_frame, target_frame)
 
+            # Diagnostic: Log prediction and target ranges occasionally
+            if (global_step + 1) % (config.log_every * 5) == 0:
+                logger.info(
+                    "Data ranges at step %d | pred: [%.4f, %.4f] | target: [%.4f, %.4f]",
+                    global_step + 1,
+                    pred_frame.min().item(),
+                    pred_frame.max().item(),
+                    target_frame.min().item(),
+                    target_frame.max().item(),
+                )
+
             scaler.scale(loss).backward()
+
+            # Diagnostic: Check for NaN/Inf in loss and gradients
+            loss_value = loss.item()
+            if math.isnan(loss_value) or math.isinf(loss_value):
+                logger.error(
+                    "Invalid loss at step %d: %.4f | Skipping batch",
+                    global_step + 1,
+                    loss_value,
+                )
+                optimizer.zero_grad()
+                continue
+
+            # Diagnostic: Compute gradient norm before clipping
+            total_norm = 0.0
+            param_norm = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    param_grad_norm = p.grad.data.norm(2)
+                    total_norm += param_grad_norm.item() ** 2
+                param_norm += p.data.norm(2).item() ** 2
+            grad_norm = total_norm ** 0.5
+            param_norm = param_norm ** 0.5
+
+            # Track recent gradient norms and detect spikes
+            recent_grad_norms.append(grad_norm)
+            if len(recent_grad_norms) > max_recent_grad_window:
+                recent_grad_norms.pop(0)
+
+            # Debug: Save batch if gradient norm spikes dramatically
+            should_save_debug = False
+            if len(recent_grad_norms) >= 10:
+                avg_recent_grad = sum(recent_grad_norms[-11:-1]) / 10
+                if grad_norm > avg_recent_grad * 5.0 or grad_norm > 100.0:
+                    should_save_debug = True
+                    logger.warning(
+                        "Gradient spike detected! Step %d: grad_norm %.4f (recent avg: %.4f, ratio: %.2fx)",
+                        global_step + 1,
+                        grad_norm,
+                        avg_recent_grad,
+                        grad_norm / avg_recent_grad if avg_recent_grad > 0 else float('inf'),
+                    )
+
             scaler.step(optimizer)
             scaler.update()
 
-            running_loss += loss.item()
+            running_loss += loss_value
 
             current_step = global_step + 1
 
+            # Save debug batch if needed
+            if should_save_debug:
+                debug_path = dirs["debug"] / f"gradient_spike_step_{current_step:06d}.png"
+                debug_data_path = dirs["debug"] / f"gradient_spike_step_{current_step:06d}.pt"
+                try:
+                    render_debug_batch(
+                        model,
+                        batch,
+                        pred_frame,
+                        device,
+                        debug_path,
+                        current_step,
+                        loss_value,
+                        grad_norm,
+                    )
+                    # Also save raw data for deeper analysis
+                    torch.save({
+                        "context_frames": batch["context_frames"].cpu(),
+                        "context_actions": batch["context_actions"].cpu(),
+                        "future_frames": batch["future_frames"].cpu(),
+                        "pred_frame": pred_frame.detach().cpu(),
+                        "loss": loss_value,
+                        "grad_norm": grad_norm,
+                        "step": current_step,
+                    }, debug_data_path)
+                    logger.info("Saved debug batch to %s and %s", debug_path, debug_data_path)
+                except Exception as e:
+                    logger.error("Failed to save debug batch: %s", e)
+                model.train()
+
             if config.log_every > 0 and current_step % config.log_every == 0:
+                scale_info = ""
+                if config.mixed_precision:
+                    scale_info = f" | scaler_scale {scaler.get_scale():.0f}"
                 logger.info(
-                    "Epoch %d Step %d | loss %.4f",
+                    "Epoch %d Step %d | loss %.4f | grad_norm %.4f | param_norm %.4f%s",
                     epoch,
                     current_step,
-                    loss.item(),
+                    loss_value,
+                    grad_norm,
+                    param_norm,
+                    scale_info,
                 )
 
             loss_history.append({
                 "step": current_step,
-                "loss": float(loss.item()),
+                "loss": float(loss_value),
             })
+
+            # Diagnostic: Warn if loss suddenly spikes
+            if len(loss_history) > 10:
+                recent_avg = sum(h["loss"] for h in loss_history[-11:-1]) / 10
+                if loss_value > recent_avg * 3.0:
+                    logger.warning(
+                        "Loss spike detected! Step %d: loss %.4f (recent avg: %.4f, ratio: %.2fx) | grad_norm %.4f",
+                        current_step,
+                        loss_value,
+                        recent_avg,
+                        loss_value / recent_avg,
+                        grad_norm,
+                    )
 
             if config.checkpoint_every > 0 and current_step % config.checkpoint_every == 0:
                 save_checkpoint(
