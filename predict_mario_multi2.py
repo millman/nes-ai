@@ -41,6 +41,14 @@ from super_mario_env import _describe_controller_vector
 logger = logging.getLogger(__name__)
 
 
+class _NullContext:
+    def __enter__(self) -> "_NullContext":
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+
 def _normalize_latent_tensor(tensor: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """L2-normalise over spatial/channel axes while preserving batch/sequence dims."""
     if tensor.dim() < 3:
@@ -82,6 +90,8 @@ class TrainConfig:
     future_steps: int = 8
     encode_chunk: int = 4
     decode_chunk: int = 4
+    reason_steps: int = 2
+    reason_inner_steps: int = 2
     base_channels: int = 32
     latent_channels: int = 96
     vis_every: int = 50
@@ -107,10 +117,14 @@ class TrainConfig:
             self.encode_chunk = self.context_steps
         if self.decode_chunk > self.future_steps:
             self.decode_chunk = self.future_steps
+        if self.reason_steps < 0:
+            raise ValueError("reason_steps must be non-negative.")
+        if self.reason_inner_steps <= 0:
+            raise ValueError("reason_inner_steps must be positive.")
 
 
 class MarioSequenceDataset(Dataset):
-    """Return sliding windows of four frames + actions and four future frames."""
+    """Return sliding windows of context frames plus actions and future frames."""
 
     def __init__(
         self,
@@ -372,19 +386,12 @@ class TemporalSpatialAggregator(nn.Module):
         super().__init__()
         if action_embed_dim != latent_dim:
             raise ValueError("Action embedding dimension must match latent dimension.")
-        groups = 8 if latent_dim % 8 == 0 else 1
-        self.latent_proj = nn.Sequential(
-            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, latent_dim),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, latent_dim),
-            nn.SiLU(inplace=True),
-        )
+        hidden = max(1, latent_dim // 2)
+        self.summary_pool = nn.AdaptiveAvgPool2d(1)
         self.weight_net = nn.Sequential(
-            nn.Linear(latent_dim * 2, latent_dim),
+            nn.Linear(latent_dim * 2, hidden),
             nn.SiLU(inplace=True),
-            nn.Linear(latent_dim, 1),
+            nn.Linear(hidden, 1),
         )
 
     def forward(
@@ -405,15 +412,16 @@ class TemporalSpatialAggregator(nn.Module):
                 f"Expected action embedding dimension {channels}, got {action_embeddings.shape[-1]}"
             )
 
-        flat = latent_maps.reshape(batch * steps, channels, height, width)
-        processed = self.latent_proj(flat).reshape(batch, steps, channels, height, width)
-        processed_norm = _normalize_latent_tensor(processed)
-        step_features = processed_norm.mean(dim=(3, 4))
+        normalized = _normalize_latent_tensor(latent_maps)
+        pooled = self.summary_pool(
+            normalized.reshape(batch * steps, channels, height, width)
+        ).reshape(batch, steps, channels)
+        step_features = pooled
         weight_inputs = torch.cat([step_features, action_embeddings], dim=-1)
         logits = self.weight_net(weight_inputs).squeeze(-1)
         attn_weights = torch.softmax(logits, dim=1)
         weight_view = attn_weights.reshape(batch, steps, 1, 1, 1)
-        fused = (processed * weight_view).sum(dim=1)
+        fused = (latent_maps * weight_view).sum(dim=1)
         fused_skips: List[torch.Tensor] = []
         for level_feats in skip_pyramids:
             if level_feats.dim() != 5:
@@ -430,42 +438,15 @@ class MultiScaleResidualPredictor(nn.Module):
         self.latent_dim = latent_dim
         self.skip_dims = tuple(int(d) for d in skip_dims)
 
-        hidden_channels = latent_dim * 2
-        hidden_groups = 8 if hidden_channels % 8 == 0 else 1
-        output_groups = 8 if latent_dim % 8 == 0 else 1
-        self.input_proj = nn.Sequential(
-            nn.Conv2d(latent_dim * 2, hidden_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(hidden_groups, hidden_channels),
+        self.action_proj = nn.Linear(latent_dim, latent_dim)
+        self.delta_net = nn.Sequential(
+            nn.Conv2d(latent_dim * 2, latent_dim, kernel_size=3, padding=1),
+            _group_norm(latent_dim),
             nn.SiLU(inplace=True),
+            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
         )
-        self.residual_block = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(hidden_groups, hidden_channels),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(hidden_groups, hidden_channels),
-        )
-        self.output_proj = nn.Sequential(
-            nn.SiLU(inplace=True),
-            nn.Conv2d(hidden_channels, latent_dim, kernel_size=3, padding=1),
-            nn.GroupNorm(output_groups, latent_dim),
-        )
-
-        self.latent_to_skip = nn.ModuleList(
+        self.skip_projections = nn.ModuleList(
             nn.Conv2d(latent_dim, skip_dim, kernel_size=1) for skip_dim in self.skip_dims
-        )
-        self.skip_action_proj = nn.ModuleList(
-            nn.Linear(latent_dim, skip_dim) for skip_dim in self.skip_dims
-        )
-        self.skip_blocks = nn.ModuleList(
-            nn.Sequential(
-                nn.Conv2d(skip_dim * 3, skip_dim, kernel_size=3, padding=1),
-                _group_norm(skip_dim),
-                nn.SiLU(inplace=True),
-                nn.Conv2d(skip_dim, skip_dim, kernel_size=3, padding=1),
-                _group_norm(skip_dim),
-            )
-            for skip_dim in self.skip_dims
         )
 
     def forward(
@@ -510,47 +491,141 @@ class MultiScaleResidualPredictor(nn.Module):
 
         current_latent = initial_latent
         current_norm = _normalize_latent_tensor(current_latent)
-        current_skips = [skip for skip in initial_skips]
 
         latents: List[torch.Tensor] = []
         residuals: List[torch.Tensor] = []
         skip_sequences: List[List[torch.Tensor]] = [[] for _ in self.skip_dims]
+        skip_sizes = [skip.shape[-2:] for skip in initial_skips]
 
         for t in range(rollout_steps):
             action_vec = action_embeddings[:, t]
-            action_map = action_vec.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, height, width)
-            fused = torch.cat([current_norm, action_map], dim=1)
-            hidden = self.input_proj(fused)
-            block_out = self.residual_block(hidden)
-            hidden = hidden + block_out
-            delta = self.output_proj(hidden)
+            projected_action = self.action_proj(action_vec).unsqueeze(-1).unsqueeze(-1)
+            action_map = projected_action.expand(-1, -1, height, width)
+            fused = torch.cat([current_latent, action_map], dim=1)
+            delta = self.delta_net(fused)
             updated_latent = current_latent + delta
             updated_norm = _normalize_latent_tensor(updated_latent)
 
             latents.append(updated_latent)
             residuals.append(updated_norm - current_norm)
 
-            next_skips: List[torch.Tensor] = []
-            for idx, skip_dim in enumerate(self.skip_dims):
-                skip_feat = current_skips[idx]
-                if skip_feat.dim() != 4:
-                    raise ValueError("Skip tensor must have 4 dimensions.")
-                skip_h, skip_w = skip_feat.shape[-2:]
-                latent_down = self.latent_to_skip[idx](
-                    F.interpolate(updated_latent, size=(skip_h, skip_w), mode="bilinear", align_corners=False)
-                )
-                action_skip = self.skip_action_proj[idx](action_vec).view(batch, skip_dim, 1, 1).expand(-1, -1, skip_h, skip_w)
-                skip_input = torch.cat([skip_feat, latent_down, action_skip], dim=1)
-                skip_delta = self.skip_blocks[idx](skip_input)
-                next_skip = skip_feat + skip_delta
-                next_skips.append(next_skip)
-                skip_sequences[idx].append(next_skip)
             current_latent = updated_latent
             current_norm = updated_norm
-            current_skips = next_skips
+            for idx, proj in enumerate(self.skip_projections):
+                skip_h, skip_w = skip_sizes[idx]
+                skip_map = proj(
+                    F.interpolate(updated_latent, size=(skip_h, skip_w), mode="bilinear", align_corners=False)
+                )
+                skip_sequences[idx].append(skip_map)
 
         stacked_skips = tuple(torch.stack(level_seq, dim=1) for level_seq in skip_sequences)
         return torch.stack(latents, dim=1), torch.stack(residuals, dim=1), stacked_skips
+
+
+class LatentReasoner(nn.Module):
+    def __init__(self, latent_dim: int, skip_dims: Sequence[int]) -> None:
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.skip_dims = tuple(int(d) for d in skip_dims)
+
+        combined_channels = latent_dim * 2 + latent_dim  # latent + state + action
+        groups = 8 if latent_dim % 8 == 0 else 1
+        self.latent_update = nn.Sequential(
+            nn.Conv2d(combined_channels, latent_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_dim),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_dim),
+        )
+        self.state_update = nn.Sequential(
+            nn.Conv2d(latent_dim * 2, latent_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_dim),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_dim),
+        )
+        self.action_proj = nn.Linear(latent_dim, latent_dim)
+
+        self.skip_refine = nn.ModuleList()
+        for skip_dim in self.skip_dims:
+            in_channels = skip_dim + latent_dim * 3
+            skip_groups = 8 if skip_dim % 8 == 0 else 1
+            self.skip_refine.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channels, skip_dim, kernel_size=3, padding=1),
+                    nn.GroupNorm(skip_groups, skip_dim),
+                    nn.SiLU(inplace=True),
+                    nn.Conv2d(skip_dim, skip_dim, kernel_size=3, padding=1),
+                    nn.GroupNorm(skip_groups, skip_dim),
+                )
+            )
+
+    def forward(
+        self,
+        latents: torch.Tensor,
+        skip_pyramids: Tuple[torch.Tensor, ...],
+        reason_state: torch.Tensor,
+        action_embeddings: Optional[torch.Tensor],
+        *,
+        inner_steps: int,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...], torch.Tensor]:
+        if inner_steps <= 0:
+            return latents, skip_pyramids, reason_state
+        if action_embeddings is None:
+            action_embeddings = latents.new_zeros(latents.shape[0], latents.shape[1], self.latent_dim)
+        else:
+            if action_embeddings.shape[-1] != self.latent_dim:
+                raise ValueError("Action embeddings must match latent dimension for reasoning.")
+        state = reason_state
+        latent_sequence = latents
+        skip_sequence = skip_pyramids
+        for _ in range(inner_steps):
+            latent_sequence, skip_sequence, state = self._single_iteration(latent_sequence, skip_sequence, state, action_embeddings)
+        return latent_sequence, skip_sequence, state
+
+    def _single_iteration(
+        self,
+        latents: torch.Tensor,
+        skip_pyramids: Tuple[torch.Tensor, ...],
+        reason_state: torch.Tensor,
+        action_embeddings: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...], torch.Tensor]:
+        batch, steps, _, height, width = latents.shape
+        state = reason_state
+        updated_latents: List[torch.Tensor] = []
+        updated_skip_levels: List[List[torch.Tensor]] = [[] for _ in self.skip_dims]
+
+        for t in range(steps):
+            action_vec = self.action_proj(action_embeddings[:, t])
+            action_map = action_vec.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, height, width)
+            latent_input = torch.cat([latents[:, t], state, action_map], dim=1)
+            latent_delta = self.latent_update(latent_input)
+            latent_next = latents[:, t] + latent_delta
+            latent_next = _normalize_latent_tensor(latent_next)
+
+            state_input = torch.cat([state, latent_next], dim=1)
+            state_delta = self.state_update(state_input)
+            state = _normalize_latent_tensor(state + state_delta)
+
+            updated_latents.append(latent_next)
+
+            for level, module in enumerate(self.skip_refine):
+                skip_tensor = skip_pyramids[level][:, t]
+                target_hw = skip_tensor.shape[-2:]
+                latent_resized = F.interpolate(latent_next, size=target_hw, mode="bilinear", align_corners=False)
+                state_resized = F.interpolate(state, size=target_hw, mode="bilinear", align_corners=False)
+                action_resized = F.interpolate(action_map, size=target_hw, mode="bilinear", align_corners=False)
+                skip_input = torch.cat([skip_tensor, latent_resized, state_resized, action_resized], dim=1)
+                skip_delta = module(skip_input)
+                updated_skip_levels[level].append(skip_tensor + skip_delta)
+
+        updated_latent_tensor = torch.stack(updated_latents, dim=1)
+        updated_skip_tensors: Tuple[torch.Tensor, ...]
+        if self.skip_dims:
+            updated_skip_tensors = tuple(torch.stack(level_seq, dim=1) for level_seq in updated_skip_levels)
+        else:
+            updated_skip_tensors = tuple()
+        return updated_latent_tensor, updated_skip_tensors, state
 
 
 @dataclass
@@ -565,6 +640,8 @@ class ModelOutputs:
     input_reconstructions: Optional[torch.Tensor]
     encoded_future_latents: Optional[torch.Tensor]
     encoded_future_skips: Optional[Tuple[torch.Tensor, ...]]
+    reason_state: torch.Tensor
+    reason_iterations: int
     attention_weights: Optional[torch.Tensor]
 
 
@@ -577,10 +654,14 @@ class MarioSequencePredictor(nn.Module):
         latent_channels: int = 96,
         image_hw: Tuple[int, int] = (224, 224),
         decode_chunk: int = 4,
+        reason_steps: int = 0,
+        reason_inner_steps: int = 1,
     ) -> None:
         super().__init__()
         self.image_hw = image_hw
         self.decode_chunk = max(1, int(decode_chunk))
+        self.reason_steps = max(0, int(reason_steps))
+        self.reason_inner_steps = max(1, int(reason_inner_steps))
         self.encoder = FrameEncoder(base_channels=base_channels, latent_channels=latent_channels)
         self.decoder = LatentDecoder(latent_channels=latent_channels, base_channels=base_channels)
         self.action_encoder = ActionEncoder(action_dim, embed_dim=latent_channels)
@@ -590,6 +671,8 @@ class MarioSequencePredictor(nn.Module):
         )
         self.skip_dims = (base_channels, base_channels * 2, base_channels * 3)
         self.predictor = MultiScaleResidualPredictor(latent_dim=latent_channels, skip_dims=self.skip_dims)
+        self.reason_state_init = nn.Conv2d(latent_channels, latent_channels, kernel_size=1)
+        self.reasoner = LatentReasoner(latent_dim=latent_channels, skip_dims=self.skip_dims)
         self.recon_loss_fn = nn.SmoothL1Loss()
         self.latent_loss_fn = nn.MSELoss()
         self.residual_loss_fn = nn.MSELoss()
@@ -675,6 +758,28 @@ class MarioSequencePredictor(nn.Module):
             future_action_embeddings,
             steps=rollout_steps,
         )
+        reason_state = _normalize_latent_tensor(self.reason_state_init(context_map))
+        latents_for_reason = predicted_latents
+        skips_for_reason = predicted_skips
+        executed_reason_iterations = 0
+        if self.reason_steps > 0 and latents_for_reason.dim() == 5:
+            for step in range(self.reason_steps):
+                context_manager = torch.no_grad() if step < self.reason_steps - 1 else _NullContext()
+                with context_manager:
+                    latents_for_reason, skips_for_reason, reason_state = self.reasoner(
+                        latents_for_reason,
+                        skips_for_reason,
+                        reason_state,
+                        future_action_embeddings,
+                        inner_steps=self.reason_inner_steps,
+                    )
+                executed_reason_iterations += self.reason_inner_steps
+                if step < self.reason_steps - 1:
+                    latents_for_reason = latents_for_reason.detach()
+                    skips_for_reason = tuple(skip.detach() for skip in skips_for_reason)
+                    reason_state = reason_state.detach()
+        predicted_latents = latents_for_reason
+        predicted_skips = skips_for_reason
         predicted_frames = self._decode_sequence(
             predicted_latents,
             predicted_skips,
@@ -704,6 +809,8 @@ class MarioSequencePredictor(nn.Module):
             input_reconstructions=recon,
             encoded_future_latents=encoded_future_latents,
             encoded_future_skips=encoded_future_skips,
+             reason_state=reason_state,
+             reason_iterations=executed_reason_iterations,
             attention_weights=attn_weights,
         )
 
@@ -1170,6 +1277,8 @@ def train(config: TrainConfig) -> None:
         latent_channels=config.latent_channels,
         image_hw=image_hw,
         decode_chunk=config.decode_chunk,
+        reason_steps=config.reason_steps,
+        reason_inner_steps=config.reason_inner_steps,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
