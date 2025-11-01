@@ -621,7 +621,12 @@ def save_comparison_grid(
     font = ImageFont.load_default()
 
     for col_idx, title in enumerate(titles):
-        text_w, text_h = draw.textsize(title, font=font)
+        if hasattr(draw, "textbbox"):
+            left, top, right, bottom = draw.textbbox((0, 0), title, font=font)
+            text_w = right - left
+            text_h = bottom - top
+        else:
+            text_w, text_h = font.getsize(title)
         x = col_idx * tile_w + max(0, (tile_w - text_w) // 2)
         y = max(0, (header_height - text_h) // 2)
         draw.text((x, y), title, fill=(255, 255, 255), font=font)

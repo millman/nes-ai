@@ -473,6 +473,97 @@ def save_pca_traversal_grid(
     canvas.save(out_path)
 
 
+@torch.no_grad()
+def save_geodesic_traversal_grid(
+    model: CFMAutoencoder,
+    input_frame: torch.Tensor,
+    recon_frame: torch.Tensor,
+    latent: torch.Tensor,
+    directions: Sequence[torch.Tensor],
+    percent_levels: Sequence[float],
+    projections: Sequence[torch.Tensor],
+    out_path: Path,
+    device: torch.device,
+) -> None:
+    """Traverse PCA directions along sphere-constrained geodesics."""
+    if not directions:
+        raise ValueError("No PCA directions provided")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    base_img = to_image(input_frame)
+    recon_img = to_image(recon_frame)
+    tile_w, tile_h = base_img.size
+    num_rows = len(directions)
+    num_cols = 1 + len(percent_levels)
+    canvas = Image.new("RGB", (num_cols * tile_w, num_rows * tile_h), color=(0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    latent_device = latent.to(device)
+    latent_norm = float(latent_device.norm().item())
+    if latent_norm <= 0.0:
+        raise ValueError("Latent norm must be positive for geodesic traversal")
+    z_unit = latent_device / latent_norm
+    percent_list = [float(p) for p in percent_levels]
+    label_height = 24
+
+    for row_idx, (direction, comp_proj) in enumerate(
+        zip(directions, projections), start=1
+    ):
+        y = (row_idx - 1) * tile_h
+        canvas.paste(base_img, (0, y))
+        draw.rectangle([4, y + 4, tile_w - 4, y + 28], outline=(255, 255, 0))
+        draw.text((8, y + 8), f"Geo PC{row_idx}", fill=(255, 255, 0))
+        draw.rectangle(
+            [0, y + tile_h - label_height, tile_w, y + tile_h],
+            fill=(0, 0, 0),
+        )
+        draw.text(
+            (6, y + tile_h - label_height + 4),
+            "+0.000 (+0%) θ=+0.000",
+            fill=(255, 255, 0),
+        )
+
+        direction_device = direction.to(device)
+        comp_proj_float = comp_proj.to(dtype=torch.float32)
+        radial = torch.dot(direction_device, z_unit)
+        tangent = direction_device - radial * z_unit
+        tangent_norm = float(tangent.norm().item())
+        for col_idx, percent in enumerate(percent_list, start=1):
+            x = col_idx * tile_w
+            if abs(percent) < 1e-6:
+                tile = recon_img
+                delta = 0.0
+                theta = 0.0
+            else:
+                q = 0.5 + 0.5 * percent
+                q = max(0.0, min(1.0, q))
+                delta = float(torch.quantile(comp_proj_float, q))
+                if tangent_norm <= 1e-8:
+                    # Tangent collapsed; fall back to linear interpolation.
+                    shifted = latent_device + delta * direction_device
+                    theta = 0.0
+                else:
+                    tangent_unit = tangent / tangent_norm
+                    # Match small-angle displacement with linear PCA traversal.
+                    theta = delta * (tangent_norm / latent_norm)
+                    cos_t = math.cos(theta)
+                    sin_t = math.sin(theta)
+                    shifted_unit = cos_t * z_unit + sin_t * tangent_unit
+                    shifted = shifted_unit * latent_norm
+                decoded = model.decode(shifted.unsqueeze(0)).cpu()[0]
+                tile = to_image(decoded)
+            canvas.paste(tile, (x, y))
+            draw.rectangle(
+                [x, y + tile_h - label_height, x + tile_w, y + tile_h],
+                fill=(0, 0, 0),
+            )
+            draw.text(
+                (x + 6, y + tile_h - label_height + 4),
+                f"{delta:+.3f} ({percent*100:+.0f}%) θ={theta:+.3f}",
+                fill=(255, 255, 0),
+            )
+    canvas.save(out_path)
+
+
 def save_comparison_grid(
     inputs: torch.Tensor,
     reconstructions: torch.Tensor,
@@ -612,6 +703,7 @@ def main() -> None:
 
     samples_root = run_dir / "samples"
     pca_samples_dir = samples_root / "pca"
+    pca_geodesic_dir = samples_root / "pca_geodesic"
     fixed_samples_dir = samples_root / "fixed"
     rolling_samples_dir = samples_root / "rolling"
     metrics_dir = run_dir / "metrics"
@@ -619,6 +711,7 @@ def main() -> None:
     for directory in (
         samples_root,
         pca_samples_dir,
+        pca_geodesic_dir,
         fixed_samples_dir,
         rolling_samples_dir,
         metrics_dir,
@@ -863,6 +956,20 @@ def main() -> None:
                             percent_levels.tolist(),
                             proj_samples,
                             out_path,
+                            device,
+                        )
+                        geo_path = pca_geodesic_dir / (
+                            f"geodesic_step_{global_step:06d}_idx_{idx}.png"
+                        )
+                        save_geodesic_traversal_grid(
+                            model,
+                            fixed_batch_cpu[idx],
+                            fixed_recon_cpu[idx],
+                            fixed_latent_cpu[idx],
+                            directions,
+                            percent_levels.tolist(),
+                            proj_samples,
+                            geo_path,
                             device,
                         )
                 plot_loss(loss_hist, metrics_dir, global_step)
