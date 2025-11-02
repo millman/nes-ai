@@ -41,6 +41,25 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def symlog(x: torch.Tensor) -> torch.Tensor:
+    """Symmetric log transform used to damp outliers."""
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def symlog_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
+    """Symlog regression loss."""
+    diff = pred - target
+    transformed = symlog(diff)
+    loss = transformed.pow(2)
+    if reduction == "mean":
+        return loss.mean()
+    if reduction == "sum":
+        return loss.sum()
+    if reduction == "none":
+        return loss
+    raise ValueError(f"Unsupported reduction: {reduction}")
+
+
 @dataclass
 class TrainConfig:
     data_root: Path = Path("data.image_distance.train_levels_1_2")
@@ -485,20 +504,38 @@ def visualize_reconstruction(
     out_path: Path,
     target_frames: torch.Tensor,
     reconstructed_frames: torch.Tensor,
+    direct_reconstructions: torch.Tensor,
+    warmup_steps: int,
+    column_prefix: str,
+    row_labels: Tuple[str, str, str] = (
+        "Ground Truth",
+        "Hidden-State Reconstruction",
+        "Direct Encoder/Decoder",
+    ),
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     target = target_frames[0].detach().cpu()
     recon = torch.clamp(reconstructed_frames[0].detach().cpu(), 0.0, 1.0)
+    direct = torch.clamp(direct_reconstructions[0].detach().cpu(), 0.0, 1.0)
     steps = target.shape[0]
-    fig, axes = plt.subplots(2, steps, figsize=(steps * 2, 4))
+    fig, axes = plt.subplots(3, steps, figsize=(steps * 2, 6))
 
     for idx in range(steps):
+        col_label = f"{column_prefix} | t={warmup_steps + idx}"
         axes[0, idx].imshow(target[idx].permute(1, 2, 0).numpy())
+        axes[0, idx].set_title(col_label, fontsize=8)
         axes[0, idx].axis("off")
+
         axes[1, idx].imshow(recon[idx].permute(1, 2, 0).numpy())
         axes[1, idx].axis("off")
 
-    fig.suptitle("Top: target | Bottom: reconstruction")
+        axes[2, idx].imshow(direct[idx].permute(1, 2, 0).numpy())
+        axes[2, idx].axis("off")
+
+    for row_idx, label in enumerate(row_labels):
+        axes[row_idx, 0].set_ylabel(label, rotation=90, va="center", fontsize=9)
+
+    fig.suptitle("Visual comparison: ground truth vs. reconstructed variants")
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -553,8 +590,6 @@ def train(cfg: TrainConfig) -> None:
         film_layers=cfg.film_layers,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
-    mse_loss = nn.MSELoss()
-    bce_loss = nn.BCEWithLogitsLoss()
 
     metrics_dir = run_dir / "metrics"
     samples_dir = run_dir / "samples"
@@ -596,10 +631,9 @@ def train(cfg: TrainConfig) -> None:
             target_actions = actions[:, cfg.warmup_steps :]
             forward_end = perf_counter()
 
-            recon_loss = mse_loss(outputs["reconstructions"], target_frames)
-            action_logits = outputs["action_logits"].reshape(-1, actions.shape[-1])
-            action_targets = target_actions.reshape(-1, actions.shape[-1])
-            action_loss = bce_loss(action_logits, action_targets)
+            recon_loss = symlog_loss(outputs["reconstructions"], target_frames)
+            action_probs = torch.sigmoid(outputs["action_logits"])
+            action_loss = symlog_loss(action_probs, target_actions)
             loss = recon_loss + cfg.action_loss_weight * action_loss
 
             optimizer.zero_grad(set_to_none=True)
@@ -653,21 +687,35 @@ def train(cfg: TrainConfig) -> None:
                 model.eval()
                 with torch.no_grad():
                     if fixed_batch_cpu is not None:
+                        fixed_frames_dev = fixed_batch_cpu["frames"].to(device)
+                        fixed_actions_dev = fixed_batch_cpu["actions"].to(device)
                         fixed_outputs = model(
-                            fixed_batch_cpu["frames"].to(device),
-                            fixed_batch_cpu["actions"].to(device),
+                            fixed_frames_dev,
+                            fixed_actions_dev,
                             warmup_steps=cfg.warmup_steps,
                         )
+                        fixed_targets_dev = fixed_frames_dev[:, cfg.warmup_steps :]
+                        flat_fixed = fixed_targets_dev.reshape(-1, *fixed_targets_dev.shape[2:])
+                        fixed_direct = model.decoder(model.encoder(flat_fixed)).reshape_as(fixed_targets_dev)
                         visualize_reconstruction(
                             out_path=samples_dir / f"fixed_step_{global_step:07d}.png",
-                            target_frames=fixed_batch_cpu["frames"][:, cfg.warmup_steps :],
+                            target_frames=fixed_targets_dev.detach().cpu(),
                             reconstructed_frames=fixed_outputs["reconstructions"].detach().cpu(),
+                            direct_reconstructions=fixed_direct.detach().cpu(),
+                            warmup_steps=cfg.warmup_steps,
+                            column_prefix="fixed",
                         )
                     rolling_outputs = model(frames, actions, warmup_steps=cfg.warmup_steps)
+                    rolling_targets_dev = frames[:, cfg.warmup_steps :]
+                    flat_rolling = rolling_targets_dev.reshape(-1, *rolling_targets_dev.shape[2:])
+                    rolling_direct = model.decoder(model.encoder(flat_rolling)).reshape_as(rolling_targets_dev)
                     visualize_reconstruction(
                         out_path=samples_dir / f"rolling_step_{global_step:07d}.png",
-                        target_frames=frames[:, cfg.warmup_steps :].detach().cpu(),
+                        target_frames=rolling_targets_dev.detach().cpu(),
                         reconstructed_frames=rolling_outputs["reconstructions"].detach().cpu(),
+                        direct_reconstructions=rolling_direct.detach().cpu(),
+                        warmup_steps=cfg.warmup_steps,
+                        column_prefix="rolling",
                     )
                 model.train()
 
