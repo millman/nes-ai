@@ -15,15 +15,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 import tyro
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
 from predict_mario_ms_ssim import pick_device
 from recon.data import list_trajectories, load_frame_as_tensor
@@ -100,6 +100,7 @@ class MarioWarmupDataset(Dataset):
         self.warmup_steps = warmup_steps
         self.rollout_steps = rollout_steps
         self.total_steps = warmup_steps + rollout_steps
+
         if self.total_steps < 1:
             raise ValueError("Expected warmup_steps + rollout_steps >= 1.")
         self.image_hw = image_hw
@@ -170,6 +171,7 @@ class MarioWarmupDataset(Dataset):
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         frame_paths, actions, start = self._samples[index]
         frames: List[torch.Tensor] = []
+        path_slice: List[str] = []
         for offset in range(self.total_steps):
             frame = load_frame_as_tensor(
                 frame_paths[start + offset],
@@ -177,11 +179,58 @@ class MarioWarmupDataset(Dataset):
                 normalize=None,
             )
             frames.append(frame)
+            path_slice.append(str(frame_paths[start + offset]))
         action_slice = actions[start : start + self.total_steps]
         return {
             "frames": torch.stack(frames, dim=0),
             "actions": torch.from_numpy(action_slice),
+            "frame_paths": path_slice,
         }
+
+
+def extract_traj_state_label(frame_path: str) -> str:
+    path = Path(frame_path)
+    traj = next((part for part in path.parts if part.startswith("traj_")), "traj_unknown")
+    state = path.stem
+    return f"{traj}/{state}"
+
+
+def build_frame_labels(frame_paths: List[str], warmup_steps: int) -> Tuple[List[str], List[str]]:
+    if warmup_steps > len(frame_paths):
+        raise ValueError("warmup_steps exceeds number of frame paths.")
+    labels = [extract_traj_state_label(p) for p in frame_paths]
+    warmup_labels = [f"{label} | warmup" for label in labels[:warmup_steps]]
+    predicted_labels = [f"{label} | predicted" for label in labels[warmup_steps:]]
+    expected_predicted = len(labels) - warmup_steps
+    assert expected_predicted >= 0, "Expected non-negative predicted frame count."
+    assert len(predicted_labels) >= expected_predicted, (
+        f"Expected at least {expected_predicted} predicted labels, received {len(predicted_labels)}."
+    )
+    predicted_labels = predicted_labels[:expected_predicted]
+    assert len(warmup_labels) == warmup_steps, (
+        f"Expected {warmup_steps} warmup labels, received {len(warmup_labels)}."
+    )
+    assert len(predicted_labels) == expected_predicted, (
+        f"Expected {expected_predicted} predicted labels, received {len(predicted_labels)}."
+    )
+    return warmup_labels, predicted_labels
+
+
+def extract_paths_for_sample(batch_paths: Sequence[Any], sample_idx: int) -> List[str]:
+    assert isinstance(batch_paths, (list, tuple)), (
+        f"Unexpected frame_paths type: {type(batch_paths)!r}"
+    )
+    if not batch_paths:
+        return []
+    first = batch_paths[0]
+    if isinstance(first, (list, tuple)):
+        paths = [seq[sample_idx] for seq in batch_paths]
+    elif isinstance(first, (str, Path)):
+        assert sample_idx == 0, "String-based frame_paths only support sample_idx == 0."
+        paths = batch_paths
+    else:
+        raise TypeError(f"Unsupported frame_paths element type: {type(first)!r}")
+    return [str(path) for path in paths]
 
 
 class ImageEncoder(nn.Module):
@@ -502,11 +551,13 @@ def make_dataloader(cfg: TrainConfig) -> DataLoader:
 def visualize_reconstruction(
     *,
     out_path: Path,
-    target_frames: torch.Tensor,
-    reconstructed_frames: torch.Tensor,
-    direct_reconstructions: torch.Tensor,
-    warmup_steps: int,
-    column_prefix: str,
+    warmup_frames: torch.Tensor,
+    predicted_frames: torch.Tensor,
+    hidden_reconstructions: torch.Tensor,
+    direct_warmup: torch.Tensor,
+    direct_predicted: torch.Tensor,
+    warmup_labels: Sequence[str],
+    predicted_labels: Sequence[str],
     row_labels: Tuple[str, str, str] = (
         "Ground Truth",
         "Hidden-State Reconstruction",
@@ -514,29 +565,60 @@ def visualize_reconstruction(
     ),
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    target = target_frames[0].detach().cpu()
-    recon = torch.clamp(reconstructed_frames[0].detach().cpu(), 0.0, 1.0)
-    direct = torch.clamp(direct_reconstructions[0].detach().cpu(), 0.0, 1.0)
-    steps = target.shape[0]
-    fig, axes = plt.subplots(3, steps, figsize=(steps * 2, 6))
+    warmup = torch.clamp(warmup_frames[0].detach().cpu(), 0.0, 1.0)
+    predicted = torch.clamp(predicted_frames[0].detach().cpu(), 0.0, 1.0)
+    hidden_pred = torch.clamp(hidden_reconstructions[0].detach().cpu(), 0.0, 1.0)
+    direct_w = torch.clamp(direct_warmup[0].detach().cpu(), 0.0, 1.0)
+    direct_p = torch.clamp(direct_predicted[0].detach().cpu(), 0.0, 1.0)
 
-    for idx in range(steps):
-        col_label = f"{column_prefix} | t={warmup_steps + idx}"
-        axes[0, idx].imshow(target[idx].permute(1, 2, 0).numpy())
-        axes[0, idx].set_title(col_label, fontsize=8)
-        axes[0, idx].axis("off")
+    warmup_cols = warmup.shape[0]
+    predicted_cols = predicted.shape[0]
+    warmup_labels = list(warmup_labels)
+    predicted_labels = list(predicted_labels)
+    assert len(warmup_labels) == warmup_cols, (
+        f"Expected {warmup_cols} warmup labels, received {len(warmup_labels)}."
+    )
+    assert len(predicted_labels) == predicted_cols, (
+        f"Expected {predicted_cols} predicted labels, received {len(predicted_labels)}."
+    )
+    total_cols = warmup_cols + predicted_cols
+    all_labels = warmup_labels + predicted_labels
 
-        axes[1, idx].imshow(recon[idx].permute(1, 2, 0).numpy())
-        axes[1, idx].axis("off")
+    fig, axes = plt.subplots(3, total_cols, figsize=(total_cols * 2, 6))
+    blank = torch.ones_like(warmup[0]) * 0.5
 
-        axes[2, idx].imshow(direct[idx].permute(1, 2, 0).numpy())
-        axes[2, idx].axis("off")
+    def _imshow(ax: plt.Axes, tensor: torch.Tensor) -> None:
+        ax.imshow(tensor.permute(1, 2, 0).numpy())
+        ax.axis("off")
+
+    for idx, label in enumerate(all_labels):
+        if idx < warmup_cols:
+            _imshow(axes[0, idx], warmup[idx])
+            _imshow(axes[1, idx], blank)
+            _imshow(axes[2, idx], direct_w[idx])
+        else:
+            pred_idx = idx - warmup_cols
+            _imshow(axes[0, idx], predicted[pred_idx])
+            _imshow(axes[1, idx], hidden_pred[pred_idx])
+            _imshow(axes[2, idx], direct_p[pred_idx])
+
+        axes[0, idx].set_title(label, fontsize=8)
+
+    fig.suptitle("Ground truth vs. hidden-path vs. direct reconstructions")
+    fig.tight_layout(rect=(0.08, 0.0, 1.0, 0.95))
 
     for row_idx, label in enumerate(row_labels):
-        axes[row_idx, 0].set_ylabel(label, rotation=90, va="center", fontsize=9)
+        axes[row_idx, 0].text(
+            -0.12,
+            0.5,
+            label,
+            transform=axes[row_idx, 0].transAxes,
+            va="center",
+            ha="right",
+            fontsize=8,
+            rotation=90,
+        )
 
-    fig.suptitle("Visual comparison: ground truth vs. reconstructed variants")
-    fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
 
@@ -598,7 +680,7 @@ def train(cfg: TrainConfig) -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
     loss_history = LossHistory.empty()
-    fixed_batch_cpu: Optional[Dict[str, torch.Tensor]] = None
+    fixed_batch_cpu: Optional[Dict[str, Any]] = None
     best_metric = float("inf")
     last_loss = float("inf")
     global_step = 0
@@ -620,8 +702,9 @@ def train(cfg: TrainConfig) -> None:
 
             if fixed_batch_cpu is None:
                 fixed_batch_cpu = {
-                    "frames": frames[:1].detach().cpu(),
-                    "actions": actions[:1].detach().cpu(),
+                    "frames": batch["frames"][:1].detach().cpu(),
+                    "actions": batch["actions"][:1].detach().cpu(),
+                    "frame_paths": extract_paths_for_sample(batch["frame_paths"], 0),
                 }
 
             transfer_end = perf_counter()
@@ -689,33 +772,55 @@ def train(cfg: TrainConfig) -> None:
                     if fixed_batch_cpu is not None:
                         fixed_frames_dev = fixed_batch_cpu["frames"].to(device)
                         fixed_actions_dev = fixed_batch_cpu["actions"].to(device)
+                        fixed_paths = fixed_batch_cpu["frame_paths"]
+                        fixed_warm_labels, fixed_pred_labels = build_frame_labels(fixed_paths, cfg.warmup_steps)
                         fixed_outputs = model(
                             fixed_frames_dev,
                             fixed_actions_dev,
                             warmup_steps=cfg.warmup_steps,
                         )
+                        fixed_warmup_dev = fixed_frames_dev[:, : cfg.warmup_steps]
                         fixed_targets_dev = fixed_frames_dev[:, cfg.warmup_steps :]
-                        flat_fixed = fixed_targets_dev.reshape(-1, *fixed_targets_dev.shape[2:])
-                        fixed_direct = model.decoder(model.encoder(flat_fixed)).reshape_as(fixed_targets_dev)
+                        flat_fixed_warmup = fixed_warmup_dev.reshape(-1, *fixed_warmup_dev.shape[2:])
+                        flat_fixed_pred = fixed_targets_dev.reshape(-1, *fixed_targets_dev.shape[2:])
+                        fixed_direct_warmup = model.decoder(model.encoder(flat_fixed_warmup)).reshape_as(
+                            fixed_warmup_dev
+                        )
+                        fixed_direct_pred = model.decoder(model.encoder(flat_fixed_pred)).reshape_as(
+                            fixed_targets_dev
+                        )
                         visualize_reconstruction(
                             out_path=samples_dir / f"fixed_step_{global_step:07d}.png",
-                            target_frames=fixed_targets_dev.detach().cpu(),
-                            reconstructed_frames=fixed_outputs["reconstructions"].detach().cpu(),
-                            direct_reconstructions=fixed_direct.detach().cpu(),
-                            warmup_steps=cfg.warmup_steps,
-                            column_prefix="fixed",
+                            warmup_frames=fixed_warmup_dev.detach().cpu(),
+                            predicted_frames=fixed_targets_dev.detach().cpu(),
+                            hidden_reconstructions=fixed_outputs["reconstructions"].detach().cpu(),
+                            direct_warmup=fixed_direct_warmup.detach().cpu(),
+                            direct_predicted=fixed_direct_pred.detach().cpu(),
+                            warmup_labels=fixed_warm_labels,
+                            predicted_labels=fixed_pred_labels,
                         )
                     rolling_outputs = model(frames, actions, warmup_steps=cfg.warmup_steps)
                     rolling_targets_dev = frames[:, cfg.warmup_steps :]
-                    flat_rolling = rolling_targets_dev.reshape(-1, *rolling_targets_dev.shape[2:])
-                    rolling_direct = model.decoder(model.encoder(flat_rolling)).reshape_as(rolling_targets_dev)
+                    rolling_warmup_dev = frames[:, : cfg.warmup_steps]
+                    rolling_paths = extract_paths_for_sample(batch["frame_paths"], 0)
+                    rolling_warm_labels, rolling_pred_labels = build_frame_labels(rolling_paths, cfg.warmup_steps)
+                    flat_rolling_warmup = rolling_warmup_dev.reshape(-1, *rolling_warmup_dev.shape[2:])
+                    flat_rolling_pred = rolling_targets_dev.reshape(-1, *rolling_targets_dev.shape[2:])
+                    rolling_direct_warm = model.decoder(model.encoder(flat_rolling_warmup)).reshape_as(
+                        rolling_warmup_dev
+                    )
+                    rolling_direct_pred = model.decoder(model.encoder(flat_rolling_pred)).reshape_as(
+                        rolling_targets_dev
+                    )
                     visualize_reconstruction(
                         out_path=samples_dir / f"rolling_step_{global_step:07d}.png",
-                        target_frames=rolling_targets_dev.detach().cpu(),
-                        reconstructed_frames=rolling_outputs["reconstructions"].detach().cpu(),
-                        direct_reconstructions=rolling_direct.detach().cpu(),
-                        warmup_steps=cfg.warmup_steps,
-                        column_prefix="rolling",
+                        warmup_frames=rolling_warmup_dev.detach().cpu(),
+                        predicted_frames=rolling_targets_dev.detach().cpu(),
+                        hidden_reconstructions=rolling_outputs["reconstructions"].detach().cpu(),
+                        direct_warmup=rolling_direct_warm.detach().cpu(),
+                        direct_predicted=rolling_direct_pred.detach().cpu(),
+                        warmup_labels=rolling_warm_labels,
+                        predicted_labels=rolling_pred_labels,
                     )
                 model.train()
 
