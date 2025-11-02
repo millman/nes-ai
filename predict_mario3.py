@@ -337,7 +337,8 @@ class MarioPredictor(nn.Module):
             predicted_frames.append(self.decoder(latent))
 
             if future_frame_embeds is not None:
-                target_latents.append(future_frame_embeds[:, step, :])
+                direct_latent = future_frame_embeds[:, step, :]
+                target_latents.append(direct_latent)
             if future_action_embeds is not None:
                 next_action = future_action_embeds[:, step, :]
             elif action_window:
@@ -362,27 +363,75 @@ class MarioPredictor(nn.Module):
         return outputs
 
 
+@dataclass
+class LossHistory:
+    steps: List[float]
+    total: List[float]
+    recon: List[float]
+    action: List[float]
+    pixel: List[float]
+
+    @classmethod
+    def empty(cls) -> "LossHistory":
+        return cls([], [], [], [], [])
+
+    def append(
+        self,
+        *,
+        step: float,
+        total: float,
+        recon: float,
+        action: float,
+        pixel: float,
+    ) -> None:
+        self.steps.append(step)
+        self.total.append(total)
+        self.recon.append(recon)
+        self.action.append(action)
+        self.pixel.append(pixel)
+
+    def __len__(self) -> int:
+        return len(self.steps)
+
+    def rows(self) -> Dict[str, List[float]]:
+        return {
+            "step": self.steps,
+            "total": self.total,
+            "recon": self.recon,
+            "action": self.action,
+            "pixel": self.pixel,
+        }
+
+
 LOSS_COLUMNS = ["step", "total", "recon", "action", "pixel"]
 
 
-def write_loss_csv(history: List[Dict[str, float]], path: Path) -> None:
+def write_loss_csv(history: LossHistory, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(LOSS_COLUMNS)
-        for entry in history:
-            writer.writerow([entry[col] for col in LOSS_COLUMNS])
+        for row in zip(
+            history.steps,
+            history.total,
+            history.recon,
+            history.action,
+            history.pixel,
+        ):
+            writer.writerow(row)
 
 
-def plot_loss_curves(history: List[Dict[str, float]], out_dir: Path) -> None:
-    if not history:
+def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
+    if len(history) == 0:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
-    steps = [entry["step"] for entry in history]
+    steps = history.steps
 
     plt.figure(figsize=(8, 5))
-    for label in ("total", "recon", "action", "pixel"):
-        plt.plot(steps, [entry[label] for entry in history], label=label)
+    plt.plot(steps, history.total, label="total")
+    plt.plot(steps, history.recon, label="recon")
+    plt.plot(steps, history.action, label="action")
+    plt.plot(steps, history.pixel, label="pixel")
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
@@ -451,18 +500,25 @@ def visualize_rollout(
 def save_checkpoint(
     *,
     output_dir: Path,
-    global_step: int,
+    name: str,
+    step: int,
+    epoch: int,
+    metric: float,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
-) -> None:
+) -> Path:
     ckpt_dir = output_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     state = {
-        "step": global_step,
+        "step": step,
+        "epoch": epoch,
+        "metric": metric,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
     }
-    torch.save(state, ckpt_dir / f"step_{global_step:07d}.pt")
+    path = ckpt_dir / name
+    torch.save(state, path)
+    return path
 
 
 def train(cfg: TrainConfig) -> None:
@@ -495,8 +551,10 @@ def train(cfg: TrainConfig) -> None:
     for directory in (metrics_dir, fixed_samples_dir, rolling_samples_dir, checkpoints_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    loss_history: List[Dict[str, float]] = []
+    loss_history = LossHistory.empty()
     fixed_batch_cpu: Optional[Dict[str, torch.Tensor]] = None
+    best_metric = float("inf")
+    last_loss = float("inf")
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -534,12 +592,13 @@ def train(cfg: TrainConfig) -> None:
             recon_loss = mse_loss(outputs["reconstruction"], context_frames[:, -1])
             action_loss = mse_loss(outputs["predicted_latents"], outputs["target_latents"])
             pixel_loss = mse_loss(outputs["predicted_frames"], outputs["target_frames"])
-
             loss = recon_loss + action_loss + pixel_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             backward_end = perf_counter()
+            current_loss = float(loss.item())
+            last_loss = current_loss
 
             running_recon += recon_loss.item()
             running_action += action_loss.item()
@@ -574,13 +633,11 @@ def train(cfg: TrainConfig) -> None:
                     avg_backward,
                 )
                 loss_history.append(
-                    {
-                        "step": float(global_step),
-                        "total": avg_total,
-                        "recon": avg_recon,
-                        "action": avg_action,
-                        "pixel": avg_pixel,
-                    }
+                    step=float(global_step),
+                    total=avg_total,
+                    recon=avg_recon,
+                    action=avg_action,
+                    pixel=avg_pixel,
                 )
                 write_loss_csv(loss_history, metrics_dir / "loss.csv")
                 plot_loss_curves(loss_history, metrics_dir)
@@ -620,15 +677,58 @@ def train(cfg: TrainConfig) -> None:
             if cfg.checkpoint_every_steps > 0 and global_step % cfg.checkpoint_every_steps == 0:
                 save_checkpoint(
                     output_dir=run_dir,
-                    global_step=global_step,
+                    name="checkpoint_last.pt",
+                    step=global_step,
+                    epoch=epoch,
+                    metric=current_loss,
                     model=model,
                     optimizer=optimizer,
                 )
+                if current_loss < best_metric:
+                    best_metric = current_loss
+                    save_checkpoint(
+                        output_dir=run_dir,
+                        name="checkpoint_best.pt",
+                        step=global_step,
+                        epoch=epoch,
+                        metric=current_loss,
+                        model=model,
+                        optimizer=optimizer,
+                    )
 
         epoch_duration = perf_counter() - epoch_start
         logger.info("Epoch %d finished in %.2f s (global_step=%d)", epoch, epoch_duration, global_step)
     write_loss_csv(loss_history, metrics_dir / "loss.csv")
     plot_loss_curves(loss_history, metrics_dir)
+    save_checkpoint(
+        output_dir=run_dir,
+        name="checkpoint_last.pt",
+        step=global_step,
+        epoch=epoch,
+        metric=last_loss,
+        model=model,
+        optimizer=optimizer,
+    )
+    if last_loss < best_metric:
+        best_metric = last_loss
+        save_checkpoint(
+            output_dir=run_dir,
+            name="checkpoint_best.pt",
+            step=global_step,
+            epoch=epoch,
+            metric=last_loss,
+            model=model,
+            optimizer=optimizer,
+        )
+    save_checkpoint(
+        output_dir=run_dir,
+        name="checkpoint_final.pt",
+        step=global_step,
+        epoch=epoch,
+        metric=last_loss,
+        model=model,
+        optimizer=optimizer,
+    )
 
 
 def main() -> None:
