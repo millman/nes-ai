@@ -240,8 +240,8 @@ class FiLMLayer(nn.Module):
         return conditioned * (1.0 + gamma) + beta
 
 
-class FiLMStack(nn.Module):
-    """Stack multiple FiLM layers."""
+class ActionFiLM(nn.Module):
+    """Stack multiple FiLM layers for action conditioning."""
 
     def __init__(self, hidden_dim: int, action_dim: int, layers: int) -> None:
         super().__init__()
@@ -306,10 +306,10 @@ class HiddenUpdateCell(nn.Module):
         film_layers: int,
     ) -> None:
         super().__init__()
-        self.film = FiLMStack(hidden_dim, action_dim, film_layers)
-        ssm_input_dim = hidden_dim + latent_dim + action_dim
-        self.ssm = SelectiveSSMCell(state_dim=hidden_dim, x_dim=ssm_input_dim, y_dim=hidden_dim)
-        self.gru = nn.GRUCell(latent_dim + action_dim, hidden_dim)
+        self.preprocess = nn.Linear(hidden_dim + latent_dim, hidden_dim)
+        self.film = ActionFiLM(hidden_dim, action_dim, film_layers)
+        self.ssm = SelectiveSSMCell(state_dim=hidden_dim, x_dim=hidden_dim, y_dim=None)
+        self.gru = nn.GRUCell(hidden_dim, hidden_dim)
         self.post_norm = nn.LayerNorm(hidden_dim)
 
     def forward(
@@ -318,13 +318,12 @@ class HiddenUpdateCell(nn.Module):
         latent: torch.Tensor,
         action_embed: torch.Tensor,
     ) -> torch.Tensor:
-        mod_hidden = self.film(hidden, action_embed)
-        ssm_input = torch.cat([mod_hidden, latent, action_embed], dim=-1)
-        ssm_state, ssm_out = self.ssm(ssm_input, hidden)
-        gru_input = torch.cat([latent, action_embed], dim=-1)
-        next_hidden = self.gru(gru_input, ssm_state)
-        fused = 0.5 * (next_hidden + ssm_out)
-        return self.post_norm(fused)
+        x_t = torch.cat([hidden, latent], dim=-1)
+        x_t = self.preprocess(x_t)
+        x_mod = self.film(x_t, action_embed)
+        s_t, _ = self.ssm(x_mod, hidden)
+        h_t = self.gru(s_t, hidden)
+        return self.post_norm(h_t)
 
 
 class Mario4Model(nn.Module):
