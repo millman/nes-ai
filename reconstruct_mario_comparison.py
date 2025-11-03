@@ -54,6 +54,7 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "no_skip_autoencoder": "Autoencoder (No Skip)",
     "no_skip_patch_autoencoder": "Autoencoder (No Skip Patch)",
     "skip_train_autoencoder": "Autoencoder (Train Skip, Eval Zero)",
+    "resnet_autoencoder": "Autoencoder (ResNet Blocks)",
 }
 
 
@@ -91,6 +92,10 @@ class _ElapsedTimeFormatter(logging.Formatter):
         finally:
             # Clean up to avoid leaking the custom attribute outside this formatter.
             del record.elapsed
+
+
+def _norm_groups(channels: int) -> int:
+    return 8 if channels % 8 == 0 else 1
 
 
 def _get_logger() -> logging.Logger:
@@ -246,6 +251,49 @@ class DownBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+class ResidualBlock(nn.Module):
+    """Residual block with optional downsampling."""
+
+    def __init__(self, in_ch: int, out_ch: int, *, stride: int = 1) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1)
+        self.norm1 = nn.GroupNorm(_norm_groups(out_ch), out_ch)
+        self.act = nn.SiLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(_norm_groups(out_ch), out_ch)
+        if stride != 1 or in_ch != out_ch:
+            self.skip = nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride)
+        else:
+            self.skip = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = self.skip(x)
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act(out)
+        out = self.conv2(out)
+        out = self.norm2(out)
+        out = out + identity
+        return self.act(out)
+
+
+class ResidualUpBlock(nn.Module):
+    """Upsampling residual block using transposed convolutions."""
+
+    def __init__(self, in_ch: int, out_ch: int) -> None:
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2)
+        self.norm = nn.GroupNorm(_norm_groups(out_ch), out_ch)
+        self.act = nn.SiLU(inplace=True)
+        self.block = ResidualBlock(out_ch, out_ch)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        x = self.norm(x)
+        x = self.act(x)
+        return self.block(x)
 
 
 class LightweightAutoencoder(nn.Module):
@@ -477,6 +525,50 @@ class LightweightAutoencoderSkipTrain(nn.Module):
         target_hw: Optional[Tuple[int, int]] = None,
     ) -> torch.Tensor:
         return self._decode(latent, skips=None, target_hw=target_hw)
+
+
+class ResNetAutoencoder(nn.Module):
+    """Residual U-Net style autoencoder for Mario reconstruction comparisons."""
+
+    def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
+        super().__init__()
+        if base_channels <= 0 or latent_channels <= 0:
+            raise ValueError("base_channels and latent_channels must be positive.")
+        self.input_hw = (224, 224)
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(_norm_groups(base_channels), base_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.enc0 = ResidualBlock(base_channels, base_channels)
+        self.down1 = ResidualBlock(base_channels, base_channels * 2, stride=2)
+        self.down2 = ResidualBlock(base_channels * 2, base_channels * 3, stride=2)
+        self.down3 = ResidualBlock(base_channels * 3, latent_channels, stride=2)
+        self.bottleneck = ResidualBlock(latent_channels, latent_channels)
+        self.up1 = ResidualUpBlock(latent_channels, base_channels * 3)
+        self.up2 = ResidualUpBlock(base_channels * 3, base_channels * 2)
+        self.up3 = ResidualUpBlock(base_channels * 2, base_channels)
+        self.head = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels // 2, 3, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        target_hw = x.shape[-2:]
+        stem = self.stem(x)
+        h0 = self.enc0(stem)
+        h1 = self.down1(h0)
+        h2 = self.down2(h1)
+        h3 = self.down3(h2)
+        bottleneck = self.bottleneck(h3)
+        u1 = self.up1(bottleneck) + h2
+        u2 = self.up2(u1) + h1
+        u3 = self.up3(u2) + h0
+        out = self.head(u3)
+        if out.shape[-2:] != target_hw:
+            out = F.interpolate(out, size=target_hw, mode="bilinear", align_corners=False)
+        return out
 
 
 class TextureAwareAutoencoder(nn.Module):
@@ -1321,6 +1413,7 @@ class Config:
     enable_no_skip_autoencoder: bool = True
     enable_no_skip_patch_autoencoder: bool = False
     enable_skip_train_autoencoder: bool = False
+    enable_resnet_autoencoder: bool = False
 
 
 def seed_everything(seed: int) -> None:
@@ -1442,6 +1535,17 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 skip_train_model,
                 device=device,
                 lr=cfg.lr,
+            )
+        )
+    if cfg.enable_resnet_autoencoder:
+        resnet_model = ResNetAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "resnet_autoencoder",
+                resnet_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
             )
         )
     if cfg.enable_msssim_autoencoder:
