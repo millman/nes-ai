@@ -60,27 +60,6 @@ def symlog_loss(pred: torch.Tensor, target: torch.Tensor, reduction: str = "mean
     raise ValueError(f"Unsupported reduction: {reduction}")
 
 
-def reparameterize(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    """Sample using the reparameterization trick for a diagonal Gaussian."""
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn_like(std)
-    return mean + eps * std
-
-
-def kl_divergence_diag_gaussians(
-    mean_q: torch.Tensor,
-    logvar_q: torch.Tensor,
-    mean_p: torch.Tensor,
-    logvar_p: torch.Tensor,
-) -> torch.Tensor:
-    """KL divergence between two diagonal Gaussians."""
-    var_q = torch.exp(logvar_q)
-    var_p = torch.exp(logvar_p)
-    term1 = logvar_p - logvar_q
-    term2 = (var_q + (mean_q - mean_p).pow(2)) / var_p
-    return 0.5 * (term1 + term2 - 1.0)
-
-
 @dataclass
 class TrainConfig:
     data_root: Path = Path("data.image_distance.train_levels_1_2")
@@ -98,9 +77,6 @@ class TrainConfig:
     latent_dim: int = 192
     film_layers: int = 2
     action_loss_weight: float = 1.0
-    beta_pred: float = 1.0
-    beta_dyn: float = 0.95
-    beta_rep: float = 0.05
     log_every_steps: int = 10
     vis_every_steps: int = 100
     checkpoint_every_steps: int = 1000
@@ -316,49 +292,6 @@ class ActionEmbedding(nn.Module):
         return self.net(actions)
 
 
-class DiagonalGaussianMLP(nn.Module):
-    """Produce mean and log-variance for a diagonal Gaussian latent."""
-
-    def __init__(self, in_dim: int, hidden_dim: int, latent_dim: int) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 2 * latent_dim),
-        )
-
-    def forward(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        params = self.net(inputs)
-        mean, logvar = torch.chunk(params, 2, dim=-1)
-        return mean, logvar
-
-
-class RepresentationModel(nn.Module):
-    """Posterior over latent state conditioned on deterministic state and encoded features."""
-
-    def __init__(self, hidden_dim: int, latent_dim: int) -> None:
-        super().__init__()
-        in_dim = hidden_dim + latent_dim
-        self.posterior = DiagonalGaussianMLP(in_dim, hidden_dim, latent_dim)
-
-    def forward(self, hidden: torch.Tensor, encoded: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        inputs = torch.cat([hidden, encoded], dim=-1)
-        return self.posterior(inputs)
-
-
-class DynamicsModel(nn.Module):
-    """Prior over latent state conditioned on deterministic hidden state."""
-
-    def __init__(self, hidden_dim: int, latent_dim: int) -> None:
-        super().__init__()
-        self.prior = DiagonalGaussianMLP(hidden_dim, hidden_dim, latent_dim)
-
-    def forward(self, hidden: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.prior(hidden)
-
-
 class FiLMLayer(nn.Module):
     """Single FiLM modulation layer."""
 
@@ -477,8 +410,6 @@ class Mario4Model(nn.Module):
         self.latent_dim = latent_dim
         self.encoder = ImageEncoder(latent_dim)
         self.decoder = ImageDecoder(latent_dim)
-        self.representation = RepresentationModel(hidden_dim, latent_dim)
-        self.dynamics = DynamicsModel(hidden_dim, latent_dim)
         self.action_embed = ActionEmbedding(action_dim, hidden_dim)
         self.hidden_cell = HiddenUpdateCell(
             hidden_dim=hidden_dim,
@@ -510,9 +441,7 @@ class Mario4Model(nn.Module):
             for step in range(min(warmup_steps, total_steps)):
                 frame = frames[:, step]
                 action = actions[:, step]
-                encoded = self.encoder(frame)
-                post_mean, post_logvar = self.representation(hidden, encoded)
-                latent = reparameterize(post_mean, post_logvar)
+                latent = self.encoder(frame)
                 action_embed = self.action_embed(action)
                 hidden = self.hidden_cell(hidden, latent, action_embed)
         hidden = hidden.detach()
@@ -520,18 +449,11 @@ class Mario4Model(nn.Module):
         reconstructions: List[torch.Tensor] = []
         action_logits: List[torch.Tensor] = []
         hidden_states: List[torch.Tensor] = []
-        posterior_means: List[torch.Tensor] = []
-        posterior_logvars: List[torch.Tensor] = []
-        prior_means: List[torch.Tensor] = []
-        prior_logvars: List[torch.Tensor] = []
 
         for step in range(warmup_steps, total_steps):
             frame = frames[:, step]
             action = actions[:, step]
-            encoded = self.encoder(frame)
-            prior_mean, prior_logvar = self.dynamics(hidden)
-            post_mean, post_logvar = self.representation(hidden, encoded)
-            latent = reparameterize(post_mean, post_logvar)
+            latent = self.encoder(frame)
             action_embed = self.action_embed(action)
             hidden = self.hidden_cell(hidden, latent, action_embed)
             recon = self.decoder(latent)
@@ -539,19 +461,11 @@ class Mario4Model(nn.Module):
             reconstructions.append(recon)
             action_logits.append(logits)
             hidden_states.append(hidden)
-            posterior_means.append(post_mean)
-            posterior_logvars.append(post_logvar)
-            prior_means.append(prior_mean)
-            prior_logvars.append(prior_logvar)
 
         return {
             "reconstructions": torch.stack(reconstructions, dim=1),
             "action_logits": torch.stack(action_logits, dim=1),
             "hidden_states": torch.stack(hidden_states, dim=1),
-            "posterior_mean": torch.stack(posterior_means, dim=1),
-            "posterior_logvar": torch.stack(posterior_logvars, dim=1),
-            "prior_mean": torch.stack(prior_means, dim=1),
-            "prior_logvar": torch.stack(prior_logvars, dim=1),
         }
 
 
@@ -559,34 +473,18 @@ class Mario4Model(nn.Module):
 class LossHistory:
     steps: List[float]
     total: List[float]
-    pred: List[float]
     recon: List[float]
     action: List[float]
-    dyn: List[float]
-    rep: List[float]
 
     @classmethod
     def empty(cls) -> "LossHistory":
-        return cls([], [], [], [], [], [], [])
+        return cls([], [], [], [])
 
-    def append(
-        self,
-        *,
-        step: float,
-        total: float,
-        pred: float,
-        recon: float,
-        action: float,
-        dyn: float,
-        rep: float,
-    ) -> None:
+    def append(self, *, step: float, total: float, recon: float, action: float) -> None:
         self.steps.append(step)
         self.total.append(total)
-        self.pred.append(pred)
         self.recon.append(recon)
         self.action.append(action)
-        self.dyn.append(dyn)
-        self.rep.append(rep)
 
     def __len__(self) -> int:
         return len(self.steps)
@@ -595,15 +493,12 @@ class LossHistory:
         return {
             "step": self.steps,
             "total": self.total,
-            "pred": self.pred,
             "recon": self.recon,
             "action": self.action,
-            "dyn": self.dyn,
-            "rep": self.rep,
         }
 
 
-LOSS_COLUMNS = ["step", "total", "pred", "recon", "action", "dyn", "rep"]
+LOSS_COLUMNS = ["step", "total", "recon", "action"]
 
 
 def write_loss_csv(history: LossHistory, path: Path) -> None:
@@ -611,9 +506,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(LOSS_COLUMNS)
-        rows = history.rows()
-        for idx in range(len(history)):
-            writer.writerow([rows[column][idx] for column in LOSS_COLUMNS])
+        for row in zip(history.steps, history.total, history.recon, history.action):
+            writer.writerow(row)
 
 
 def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
@@ -624,11 +518,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
 
     plt.figure(figsize=(8, 5))
     plt.plot(steps, history.total, label="total")
-    plt.plot(steps, history.pred, label="pred")
     plt.plot(steps, history.recon, label="recon")
     plt.plot(steps, history.action, label="action")
-    plt.plot(steps, history.dyn, label="dyn")
-    plt.plot(steps, history.rep, label="rep")
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
@@ -798,9 +689,6 @@ def train(cfg: TrainConfig) -> None:
         model.train()
         running_recon = 0.0
         running_action = 0.0
-        running_pred = 0.0
-        running_dyn = 0.0
-        running_rep = 0.0
         running_total = 0.0
         window_data_time = 0.0
         window_forward_time = 0.0
@@ -829,36 +717,7 @@ def train(cfg: TrainConfig) -> None:
             recon_loss = symlog_loss(outputs["reconstructions"], target_frames)
             action_probs = torch.sigmoid(outputs["action_logits"])
             action_loss = symlog_loss(action_probs, target_actions)
-            prediction_loss = recon_loss + cfg.action_loss_weight * action_loss
-
-            posterior_mean = outputs["posterior_mean"]
-            posterior_logvar = outputs["posterior_logvar"]
-            prior_mean = outputs["prior_mean"]
-            prior_logvar = outputs["prior_logvar"]
-
-            kl_dyn = kl_divergence_diag_gaussians(
-                posterior_mean.detach(),
-                posterior_logvar.detach(),
-                prior_mean,
-                prior_logvar,
-            ).sum(dim=-1)
-            kl_dyn = torch.maximum(kl_dyn, torch.ones_like(kl_dyn))
-            dynamics_loss = kl_dyn.mean()
-
-            kl_rep = kl_divergence_diag_gaussians(
-                posterior_mean,
-                posterior_logvar,
-                prior_mean.detach(),
-                prior_logvar.detach(),
-            ).sum(dim=-1)
-            kl_rep = torch.maximum(kl_rep, torch.ones_like(kl_rep))
-            representation_loss = kl_rep.mean()
-
-            loss = (
-                cfg.beta_pred * prediction_loss
-                + cfg.beta_dyn * dynamics_loss
-                + cfg.beta_rep * representation_loss
-            )
+            loss = recon_loss + cfg.action_loss_weight * action_loss
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -869,9 +728,6 @@ def train(cfg: TrainConfig) -> None:
             last_loss = current_loss
             running_recon += recon_loss.item()
             running_action += action_loss.item()
-            running_pred += prediction_loss.item()
-            running_dyn += dynamics_loss.item()
-            running_rep += representation_loss.item()
             running_total += loss.item()
             global_step += 1
 
@@ -882,25 +738,19 @@ def train(cfg: TrainConfig) -> None:
             if global_step % cfg.log_every_steps == 0:
                 avg_recon = running_recon / cfg.log_every_steps
                 avg_action = running_action / cfg.log_every_steps
-                avg_pred = running_pred / cfg.log_every_steps
-                avg_dyn = running_dyn / cfg.log_every_steps
-                avg_rep = running_rep / cfg.log_every_steps
                 avg_total = running_total / cfg.log_every_steps
                 avg_data = window_data_time / cfg.log_every_steps
                 avg_forward = window_forward_time / cfg.log_every_steps
                 avg_backward = window_backward_time / cfg.log_every_steps
                 logger.info(
                     (
-                        "[step %d] total %.4f | pred %.4f (recon %.4f, action %.4f)"
-                        " | dyn %.4f | rep %.4f | data %.4f s | forward %.4f s | backward %.4f s"
+                        "[step %d] recon %.4f | action %.4f | total %.4f"
+                        " | data %.4f s | forward %.4f s | backward %.4f s"
                     ),
                     global_step,
-                    avg_total,
-                    avg_pred,
                     avg_recon,
                     avg_action,
-                    avg_dyn,
-                    avg_rep,
+                    avg_total,
                     avg_data,
                     avg_forward,
                     avg_backward,
@@ -908,15 +758,12 @@ def train(cfg: TrainConfig) -> None:
                 loss_history.append(
                     step=float(global_step),
                     total=avg_total,
-                    pred=avg_pred,
                     recon=avg_recon,
                     action=avg_action,
-                    dyn=avg_dyn,
-                    rep=avg_rep,
                 )
                 write_loss_csv(loss_history, metrics_dir / "loss.csv")
                 plot_loss_curves(loss_history, metrics_dir)
-                running_recon = running_action = running_pred = running_dyn = running_rep = running_total = 0.0
+                running_recon = running_action = running_total = 0.0
                 window_data_time = window_forward_time = window_backward_time = 0.0
 
             if cfg.vis_every_steps > 0 and global_step % cfg.vis_every_steps == 0:
