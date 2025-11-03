@@ -528,13 +528,12 @@ class LightweightAutoencoderSkipTrain(nn.Module):
 
 
 class ResNetAutoencoder(nn.Module):
-    """Residual U-Net style autoencoder for Mario reconstruction comparisons."""
+    """Residual autoencoder without skip connections for baseline comparison."""
 
     def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
         super().__init__()
         if base_channels <= 0 or latent_channels <= 0:
             raise ValueError("base_channels and latent_channels must be positive.")
-        self.input_hw = (224, 224)
         self.stem = nn.Sequential(
             nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
             nn.GroupNorm(_norm_groups(base_channels), base_channels),
@@ -556,16 +555,16 @@ class ResNetAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         target_hw = x.shape[-2:]
-        stem = self.stem(x)
-        h0 = self.enc0(stem)
-        h1 = self.down1(h0)
-        h2 = self.down2(h1)
-        h3 = self.down3(h2)
-        bottleneck = self.bottleneck(h3)
-        u1 = self.up1(bottleneck) + h2
-        u2 = self.up2(u1) + h1
-        u3 = self.up3(u2) + h0
-        out = self.head(u3)
+        h = self.stem(x)
+        h = self.enc0(h)
+        h = self.down1(h)
+        h = self.down2(h)
+        h = self.down3(h)
+        h = self.bottleneck(h)
+        h = self.up1(h)
+        h = self.up2(h)
+        h = self.up3(h)
+        out = self.head(h)
         if out.shape[-2:] != target_hw:
             out = F.interpolate(out, size=target_hw, mode="bilinear", align_corners=False)
         return out
