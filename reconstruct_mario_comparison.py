@@ -52,6 +52,8 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "msssim_autoencoder": "Autoencoder (MS-SSIM)",
     "focal_msssim_autoencoder": "Autoencoder (Focal MS-SSIM)",
     "no_skip_autoencoder": "Autoencoder (No Skip)",
+    "no_skip_patch_autoencoder": "Autoencoder (No Skip Patch)",
+    "skip_train_autoencoder": "Autoencoder (Train Skip, Eval Zero)",
 }
 
 
@@ -384,6 +386,99 @@ class LightweightAutoencoderNoSkip(nn.Module):
         return self.decoder(latent, target_hw=target_hw)
 
 
+class LightweightAutoencoderNoSkipPatch(LightweightAutoencoderNoSkip):
+    """No-skip autoencoder trained with multi-scale patch reconstruction loss."""
+
+    def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
+        super().__init__(base_channels, latent_channels)
+
+
+class LightweightAutoencoderSkipTrain(nn.Module):
+    """Trains with skip connections but removes them during evaluation/inference."""
+
+    def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
+        super().__init__()
+        if base_channels % 8 != 0:
+            raise ValueError("base_channels must be divisible by 8 for GroupNorm stability.")
+        self.output_hw = (224, 224)
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, base_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(8, base_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.down1 = DownBlock(base_channels, base_channels * 2)
+        self.down2 = DownBlock(base_channels * 2, base_channels * 3)
+        self.down3 = DownBlock(base_channels * 3, latent_channels)
+        groups = 8 if latent_channels % 8 == 0 else 1
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(latent_channels, latent_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, latent_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.up1 = UpBlock(latent_channels, base_channels * 3)
+        self.up2 = UpBlock(base_channels * 3, base_channels * 2)
+        self.up3 = UpBlock(base_channels * 2, base_channels)
+        self.head = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels // 2, 3, kernel_size=1),
+        )
+
+    def _encode_with_skips(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        if x.shape[-2:] != self.output_hw:
+            raise RuntimeError(f"Expected input spatial size {self.output_hw}, got {tuple(x.shape[-2:])}")
+        h0 = self.stem(x)
+        h1 = self.down1(h0)
+        h2 = self.down2(h1)
+        h3 = self.down3(h2)
+        latent = self.bottleneck(h3)
+        return latent, (h0, h1, h2)
+
+    def _decode(
+        self,
+        latent: torch.Tensor,
+        *,
+        skips: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+        target_hw: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        h0 = h1 = h2 = None
+        if skips is not None:
+            h0, h1, h2 = skips
+        u1 = self.up1(latent)
+        if h2 is not None:
+            u1 = u1 + h2
+        u2 = self.up2(u1)
+        if h1 is not None:
+            u2 = u2 + h1
+        u3 = self.up3(u2)
+        if h0 is not None:
+            u3 = u3 + h0
+        out = self.head(u3)
+        final_hw = target_hw or self.output_hw
+        if out.shape[-2:] != final_hw:
+            out = F.interpolate(out, size=final_hw, mode="bilinear", align_corners=False)
+        return out
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        latent, skips = self._encode_with_skips(x)
+        use_skips = self.training
+        return self._decode(latent, skips=skips if use_skips else None, target_hw=x.shape[-2:])
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        latent, _ = self._encode_with_skips(x)
+        return latent
+
+    def decode(
+        self,
+        latent: torch.Tensor,
+        *,
+        target_hw: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        return self._decode(latent, skips=None, target_hw=target_hw)
+
+
 class TextureAwareAutoencoder(nn.Module):
     """Higher-capacity autoencoder tuned for style and patch contrastive training."""
 
@@ -592,6 +687,59 @@ class CauchyLoss(nn.Module):
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         diff = (input - target) / self.sigma
         return torch.log1p(diff.pow(2)).mean().clamp_min(self.eps)
+
+
+class MultiScalePatchLoss(nn.Module):
+    """Aggregate MSE over local patches across a pyramid of spatial scales."""
+
+    def __init__(
+        self,
+        patch_sizes: Sequence[int] = (7, 11, 15),
+        pool_scales: Sequence[int] = (1, 2, 4),
+    ) -> None:
+        super().__init__()
+        if not patch_sizes:
+            raise ValueError("patch_sizes must be non-empty.")
+        if not pool_scales:
+            raise ValueError("pool_scales must be non-empty.")
+        if len(patch_sizes) != len(pool_scales):
+            raise ValueError("patch_sizes and pool_scales must be the same length.")
+        if any(size <= 0 for size in patch_sizes):
+            raise ValueError("patch_sizes must contain positive integers.")
+        if any(scale <= 0 for scale in pool_scales):
+            raise ValueError("pool_scales must contain positive integers.")
+        self.patch_sizes = tuple(int(size) for size in patch_sizes)
+        self.pool_scales = tuple(int(scale) for scale in pool_scales)
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if input.shape != target.shape:
+            raise ValueError("input and target must share the same shape.")
+        total_loss = input.new_tensor(0.0)
+        total_weight = 0
+        for patch_size, pool_scale in zip(self.patch_sizes, self.pool_scales):
+            if pool_scale > 1:
+                pooled_input = F.avg_pool2d(input, kernel_size=pool_scale, stride=pool_scale)
+                pooled_target = F.avg_pool2d(target, kernel_size=pool_scale, stride=pool_scale)
+            else:
+                pooled_input = input
+                pooled_target = target
+            k = min(patch_size, pooled_input.shape[-2], pooled_input.shape[-1])
+            if k <= 0:
+                raise RuntimeError("Patch size became non-positive after clamping.")
+            stride = max(1, k // 2)
+            padding = k // 2
+            unfolded_input = F.unfold(pooled_input, kernel_size=k, stride=stride, padding=padding)
+            unfolded_target = F.unfold(pooled_target, kernel_size=k, stride=stride, padding=padding)
+            if unfolded_input.shape[-1] == 0:
+                patch_loss = F.mse_loss(pooled_input, pooled_target)
+            else:
+                diff = unfolded_input - unfolded_target
+                patch_loss = diff.pow(2).mean()
+            total_loss = total_loss + patch_loss
+            total_weight += 1
+        if total_weight == 0:
+            raise RuntimeError("No scales contributed to the loss computation.")
+        return total_loss / total_weight
 
 
 def _compute_shared_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
@@ -1171,6 +1319,8 @@ class Config:
     enable_msssim_autoencoder: bool = True
     enable_focal_msssim_autoencoder: bool = False
     enable_no_skip_autoencoder: bool = True
+    enable_no_skip_patch_autoencoder: bool = False
+    enable_skip_train_autoencoder: bool = False
 
 
 def seed_everything(seed: int) -> None:
@@ -1269,6 +1419,27 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
             AutoencoderTrainer(
                 "no_skip_autoencoder",
                 no_skip_model,
+                device=device,
+                lr=cfg.lr,
+            )
+        )
+    if cfg.enable_no_skip_patch_autoencoder:
+        no_skip_patch_model = LightweightAutoencoderNoSkipPatch()
+        trainers.append(
+            AutoencoderTrainer(
+                "no_skip_patch_autoencoder",
+                no_skip_patch_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=MultiScalePatchLoss(),
+            )
+        )
+    if cfg.enable_skip_train_autoencoder:
+        skip_train_model = LightweightAutoencoderSkipTrain()
+        trainers.append(
+            AutoencoderTrainer(
+                "skip_train_autoencoder",
+                skip_train_model,
                 device=device,
                 lr=cfg.lr,
             )
