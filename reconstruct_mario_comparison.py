@@ -57,17 +57,17 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "style_contrast_autoencoder": "Autoencoder (Style + PatchNCE)",
     "msssim_autoencoder": "Autoencoder (MS-SSIM)",
     "focal_msssim_autoencoder": "Autoencoder (Focal MS-SSIM)",
-    "no_skip_autoencoder": "Autoencoder (No Skip)",
+    "no_skip_autoencoder": "Autoencoder (Spatial Latent)",
     "no_skip_patch_autoencoder": "Autoencoder (No Skip Patch)",
     "skip_train_autoencoder": "Autoencoder (Train Skip, Eval Zero)",
     "resnet_autoencoder": "Autoencoder (ResNet Blocks)",
     "resnetv2_autoencoder": "Autoencoder (ResNet v2)",
     "modern_attn_autoencoder": "Autoencoder (Modern ResNet + Attn)",
-    "mario4_autoencoder": "Autoencoder (Mario4 Encoder/Decoder)",
-    "mario4_mirrored_autoencoder": "Autoencoder (Mario4 Encoder/Mirrored Decoder)",
-    "mario4_spatial_autoencoder": "Autoencoder (Mario4 Spatial Softmax)",
-    "mario4_large_autoencoder": "Autoencoder (Mario4 Latent 1024)",
-    "mario4_spatial_large_autoencoder": "Autoencoder (Mario4 Spatial Softmax 1024)",
+    "mario4_autoencoder": "Autoencoder (Mario4)",
+    "mario4_mirrored_autoencoder": "Mario4 Mirrored Decoder",
+    "mario4_spatial_autoencoder": "Mario4 Spatial Softmax 192",
+    "mario4_large_autoencoder": "Mario4 Latent 1024",
+    "mario4_spatial_large_autoencoder": "Mario4 Spatial Softmax 1024",
 }
 
 
