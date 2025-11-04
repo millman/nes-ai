@@ -274,7 +274,42 @@ class ImageDecoder(nn.Module):
         x = self.fc(latent)
         x = x.view(latent.size(0), -1, 14, 14)
         x = self.net(x)
-        return torch.sigmoid(x)
+        # Return raw logits; callers clamp when needed for visualisation.
+        return x
+
+
+class ImageDecoderMirrored(nn.Module):
+    """Decoder that mirrors ImageEncoder's stride-2 conv stack in reverse."""
+
+    def __init__(self, latent_dim: int, initial_hw: int = 14) -> None:
+        super().__init__()
+        self.initial_hw = initial_hw
+        channels = [3, 32, 64, 128, 192]
+        bottleneck_channels = channels[-1]
+        self.expand = nn.Linear(latent_dim, bottleneck_channels * initial_hw * initial_hw)
+
+        layers: List[nn.Module] = []
+        reversed_channels = list(zip(channels[::-1], channels[::-1][1:]))
+        for idx, (in_ch, out_ch) in enumerate(reversed_channels):
+            layers.append(
+                nn.ConvTranspose2d(
+                    in_ch,
+                    out_ch,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    output_padding=1,
+                )
+            )
+            if idx < len(reversed_channels) - 1:
+                layers.append(nn.BatchNorm2d(out_ch))
+                layers.append(nn.GELU())
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        x = self.expand(latent)
+        x = x.view(latent.size(0), -1, self.initial_hw, self.initial_hw)
+        return self.net(x)
 
 
 class ActionEmbedding(nn.Module):

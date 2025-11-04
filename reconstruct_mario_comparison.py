@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import random
 import csv
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,11 @@ import tyro
 from PIL import Image
 
 from predict_mario_ms_ssim import default_transform, ms_ssim_loss, pick_device, unnormalize
+from predict_mario4 import (
+    ImageEncoder as Mario4ImageEncoder,
+    ImageDecoder as Mario4ImageDecoder,
+    ImageDecoderMirrored as Mario4ImageDecoderMirrored,
+)
 from trajectory_utils import list_state_frames, list_traj_dirs
 
 
@@ -55,6 +61,10 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "no_skip_patch_autoencoder": "Autoencoder (No Skip Patch)",
     "skip_train_autoencoder": "Autoencoder (Train Skip, Eval Zero)",
     "resnet_autoencoder": "Autoencoder (ResNet Blocks)",
+    "resnetv2_autoencoder": "Autoencoder (ResNet v2)",
+    "modern_attn_autoencoder": "Autoencoder (Modern ResNet + Attn)",
+    "mario4_autoencoder": "Autoencoder (Mario4 Encoder/Decoder)",
+    "mario4_mirrored_autoencoder": "Autoencoder (Mario4 Encoder/Mirrored Decoder)",
 }
 
 
@@ -96,6 +106,19 @@ class _ElapsedTimeFormatter(logging.Formatter):
 
 def _norm_groups(channels: int) -> int:
     return 8 if channels % 8 == 0 else 1
+
+
+def default(val: Optional[int], d: int) -> int:
+    return d if val is None else val
+
+
+def _group_count(channels: int, max_groups: int) -> int:
+    """Pick the largest group count ≤ max_groups that divides channels."""
+    limit = min(max_groups, channels)
+    for groups in range(limit, 0, -1):
+        if channels % groups == 0:
+            return groups
+    return 1
 
 
 def _get_logger() -> logging.Logger:
@@ -293,6 +316,251 @@ class ResidualUpBlock(nn.Module):
         x = self.up(x)
         x = self.norm(x)
         x = self.act(x)
+        return self.block(x)
+
+
+class PreActResidualBlock(nn.Module):
+    """Pre-activation residual block following ResNet v2 conventions."""
+
+    def __init__(self, in_ch: int, out_ch: int, *, stride: int = 1) -> None:
+        super().__init__()
+        self.norm1 = nn.GroupNorm(_norm_groups(in_ch), in_ch)
+        self.act1 = nn.SiLU(inplace=True)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.norm2 = nn.GroupNorm(_norm_groups(out_ch), out_ch)
+        self.act2 = nn.SiLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False)
+        if stride != 1 or in_ch != out_ch:
+            self.skip = nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False)
+        else:
+            self.skip = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.norm1(x)
+        out = self.act1(out)
+        identity = self.skip(out) if self.skip is not None else x
+        out = self.conv1(out)
+        out = self.norm2(out)
+        out = self.act2(out)
+        out = self.conv2(out)
+        return out + identity
+
+
+class PreActResidualUpBlock(nn.Module):
+    """Pre-activation upsampling block mirroring ResNet v2 style."""
+
+    def __init__(self, in_ch: int, out_ch: int) -> None:
+        super().__init__()
+        self.norm = nn.GroupNorm(_norm_groups(in_ch), in_ch)
+        self.act = nn.SiLU(inplace=True)
+        self.up = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2, bias=False)
+        self.block = PreActResidualBlock(out_ch, out_ch)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.norm(x)
+        x = self.act(x)
+        x = self.up(x)
+        return self.block(x)
+
+
+class Residual(nn.Module):
+    """Wrap a module with a residual connection, optionally learning the skip."""
+
+    def __init__(
+        self,
+        fn: nn.Module,
+        *,
+        in_channels: Optional[int] = None,
+        out_channels: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        learned_skip = (
+            in_channels is not None
+            and out_channels is not None
+            and in_channels != out_channels
+        )
+        self.fn = fn
+        self.skip = (
+            nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            if learned_skip
+            else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        return self.skip(x) + self.fn(x, **kwargs)
+
+
+class ResNetBlock2d(nn.Module):
+    """Pre-activation residual block with SiLU activations and GroupNorm."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: Optional[int] = None,
+        *,
+        groups: int = 32,
+    ) -> None:
+        super().__init__()
+        out_channels = default(out_channels, in_channels)
+        self.norm1 = nn.GroupNorm(_group_count(in_channels, groups), in_channels)
+        self.act1 = nn.SiLU(inplace=True)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(_group_count(out_channels, groups), out_channels)
+        self.act2 = nn.SiLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.skip = (
+            nn.Identity()
+            if in_channels == out_channels
+            else nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.conv1(self.act1(self.norm1(x)))
+        h = self.conv2(self.act2(self.norm2(h)))
+        return h + self.skip(x)
+
+
+class SelfAttention2d(nn.Module):
+    """Multi-head self-attention operating over spatial tokens."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        heads: int = 4,
+        dim_head: int = 64,
+        max_tokens: int = 4096,
+    ) -> None:
+        super().__init__()
+        self.heads = heads
+        inner = heads * dim_head
+        self.norm = nn.GroupNorm(1, channels)
+        self.to_qkv = nn.Conv2d(channels, inner * 3, kernel_size=1, bias=False)
+        self.proj = nn.Conv2d(inner, channels, kernel_size=1)
+        self.scale = dim_head ** -0.5
+        if max_tokens <= 0:
+            raise ValueError("max_tokens must be positive.")
+        self.max_tokens = max_tokens
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, _, h, w = x.shape
+        x_n = self.norm(x)
+        tokens = h * w
+        if tokens > self.max_tokens:
+            pool_factor = int(math.ceil(math.sqrt(tokens / self.max_tokens)))
+            pooled = F.avg_pool2d(x_n, kernel_size=pool_factor, stride=pool_factor, ceil_mode=True)
+            target_size = pooled.shape[-2:]
+        else:
+            pooled = x_n
+            target_size = (h, w)
+
+        qkv = self.to_qkv(pooled)
+        q, k, v = qkv.chunk(3, dim=1)
+
+        def reshape_heads(t: torch.Tensor) -> torch.Tensor:
+            bsz, ch, height, width = t.shape
+            t = t.view(bsz, self.heads, ch // self.heads, height * width)
+            return t
+
+        q = reshape_heads(q)
+        k = reshape_heads(k)
+        v = reshape_heads(v)
+        attn = torch.einsum("bhdi,bhdj->bhij", q * self.scale, k)
+        attn = attn.softmax(dim=-1)
+        out = torch.einsum("bhij,bhdj->bhdi", attn, v)
+        out = out.contiguous().view(b, -1, target_size[0] * target_size[1]).view(
+            b, -1, target_size[0], target_size[1]
+        )
+        out = self.proj(out)
+        if target_size != (h, w):
+            out = F.interpolate(out, size=(h, w), mode="bilinear", align_corners=False)
+        return out + x
+
+
+class ModernResNetAttnBlock(nn.Module):
+    """Residual block that combines modern conv block with spatial attention."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: Optional[int] = None,
+        *,
+        heads: int = 4,
+        dim_head: int = 64,
+        groups: int = 32,
+    ) -> None:
+        super().__init__()
+        out_channels = default(out_channels, in_channels)
+        self.residual_block = ResNetBlock2d(
+            in_channels, out_channels, groups=groups
+        )
+        self.attn = Residual(
+            SelfAttention2d(out_channels, heads=heads, dim_head=dim_head),
+            in_channels=out_channels,
+            out_channels=out_channels,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.residual_block(x)
+        x = self.attn(x)
+        return x
+
+
+class ModernResNetAttnDown(nn.Module):
+    """Downsampling block built around ModernResNetAttnBlock."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        heads: int = 4,
+        dim_head: int = 64,
+        groups: int = 32,
+    ) -> None:
+        super().__init__()
+        self.block = ModernResNetAttnBlock(
+            in_channels,
+            out_channels,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.down = nn.Sequential(
+            nn.GroupNorm(_group_count(out_channels, groups), out_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.block(x)
+        return self.down(x)
+
+
+class ModernResNetAttnUp(nn.Module):
+    """Upsampling block for the modern attention autoencoder."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        heads: int = 4,
+        dim_head: int = 64,
+        groups: int = 32,
+    ) -> None:
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.block = ModernResNetAttnBlock(
+            out_channels,
+            out_channels,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
         return self.block(x)
 
 
@@ -568,6 +836,197 @@ class ResNetAutoencoder(nn.Module):
         if out.shape[-2:] != target_hw:
             out = F.interpolate(out, size=target_hw, mode="bilinear", align_corners=False)
         return out
+
+
+class ResNetV2Autoencoder(nn.Module):
+    """Pre-activation residual autoencoder inspired by ResNet v2."""
+
+    def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
+        super().__init__()
+        if base_channels <= 0 or latent_channels <= 0:
+            raise ValueError("base_channels and latent_channels must be positive.")
+        self.stem = nn.Conv2d(3, base_channels, kernel_size=3, padding=1, bias=False)
+        self.block0 = PreActResidualBlock(base_channels, base_channels)
+        self.down1 = PreActResidualBlock(base_channels, base_channels * 2, stride=2)
+        self.down2 = PreActResidualBlock(base_channels * 2, base_channels * 3, stride=2)
+        self.down3 = PreActResidualBlock(base_channels * 3, latent_channels, stride=2)
+        self.bottleneck = PreActResidualBlock(latent_channels, latent_channels)
+        self.up1 = PreActResidualUpBlock(latent_channels, base_channels * 3)
+        self.up2 = PreActResidualUpBlock(base_channels * 3, base_channels * 2)
+        self.up3 = PreActResidualUpBlock(base_channels * 2, base_channels)
+        self.head = nn.Sequential(
+            nn.GroupNorm(_norm_groups(base_channels), base_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1, bias=False),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels // 2, 3, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        target_hw = x.shape[-2:]
+        h = self.stem(x)
+        h = self.block0(h)
+        h = self.down1(h)
+        h = self.down2(h)
+        h = self.down3(h)
+        h = self.bottleneck(h)
+        h = self.up1(h)
+        h = self.up2(h)
+        h = self.up3(h)
+        out = self.head(h)
+        if out.shape[-2:] != target_hw:
+            out = F.interpolate(out, size=target_hw, mode="bilinear", align_corners=False)
+        return out
+
+
+class ModernResNetAttnAutoencoder(nn.Module):
+    """Modern ResNet + attention blocks forming a skip-free autoencoder."""
+
+    def __init__(
+        self,
+        base_channels: int = 48,
+        latent_channels: int = 128,
+        *,
+        heads: int = 4,
+        dim_head: int = 64,
+        groups: int = 32,
+    ) -> None:
+        super().__init__()
+        if base_channels <= 0 or latent_channels <= 0:
+            raise ValueError("base_channels and latent_channels must be positive.")
+        self.stem = nn.Conv2d(3, base_channels, kernel_size=3, padding=1)
+        self.block0 = ModernResNetAttnBlock(
+            base_channels,
+            base_channels,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.down1 = ModernResNetAttnDown(
+            base_channels,
+            base_channels * 2,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.down2 = ModernResNetAttnDown(
+            base_channels * 2,
+            base_channels * 3,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.down3 = ModernResNetAttnDown(
+            base_channels * 3,
+            latent_channels,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.bottleneck = ModernResNetAttnBlock(
+            latent_channels,
+            latent_channels,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.up1 = ModernResNetAttnUp(
+            latent_channels,
+            base_channels * 3,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.up2 = ModernResNetAttnUp(
+            base_channels * 3,
+            base_channels * 2,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.up3 = ModernResNetAttnUp(
+            base_channels * 2,
+            base_channels,
+            heads=heads,
+            dim_head=dim_head,
+            groups=groups,
+        )
+        self.head = nn.Sequential(
+            nn.GroupNorm(_group_count(base_channels, groups), base_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(base_channels // 2, 3, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        target_hw = x.shape[-2:]
+        h = self.stem(x)
+        h = self.block0(h)
+        h = self.down1(h)
+        h = self.down2(h)
+        h = self.down3(h)
+        h = self.bottleneck(h)
+        h = self.up1(h)
+        h = self.up2(h)
+        h = self.up3(h)
+        out = self.head(h)
+        if out.shape[-2:] != target_hw:
+            out = F.interpolate(out, size=target_hw, mode="bilinear", align_corners=False)
+        return out
+
+
+class _Mario4AutoencoderBase(nn.Module):
+    """Shared normalisation wrapper for Mario4-derived autoencoders."""
+
+    def __init__(self, *, decoder: nn.Module, latent_dim: int = 192) -> None:
+        super().__init__()
+        self.encoder = Mario4ImageEncoder(latent_dim)
+        self.decoder = decoder
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
+        std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
+        self.register_buffer("_mean", mean.view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("_std", std.view(1, 3, 1, 1), persistent=False)
+
+    def _denormalize(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self._std.to(dtype=x.dtype, device=x.device) + self._mean.to(
+            dtype=x.dtype, device=x.device
+        )
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        return (x - self._mean.to(dtype=x.dtype, device=x.device)) / self._std.to(
+            dtype=x.dtype, device=x.device
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raw = self._denormalize(x)
+        latent = self.encoder(raw)
+        recon_raw = self.decoder(latent)
+        return self._normalize(recon_raw)
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        raw = self._denormalize(x)
+        return self.encoder(raw)
+
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        recon_raw = self.decoder(latent)
+        return self._normalize(recon_raw)
+
+
+class Mario4Autoencoder(_Mario4AutoencoderBase):
+    """Autoencoder built from predict_mario4's baseline decoder."""
+
+    def __init__(self, latent_dim: int = 192, base_channels: int = 32) -> None:
+        decoder = Mario4ImageDecoder(latent_dim, base=base_channels)
+        super().__init__(decoder=decoder, latent_dim=latent_dim)
+
+
+class Mario4MirroredAutoencoder(_Mario4AutoencoderBase):
+    """Autoencoder using the mirrored ImageDecoder for spatial upsampling."""
+
+    def __init__(self, latent_dim: int = 192, initial_hw: int = 14) -> None:
+        decoder = Mario4ImageDecoderMirrored(latent_dim, initial_hw=initial_hw)
+        super().__init__(decoder=decoder, latent_dim=latent_dim)
 
 
 class TextureAwareAutoencoder(nn.Module):
@@ -1403,7 +1862,7 @@ class Config:
     enable_convnext_base: bool = False
     enable_l1_autoencoder: bool = False
     enable_smoothl1_autoencoder: bool = False
-    enable_mse_autoencoder: bool = True
+    enable_mse_autoencoder: bool = False
     enable_focal_autoencoder: bool = False
     enable_style_contrast_autoencoder: bool = False
     enable_cauchy_autoencoder: bool = False
@@ -1413,6 +1872,10 @@ class Config:
     enable_no_skip_patch_autoencoder: bool = False
     enable_skip_train_autoencoder: bool = False
     enable_resnet_autoencoder: bool = False
+    enable_resnetv2_autoencoder: bool = False
+    enable_modern_attn_autoencoder: bool = False
+    enable_mario4_autoencoder: bool = False
+    enable_mario4_mirrored_autoencoder: bool = False
 
 
 def seed_everything(seed: int) -> None:
@@ -1542,6 +2005,50 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
             AutoencoderTrainer(
                 "resnet_autoencoder",
                 resnet_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_resnetv2_autoencoder:
+        resnet_v2_model = ResNetV2Autoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "resnetv2_autoencoder",
+                resnet_v2_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_modern_attn_autoencoder:
+        modern_attn_model = ModernResNetAttnAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "modern_attn_autoencoder",
+                modern_attn_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_mario4_autoencoder:
+        mario4_model = Mario4Autoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "mario4_autoencoder",
+                mario4_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_mario4_mirrored_autoencoder:
+        mario4_mirror_model = Mario4MirroredAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "mario4_mirrored_autoencoder",
+                mario4_mirror_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
