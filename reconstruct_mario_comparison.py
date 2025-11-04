@@ -1842,7 +1842,7 @@ class Config:
     max_trajs: Optional[int] = None
     batch_size: int = 16
     num_workers: int = 0
-    train_steps: int = 1_000
+    train_steps: int = 10_000
     log_every: int = 10
     vis_every: int = 50
     vis_rows: int = 6
