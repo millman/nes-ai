@@ -65,6 +65,9 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "modern_attn_autoencoder": "Autoencoder (Modern ResNet + Attn)",
     "mario4_autoencoder": "Autoencoder (Mario4 Encoder/Decoder)",
     "mario4_mirrored_autoencoder": "Autoencoder (Mario4 Encoder/Mirrored Decoder)",
+    "mario4_spatial_autoencoder": "Autoencoder (Mario4 Spatial Softmax)",
+    "mario4_large_autoencoder": "Autoencoder (Mario4 Latent 1024)",
+    "mario4_spatial_large_autoencoder": "Autoencoder (Mario4 Spatial Softmax 1024)",
 }
 
 
@@ -979,9 +982,15 @@ class ModernResNetAttnAutoencoder(nn.Module):
 class _Mario4AutoencoderBase(nn.Module):
     """Shared normalisation wrapper for Mario4-derived autoencoders."""
 
-    def __init__(self, *, decoder: nn.Module, latent_dim: int = 192) -> None:
+    def __init__(
+        self,
+        *,
+        decoder: nn.Module,
+        latent_dim: int = 192,
+        encoder: Optional[nn.Module] = None,
+    ) -> None:
         super().__init__()
-        self.encoder = Mario4ImageEncoder(latent_dim)
+        self.encoder = encoder if encoder is not None else Mario4ImageEncoder(latent_dim)
         self.decoder = decoder
         mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
         std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
@@ -1026,6 +1035,92 @@ class Mario4MirroredAutoencoder(_Mario4AutoencoderBase):
 
     def __init__(self, latent_dim: int = 192, initial_hw: int = 14) -> None:
         decoder = Mario4ImageDecoderMirrored(latent_dim, initial_hw=initial_hw)
+        super().__init__(decoder=decoder, latent_dim=latent_dim)
+
+
+class Mario4ImageDecoderMirroredLarge(Mario4ImageDecoderMirrored):
+    """Mario4 mirrored decoder defaulting to a 1024-dimensional latent."""
+
+    def __init__(self, latent_dim: int = 1024, initial_hw: int = 14) -> None:
+        super().__init__(latent_dim=latent_dim, initial_hw=initial_hw)
+
+
+class SpatialSoftmax(nn.Module):
+    """Compute per-channel spatial softmax expectations."""
+
+    def __init__(self, channels: int, *, normalize: bool = True) -> None:
+        super().__init__()
+        if channels <= 0:
+            raise ValueError("channels must be positive.")
+        self.channels = channels
+        self.normalize = normalize
+
+    @property
+    def output_dim(self) -> int:
+        return self.channels * 2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"Expected 4D tensor (B, C, H, W); got {x.shape}.")
+        b, c, h, w = x.shape
+        if c != self.channels:
+            raise ValueError(f"Expected {self.channels} channels, received {c}.")
+        flat = x.view(b, c, h * w)
+        weights = torch.softmax(flat, dim=-1)
+        if self.normalize:
+            ys = torch.linspace(-1.0, 1.0, h, device=x.device, dtype=x.dtype)
+            xs = torch.linspace(-1.0, 1.0, w, device=x.device, dtype=x.dtype)
+        else:
+            ys = torch.linspace(0.0, float(h - 1), h, device=x.device, dtype=x.dtype)
+            xs = torch.linspace(0.0, float(w - 1), w, device=x.device, dtype=x.dtype)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        grid_x = grid_x.reshape(1, 1, -1)
+        grid_y = grid_y.reshape(1, 1, -1)
+        exp_x = torch.sum(weights * grid_x, dim=-1)
+        exp_y = torch.sum(weights * grid_y, dim=-1)
+        return torch.cat([exp_x, exp_y], dim=-1)
+
+
+class Mario4SpatialSoftmaxEncoder(nn.Module):
+    """Mario4 encoder variant that applies spatial softmax before projection."""
+
+    def __init__(self, latent_dim: int = 192) -> None:
+        super().__init__()
+        base = Mario4ImageEncoder(latent_dim)
+        self.features = base.features
+        feature_dim = base.proj.in_features
+        self.spatial_pool = SpatialSoftmax(feature_dim)
+        self.proj = nn.Linear(self.spatial_pool.output_dim, latent_dim)
+
+    def forward(self, frame: torch.Tensor) -> torch.Tensor:
+        x = self.features(frame)
+        x = self.spatial_pool(x)
+        return self.proj(x)
+
+
+class Mario4SpatialSoftmaxAutoencoder(_Mario4AutoencoderBase):
+    """Autoencoder pairing the Mario4 decoder with a spatial-softmax encoder head."""
+
+    def __init__(self, latent_dim: int = 192, initial_hw: int = 14) -> None:
+        encoder = Mario4SpatialSoftmaxEncoder(latent_dim)
+        decoder = Mario4ImageDecoderMirrored(latent_dim, initial_hw=initial_hw)
+        super().__init__(decoder=decoder, latent_dim=latent_dim, encoder=encoder)
+
+
+class Mario4SpatialSoftmaxLargeAutoencoder(_Mario4AutoencoderBase):
+    """Spatial-softmax Mario4 autoencoder variant with a 1024-D latent."""
+
+    def __init__(self, latent_dim: int = 1024, initial_hw: int = 14) -> None:
+        encoder = Mario4SpatialSoftmaxEncoder(latent_dim)
+        decoder = Mario4ImageDecoderMirroredLarge(latent_dim=latent_dim, initial_hw=initial_hw)
+        super().__init__(decoder=decoder, latent_dim=latent_dim, encoder=encoder)
+
+
+class Mario4LargeAutoencoder(_Mario4AutoencoderBase):
+    """Mario4 autoencoder variant with enlarged latent dimensionality."""
+
+    def __init__(self, latent_dim: int = 1024, base_channels: int = 32) -> None:
+        decoder = Mario4ImageDecoder(latent_dim, base=base_channels)
         super().__init__(decoder=decoder, latent_dim=latent_dim)
 
 
@@ -1876,6 +1971,9 @@ class Config:
     enable_modern_attn_autoencoder: bool = False
     enable_mario4_autoencoder: bool = False
     enable_mario4_mirrored_autoencoder: bool = False
+    enable_mario4_spatial_autoencoder: bool = False
+    enable_mario4_large_autoencoder: bool = False
+    enable_mario4_spatial_large_autoencoder: bool = False
 
 
 def seed_everything(seed: int) -> None:
@@ -2049,6 +2147,39 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
             AutoencoderTrainer(
                 "mario4_mirrored_autoencoder",
                 mario4_mirror_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_mario4_spatial_autoencoder:
+        mario4_spatial_model = Mario4SpatialSoftmaxAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "mario4_spatial_autoencoder",
+                mario4_spatial_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_mario4_large_autoencoder:
+        mario4_large_model = Mario4LargeAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "mario4_large_autoencoder",
+                mario4_large_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_mario4_spatial_large_autoencoder:
+        mario4_spatial_large_model = Mario4SpatialSoftmaxLargeAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "mario4_spatial_large_autoencoder",
+                mario4_spatial_large_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
