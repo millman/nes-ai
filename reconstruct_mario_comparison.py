@@ -1088,14 +1088,18 @@ class Mario4SpatialSoftmaxEncoder(nn.Module):
         super().__init__()
         base = Mario4ImageEncoder(latent_dim)
         self.features = base.features
+        self.pool = base.pool
         feature_dim = base.proj.in_features
         self.spatial_pool = SpatialSoftmax(feature_dim)
-        self.proj = nn.Linear(self.spatial_pool.output_dim, latent_dim)
+        concat_dim = feature_dim + self.spatial_pool.output_dim
+        self.proj = nn.Linear(concat_dim, latent_dim)
 
     def forward(self, frame: torch.Tensor) -> torch.Tensor:
         x = self.features(frame)
-        x = self.spatial_pool(x)
-        return self.proj(x)
+        pooled = self.pool(x).flatten(1)
+        spatial = self.spatial_pool(x)
+        combined = torch.cat([pooled, spatial], dim=-1)
+        return self.proj(combined)
 
 
 class Mario4SpatialSoftmaxAutoencoder(_Mario4AutoencoderBase):
