@@ -68,6 +68,7 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "mario4_spatial_autoencoder": "Mario4 Spatial Softmax 192",
     "mario4_large_autoencoder": "Mario4 Latent 1024",
     "mario4_spatial_large_autoencoder": "Mario4 Spatial Softmax 1024",
+    "lightweight_flat_autoencoder": "Autoencoder (Lightweight Flat Latent)",
 }
 
 
@@ -1128,6 +1129,62 @@ class Mario4LargeAutoencoder(_Mario4AutoencoderBase):
         super().__init__(decoder=decoder, latent_dim=latent_dim)
 
 
+class LightweightFlatLatentAutoencoder(nn.Module):
+    """Lightweight autoencoder that compresses to a flat latent vector."""
+
+    def __init__(
+        self,
+        base_channels: int = 48,
+        latent_channels: int = 128,
+        latent_dim: int = 256,
+        input_hw: Tuple[int, int] = (224, 224),
+    ) -> None:
+        super().__init__()
+        self.encoder = LightweightEncoder(base_channels, latent_channels)
+        self.decoder = LightweightDecoder(base_channels, latent_channels, output_hw=input_hw)
+        self.latent_channels = latent_channels
+        height, width = input_hw
+        if height % 8 != 0 or width % 8 != 0:
+            raise ValueError("input_hw dimensions must be divisible by 8 to match encoder strides.")
+        self.latent_hw = (height // 8, width // 8)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.spatial = SpatialSoftmax(latent_channels)
+        combined_dim = latent_channels + self.spatial.output_dim
+        self.pre_latent_norm = nn.LayerNorm(combined_dim)
+        self.latent_proj = nn.Linear(combined_dim, latent_dim)
+        self.latent_norm = nn.LayerNorm(latent_dim)
+        self.expand = nn.Linear(latent_dim, latent_channels * self.latent_hw[0] * self.latent_hw[1])
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.encoder(x)
+        pooled = self.pool(features).flatten(1)
+        spatial = self.spatial(features)
+        combined = torch.cat([pooled, spatial], dim=-1)
+        combined = self.pre_latent_norm(combined)
+        latent = self.latent_proj(combined)
+        return self.latent_norm(latent)
+
+    def decode(
+        self,
+        latent: torch.Tensor,
+        *,
+        target_hw: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        latent = self.latent_norm(latent)
+        expanded = self.expand(latent)
+        expanded = expanded.view(
+            latent.size(0),
+            self.latent_channels,
+            self.latent_hw[0],
+            self.latent_hw[1],
+        )
+        return self.decoder(expanded, target_hw=target_hw)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        latent = self.encode(x)
+        return self.decode(latent, target_hw=x.shape[-2:])
+
+
 class TextureAwareAutoencoder(nn.Module):
     """Higher-capacity autoencoder tuned for style and patch contrastive training."""
 
@@ -1973,6 +2030,7 @@ class Config:
     enable_resnet_autoencoder: bool = False
     enable_resnetv2_autoencoder: bool = False
     enable_modern_attn_autoencoder: bool = False
+    enable_lightweight_flat_autoencoder: bool = False
     enable_mario4_autoencoder: bool = False
     enable_mario4_mirrored_autoencoder: bool = False
     enable_mario4_spatial_autoencoder: bool = False
@@ -2129,6 +2187,17 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
             AutoencoderTrainer(
                 "modern_attn_autoencoder",
                 modern_attn_model,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.SmoothL1Loss(),
+            )
+        )
+    if cfg.enable_lightweight_flat_autoencoder:
+        lightweight_flat_model = LightweightFlatLatentAutoencoder()
+        trainers.append(
+            AutoencoderTrainer(
+                "lightweight_flat_autoencoder",
+                lightweight_flat_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),

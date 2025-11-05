@@ -274,8 +274,7 @@ class ImageDecoder(nn.Module):
         x = self.fc(latent)
         x = x.view(latent.size(0), -1, 14, 14)
         x = self.net(x)
-        # Return raw logits; callers clamp when needed for visualisation.
-        return x
+        return torch.sigmoid(x)
 
 
 class ImageDecoderMirrored(nn.Module):
@@ -309,7 +308,7 @@ class ImageDecoderMirrored(nn.Module):
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         x = self.expand(latent)
         x = x.view(latent.size(0), -1, self.initial_hw, self.initial_hw)
-        return self.net(x)
+        return torch.sigmoid(self.net(x))
 
 
 class ActionEmbedding(nn.Module):
