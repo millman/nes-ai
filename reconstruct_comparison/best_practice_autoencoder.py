@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -62,25 +61,28 @@ class ResidualBlock(nn.Module):
 
 
 class SelfAttention2d(nn.Module):
-    """Multi-head self-attention operating over flattened spatial tokens."""
+    """Multi-head self-attention operating over flattened spatial tokens.
 
-    def __init__(self, channels: int, num_heads: int = 4) -> None:
+    Falls back to a pooled variant when the spatial grid would otherwise
+    explode memory usage (e.g. 112×112 features inside the decoder).
+    """
+
+    def __init__(self, channels: int, num_heads: int = 4, max_tokens: int = 4096) -> None:
         super().__init__()
         self.num_heads = num_heads
+        self.max_tokens = max_tokens
         self.norm = nn.GroupNorm(_norm_groups(channels), channels)
         self.qkv = nn.Conv1d(channels, channels * 3, kernel_size=1)
         self.proj = nn.Conv1d(channels, channels, kernel_size=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _attention(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
-        residual = x
-        x = self.norm(x)
         flat = x.view(b, c, h * w)
         qkv = self.qkv(flat)
         q, k, v = qkv.chunk(3, dim=1)
         head_dim = c // self.num_heads
         if head_dim == 0:
-            return residual
+            return x
         q = q.view(b, self.num_heads, head_dim, h * w).permute(0, 1, 3, 2)
         k = k.view(b, self.num_heads, head_dim, h * w).permute(0, 1, 3, 2)
         v = v.view(b, self.num_heads, head_dim, h * w).permute(0, 1, 3, 2)
@@ -90,8 +92,25 @@ class SelfAttention2d(nn.Module):
         out = torch.matmul(attn, v)
         out = out.permute(0, 1, 3, 2).reshape(b, c, h * w)
         out = self.proj(out)
-        out = out.view(b, c, h, w)
-        return out + residual
+        return out.view(b, c, h, w)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        residual = x
+        x = self.norm(x)
+        tokens = h * w
+
+        if tokens <= self.max_tokens:
+            attn_out = self._attention(x)
+        else:
+            scale = math.sqrt(tokens / self.max_tokens)
+            target_h = max(1, int(math.ceil(h / scale)))
+            target_w = max(1, int(math.ceil(w / scale)))
+            reduced = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=False)
+            attn_out = self._attention(reduced)
+            attn_out = F.interpolate(attn_out, size=(h, w), mode="bilinear", align_corners=False)
+
+        return attn_out + residual
 
 
 class EncoderStage(nn.Module):
@@ -224,7 +243,7 @@ class BestPracticeAutoencoderTrainer(BaseAutoencoderTrainer):
         *,
         device: torch.device,
         lr: float,
-        loss_fn: Optional[nn.Module] = None,
+        loss_fn: nn.Module,
         base_channels: int = 64,
         latent_channels: int = 256,
         weight_decay: float = 1e-4,

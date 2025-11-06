@@ -1,50 +1,42 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from .metrics import compute_shared_metrics
 
-OptimizerFactory = Callable[[Iterable[nn.Parameter]], torch.optim.Optimizer]
 
-
-class BaseAutoencoderTrainer:
-    """Shared training harness for autoencoders matching comparison script style."""
+class ReconstructionTrainer:
+    """Wraps a frozen encoder and trainable decoder with a unified step API."""
 
     def __init__(
         self,
         name: str,
-        model: nn.Module,
+        encoder: nn.Module,
+        decoder: nn.Module,
         *,
         device: torch.device,
         lr: float,
-        loss_fn: nn.Module,
-        weight_decay: float = 1e-4,
-        optimizer_factory: Optional[OptimizerFactory] = None,
     ) -> None:
         self.name = name
         self.device = device
-        self.model = model.to(device)
-        if optimizer_factory is not None:
-            self.optimizer = optimizer_factory(self.model.parameters())
-        else:
-            self.optimizer = torch.optim.AdamW(
-                self.model.parameters(), lr=lr, weight_decay=weight_decay
-            )
-        if loss_fn is None:
-            raise ValueError("loss_fn must be provided.")
-        self.loss_fn = loss_fn
-        self.history: list[Tuple[int, float]] = []
-        self.shared_history: list[Tuple[int, Dict[str, float]]] = []
+        self.encoder = encoder.to(device)
+        self.decoder = decoder.to(device)
+        self.optimizer = torch.optim.Adam(self.decoder.parameters(), lr=lr)
+        self.loss_fn = nn.MSELoss()
+        self.history: List[Tuple[int, float]] = []
+        self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
         self.best_loss: Optional[float] = None
 
     def step(self, batch: torch.Tensor) -> Tuple[float, bool, Dict[str, float]]:
-        self.model.train()
-        recon = self.model(batch)
+        self.decoder.train()
+        with torch.no_grad():
+            feats = self.encoder(batch)
+        recon = self.decoder(feats)
         loss = self.loss_fn(recon, batch)
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -61,38 +53,18 @@ class BaseAutoencoderTrainer:
 
     @torch.no_grad()
     def reconstruct(self, batch: torch.Tensor) -> torch.Tensor:
-        was_training = self.model.training
-        self.model.eval()
-        recon = self.model(batch.to(self.device))
+        was_training = self.decoder.training
+        self.encoder.eval()
+        self.decoder.eval()
+        feats = self.encoder(batch.to(self.device))
+        recon = self.decoder(feats)
         if was_training:
-            self.model.train()
-        return recon.cpu()
-
-    @torch.no_grad()
-    def encode(self, batch: torch.Tensor) -> torch.Tensor:
-        if not hasattr(self.model, "encode"):
-            raise AttributeError("Model does not implement encode().")
-        was_training = self.model.training
-        self.model.eval()
-        latent = self.model.encode(batch.to(self.device))
-        if was_training:
-            self.model.train()
-        return latent.cpu()
-
-    @torch.no_grad()
-    def decode(self, latent: torch.Tensor) -> torch.Tensor:
-        if not hasattr(self.model, "decode"):
-            raise AttributeError("Model does not implement decode().")
-        was_training = self.model.training
-        self.model.eval()
-        recon = self.model.decode(latent.to(self.device))
-        if was_training:
-            self.model.train()
+            self.decoder.train()
         return recon.cpu()
 
     def state_dict(self) -> dict:
         return {
-            "model": self.model.state_dict(),
+            "decoder": self.decoder.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "history": self.history,
             "shared_history": self.shared_history,
@@ -106,7 +78,7 @@ class BaseAutoencoderTrainer:
         torch.save(self.state_dict(), path)
 
     def load_state_dict(self, state: dict, *, lr: Optional[float] = None) -> None:
-        self.model.load_state_dict(state["model"])
+        self.decoder.load_state_dict(state["decoder"])
         self.optimizer.load_state_dict(state["optimizer"])
         if lr is not None:
             for group in self.optimizer.param_groups:
@@ -117,4 +89,4 @@ class BaseAutoencoderTrainer:
         self.best_loss = state.get("best_loss")
 
 
-__all__ = ["BaseAutoencoderTrainer"]
+__all__ = ["ReconstructionTrainer"]

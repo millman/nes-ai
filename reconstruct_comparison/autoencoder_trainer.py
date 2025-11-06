@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+from .base import BaseAutoencoderTrainer
+
+
+class FocalL1Loss(nn.Module):
+    """Pixel-wise focal weighting applied to an L1 reconstruction objective."""
+
+    def __init__(self, gamma: float = 2.0, max_weight: float = 5.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if gamma <= 0:
+            raise ValueError("gamma must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.gamma = gamma
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        l1 = torch.abs(input - target)
+        norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        weight = torch.pow(l1 / norm, self.gamma).clamp(max=self.max_weight)
+        loss = weight * l1
+        return loss.mean()
+
+
+class AutoencoderTrainer(BaseAutoencoderTrainer):
+    """Trainable encoder/decoder pair using an explicit reconstruction loss."""
+
+    def __init__(
+        self,
+        name: str,
+        model: nn.Module,
+        *,
+        device: torch.device,
+        lr: float,
+        loss_fn: nn.Module,
+        weight_decay: float = 1e-4,
+    ) -> None:
+        super().__init__(
+            name,
+            model,
+            device=device,
+            lr=lr,
+            loss_fn=loss_fn,
+            weight_decay=weight_decay,
+        )
+
+
+__all__ = ["AutoencoderTrainer", "FocalL1Loss"]

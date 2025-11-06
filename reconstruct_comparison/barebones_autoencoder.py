@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -80,7 +78,7 @@ class BarebonesAutoencoderTrainer(BaseAutoencoderTrainer):
         *,
         device: torch.device,
         lr: float,
-        loss_fn: Optional[nn.Module] = None,
+        loss_fn: nn.Module,
         latent_channels: int = 64,
         weight_decay: float = 0.0,
         name: str = "barebones_autoencoder",
