@@ -35,6 +35,15 @@ import tyro
 from PIL import Image
 
 from predict_mario_ms_ssim import default_transform, ms_ssim_loss, pick_device, unnormalize
+from reconstruct_comparison import (
+    BaseAutoencoderTrainer,
+    BarebonesAutoencoderTrainer,
+    BarebonesVectorAutoencoderTrainer,
+    BestPracticeAutoencoderTrainer,
+    BestPracticeVectorAutoencoderTrainer,
+    compute_shared_metrics,
+    ms_ssim_per_sample,
+)
 from trajectory_utils import list_state_frames, list_traj_dirs
 
 
@@ -55,6 +64,10 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "no_skip_patch_autoencoder": "Autoencoder (No Skip Patch)",
     "skip_train_autoencoder": "Autoencoder (Train Skip, Eval Zero)",
     "resnet_autoencoder": "Autoencoder (ResNet Blocks)",
+    "barebones_autoencoder": "Autoencoder (Barebones)",
+    "barebones_vector_autoencoder": "Autoencoder (Barebones Vector)",
+    "best_practice_autoencoder": "Autoencoder (Best Practice)",
+    "best_practice_vector_autoencoder": "Autoencoder (Best Practice Vector)",
 }
 
 
@@ -654,87 +667,7 @@ class FocalL1Loss(nn.Module):
         return loss.mean()
 
 
-def _build_gaussian_window(
-    window_size: int,
-    sigma: float,
-    channels: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    coords = torch.arange(window_size, device=device, dtype=dtype) - window_size // 2
-    gauss = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-    gauss = (gauss / gauss.sum()).unsqueeze(0)
-    window_2d = (gauss.t() @ gauss).unsqueeze(0).unsqueeze(0)
-    return window_2d.expand(channels, 1, window_size, window_size).contiguous()
 
-
-def _ssim_components_full(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    window: torch.Tensor,
-    *,
-    data_range: float = 1.0,
-    k1: float = 0.01,
-    k2: float = 0.03,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    padding = window.shape[-1] // 2
-    mu_x = F.conv2d(x, window, padding=padding, groups=x.shape[1])
-    mu_y = F.conv2d(y, window, padding=padding, groups=y.shape[1])
-    mu_x_sq = mu_x.pow(2)
-    mu_y_sq = mu_y.pow(2)
-    mu_xy = mu_x * mu_y
-    sigma_x_sq = F.conv2d(x * x, window, padding=padding, groups=x.shape[1]) - mu_x_sq
-    sigma_y_sq = F.conv2d(y * y, window, padding=padding, groups=y.shape[1]) - mu_y_sq
-    sigma_xy = F.conv2d(x * y, window, padding=padding, groups=x.shape[1]) - mu_xy
-    c1 = (k1 * data_range) ** 2
-    c2 = (k2 * data_range) ** 2
-    numerator = (2 * mu_xy + c1) * (2 * sigma_xy + c2)
-    denominator = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
-    ssim_map = numerator / denominator
-    cs_map = (2 * sigma_xy + c2) / (sigma_x_sq + sigma_y_sq + c2)
-    ssim_val = ssim_map.mean(dim=(1, 2, 3))
-    cs_val = cs_map.mean(dim=(1, 2, 3))
-    return ssim_val, cs_val
-
-
-def ms_ssim_per_sample(
-    x_hat_norm: torch.Tensor,
-    x_true_norm: torch.Tensor,
-    *,
-    weights: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    if weights is None:
-        weights = torch.tensor(
-            [0.0448, 0.2856, 0.3001, 0.2363, 0.1333],
-            device=x_hat_norm.device,
-            dtype=x_hat_norm.dtype,
-        )
-    xh = unnormalize(x_hat_norm)
-    xt = unnormalize(x_true_norm)
-    window_size = 11
-    sigma = 1.5
-    channels = xh.shape[1]
-    window = _build_gaussian_window(window_size, sigma, channels, xh.device, xh.dtype)
-    levels = weights.shape[0]
-    mssim: List[torch.Tensor] = []
-    mcs: List[torch.Tensor] = []
-    x_scaled = xh
-    y_scaled = xt
-    for _ in range(levels):
-        ssim_val, cs_val = _ssim_components_full(x_scaled, y_scaled, window)
-        mssim.append(ssim_val)
-        mcs.append(cs_val)
-        x_scaled = F.avg_pool2d(x_scaled, kernel_size=2, stride=2)
-        y_scaled = F.avg_pool2d(y_scaled, kernel_size=2, stride=2)
-    mssim_tensor = torch.stack(mssim, dim=0)
-    mcs_tensor = torch.stack(mcs[:-1], dim=0)
-    eps = torch.finfo(mssim_tensor.dtype).eps
-    mssim_tensor = mssim_tensor.clamp(min=eps, max=1.0)
-    mcs_tensor = mcs_tensor.clamp(min=eps, max=1.0)
-    pow1 = weights[:-1].unsqueeze(1)
-    pow2 = weights[-1]
-    ms_prod = torch.prod(mcs_tensor ** pow1, dim=0) * (mssim_tensor[-1] ** pow2)
-    return ms_prod
 
 
 class MSSSIMLoss(nn.Module):
@@ -832,12 +765,6 @@ class MultiScalePatchLoss(nn.Module):
             raise RuntimeError("No scales contributed to the loss computation.")
         return total_loss / total_weight
 
-
-def _compute_shared_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
-    with torch.no_grad():
-        l1 = F.l1_loss(pred, target).item()
-        ms = float(ms_ssim_per_sample(pred, target).mean().item())
-    return {"l1": l1, "ms_ssim": ms}
 
 
 def _gram_matrix(feat: torch.Tensor) -> torch.Tensor:
@@ -1003,7 +930,7 @@ class ReconstructionTrainer:
         self.global_step += 1
         loss_val = float(loss.detach().item())
         self.history.append((self.global_step, loss_val))
-        metrics = _compute_shared_metrics(recon.detach(), batch)
+        metrics = compute_shared_metrics(recon.detach(), batch)
         self.shared_history.append((self.global_step, metrics))
         improved = self.best_loss is None or loss_val < self.best_loss
         if improved:
@@ -1048,7 +975,7 @@ class ReconstructionTrainer:
         self.best_loss = state.get("best_loss")
 
 
-class AutoencoderTrainer:
+class AutoencoderTrainer(BaseAutoencoderTrainer):
     """Trainable encoder/decoder pair driven by focal L1 loss."""
 
     def __init__(
@@ -1061,69 +988,14 @@ class AutoencoderTrainer:
         weight_decay: float = 1e-4,
         loss_fn: Optional[nn.Module] = None,
     ) -> None:
-        self.name = name
-        self.device = device
-        self.model = model.to(device)
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=lr, weight_decay=weight_decay
+        super().__init__(
+            name,
+            model,
+            device=device,
+            lr=lr,
+            loss_fn=loss_fn or FocalL1Loss(),
+            weight_decay=weight_decay,
         )
-        self.loss_fn = loss_fn or FocalL1Loss()
-        self.history: List[Tuple[int, float]] = []
-        self.shared_history: List[Tuple[int, Dict[str, float]]] = []
-        self.global_step = 0
-        self.best_loss: Optional[float] = None
-
-    def step(self, batch: torch.Tensor) -> Tuple[float, bool, Dict[str, float]]:
-        self.model.train()
-        recon = self.model(batch)
-        loss = self.loss_fn(recon, batch)
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        self.optimizer.step()
-        self.global_step += 1
-        loss_val = float(loss.detach().item())
-        self.history.append((self.global_step, loss_val))
-        metrics = _compute_shared_metrics(recon.detach(), batch)
-        self.shared_history.append((self.global_step, metrics))
-        improved = self.best_loss is None or loss_val < self.best_loss
-        if improved:
-            self.best_loss = loss_val
-        return loss_val, improved, metrics
-
-    @torch.no_grad()
-    def reconstruct(self, batch: torch.Tensor) -> torch.Tensor:
-        was_training = self.model.training
-        self.model.eval()
-        recon = self.model(batch.to(self.device))
-        if was_training:
-            self.model.train()
-        return recon.cpu()
-
-    def state_dict(self) -> dict:
-        return {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "history": self.history,
-            "shared_history": self.shared_history,
-            "global_step": self.global_step,
-            "name": self.name,
-            "best_loss": self.best_loss,
-        }
-
-    def save_checkpoint(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self.state_dict(), path)
-
-    def load_state_dict(self, state: dict, *, lr: Optional[float] = None) -> None:
-        self.model.load_state_dict(state["model"])
-        self.optimizer.load_state_dict(state["optimizer"])
-        if lr is not None:
-            for group in self.optimizer.param_groups:
-                group["lr"] = lr
-        self.history = state.get("history", [])
-        self.shared_history = state.get("shared_history", [])
-        self.global_step = state.get("global_step", 0)
-        self.best_loss = state.get("best_loss")
 
 
 class StyleContrastTrainer:
@@ -1197,7 +1069,7 @@ class StyleContrastTrainer:
         self.global_step += 1
         loss_val = float(total_loss.detach().item())
         self.history.append((self.global_step, loss_val))
-        metrics = _compute_shared_metrics(recon.detach(), batch)
+        metrics = compute_shared_metrics(recon.detach(), batch)
         self.shared_history.append((self.global_step, metrics))
         improved = self.best_loss is None or loss_val < self.best_loss
         if improved:
@@ -1240,7 +1112,7 @@ class StyleContrastTrainer:
         self.best_loss = state.get("best_loss")
 
 
-Trainer = ReconstructionTrainer | AutoencoderTrainer | StyleContrastTrainer
+Trainer = ReconstructionTrainer | BaseAutoencoderTrainer | StyleContrastTrainer
 
 
 # ---------------------------------------------------------------------------
@@ -1413,6 +1285,10 @@ class Config:
     enable_no_skip_patch_autoencoder: bool = False
     enable_skip_train_autoencoder: bool = False
     enable_resnet_autoencoder: bool = False
+    enable_barebones_autoencoder: bool = False
+    enable_barebones_vector_autoencoder: bool = False
+    enable_best_practice_autoencoder: bool = False
+    enable_best_practice_vector_autoencoder: bool = False
 
 
 def seed_everything(seed: int) -> None:
@@ -1569,6 +1445,40 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 loss_fn=FocalMSSSIMLoss(),
             )
         )
+    if cfg.enable_barebones_autoencoder:
+        trainers.append(
+            BarebonesAutoencoderTrainer(
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.MSELoss(),
+                weight_decay=0.0,
+            )
+        )
+    if cfg.enable_barebones_vector_autoencoder:
+        trainers.append(
+            BarebonesVectorAutoencoderTrainer(
+                device=device,
+                lr=cfg.lr,
+                loss_fn=nn.MSELoss(),
+                weight_decay=0.0,
+            )
+        )
+    if cfg.enable_best_practice_autoencoder:
+        trainers.append(
+            BestPracticeAutoencoderTrainer(
+                device=device,
+                lr=cfg.lr,
+                loss_fn=FocalL1Loss(),
+            )
+        )
+    if cfg.enable_best_practice_vector_autoencoder:
+        trainers.append(
+            BestPracticeVectorAutoencoderTrainer(
+                device=device,
+                lr=cfg.lr,
+                loss_fn=FocalL1Loss(),
+            )
+        )
     if not trainers:
         raise ValueError("No trainers enabled. Enable at least one model to proceed.")
     return trainers
@@ -1611,9 +1521,7 @@ def main() -> None:
     for trainer in trainers:
         if isinstance(trainer, ReconstructionTrainer):
             module = trainer.decoder
-        elif isinstance(trainer, AutoencoderTrainer):
-            module = trainer.model
-        elif isinstance(trainer, StyleContrastTrainer):
+        elif isinstance(trainer, (BaseAutoencoderTrainer, StyleContrastTrainer)):
             module = trainer.model
         else:
             continue
