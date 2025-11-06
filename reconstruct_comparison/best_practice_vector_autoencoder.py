@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .base import BaseAutoencoderTrainer
-from .best_practice_autoencoder import BestPracticeAutoencoder
+from .best_practice_autoencoder import BestPracticeAutoencoder, _norm_groups
 
 
 class BestPracticeVectorAutoencoder(nn.Module):
@@ -16,18 +16,17 @@ class BestPracticeVectorAutoencoder(nn.Module):
     Rationale:
     - Reuses the expressive convolutional backbone so the encoder maintains
       spatial awareness and attention-driven detail.
-    - Adds projection heads so downstream agents can consume/produce a compact
-      latent vector while the decoder still benefits from the structured latent
-      grid.
+    - Down-samples the latent grid before flattening so the vector head adds
+      only ≈2.8e7 parameters instead of hundreds of millions.
 
-    Total parameters: ≈8.5e8 learnable weights (dominated by the latent MLP).
+    Total parameters: ≈5.6e7 learnable weights (vector head + backbone).
     """
 
     def __init__(
         self,
         base_channels: int = 64,
         latent_channels: int = 256,
-        latent_dim: int = 2048,
+        latent_dim: int = 1024,
     ) -> None:
         super().__init__()
         self.backbone = BestPracticeAutoencoder(
@@ -35,22 +34,50 @@ class BestPracticeVectorAutoencoder(nn.Module):
             latent_channels=latent_channels,
         )
         self.latent_channels = latent_channels
-        self.spatial_hw = 28
         self.latent_dim = latent_dim
-        # Flattened latent projection: [B, C=256, H=W=28] -> [B, latent_dim].
-        self.to_latent = nn.Linear(latent_channels * self.spatial_hw * self.spatial_hw, latent_dim)
-        # Learned unflattening back to spatial tensor for the decoder path.
-        self.from_latent = nn.Linear(latent_dim, latent_channels * self.spatial_hw * self.spatial_hw)
+        # Reduce the spatial latent grid: [B, 256, 28, 28] -> [B, 256, 7, 7].
+        self.reducer = nn.Sequential(
+            # [B, C=256, 28, 28] -> [B, 256, 14, 14]; strided conv halves spatial
+            # size while maintaining channels for context gathering.
+            nn.Conv2d(latent_channels, latent_channels, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(_norm_groups(latent_channels), latent_channels),
+            nn.SiLU(inplace=True),
+            # [B, 256, 14, 14] -> [B, 256, 7, 7]; second stride prepares compact grid
+            # for the latent projection without overwhelming parameter count.
+            nn.Conv2d(latent_channels, latent_channels, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(_norm_groups(latent_channels), latent_channels),
+            nn.SiLU(inplace=True),
+        )
+        self.reduced_hw = 7
+        reduced_dim = latent_channels * self.reduced_hw * self.reduced_hw
+        # Flattened latent projection: [B, reduced_dim] -> [B, latent_dim].
+        self.to_latent = nn.Linear(reduced_dim, latent_dim)
+        # Learned unflattening back to pooled spatial tensor for the decoder path.
+        self.from_latent = nn.Linear(latent_dim, reduced_dim)
+        self.expander = nn.Sequential(
+            # [B, 256, 7, 7] -> [B, 256, 14, 14]; learnable up-sampling mirrors reducer.
+            nn.ConvTranspose2d(latent_channels, latent_channels, kernel_size=4, stride=2, padding=1),
+            nn.GroupNorm(_norm_groups(latent_channels), latent_channels),
+            nn.SiLU(inplace=True),
+            # [B, 256, 14, 14] -> [B, 256, 28, 28]; restores latent grid for decoder.
+            nn.ConvTranspose2d(latent_channels, latent_channels, kernel_size=4, stride=2, padding=1),
+            nn.GroupNorm(_norm_groups(latent_channels), latent_channels),
+            nn.SiLU(inplace=True),
+        )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         feats = self.backbone.encode(x)
-        flat = feats.view(feats.shape[0], -1)
+        reduced = self.reducer(feats)
+        flat = reduced.view(reduced.shape[0], -1)
         return self.to_latent(flat)
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         feats = self.from_latent(latent)
-        feats = feats.view(latent.shape[0], self.latent_channels, self.spatial_hw, self.spatial_hw)
-        return self.backbone.decode(feats)
+        feats = feats.view(
+            latent.shape[0], self.latent_channels, self.reduced_hw, self.reduced_hw
+        )
+        expanded = self.expander(feats)
+        return self.backbone.decode(expanded)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         latent = self.encode(x)
@@ -71,7 +98,7 @@ class BestPracticeVectorAutoencoderTrainer(BaseAutoencoderTrainer):
         loss_fn: Optional[nn.Module] = None,
         base_channels: int = 64,
         latent_channels: int = 256,
-        latent_dim: int = 2048,
+        latent_dim: int = 1024,
         weight_decay: float = 1e-4,
         name: str = "best_practice_vector_autoencoder",
     ) -> None:
