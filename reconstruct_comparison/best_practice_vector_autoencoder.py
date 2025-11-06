@@ -20,7 +20,7 @@ class BestPracticeVectorAutoencoder(nn.Module):
       latent vector while the decoder still benefits from the structured latent
       grid.
 
-    Total parameters: ≈2.35e8 learnable weights (dominated by the latent MLP).
+    Total parameters: ≈8.5e8 learnable weights (dominated by the latent MLP).
     """
 
     def __init__(
