@@ -49,26 +49,26 @@ SCRIPT_START_TIME = time.time()
 MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "resnet50": "ResNet-50 (MSE)",
     "convnext_base": "ConvNeXt-Base (MSE)",
-    "l1_autoencoder": "Autoencoder (L1)",
-    "mse_autoencoder": "Autoencoder (MSE)",
-    "focal_autoencoder": "Autoencoder (Focal L1)",
-    "smoothl1_autoencoder": "Autoencoder (Smooth L1)",
-    "cauchy_autoencoder": "Autoencoder (Cauchy)",
-    "style_contrast_autoencoder": "Autoencoder (Style + PatchNCE)",
+    "autoencoder_l1": "Autoencoder (L1)",
+    "autoencoder_mse": "Autoencoder (MSE)",
+    "autoencoder_focal": "Autoencoder (Focal L1)",
+    "autoencoder_smooth_l1": "Autoencoder (Smooth L1)",
+    "autoencoder_cauchy": "Autoencoder (Cauchy)",
+    "autoencoder_style_contrast": "Autoencoder (Style + PatchNCE)",
     "msssim_autoencoder": "Autoencoder (MS-SSIM)",
-    "focal_msssim_autoencoder": "Autoencoder (Focal MS-SSIM)",
-    "no_skip_autoencoder": "Autoencoder (Spatial Latent)",
-    "no_skip_patch_autoencoder": "Autoencoder (No Skip Patch)",
-    "skip_train_autoencoder": "Autoencoder (Train Skip, Eval Zero)",
-    "resnet_autoencoder": "Autoencoder (ResNet Blocks)",
-    "resnetv2_autoencoder": "Autoencoder (ResNet v2)",
-    "modern_attn_autoencoder": "Autoencoder (Modern ResNet + Attn)",
-    "mario4_autoencoder": "Autoencoder (Mario4)",
-    "mario4_mirrored_autoencoder": "Mario4 Mirrored Decoder",
-    "mario4_spatial_autoencoder": "Mario4 Spatial Softmax 192",
-    "mario4_large_autoencoder": "Mario4 Latent 1024",
-    "mario4_spatial_large_autoencoder": "Mario4 Spatial Softmax 1024",
-    "lightweight_flat_autoencoder": "Autoencoder (Lightweight Flat Latent)",
+    "autoencoder_focal_msssim": "Autoencoder (Focal MS-SSIM)",
+    "autoencoder_spatial_latent": "Autoencoder (Spatial Latent)",
+    "autoencoder_patch": "Autoencoder (No Skip Patch)",
+    "autoencoder_skip_train": "Autoencoder (Train Skip, Eval Zero)",
+    "autoencoder_resnet": "Autoencoder (ResNet Blocks)",
+    "autoencoder_resnetv2": "Autoencoder (ResNet v2)",
+    "autoencoder_modern_attn": "Autoencoder (Modern ResNet + Attn)",
+    "autoencoder_mario4": "Mario4 Autoencoder",
+    "mario4_mirrored_decoder": "Mario4 Mirrored Decoder",
+    "mario4_spatial_softmax_192": "Mario4 Spatial Softmax 192",
+    "mario4_latent_1024": "Mario4 Latent 1024",
+    "mario4_spatial_softmax_1024": "Mario4 Spatial Softmax 1024",
+    "autoencoder_lightweight_flat_latent": "Lightweight Flat Latent",
 }
 
 
@@ -568,7 +568,7 @@ class ModernResNetAttnUp(nn.Module):
         return self.block(x)
 
 
-class LightweightAutoencoder(nn.Module):
+class LightweightAutoencoderUNet(nn.Module):
     """Compact encoder/decoder that trains quickly on a single GPU."""
 
     def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
@@ -682,7 +682,7 @@ class LightweightDecoder(nn.Module):
         return out
 
 
-class LightweightAutoencoderNoSkip(nn.Module):
+class LightweightAutoencoder(nn.Module):
     """Variant without skip connections; exposes encoder/decoder components."""
 
     def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
@@ -706,14 +706,14 @@ class LightweightAutoencoderNoSkip(nn.Module):
         return self.decoder(latent, target_hw=target_hw)
 
 
-class LightweightAutoencoderNoSkipPatch(LightweightAutoencoderNoSkip):
+class LightweightAutoencoderPatch(LightweightAutoencoder):
     """No-skip autoencoder trained with multi-scale patch reconstruction loss."""
 
     def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
         super().__init__(base_channels, latent_channels)
 
 
-class LightweightAutoencoderSkipTrain(nn.Module):
+class LightweightAutoencoderUNetSkipTrain(nn.Module):
     """Trains with skip connections but removes them during evaluation/inference."""
 
     def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
@@ -1185,7 +1185,7 @@ class LightweightFlatLatentAutoencoder(nn.Module):
         return self.decode(latent, target_hw=x.shape[-2:])
 
 
-class TextureAwareAutoencoder(nn.Module):
+class TextureAwareAutoencoderUNet(nn.Module):
     """Higher-capacity autoencoder tuned for style and patch contrastive training."""
 
     def __init__(self, base_channels: int = 64, latent_channels: int = 192) -> None:
@@ -1234,14 +1234,14 @@ class TextureAwareAutoencoder(nn.Module):
         return out
 
 
-class MSSSIMAutoencoder(LightweightAutoencoder):
+class MSSSIMAutoencoderUNet(LightweightAutoencoderUNet):
     """Variant tuned for pure MS-SSIM optimisation."""
 
     def __init__(self) -> None:
         super().__init__(base_channels=40, latent_channels=120)
 
 
-class FocalMSSSIMAutoencoder(TextureAwareAutoencoder):
+class FocalMSSSIMAutoencoderUNetUNet(TextureAwareAutoencoderUNet):
     """Higher-capacity variant for focal MS-SSIM training."""
 
     def __init__(self) -> None:
@@ -1673,8 +1673,8 @@ class AutoencoderTrainer:
         *,
         device: torch.device,
         lr: float,
+        loss_fn: nn.Module,
         weight_decay: float = 1e-4,
-        loss_fn: Optional[nn.Module] = None,
     ) -> None:
         self.name = name
         self.device = device
@@ -1682,7 +1682,7 @@ class AutoencoderTrainer:
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=lr, weight_decay=weight_decay
         )
-        self.loss_fn = loss_fn or FocalL1Loss()
+        self.loss_fn = loss_fn
         self.history: List[Tuple[int, float]] = []
         self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
@@ -2014,28 +2014,28 @@ class Config:
     reconstruction_weight: float = 0.0
     style_layers: Tuple[int, ...] = (3, 8, 15)
     patch_layer: int = 22
-    enable_resnet50: bool = False
-    enable_convnext_base: bool = False
-    enable_l1_autoencoder: bool = False
-    enable_smoothl1_autoencoder: bool = False
-    enable_mse_autoencoder: bool = False
-    enable_focal_autoencoder: bool = False
-    enable_style_contrast_autoencoder: bool = False
-    enable_cauchy_autoencoder: bool = False
-    enable_msssim_autoencoder: bool = False
-    enable_focal_msssim_autoencoder: bool = False
-    enable_no_skip_autoencoder: bool = False
-    enable_no_skip_patch_autoencoder: bool = False
-    enable_skip_train_autoencoder: bool = False
-    enable_resnet_autoencoder: bool = False
-    enable_resnetv2_autoencoder: bool = False
-    enable_modern_attn_autoencoder: bool = False
-    enable_lightweight_flat_autoencoder: bool = False
-    enable_mario4_autoencoder: bool = False
-    enable_mario4_mirrored_autoencoder: bool = False
-    enable_mario4_spatial_autoencoder: bool = False
-    enable_mario4_large_autoencoder: bool = False
-    enable_mario4_spatial_large_autoencoder: bool = False
+    enable_pretrained_resnet50: bool = False
+    enable_pretrained_convnext: bool = False
+    enable_unet_l1: bool = False
+    enable_unet_smoothl1: bool = False
+    enable_unet_mse: bool = False
+    enable_unet_focal: bool = False
+    enable_unet_style_contrast: bool = False
+    enable_unet_cauchy: bool = False
+    enable_unet_msssim: bool = False
+    enable_unet_focal_msssim: bool = False
+    enable_l1: bool = False
+    enable_patch_mse: bool = False
+    enable_skip_train: bool = False
+    enable_resnet: bool = False
+    enable_resnetv2: bool = False
+    enable_modern_attn: bool = False
+    enable_lightweight_flat: bool = False
+    enable_mario4: bool = False
+    enable_mario4_mirrored: bool = False
+    enable_mario4_spatial_softmax_192: bool = False
+    enable_mario4_1024: bool = False
+    enable_mario4_spatial_softmax_1024: bool = False
 
 
 def seed_everything(seed: int) -> None:
@@ -2047,13 +2047,13 @@ def seed_everything(seed: int) -> None:
 
 def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
     trainers: List[Trainer] = []
-    if cfg.enable_resnet50:
+    if cfg.enable_pretrained_resnet50:
         resnet_enc = _resnet_encoder(ResNet50_Weights.IMAGENET1K_V2)
         resnet_dec = Decoder(2048)
         trainers.append(
             ReconstructionTrainer("resnet50", resnet_enc, resnet_dec, device=device, lr=cfg.lr)
         )
-    if cfg.enable_convnext_base:
+    if cfg.enable_pretrained_convnext:
         convnext_enc = _convnext_encoder(ConvNeXt_Base_Weights.IMAGENET1K_V1)
         convnext_dec = Decoder(1024)
         trainers.append(
@@ -2061,49 +2061,57 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 "convnext_base", convnext_enc, convnext_dec, device=device, lr=cfg.lr
             )
         )
-    if cfg.enable_mse_autoencoder:
-        mse_model = LightweightAutoencoder()
+    if cfg.enable_unet_mse:
+        mse_model = LightweightAutoencoderUNet()
         trainers.append(
             AutoencoderTrainer(
-                "mse_autoencoder",
+                "autoencoder_mse",
                 mse_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.MSELoss(),
             )
         )
-    if cfg.enable_l1_autoencoder:
-        l1_model = LightweightAutoencoder()
+    if cfg.enable_unet_l1:
+        l1_model = LightweightAutoencoderUNet()
         trainers.append(
             AutoencoderTrainer(
-                "l1_autoencoder",
+                "autoencoder_l1",
                 l1_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.L1Loss(),
             )
         )
-    if cfg.enable_smoothl1_autoencoder:
-        smooth_model = LightweightAutoencoder()
+    if cfg.enable_unet_smoothl1:
+        smooth_model = LightweightAutoencoderUNet()
         trainers.append(
             AutoencoderTrainer(
-                "smoothl1_autoencoder",
+                "autoencoder_smooth_l1",
                 smooth_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_focal_autoencoder:
-        autoencoder = LightweightAutoencoder()
-        trainers.append(AutoencoderTrainer("focal_autoencoder", autoencoder, device=device, lr=cfg.lr))
-    if cfg.enable_style_contrast_autoencoder:
-        texture_autoencoder = TextureAwareAutoencoder()
+    if cfg.enable_unet_focal:
+        autoencoder = LightweightAutoencoderUNet()
+        trainers.append(
+            AutoencoderTrainer(
+                "autoencoder_focal",
+                autoencoder,
+                device=device,
+                lr=cfg.lr,
+                loss_fn=FocalL1Loss(),
+            )
+        )
+    if cfg.enable_unet_style_contrast:
+        texture_autoencoder = TextureAwareAutoencoderUNet()
         feature_layers = sorted(set(cfg.style_layers + (cfg.patch_layer,)))
         feature_extractor = StyleFeatureExtractor(feature_layers)
         trainers.append(
             StyleContrastTrainer(
-                "style_contrast_autoencoder",
+                "autoencoder_style_contrast",
                 texture_autoencoder,
                 feature_extractor,
                 device=device,
@@ -2117,149 +2125,151 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 reconstruction_weight=cfg.reconstruction_weight,
             )
         )
-    if cfg.enable_cauchy_autoencoder:
-        cauchy_model = LightweightAutoencoder()
+    if cfg.enable_unet_cauchy:
+        cauchy_model = LightweightAutoencoderUNet()
         trainers.append(
             AutoencoderTrainer(
-                "cauchy_autoencoder",
+                "autoencoder_cauchy",
                 cauchy_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=CauchyLoss(),
             )
         )
-    if cfg.enable_no_skip_autoencoder:
-        no_skip_model = LightweightAutoencoderNoSkip()
+    if cfg.enable_l1:
+        no_skip_model = LightweightAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "no_skip_autoencoder",
+                "autoencoder_spatial_latent",
                 no_skip_model,
                 device=device,
                 lr=cfg.lr,
+                loss_fn=FocalL1Loss(),
             )
         )
-    if cfg.enable_no_skip_patch_autoencoder:
-        no_skip_patch_model = LightweightAutoencoderNoSkipPatch()
+    if cfg.enable_patch_mse:
+        no_skip_patch_model = LightweightAutoencoderPatch()
         trainers.append(
             AutoencoderTrainer(
-                "no_skip_patch_autoencoder",
+                "autoencoder_patch",
                 no_skip_patch_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=MultiScalePatchLoss(),
             )
         )
-    if cfg.enable_skip_train_autoencoder:
-        skip_train_model = LightweightAutoencoderSkipTrain()
+    if cfg.enable_skip_train:
+        skip_train_model = LightweightAutoencoderUNetSkipTrain()
         trainers.append(
             AutoencoderTrainer(
-                "skip_train_autoencoder",
+                "autoencoder_skip_train",
                 skip_train_model,
                 device=device,
                 lr=cfg.lr,
+                loss_fn=FocalL1Loss(),
             )
         )
-    if cfg.enable_resnet_autoencoder:
+    if cfg.enable_resnet:
         resnet_model = ResNetAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "resnet_autoencoder",
+                "autoencoder_resnet",
                 resnet_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_resnetv2_autoencoder:
+    if cfg.enable_resnetv2:
         resnet_v2_model = ResNetV2Autoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "resnetv2_autoencoder",
+                "autoencoder_resnetv2",
                 resnet_v2_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_modern_attn_autoencoder:
+    if cfg.enable_modern_attn:
         modern_attn_model = ModernResNetAttnAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "modern_attn_autoencoder",
+                "autoencoder_modern_attn",
                 modern_attn_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_lightweight_flat_autoencoder:
+    if cfg.enable_lightweight_flat:
         lightweight_flat_model = LightweightFlatLatentAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "lightweight_flat_autoencoder",
+                "autoencoder_lightweight_flat_latent",
                 lightweight_flat_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_mario4_autoencoder:
+    if cfg.enable_mario4:
         mario4_model = Mario4Autoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "mario4_autoencoder",
+                "autoencoder_mario4",
                 mario4_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_mario4_mirrored_autoencoder:
+    if cfg.enable_mario4_mirrored:
         mario4_mirror_model = Mario4MirroredAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "mario4_mirrored_autoencoder",
+                "mario4_mirrored_decoder",
                 mario4_mirror_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_mario4_spatial_autoencoder:
+    if cfg.enable_mario4_spatial_softmax_192:
         mario4_spatial_model = Mario4SpatialSoftmaxAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "mario4_spatial_autoencoder",
+                "mario4_spatial_softmax_192",
                 mario4_spatial_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_mario4_large_autoencoder:
+    if cfg.enable_mario4_1024:
         mario4_large_model = Mario4LargeAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "mario4_large_autoencoder",
+                "mario4_latent_1024",
                 mario4_large_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_mario4_spatial_large_autoencoder:
+    if cfg.enable_mario4_spatial_softmax_1024:
         mario4_spatial_large_model = Mario4SpatialSoftmaxLargeAutoencoder()
         trainers.append(
             AutoencoderTrainer(
-                "mario4_spatial_large_autoencoder",
+                "mario4_spatial_softmax_1024",
                 mario4_spatial_large_model,
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.SmoothL1Loss(),
             )
         )
-    if cfg.enable_msssim_autoencoder:
-        msssim_model = MSSSIMAutoencoder()
+    if cfg.enable_unet_msssim:
+        msssim_model = MSSSIMAutoencoderUNet()
         trainers.append(
             AutoencoderTrainer(
                 "msssim_autoencoder",
@@ -2269,11 +2279,11 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 loss_fn=MSSSIMLoss(),
             )
         )
-    if cfg.enable_focal_msssim_autoencoder:
-        focal_msssim_model = FocalMSSSIMAutoencoder()
+    if cfg.enable_unet_focal_msssim:
+        focal_msssim_model = FocalMSSSIMAutoencoderUNetUNet()
         trainers.append(
             AutoencoderTrainer(
-                "focal_msssim_autoencoder",
+                "autoencoder_focal_msssim",
                 focal_msssim_model,
                 device=device,
                 lr=cfg.lr,
