@@ -71,9 +71,72 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "autoencoder_lightweight_flat_latent": "Lightweight Flat Latent",
 }
 
+@dataclass(frozen=True)
+class TrainerInfo:
+    flag: str
+    model_key: str
+    loss: str
+
+
+TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
+    TrainerInfo("enable_pretrained_resnet50", "resnet50", "MSELoss"),
+    TrainerInfo("enable_pretrained_convnext", "convnext_base", "MSELoss"),
+    TrainerInfo("enable_unet_mse", "autoencoder_mse", "MSELoss"),
+    TrainerInfo("enable_unet_l1", "autoencoder_l1", "L1Loss"),
+    TrainerInfo("enable_unet_smoothl1", "autoencoder_smooth_l1", "SmoothL1Loss"),
+    TrainerInfo("enable_unet_focal", "autoencoder_focal", "FocalL1Loss"),
+    TrainerInfo("enable_unet_style_contrast", "autoencoder_style_contrast", "Style + PatchNCE"),
+    TrainerInfo("enable_unet_cauchy", "autoencoder_cauchy", "CauchyLoss"),
+    TrainerInfo("enable_l1", "autoencoder_spatial_latent", "FocalL1Loss"),
+    TrainerInfo("enable_patch_mse", "autoencoder_patch", "MultiScalePatchLoss"),
+    TrainerInfo("enable_skip_train", "autoencoder_skip_train", "FocalL1Loss"),
+    TrainerInfo("enable_resnet", "autoencoder_resnet", "SmoothL1Loss"),
+    TrainerInfo("enable_resnetv2", "autoencoder_resnetv2", "SmoothL1Loss"),
+    TrainerInfo("enable_modern_attn", "autoencoder_modern_attn", "SmoothL1Loss"),
+    TrainerInfo("enable_lightweight_flat", "autoencoder_lightweight_flat_latent", "SmoothL1Loss"),
+    TrainerInfo("enable_mario4", "autoencoder_mario4", "SmoothL1Loss"),
+    TrainerInfo("enable_mario4_mirrored", "mario4_mirrored_decoder", "SmoothL1Loss"),
+    TrainerInfo("enable_mario4_spatial_softmax_192", "mario4_spatial_softmax_192", "SmoothL1Loss"),
+    TrainerInfo("enable_mario4_1024", "mario4_latent_1024", "SmoothL1Loss"),
+    TrainerInfo("enable_mario4_spatial_softmax_1024", "mario4_spatial_softmax_1024", "SmoothL1Loss"),
+    TrainerInfo("enable_unet_msssim", "msssim_autoencoder", "MSSSIMLoss"),
+    TrainerInfo("enable_unet_focal_msssim", "autoencoder_focal_msssim", "FocalMSSSIMLoss"),
+)
+
 
 def _display_name(name: str) -> str:
     return MODEL_DISPLAY_NAMES.get(name, name)
+
+
+def _cli_flag_name(flag: str) -> str:
+    return f"--{flag.replace('_', '-')}"
+
+
+def _print_encoder_table(cfg: "Config") -> None:
+    headers = ("Enabled?", "Name", "cli arg", "loss function")
+    rows: List[Tuple[str, str, str, str]] = []
+    for info in TRAINER_INFOS:
+        enabled = getattr(cfg, info.flag)
+        rows.append(
+            (
+                "Yes" if enabled else "No",
+                _display_name(info.model_key),
+                _cli_flag_name(info.flag),
+                info.loss,
+            )
+        )
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for idx, value in enumerate(row):
+            widths[idx] = max(widths[idx], len(value))
+    print("Available encoders:")
+    header_line = " | ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers))
+    separator = "-+-".join("-" * widths[idx] for idx in range(len(headers)))
+    print(header_line)
+    print(separator)
+    for row in rows:
+        print(" | ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+    print()
 
 
 def _flatten_named_parameters(module: nn.Module) -> List[Tuple[str, int]]:
@@ -2278,6 +2341,7 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
 
 def main() -> None:
     cfg = tyro.cli(Config)
+    _print_encoder_table(cfg)
     if cfg.vis_rows <= 0:
         raise ValueError("vis_rows must be positive.")
     if cfg.vis_every <= 0:
