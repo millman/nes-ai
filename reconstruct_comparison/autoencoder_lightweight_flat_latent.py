@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .lightweight_autoencoder import LightweightDecoder, LightweightEncoder
+from .autoencoder_lightweight import LightweightDecoder, LightweightEncoder
 from .spatial_softmax import SpatialSoftmax
 
 

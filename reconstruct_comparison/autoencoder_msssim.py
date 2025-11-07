@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .lightweight_autoencoder_unet import LightweightAutoencoderUNet
-from .texture_autoencoder_unet import TextureAwareAutoencoderUNet
+from .autoencoder_lightweight_unet import LightweightAutoencoderUNet
+from .autoencoder_texture_unet import TextureAwareAutoencoderUNet
 
 
 class MSSSIMAutoencoderUNet(LightweightAutoencoderUNet):
