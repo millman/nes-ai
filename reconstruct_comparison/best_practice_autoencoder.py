@@ -67,7 +67,7 @@ class SelfAttention2d(nn.Module):
     explode memory usage (e.g. 112×112 features inside the decoder).
     """
 
-    def __init__(self, channels: int, num_heads: int = 4, max_tokens: int = 4096) -> None:
+    def __init__(self, channels: int, num_heads: int = 4, max_tokens: int = 1024) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.max_tokens = max_tokens
