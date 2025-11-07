@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .base import BaseAutoencoderTrainer
-from .best_practice_autoencoder import BestPracticeAutoencoder, _norm_groups
+from .autoencoder_best_practice import BestPracticeAutoencoder, _norm_groups
 
 
 class BestPracticeVectorAutoencoder(nn.Module):
