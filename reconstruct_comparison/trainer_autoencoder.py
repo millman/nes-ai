@@ -27,6 +27,27 @@ class FocalL1Loss(nn.Module):
         return loss.mean()
 
 
+class HardnessWeightedL1Loss(nn.Module):
+    """L1 loss reweighted by per-pixel hardness relative to mean error."""
+
+    def __init__(self, beta: float = 1.5, max_weight: float = 10.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if beta <= 0:
+            raise ValueError("beta must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.beta = beta
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        l1 = torch.abs(input - target)
+        norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        hardness = (l1.detach() / norm).clamp_min(0.0)
+        weight = torch.pow(hardness, self.beta).clamp(max=self.max_weight)
+        return (weight * l1).mean()
+
+
 class AutoencoderTrainer(BaseAutoencoderTrainer):
     """Trainable encoder/decoder pair using an explicit reconstruction loss."""
 
@@ -50,4 +71,4 @@ class AutoencoderTrainer(BaseAutoencoderTrainer):
         )
 
 
-__all__ = ["AutoencoderTrainer", "FocalL1Loss"]
+__all__ = ["AutoencoderTrainer", "FocalL1Loss", "HardnessWeightedL1Loss"]

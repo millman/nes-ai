@@ -7,11 +7,11 @@ import torch.nn.functional as F
 from .base import BaseAutoencoderTrainer
 
 
-class BarebonesVectorAutoencoder(nn.Module):
-    """Barebones autoencoder that exposes a flattened latent vector.
+class BasicVectorAutoencoder(nn.Module):
+    """Basic autoencoder that exposes a flattened latent vector.
 
     Rationale:
-    - Mirrors the spatial barebones encoder so the convolutional trunk stays
+    - Mirrors the spatial basic encoder so the convolutional trunk stays
       inexpensive while capturing coarse layout cues.
     - Uses adaptive pooling before the linear bottleneck so the latent vector
       remains compact without the ≈1e8 parameters of a full 28×28 flatten.
@@ -98,8 +98,8 @@ class BarebonesVectorAutoencoder(nn.Module):
         return recon
 
 
-class BarebonesVectorAutoencoderTrainer(BaseAutoencoderTrainer):
-    """Trainer for the barebones vector-latent autoencoder."""
+class BasicVectorAutoencoderTrainer(BaseAutoencoderTrainer):
+    """Trainer for the basic vector-latent autoencoder."""
 
     def __init__(
         self,
@@ -111,9 +111,9 @@ class BarebonesVectorAutoencoderTrainer(BaseAutoencoderTrainer):
         latent_dim: int = 256,
         latent_spatial: int = 7,
         weight_decay: float = 0.0,
-        name: str = "barebones_vector_autoencoder",
+        name: str = "basic_vector_autoencoder",
     ) -> None:
-        model = BarebonesVectorAutoencoder(
+        model = BasicVectorAutoencoder(
             latent_channels=latent_channels,
             latent_dim=latent_dim,
             latent_spatial=latent_spatial,
@@ -128,4 +128,4 @@ class BarebonesVectorAutoencoderTrainer(BaseAutoencoderTrainer):
         )
 
 
-__all__ = ["BarebonesVectorAutoencoder", "BarebonesVectorAutoencoderTrainer"]
+__all__ = ["BasicVectorAutoencoder", "BasicVectorAutoencoderTrainer"]

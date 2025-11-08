@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from .base import BaseAutoencoderTrainer
 
 
-class BarebonesAutoencoder(nn.Module):
+class BasicAutoencoder(nn.Module):
     """Minimal stride-2 convolutional autoencoder.
 
     Rationale:
@@ -70,7 +70,7 @@ class BarebonesAutoencoder(nn.Module):
         return recon
 
 
-class BarebonesAutoencoderTrainer(BaseAutoencoderTrainer):
+class BasicAutoencoderTrainer(BaseAutoencoderTrainer):
     """Trainer for the minimal convolutional autoencoder."""
 
     def __init__(
@@ -81,9 +81,9 @@ class BarebonesAutoencoderTrainer(BaseAutoencoderTrainer):
         loss_fn: nn.Module,
         latent_channels: int = 64,
         weight_decay: float = 0.0,
-        name: str = "barebones_autoencoder",
+        name: str = "basic_autoencoder",
     ) -> None:
-        model = BarebonesAutoencoder(latent_channels=latent_channels)
+        model = BasicAutoencoder(latent_channels=latent_channels)
         super().__init__(
             name,
             model,
@@ -94,4 +94,4 @@ class BarebonesAutoencoderTrainer(BaseAutoencoderTrainer):
         )
 
 
-__all__ = ["BarebonesAutoencoder", "BarebonesAutoencoderTrainer"]
+__all__ = ["BasicAutoencoder", "BasicAutoencoderTrainer"]

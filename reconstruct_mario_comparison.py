@@ -36,14 +36,15 @@ from predict_mario_ms_ssim import default_transform, pick_device, unnormalize
 from reconstruct_comparison import (
     AutoencoderTrainer,
     BaseAutoencoderTrainer,
-    BarebonesAutoencoderTrainer,
-    BarebonesVectorAutoencoderTrainer,
+    BasicAutoencoderTrainer,
+    BasicVectorAutoencoderTrainer,
     BestPracticeAutoencoderTrainer,
     BestPracticeVectorAutoencoderTrainer,
     Decoder,
     FocalMSSSIMAutoencoderUNetUNet,
     FocalMSSSIMLoss,
     FocalL1Loss,
+    HardnessWeightedL1Loss,
     LightweightAutoencoder,
     LightweightAutoencoderPatch,
     LightweightAutoencoderUNet,
@@ -94,8 +95,12 @@ MODEL_DISPLAY_NAMES: Dict[str, str] = {
     "mario4_latent_1024": "Mario4 Latent 1024",
     "mario4_spatial_softmax_1024": "Mario4 Spatial Softmax 1024",
     "autoencoder_lightweight_flat_latent": "Lightweight Flat Latent",
-    "barebones_autoencoder": "Autoencoder (Barebones)",
-    "barebones_vector_autoencoder": "Autoencoder (Barebones Vector)",
+    "basic_autoencoder": "Autoencoder (Basic)",
+    "basic_vector_autoencoder": "Autoencoder (Basic Vector)",
+    "basic_autoencoder_mse": "Basic Autoencoder (MSE)",
+    "basic_autoencoder_l1": "Basic Autoencoder (L1)",
+    "basic_autoencoder_focal": "Basic Autoencoder (Focal L1)",
+    "basic_autoencoder_hardness": "Basic Autoencoder (Hardness Weighted)",
     "best_practice_autoencoder": "Autoencoder (Best Practice)",
     "best_practice_vector_autoencoder": "Autoencoder (Best Practice Vector)",
 }
@@ -130,6 +135,21 @@ TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
     TrainerInfo("enable_mario4_spatial_softmax_1024", "mario4_spatial_softmax_1024", "SmoothL1Loss"),
     TrainerInfo("enable_unet_msssim", "msssim_autoencoder", "MSSSIMLoss"),
     TrainerInfo("enable_unet_focal_msssim", "autoencoder_focal_msssim", "FocalMSSSIMLoss"),
+    TrainerInfo("enable_basic_autoencoder_mse", "basic_autoencoder_mse", "MSELoss"),
+    TrainerInfo("enable_basic_autoencoder_l1", "basic_autoencoder_l1", "L1Loss"),
+    TrainerInfo("enable_basic_autoencoder_focal", "basic_autoencoder_focal", "FocalL1Loss"),
+    TrainerInfo(
+        "enable_basic_autoencoder_hardness",
+        "basic_autoencoder_hardness",
+        "HardnessWeightedL1Loss",
+    ),
+    TrainerInfo("enable_basic_vector_autoencoder", "basic_vector_autoencoder", "MSELoss"),
+    TrainerInfo("enable_best_practice_autoencoder", "best_practice_autoencoder", "FocalL1Loss"),
+    TrainerInfo(
+        "enable_best_practice_vector_autoencoder",
+        "best_practice_vector_autoencoder",
+        "FocalL1Loss",
+    ),
 )
 
 
@@ -573,8 +593,11 @@ class Config:
     enable_mario4_spatial_softmax_192: bool = False
     enable_mario4_1024: bool = False
     enable_mario4_spatial_softmax_1024: bool = False
-    enable_barebones_autoencoder: bool = False
-    enable_barebones_vector_autoencoder: bool = False
+    enable_basic_autoencoder_mse: bool = False
+    enable_basic_autoencoder_l1: bool = False
+    enable_basic_autoencoder_focal: bool = False
+    enable_basic_autoencoder_hardness: bool = False
+    enable_basic_vector_autoencoder: bool = False
     enable_best_practice_autoencoder: bool = False
     enable_best_practice_vector_autoencoder: bool = False
 
@@ -812,18 +835,31 @@ def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
                 loss_fn=FocalMSSSIMLoss(),
             )
         )
-    if cfg.enable_barebones_autoencoder:
+    basic_variants: Tuple[Tuple[bool, str, type[nn.Module]], ...] = (
+        (cfg.enable_basic_autoencoder_mse, "basic_autoencoder_mse", nn.MSELoss),
+        (cfg.enable_basic_autoencoder_l1, "basic_autoencoder_l1", nn.L1Loss),
+        (cfg.enable_basic_autoencoder_focal, "basic_autoencoder_focal", FocalL1Loss),
+        (
+            cfg.enable_basic_autoencoder_hardness,
+            "basic_autoencoder_hardness",
+            HardnessWeightedL1Loss,
+        ),
+    )
+    for enabled, trainer_name, loss_ctor in basic_variants:
+        if not enabled:
+            continue
         trainers.append(
-            BarebonesAutoencoderTrainer(
+            BasicAutoencoderTrainer(
+                name=trainer_name,
                 device=device,
                 lr=cfg.lr,
-                loss_fn=nn.MSELoss(),
+                loss_fn=loss_ctor(),
                 weight_decay=0.0,
             )
         )
-    if cfg.enable_barebones_vector_autoencoder:
+    if cfg.enable_basic_vector_autoencoder:
         trainers.append(
-            BarebonesVectorAutoencoderTrainer(
+            BasicVectorAutoencoderTrainer(
                 device=device,
                 lr=cfg.lr,
                 loss_fn=nn.MSELoss(),
