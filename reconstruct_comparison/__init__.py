@@ -1,4 +1,5 @@
-from .trainer_autoencoder import AutoencoderTrainer, FocalL1Loss, HardnessWeightedL1Loss
+from .trainer_autoencoder import AutoencoderTrainer
+from .loss import FocalL1Loss, HardnessWeightedL1Loss
 from .base import BaseAutoencoderTrainer
 from .autoencoder_basic import BasicAutoencoderTrainer
 from .autoencoder_basic_vector import BasicVectorAutoencoderTrainer
