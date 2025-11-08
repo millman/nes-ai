@@ -26,8 +26,6 @@ import torchvision.transforms as T
 from torchvision.models import (
     ResNet50_Weights,
     ConvNeXt_Base_Weights,
-    convnext_base,
-    resnet50,
 )
 import tyro
 from PIL import Image
@@ -66,6 +64,8 @@ from reconstruct_comparison import (
     compute_shared_metrics,
     ms_ssim_per_sample,
 )
+from reconstruct_comparison.convnext_encoder import _convnext_encoder
+from reconstruct_comparison.resnet_encoder import _resnet_encoder
 from trajectory_utils import list_state_frames, list_traj_dirs
 
 
@@ -369,42 +369,6 @@ class MultiScalePatchLoss(nn.Module):
         if total_weight == 0:
             raise RuntimeError("No scales contributed to the loss computation.")
         return total_loss / total_weight
-
-@torch.no_grad()
-def _resnet_encoder(weights: ResNet50_Weights) -> nn.Module:
-    model = resnet50(weights=weights)
-    layers = list(model.children())[:-2]  # drop avgpool + fc
-    # Spatial/channel progression:
-    #  input      -> (B, 3,   224, 224)
-    #  conv1      -> (B, 64,  112, 112)
-    #  maxpool    -> (B, 64,   56,  56)
-    #  layer1     -> (B, 256,  56,  56)
-    #  layer2     -> (B, 512,  28,  28)
-    #  layer3     -> (B, 1024, 14,  14)
-    #  layer4     -> (B, 2048,  7,   7)  <-- returned feature map
-    encoder = nn.Sequential(*layers)
-    encoder.eval()
-    for param in encoder.parameters():
-        param.requires_grad_(False)
-    return encoder
-
-
-@torch.no_grad()
-def _convnext_encoder(weights: ConvNeXt_Base_Weights) -> nn.Module:
-    model = convnext_base(weights=weights)
-    encoder = model.features  # last block yields (B,1024,7,7)
-    # Spatial/channel progression of ConvNeXt-Base stages:
-    #  input      -> (B,   3, 224, 224)
-    #  stem       -> (B, 128, 112, 112)
-    #  stage1     -> (B, 256, 112, 112)
-    #  stage2     -> (B, 512,  56,  56)
-    #  stage3     -> (B,1024,  28,  28)
-    #  stage4     -> (B,1024,   7,   7)  <-- returned feature map
-    encoder.eval()
-    for param in encoder.parameters():
-        param.requires_grad_(False)
-    return encoder
-
 
 # ---------------------------------------------------------------------------
 # Trainer wrapper
@@ -936,11 +900,8 @@ def main() -> None:
     trainers = build_trainers(cfg, device)
     logger.info("Parameter summary:")
     for trainer in trainers:
-        if isinstance(trainer, ReconstructionTrainer):
-            module = trainer.decoder
-        elif isinstance(trainer, (AutoencoderTrainer, StyleContrastTrainer)):
-            module = trainer.model
-        else:
+        module = getattr(trainer, "model", None)
+        if module is None:
             continue
         _summarize_parameters(trainer.name, module, logger=logger)
     checkpoint_paths: dict[str, dict[str, Path]] = {}

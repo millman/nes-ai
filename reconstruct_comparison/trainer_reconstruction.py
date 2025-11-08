@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from .metrics import compute_shared_metrics
+
+OptimizerFactory = Callable[[Iterable[nn.Parameter]], torch.optim.Optimizer]
 
 
 class ReconstructionTrainer:
@@ -20,19 +22,29 @@ class ReconstructionTrainer:
         *,
         device: torch.device,
         lr: float,
+        loss_fn: Optional[nn.Module] = None,
+        weight_decay: float = 0.0,
+        optimizer_factory: Optional[OptimizerFactory] = None,
     ) -> None:
         self.name = name
         self.device = device
         self.encoder = encoder.to(device)
         self.decoder = decoder.to(device)
-        self.optimizer = torch.optim.Adam(self.decoder.parameters(), lr=lr)
-        self.loss_fn = nn.MSELoss()
+        self.model = self.decoder  # align with AutoencoderTrainer interface
+        if optimizer_factory is not None:
+            self.optimizer = optimizer_factory(self.decoder.parameters())
+        else:
+            self.optimizer = torch.optim.Adam(
+                self.decoder.parameters(), lr=lr, weight_decay=weight_decay
+            )
+        self.loss_fn = loss_fn or nn.MSELoss()
         self.history: List[Tuple[int, float]] = []
         self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
         self.best_loss: Optional[float] = None
 
     def step(self, batch: torch.Tensor) -> Tuple[float, bool, Dict[str, float]]:
+        batch = batch.to(self.device)
         self.decoder.train()
         with torch.no_grad():
             feats = self.encoder(batch)
@@ -62,9 +74,29 @@ class ReconstructionTrainer:
             self.decoder.train()
         return recon.cpu()
 
+    @torch.no_grad()
+    def encode(self, batch: torch.Tensor) -> torch.Tensor:
+        was_training = self.encoder.training
+        self.encoder.eval()
+        feats = self.encoder(batch.to(self.device))
+        if was_training:
+            self.encoder.train()
+        return feats.cpu()
+
+    @torch.no_grad()
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        was_training = self.decoder.training
+        self.decoder.eval()
+        recon = self.decoder(latent.to(self.device))
+        if was_training:
+            self.decoder.train()
+        return recon.cpu()
+
     def state_dict(self) -> dict:
+        decoder_state = self.decoder.state_dict()
         return {
-            "decoder": self.decoder.state_dict(),
+            "model": decoder_state,  # mirrors AutoencoderTrainer
+            "decoder": decoder_state,  # backward compatibility
             "optimizer": self.optimizer.state_dict(),
             "history": self.history,
             "shared_history": self.shared_history,
@@ -78,7 +110,10 @@ class ReconstructionTrainer:
         torch.save(self.state_dict(), path)
 
     def load_state_dict(self, state: dict, *, lr: Optional[float] = None) -> None:
-        self.decoder.load_state_dict(state["decoder"])
+        decoder_state = state.get("model", state.get("decoder"))
+        if decoder_state is None:
+            raise KeyError("State dict missing both 'model' and 'decoder' keys.")
+        self.decoder.load_state_dict(decoder_state)
         self.optimizer.load_state_dict(state["optimizer"])
         if lr is not None:
             for group in self.optimizer.param_groups:
