@@ -13,7 +13,7 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 import time
 import textwrap
 
@@ -42,6 +42,8 @@ from reconstruct_comparison import (
     FocalMSSSIMLoss,
     FocalL1Loss,
     HardnessWeightedL1Loss,
+    CauchyLoss,
+    MultiScalePatchLoss,
     LightweightAutoencoder,
     LightweightAutoencoderPatch,
     LightweightAutoencoderUNet,
@@ -71,85 +73,54 @@ from trajectory_utils import list_state_frames, list_traj_dirs
 
 SCRIPT_START_TIME = time.time()
 
-MODEL_DISPLAY_NAMES: Dict[str, str] = {
-    "resnet50": "ResNet-50 (MSE)",
-    "convnext_base": "ConvNeXt-Base (MSE)",
-    "autoencoder_l1": "Autoencoder (L1)",
-    "autoencoder_mse": "Autoencoder (MSE)",
-    "autoencoder_focal": "Autoencoder (Focal L1)",
-    "autoencoder_smooth_l1": "Autoencoder (Smooth L1)",
-    "autoencoder_cauchy": "Autoencoder (Cauchy)",
-    "autoencoder_style_contrast": "Autoencoder (Style + PatchNCE)",
-    "msssim_autoencoder": "Autoencoder (MS-SSIM)",
-    "autoencoder_focal_msssim": "Autoencoder (Focal MS-SSIM)",
-    "autoencoder_spatial_latent": "Autoencoder (Spatial Latent)",
-    "autoencoder_patch": "Autoencoder (No Skip Patch)",
-    "autoencoder_skip_train": "Autoencoder (Train Skip, Eval Zero)",
-    "autoencoder_resnet": "Autoencoder (ResNet Blocks)",
-    "autoencoder_resnetv2": "Autoencoder (ResNet v2)",
-    "autoencoder_modern_attn": "Autoencoder (Modern ResNet + Attn)",
-    "autoencoder_mario4": "Mario4 Autoencoder",
-    "mario4_mirrored_decoder": "Mario4 Mirrored Decoder",
-    "mario4_spatial_softmax_192": "Mario4 Spatial Softmax 192",
-    "mario4_latent_1024": "Mario4 Latent 1024",
-    "mario4_spatial_softmax_1024": "Mario4 Spatial Softmax 1024",
-    "autoencoder_lightweight_flat_latent": "Lightweight Flat Latent",
-    "basic_autoencoder": "Autoencoder (Basic)",
-    "basic_vector_autoencoder": "Autoencoder (Basic Vector)",
-    "basic_autoencoder_mse": "Basic Autoencoder (MSE)",
-    "basic_autoencoder_l1": "Basic Autoencoder (L1)",
-    "basic_autoencoder_focal": "Basic Autoencoder (Focal L1)",
-    "basic_autoencoder_hardness": "Basic Autoencoder (Hardness Weighted)",
-    "best_practice_autoencoder": "Autoencoder (Best Practice)",
-    "best_practice_vector_autoencoder": "Autoencoder (Best Practice Vector)",
-}
+LossSpec = Union[str, type[nn.Module]]
+
 
 @dataclass(frozen=True)
 class TrainerInfo:
-    flag: str
     model_key: str
-    loss: str
+    loss: LossSpec
+    description: str
+
+
+def _trainer_flag(model_key: str) -> str:
+    return f"enable_{model_key}"
 
 
 TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
-    TrainerInfo("enable_pretrained_resnet50", "resnet50", "MSELoss"),
-    TrainerInfo("enable_pretrained_convnext", "convnext_base", "MSELoss"),
-    TrainerInfo("enable_unet_mse", "autoencoder_mse", "MSELoss"),
-    TrainerInfo("enable_unet_l1", "autoencoder_l1", "L1Loss"),
-    TrainerInfo("enable_unet_smoothl1", "autoencoder_smooth_l1", "SmoothL1Loss"),
-    TrainerInfo("enable_unet_focal", "autoencoder_focal", "FocalL1Loss"),
-    TrainerInfo("enable_unet_style_contrast", "autoencoder_style_contrast", "Style + PatchNCE"),
-    TrainerInfo("enable_unet_cauchy", "autoencoder_cauchy", "CauchyLoss"),
-    TrainerInfo("enable_ae_focal", "autoencoder_spatial_latent", "FocalL1Loss"),
-    TrainerInfo("enable_ae_patch_mse", "autoencoder_patch", "MultiScalePatchLoss"),
-    TrainerInfo("enable_ae_skip_train", "autoencoder_skip_train", "FocalL1Loss"),
-    TrainerInfo("enable_resnet", "autoencoder_resnet", "SmoothL1Loss"),
-    TrainerInfo("enable_resnetv2", "autoencoder_resnetv2", "SmoothL1Loss"),
-    TrainerInfo("enable_modern_attn", "autoencoder_modern_attn", "SmoothL1Loss"),
-    TrainerInfo("enable_ae_flat_l1", "autoencoder_lightweight_flat_latent", "SmoothL1Loss"),
-    TrainerInfo("enable_mario4", "autoencoder_mario4", "SmoothL1Loss"),
-    TrainerInfo("enable_mario4_mirrored", "mario4_mirrored_decoder", "SmoothL1Loss"),
-    TrainerInfo("enable_mario4_spatial_softmax_192", "mario4_spatial_softmax_192", "SmoothL1Loss"),
-    TrainerInfo("enable_mario4_1024", "mario4_latent_1024", "SmoothL1Loss"),
-    TrainerInfo("enable_mario4_spatial_softmax_1024", "mario4_spatial_softmax_1024", "SmoothL1Loss"),
-    TrainerInfo("enable_unet_msssim", "msssim_autoencoder", "MSSSIMLoss"),
-    TrainerInfo("enable_unet_focal_msssim", "autoencoder_focal_msssim", "FocalMSSSIMLoss"),
-    TrainerInfo("enable_basic_mse", "basic_autoencoder_mse", "MSELoss"),
-    TrainerInfo("enable_basic_l1", "basic_autoencoder_l1", "L1Loss"),
-    TrainerInfo("enable_basic_focal", "basic_autoencoder_focal", "FocalL1Loss"),
-    TrainerInfo(
-        "enable_basic_hardness",
-        "basic_autoencoder_hardness",
-        "HardnessWeightedL1Loss",
-    ),
-    TrainerInfo("enable_basic_flat_mse", "basic_vector_autoencoder", "MSELoss"),
-    TrainerInfo("enable_best_focal", "best_practice_autoencoder", "FocalL1Loss"),
-    TrainerInfo(
-        "enable_best_flat_focal",
-        "best_practice_vector_autoencoder",
-        "FocalL1Loss",
-    ),
+    TrainerInfo(model_key="pretrained_resnet50", loss=nn.MSELoss, description="ResNet-50 (MSE)"),
+    TrainerInfo(model_key="pretrained_convnext", loss=nn.MSELoss, description="ConvNeXt-Base (MSE)"),
+    TrainerInfo(model_key="unet_mse", loss=nn.MSELoss, description="Autoencoder (MSE)"),
+    TrainerInfo(model_key="unet_l1", loss=nn.L1Loss, description="Autoencoder (L1)"),
+    TrainerInfo(model_key="unet_smoothl1", loss=nn.SmoothL1Loss, description="Autoencoder (Smooth L1)"),
+    TrainerInfo(model_key="unet_focal", loss=FocalL1Loss, description="Autoencoder (Focal L1)"),
+    TrainerInfo(model_key="unet_style_contrast", loss="Style + PatchNCE", description="Autoencoder (Style + PatchNCE)"),
+    TrainerInfo(model_key="unet_cauchy", loss=CauchyLoss, description="Autoencoder (Cauchy)"),
+    TrainerInfo(model_key="ae_focal", loss=FocalL1Loss, description="Autoencoder (Spatial Latent)"),
+    TrainerInfo(model_key="ae_patch_mse", loss=MultiScalePatchLoss, description="Autoencoder (No Skip Patch)"),
+    TrainerInfo(model_key="ae_skip_train", loss=FocalL1Loss, description="Autoencoder (Train Skip, Eval Zero)"),
+    TrainerInfo(model_key="resnet", loss=nn.SmoothL1Loss, description="Autoencoder (ResNet Blocks)"),
+    TrainerInfo(model_key="resnetv2", loss=nn.SmoothL1Loss, description="Autoencoder (ResNet v2)"),
+    TrainerInfo(model_key="modern_attn", loss=nn.SmoothL1Loss, description="Autoencoder (Modern ResNet + Attn)"),
+    TrainerInfo(model_key="ae_flat_l1", loss=nn.SmoothL1Loss, description="Lightweight Flat Latent"),
+    TrainerInfo(model_key="mario4", loss=nn.SmoothL1Loss, description="Mario4 Autoencoder"),
+    TrainerInfo(model_key="mario4_mirrored", loss=nn.SmoothL1Loss, description="Mario4 Mirrored Decoder"),
+    TrainerInfo(model_key="mario4_spatial_softmax_192", loss=nn.SmoothL1Loss, description="Mario4 Spatial Softmax 192"),
+    TrainerInfo(model_key="mario4_1024", loss=nn.SmoothL1Loss, description="Mario4 Latent 1024"),
+    TrainerInfo(model_key="mario4_spatial_softmax_1024", loss=nn.SmoothL1Loss, description="Mario4 Spatial Softmax 1024"),
+    TrainerInfo(model_key="unet_msssim", loss=MSSSIMLoss, description="Autoencoder (MS-SSIM)"),
+    TrainerInfo(model_key="unet_focal_msssim", loss=FocalMSSSIMLoss, description="Autoencoder (Focal MS-SSIM)"),
+    TrainerInfo(model_key="basic_mse", loss=nn.MSELoss, description="Basic Autoencoder (MSE)"),
+    TrainerInfo(model_key="basic_l1", loss=nn.L1Loss, description="Basic Autoencoder (L1)"),
+    TrainerInfo(model_key="basic_focal", loss=FocalL1Loss, description="Basic Autoencoder (Focal L1)"),
+    TrainerInfo(model_key="basic_hardness", loss=HardnessWeightedL1Loss, description="Basic Autoencoder (Hardness Weighted)"),
+    TrainerInfo(model_key="basic_flat_mse", loss=nn.MSELoss, description="Autoencoder (Basic Vector)"),
+    TrainerInfo(model_key="best_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice)"),
+    TrainerInfo(model_key="best_flat_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice Vector)"),
 )
+
+
+MODEL_DISPLAY_NAMES: Dict[str, str] = {info.model_key: info.description for info in TRAINER_INFOS}
 
 
 def _display_name(name: str) -> str:
@@ -164,13 +135,14 @@ def _print_encoder_table(cfg: "Config") -> None:
     headers = ("Enabled?", "Name", "cli arg", "loss function")
     rows: List[Tuple[str, str, str, str]] = []
     for info in TRAINER_INFOS:
-        enabled = getattr(cfg, info.flag)
+        flag = _trainer_flag(info.model_key)
+        enabled = getattr(cfg, flag)
         rows.append(
             (
                 "Yes" if enabled else "No",
                 _display_name(info.model_key),
-                _cli_flag_name(info.flag),
-                info.loss,
+                _cli_flag_name(flag),
+                info.loss if isinstance(info.loss, str) else info.loss.__name__,
             )
         )
     widths = [len(header) for header in headers]
@@ -303,72 +275,7 @@ def sample_random_batch(dataset: MarioFrameDataset, count: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-class CauchyLoss(nn.Module):
-    """Robust loss based on the negative log-likelihood of the Cauchy distribution."""
 
-    def __init__(self, sigma: float = 0.1, eps: float = 1e-6) -> None:
-        super().__init__()
-        if sigma <= 0:
-            raise ValueError("sigma must be positive.")
-        self.sigma = sigma
-        self.eps = eps
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        diff = (input - target) / self.sigma
-        return torch.log1p(diff.pow(2)).mean().clamp_min(self.eps)
-
-
-class MultiScalePatchLoss(nn.Module):
-    """Aggregate MSE over local patches across a pyramid of spatial scales."""
-
-    def __init__(
-        self,
-        patch_sizes: Sequence[int] = (7, 11, 15),
-        pool_scales: Sequence[int] = (1, 2, 4),
-    ) -> None:
-        super().__init__()
-        if not patch_sizes:
-            raise ValueError("patch_sizes must be non-empty.")
-        if not pool_scales:
-            raise ValueError("pool_scales must be non-empty.")
-        if len(patch_sizes) != len(pool_scales):
-            raise ValueError("patch_sizes and pool_scales must be the same length.")
-        if any(size <= 0 for size in patch_sizes):
-            raise ValueError("patch_sizes must contain positive integers.")
-        if any(scale <= 0 for scale in pool_scales):
-            raise ValueError("pool_scales must contain positive integers.")
-        self.patch_sizes = tuple(int(size) for size in patch_sizes)
-        self.pool_scales = tuple(int(scale) for scale in pool_scales)
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if input.shape != target.shape:
-            raise ValueError("input and target must share the same shape.")
-        total_loss = input.new_tensor(0.0)
-        total_weight = 0
-        for patch_size, pool_scale in zip(self.patch_sizes, self.pool_scales):
-            if pool_scale > 1:
-                pooled_input = F.avg_pool2d(input, kernel_size=pool_scale, stride=pool_scale)
-                pooled_target = F.avg_pool2d(target, kernel_size=pool_scale, stride=pool_scale)
-            else:
-                pooled_input = input
-                pooled_target = target
-            k = min(patch_size, pooled_input.shape[-2], pooled_input.shape[-1])
-            if k <= 0:
-                raise RuntimeError("Patch size became non-positive after clamping.")
-            stride = max(1, k // 2)
-            padding = k // 2
-            unfolded_input = F.unfold(pooled_input, kernel_size=k, stride=stride, padding=padding)
-            unfolded_target = F.unfold(pooled_target, kernel_size=k, stride=stride, padding=padding)
-            if unfolded_input.shape[-1] == 0:
-                patch_loss = F.mse_loss(pooled_input, pooled_target)
-            else:
-                diff = unfolded_input - unfolded_target
-                patch_loss = diff.pow(2).mean()
-            total_loss = total_loss + patch_loss
-            total_weight += 1
-        if total_weight == 0:
-            raise RuntimeError("No scales contributed to the loss computation.")
-        return total_loss / total_weight
 
 # ---------------------------------------------------------------------------
 # Trainer wrapper
