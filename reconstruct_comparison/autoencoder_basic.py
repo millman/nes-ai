@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .base import BaseAutoencoderTrainer
+from .trainer_autoencoder import AutoencoderTrainer
 
 
 class BasicAutoencoder(nn.Module):
@@ -70,7 +70,7 @@ class BasicAutoencoder(nn.Module):
         return recon
 
 
-class BasicAutoencoderTrainer(BaseAutoencoderTrainer):
+class BasicAutoencoderTrainer(AutoencoderTrainer):
     """Trainer for the minimal convolutional autoencoder."""
 
     def __init__(

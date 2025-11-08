@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .base import BaseAutoencoderTrainer
+from .trainer_autoencoder import AutoencoderTrainer
 from .autoencoder_best_practice import BestPracticeAutoencoder, _norm_groups
 
 
@@ -85,7 +85,7 @@ class BestPracticeVectorAutoencoder(nn.Module):
         return recon
 
 
-class BestPracticeVectorAutoencoderTrainer(BaseAutoencoderTrainer):
+class BestPracticeVectorAutoencoderTrainer(AutoencoderTrainer):
     """Trainer for the vector-latent best-practice autoencoder."""
 
     def __init__(

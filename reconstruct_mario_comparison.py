@@ -35,7 +35,6 @@ from PIL import Image
 from predict_mario_ms_ssim import default_transform, pick_device, unnormalize
 from reconstruct_comparison import (
     AutoencoderTrainer,
-    BaseAutoencoderTrainer,
     BasicAutoencoderTrainer,
     BasicVectorAutoencoderTrainer,
     BestPracticeAutoencoderTrainer,
@@ -412,7 +411,7 @@ def _convnext_encoder(weights: ConvNeXt_Base_Weights) -> nn.Module:
 # ---------------------------------------------------------------------------
 
 
-Trainer = ReconstructionTrainer | BaseAutoencoderTrainer | StyleContrastTrainer
+Trainer = ReconstructionTrainer | AutoencoderTrainer | StyleContrastTrainer
 
 
 # ---------------------------------------------------------------------------
@@ -925,7 +924,7 @@ def main() -> None:
     for trainer in trainers:
         if isinstance(trainer, ReconstructionTrainer):
             module = trainer.decoder
-        elif isinstance(trainer, (BaseAutoencoderTrainer, StyleContrastTrainer)):
+        elif isinstance(trainer, (AutoencoderTrainer, StyleContrastTrainer)):
             module = trainer.model
         else:
             continue

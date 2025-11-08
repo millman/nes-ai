@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .base import BaseAutoencoderTrainer
+from .trainer_autoencoder import AutoencoderTrainer
 
 
 class BasicVectorAutoencoder(nn.Module):
@@ -98,7 +98,7 @@ class BasicVectorAutoencoder(nn.Module):
         return recon
 
 
-class BasicVectorAutoencoderTrainer(BaseAutoencoderTrainer):
+class BasicVectorAutoencoderTrainer(AutoencoderTrainer):
     """Trainer for the basic vector-latent autoencoder."""
 
     def __init__(

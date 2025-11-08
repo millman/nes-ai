@@ -1,6 +1,5 @@
 from .trainer_autoencoder import AutoencoderTrainer
 from .loss import FocalL1Loss, HardnessWeightedL1Loss
-from .base import BaseAutoencoderTrainer
 from .autoencoder_basic import BasicAutoencoderTrainer
 from .autoencoder_basic_vector import BasicVectorAutoencoderTrainer
 from .autoencoder_best_practice import BestPracticeAutoencoderTrainer
@@ -39,7 +38,6 @@ from .autoencoder_texture_unet import TextureAwareAutoencoderUNet
 
 __all__ = [
     "AutoencoderTrainer",
-    "BaseAutoencoderTrainer",
     "BasicAutoencoderTrainer",
     "BasicVectorAutoencoderTrainer",
     "BestPracticeAutoencoderTrainer",

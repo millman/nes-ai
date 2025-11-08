@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .base import BaseAutoencoderTrainer
+from .trainer_autoencoder import AutoencoderTrainer
 
 
 def _norm_groups(channels: int) -> int:
@@ -235,7 +235,7 @@ class BestPracticeAutoencoder(nn.Module):
         return recon
 
 
-class BestPracticeAutoencoderTrainer(BaseAutoencoderTrainer):
+class BestPracticeAutoencoderTrainer(AutoencoderTrainer):
     """Trainer for the best-practices autoencoder."""
 
     def __init__(
