@@ -1,5 +1,11 @@
 from .trainer_autoencoder import AutoencoderTrainer
-from .loss import FocalL1Loss, HardnessWeightedL1Loss, CauchyLoss, MultiScalePatchLoss
+from .loss import (
+    FocalL1Loss,
+    HardnessWeightedL1Loss,
+    CauchyLoss,
+    MultiScalePatchLoss,
+    FocalSpatialSoftmaxLoss,
+)
 from .autoencoder_basic import BasicAutoencoder
 from .autoencoder_basic_vector import BasicVectorAutoencoder
 from .autoencoder_best_practice import BestPracticeAutoencoderTrainer
@@ -47,6 +53,7 @@ __all__ = [
     "HardnessWeightedL1Loss",
     "CauchyLoss",
     "MultiScalePatchLoss",
+    "FocalSpatialSoftmaxLoss",
     "FocalMSSSIMAutoencoderUNet",
     "FocalMSSSIMLoss",
     "LightweightAutoencoder",

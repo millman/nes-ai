@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import random
 import csv
+import math
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +43,7 @@ from reconstruct_comparison import (
     FocalMSSSIMAutoencoderUNet,
     FocalMSSSIMLoss,
     FocalL1Loss,
+    FocalSpatialSoftmaxLoss,
     HardnessWeightedL1Loss,
     CauchyLoss,
     MultiScalePatchLoss,
@@ -100,6 +103,7 @@ TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
     TrainerInfo(model_key="basic_flat_l1", loss=nn.SmoothL1Loss, description="Basic Flat (L1)"),
     TrainerInfo(model_key="basic_flat_focal", loss=FocalL1Loss, description="Basic Flat (Focal)"),
     TrainerInfo(model_key="basic_flat_hardness", loss=HardnessWeightedL1Loss, description="Basic Flat (Hardness)"),
+    TrainerInfo(model_key="basic_flat_focal_spatial", loss=FocalSpatialSoftmaxLoss, description="Basic Flat (Focal + Spatial)",),
     TrainerInfo(model_key="basic_focal", loss=FocalL1Loss, description="Basic (Focal)"),
     TrainerInfo(model_key="basic_hardness", loss=HardnessWeightedL1Loss, description="Basic (Hardness)"),
     TrainerInfo(model_key="basic_l1", loss=nn.SmoothL1Loss, description="Basic Autoencoder (L1)"),
@@ -310,7 +314,8 @@ def save_recon_grid(
     *,
     out_path: Path,
 ) -> None:
-    rows = inputs.shape[0]
+    image_count = inputs.shape[0]
+    rows = max(1, image_count * 2)
     cols = 1 + len(reconstructions)
     fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
     if rows == 1:
@@ -320,12 +325,42 @@ def save_recon_grid(
     col_titles = ["Input"] + [_display_name(name) for name, _ in unnorm_recons]
     for col, title in enumerate(col_titles):
         axes[0, col].set_title(title)
-    for row in range(rows):
-        axes[row, 0].imshow(_tensor_to_numpy(unnorm_inputs[row]))
-        axes[row, 0].axis("off")
+
+    loss_maps: Dict[Tuple[int, int], torch.Tensor] = {}
+    max_loss_value = 0.0
+    for img_idx in range(image_count):
+        target = unnorm_inputs[img_idx]
+        for col_idx, (_, tensor) in enumerate(unnorm_recons):
+            recon = tensor[img_idx]
+            diff = torch.abs(target - recon).mean(dim=0)
+            diff = torch.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
+            loss_maps[(img_idx, col_idx)] = diff
+            max_loss_value = max(max_loss_value, float(diff.max().item()))
+    if max_loss_value == 0.0:
+        max_loss_value = 1.0
+
+    for img_idx in range(image_count):
+        recon_row = img_idx * 2
+        loss_row = min(rows - 1, recon_row + 1)
+        axes[recon_row, 0].imshow(_tensor_to_numpy(unnorm_inputs[img_idx]))
+        axes[recon_row, 0].axis("off")
+        axes[loss_row, 0].axis("off")
+        axes[loss_row, 0].text(
+            0.5,
+            0.5,
+            "Loss",
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="white",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="black", alpha=0.6),
+        )
         for col, (_, tensor) in enumerate(unnorm_recons, start=1):
-            axes[row, col].imshow(_tensor_to_numpy(tensor[row]))
-            axes[row, col].axis("off")
+            axes[recon_row, col].imshow(_tensor_to_numpy(tensor[img_idx]))
+            axes[recon_row, col].axis("off")
+            loss_map = loss_maps[(img_idx, col - 1)] / max_loss_value
+            axes[loss_row, col].imshow(loss_map.cpu(), cmap="inferno")
+            axes[loss_row, col].axis("off")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
@@ -464,6 +499,7 @@ class Config:
     enable_basic_flat_mse: bool = False
     enable_basic_flat_l1: bool = False
     enable_basic_flat_focal: bool = False
+    enable_basic_flat_focal_spatial: bool = False
     enable_basic_flat_hardness: bool = False
 
     # Standard/Lightweight autoencoders
@@ -803,6 +839,15 @@ def build_trainers(
             weight_decay=0.0,
         )
         trainers["basic_flat_focal"] = trainer
+    if cfg.enable_basic_flat_focal_spatial:
+        trainer = AutoencoderTrainer(
+            model=BasicVectorAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["basic_flat_focal_spatial"].loss(),
+            weight_decay=0.0,
+        )
+        trainers["basic_flat_focal_spatial"] = trainer
     if cfg.enable_basic_flat_hardness:
         trainer = AutoencoderTrainer(
             model=BasicVectorAutoencoder(),
@@ -836,6 +881,8 @@ def main() -> None:
     _print_encoder_table(cfg)
     if cfg.vis_rows <= 0:
         raise ValueError("vis_rows must be positive.")
+    if cfg.vis_rows % 2 != 0:
+        raise ValueError("vis_rows must be even so each image can include a loss heatmap.")
     if cfg.vis_every <= 0:
         raise ValueError("vis_every must be positive.")
     if cfg.resume_tag not in {"last", "best", "final"}:
@@ -845,6 +892,11 @@ def main() -> None:
     seed_everything(cfg.seed)
     device = pick_device(cfg.device)
     dataset = MarioFrameDataset(Path(cfg.traj_root), max_trajs=cfg.max_trajs)
+    vis_image_rows = max(1, cfg.vis_rows // 2)
+    spike_window = 50
+    spike_min_baseline = 10
+    spike_std_multiplier = 3.0
+    spike_ratio_threshold = 1.75
 
     if cfg.resume_dir is not None:
         run_dir = cfg.resume_dir
@@ -861,10 +913,15 @@ def main() -> None:
     samples_root = run_dir / "samples"
     fixed_samples_dir = samples_root / "fixed"
     rolling_samples_dir = samples_root / "rolling"
+    spike_samples_dir = samples_root / "spikes"
     fixed_samples_dir.mkdir(parents=True, exist_ok=True)
     rolling_samples_dir.mkdir(parents=True, exist_ok=True)
+    spike_samples_dir.mkdir(parents=True, exist_ok=True)
 
     trainers = build_trainers(cfg, device, TRAINER_INFO_MAP)
+    spike_windows: Dict[str, deque[float]] = {
+        key: deque(maxlen=spike_window) for key in trainers
+    }
     logger.info("Parameter summary:")
     for key, trainer in trainers.items():
         module = getattr(trainer, "model", None)
@@ -899,16 +956,22 @@ def main() -> None:
         start_step = 0
 
     vis_paths_file = run_dir / "vis_paths.txt"
+    expected_vis = min(vis_image_rows, len(dataset))
+    if expected_vis <= 0:
+        raise RuntimeError("Not enough frames available for visualisation.")
+
+    def _select_vis_paths() -> List[str]:
+        indices = random.sample(range(len(dataset)), expected_vis)
+        return [str(dataset.paths[idx]) for idx in indices]
+
     if vis_paths_file.exists():
         vis_paths = [
             line.strip() for line in vis_paths_file.read_text().splitlines() if line.strip()
         ]
     else:
-        vis_count = min(cfg.vis_rows, len(dataset))
-        if vis_count <= 0:
-            raise RuntimeError("Not enough frames available for visualisation.")
-        indices = random.sample(range(len(dataset)), vis_count)
-        vis_paths = [str(dataset.paths[idx]) for idx in indices]
+        vis_paths = []
+    if len(vis_paths) != expected_vis:
+        vis_paths = _select_vis_paths()
         vis_paths_file.write_text("\n".join(vis_paths) + "\n")
     vis_batch = load_image_batch(vis_paths, dataset.transform)
     vis_batch_device = vis_batch.to(device)
@@ -931,16 +994,48 @@ def main() -> None:
             except StopIteration:
                 data_iterator = iter(loader)
                 batch, _ = next(data_iterator)
-            batch = batch.to(device, non_blocking=True)
+            batch_cpu = batch
+            batch = batch_cpu.to(device, non_blocking=True)
             losses: dict[str, float] = {}
             shared_metrics_step: dict[str, Dict[str, float]] = {}
             timing: dict[str, float] = {}
+            step_tag = f"step_{current_step:05d}"
             for key, trainer in trainers.items():
                 step_start = time.perf_counter()
                 loss, improved, shared = trainer.step(batch)
                 timing[key] = time.perf_counter() - step_start
                 losses[key] = loss
                 shared_metrics_step[key] = shared
+                prev_losses = spike_windows[key]
+                is_spike = False
+                baseline: Optional[float] = None
+                if len(prev_losses) >= spike_min_baseline:
+                    baseline = sum(prev_losses) / len(prev_losses)
+                    variance = (
+                        sum((value - baseline) ** 2 for value in prev_losses) / len(prev_losses)
+                    )
+                    stddev = math.sqrt(variance)
+                    ratio_trigger = baseline > 0 and loss >= baseline * spike_ratio_threshold
+                    std_trigger = stddev > 0 and loss >= baseline + spike_std_multiplier * stddev
+                    is_spike = ratio_trigger or std_trigger
+                prev_losses.append(float(loss))
+                if is_spike:
+                    spike_rows = min(vis_image_rows, batch_cpu.shape[0])
+                    if spike_rows > 0:
+                        spike_dir = spike_samples_dir / key
+                        spike_dir.mkdir(parents=True, exist_ok=True)
+                        spike_inputs = batch_cpu[:spike_rows].detach().cpu()
+                        with torch.no_grad():
+                            spike_recon = trainer.reconstruct(batch)[:spike_rows]
+                        spike_recon = spike_recon.detach().cpu()
+                        spike_path = spike_dir / f"{step_tag}_loss_{loss:.4f}.png"
+                        save_recon_grid(spike_inputs, [(key, spike_recon)], out_path=spike_path)
+                        logger.warning(
+                            "Loss spike detected for %s (%.4f vs baseline %.4f)",
+                            _display_name(key),
+                            loss,
+                            baseline if baseline is not None else float("nan"),
+                        )
                 trainer.save_checkpoint(checkpoint_paths[key]["last"])
                 if improved:
                     trainer.save_checkpoint(checkpoint_paths[key]["best"])
@@ -966,7 +1061,6 @@ def main() -> None:
                 write_shared_metric_histories(trainers, metrics_dir)
                 plot_shared_metric_histories(trainers, metrics_dir)
             if current_step % cfg.vis_every == 0 or current_step == target_step:
-                step_tag = f"step_{current_step:05d}"
                 fixed_recons = [
                     (key, trainer.reconstruct(vis_batch_device)) for key, trainer in trainers.items()
                 ]
@@ -975,7 +1069,7 @@ def main() -> None:
                     fixed_recons,
                     out_path=fixed_samples_dir / f"{step_tag}.png",
                 )
-                rolling_batch = sample_random_batch(dataset, cfg.vis_rows)
+                rolling_batch = sample_random_batch(dataset, vis_image_rows)
                 rolling_batch_device = rolling_batch.to(device)
                 rolling_recons = [
                     (key, trainer.reconstruct(rolling_batch_device))
@@ -997,7 +1091,7 @@ def main() -> None:
             fixed_recons,
             out_path=fixed_samples_dir / f"{step_tag}.png",
         )
-        rolling_batch = sample_random_batch(dataset, cfg.vis_rows)
+        rolling_batch = sample_random_batch(dataset, vis_image_rows)
         rolling_batch_device = rolling_batch.to(device)
         rolling_recons = [
             (key, trainer.reconstruct(rolling_batch_device))

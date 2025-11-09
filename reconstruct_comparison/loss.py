@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .spatial_softmax import SpatialSoftmax
+
 
 class FocalL1Loss(nn.Module):
     """Pixel-wise focal weighting applied to an L1 reconstruction objective."""
@@ -117,9 +119,31 @@ class MultiScalePatchLoss(nn.Module):
         return total_loss / total_weight
 
 
+class FocalSpatialSoftmaxLoss(nn.Module):
+    """Focal L1 reconstruction loss augmented with spatial softmax alignment."""
+
+    def __init__(self, spatial_weight: float = 0.1, channels: int = 3) -> None:
+        super().__init__()
+        if spatial_weight < 0:
+            raise ValueError("spatial_weight must be non-negative.")
+        self.focal = FocalL1Loss()
+        self.spatial_weight = spatial_weight
+        self.spatial = SpatialSoftmax(channels)
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        base = self.focal(input, target)
+        if self.spatial_weight == 0.0:
+            return base
+        spatial_pred = self.spatial(input)
+        spatial_target = self.spatial(target)
+        spatial_loss = F.l1_loss(spatial_pred, spatial_target)
+        return base + self.spatial_weight * spatial_loss
+
+
 __all__ = [
     "FocalL1Loss",
     "HardnessWeightedL1Loss",
     "CauchyLoss",
     "MultiScalePatchLoss",
+    "FocalSpatialSoftmaxLoss",
 ]
