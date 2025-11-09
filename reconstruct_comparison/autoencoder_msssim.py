@@ -14,7 +14,7 @@ class MSSSIMAutoencoderUNet(LightweightAutoencoderUNet):
         super().__init__(base_channels=40, latent_channels=120)
 
 
-class FocalMSSSIMAutoencoderUNetUNet(TextureAwareAutoencoderUNet):
+class FocalMSSSIMAutoencoderUNet(TextureAwareAutoencoderUNet):
     """Higher-capacity variant for focal MS-SSIM training."""
 
     def __init__(self) -> None:
@@ -55,7 +55,7 @@ class FocalMSSSIMLoss(nn.Module):
 
 __all__ = [
     "MSSSIMAutoencoderUNet",
-    "FocalMSSSIMAutoencoderUNetUNet",
+    "FocalMSSSIMAutoencoderUNet",
     "MSSSIMLoss",
     "FocalMSSSIMLoss",
 ]

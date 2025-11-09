@@ -93,7 +93,6 @@ class StyleContrastTrainer:
 
     def __init__(
         self,
-        name: str,
         model: nn.Module,
         feature_extractor: StyleFeatureExtractor,
         *,
@@ -108,7 +107,6 @@ class StyleContrastTrainer:
         reconstruction_weight: float = 0.0,
         reconstruction_loss: Optional[nn.Module] = None,
     ) -> None:
-        self.name = name
         self.device = device
         self.model = model.to(device)
         self.feature_extractor = feature_extractor.to(device)
@@ -182,7 +180,6 @@ class StyleContrastTrainer:
             "history": self.history,
             "shared_history": self.shared_history,
             "global_step": self.global_step,
-            "name": self.name,
             "best_loss": self.best_loss,
         }
 

@@ -111,7 +111,6 @@ class BasicVectorAutoencoderTrainer(AutoencoderTrainer):
         latent_dim: int = 256,
         latent_spatial: int = 7,
         weight_decay: float = 0.0,
-        name: str = "basic_vector_autoencoder",
     ) -> None:
         model = BasicVectorAutoencoder(
             latent_channels=latent_channels,
@@ -119,7 +118,6 @@ class BasicVectorAutoencoderTrainer(AutoencoderTrainer):
             latent_spatial=latent_spatial,
         )
         super().__init__(
-            name,
             model,
             device=device,
             lr=lr,

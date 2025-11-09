@@ -247,14 +247,12 @@ class BestPracticeAutoencoderTrainer(AutoencoderTrainer):
         base_channels: int = 64,
         latent_channels: int = 256,
         weight_decay: float = 1e-4,
-        name: str = "best_practice_autoencoder",
     ) -> None:
         model = BestPracticeAutoencoder(
             base_channels=base_channels,
             latent_channels=latent_channels,
         )
         super().__init__(
-            name,
             model,
             device=device,
             lr=lr,

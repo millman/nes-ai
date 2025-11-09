@@ -81,11 +81,9 @@ class BasicAutoencoderTrainer(AutoencoderTrainer):
         loss_fn: nn.Module,
         latent_channels: int = 64,
         weight_decay: float = 0.0,
-        name: str = "basic_autoencoder",
     ) -> None:
         model = BasicAutoencoder(latent_channels=latent_channels)
         super().__init__(
-            name,
             model,
             device=device,
             lr=lr,

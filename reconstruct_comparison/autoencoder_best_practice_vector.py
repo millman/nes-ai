@@ -98,7 +98,6 @@ class BestPracticeVectorAutoencoderTrainer(AutoencoderTrainer):
         latent_channels: int = 256,
         latent_dim: int = 1024,
         weight_decay: float = 1e-4,
-        name: str = "best_practice_vector_autoencoder",
     ) -> None:
         model = BestPracticeVectorAutoencoder(
             base_channels=base_channels,
@@ -106,7 +105,6 @@ class BestPracticeVectorAutoencoderTrainer(AutoencoderTrainer):
             latent_dim=latent_dim,
         )
         super().__init__(
-            name,
             model,
             device=device,
             lr=lr,

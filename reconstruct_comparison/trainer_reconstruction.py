@@ -16,7 +16,6 @@ class ReconstructionTrainer:
 
     def __init__(
         self,
-        name: str,
         encoder: nn.Module,
         decoder: nn.Module,
         *,
@@ -26,7 +25,6 @@ class ReconstructionTrainer:
         weight_decay: float = 0.0,
         optimizer_factory: Optional[OptimizerFactory] = None,
     ) -> None:
-        self.name = name
         self.device = device
         self.encoder = encoder.to(device)
         self.decoder = decoder.to(device)
@@ -101,7 +99,6 @@ class ReconstructionTrainer:
             "history": self.history,
             "shared_history": self.shared_history,
             "global_step": self.global_step,
-            "name": self.name,
             "best_loss": self.best_loss,
         }
 

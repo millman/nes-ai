@@ -16,7 +16,6 @@ class AutoencoderTrainer:
 
     def __init__(
         self,
-        name: str,
         model: nn.Module,
         *,
         device: torch.device,
@@ -25,7 +24,6 @@ class AutoencoderTrainer:
         weight_decay: float = 1e-4,
         optimizer_factory: Optional[OptimizerFactory] = None,
     ) -> None:
-        self.name = name
         self.device = device
         self.model = model.to(device)
         if optimizer_factory is not None:
@@ -97,7 +95,6 @@ class AutoencoderTrainer:
             "history": self.history,
             "shared_history": self.shared_history,
             "global_step": self.global_step,
-            "name": self.name,
             "best_loss": self.best_loss,
         }
 

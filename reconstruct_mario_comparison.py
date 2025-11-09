@@ -13,7 +13,7 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union, Mapping
 import time
 import textwrap
 
@@ -38,7 +38,7 @@ from reconstruct_comparison import (
     BestPracticeAutoencoderTrainer,
     BestPracticeVectorAutoencoderTrainer,
     Decoder,
-    FocalMSSSIMAutoencoderUNetUNet,
+    FocalMSSSIMAutoencoderUNet,
     FocalMSSSIMLoss,
     FocalL1Loss,
     HardnessWeightedL1Loss,
@@ -120,11 +120,14 @@ TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
 )
 
 
-MODEL_DISPLAY_NAMES: Dict[str, str] = {info.model_key: info.description for info in TRAINER_INFOS}
+TRAINER_INFO_MAP: Dict[str, TrainerInfo] = {info.model_key: info for info in TRAINER_INFOS}
 
 
 def _display_name(name: str) -> str:
-    return MODEL_DISPLAY_NAMES.get(name, name)
+    info = TRAINER_INFO_MAP.get(name)
+    if info is None:
+        return name
+    return info.description
 
 
 def _cli_flag_name(flag: str) -> str:
@@ -322,13 +325,13 @@ def save_recon_grid(
     plt.close(fig)
 
 
-def plot_loss_histories(trainers: Sequence[Trainer], out_path: Path) -> None:
+def plot_loss_histories(trainers: Dict[str, Trainer], out_path: Path) -> None:
     plt.figure(figsize=(8, 5))
-    for trainer in trainers:
+    for key, trainer in trainers.items():
         if not trainer.history:
             continue
         steps, losses = zip(*trainer.history)
-        plt.plot(steps, losses, label=_display_name(trainer.name))
+        plt.plot(steps, losses, label=_display_name(key))
     plt.xlabel("Step")
     plt.ylabel("Reconstruction loss")
     plt.title("Model comparison losses (log scale)")
@@ -340,10 +343,10 @@ def plot_loss_histories(trainers: Sequence[Trainer], out_path: Path) -> None:
     plt.close()
 
 
-def write_loss_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
+def write_loss_histories(trainers: Dict[str, Trainer], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    for trainer in trainers:
-        history_path = out_dir / f"{trainer.name}_loss.csv"
+    for key, trainer in trainers.items():
+        history_path = out_dir / f"{key}_loss.csv"
         with history_path.open("w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["step", "loss"])
@@ -351,13 +354,13 @@ def write_loss_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
                 writer.writerow([step, loss])
 
 
-def write_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
+def write_shared_metric_histories(trainers: Dict[str, Trainer], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    for trainer in trainers:
+    for key, trainer in trainers.items():
         history = getattr(trainer, "shared_history", [])
         if not history:
             continue
-        history_path = out_dir / f"{trainer.name}_shared_metrics.csv"
+        history_path = out_dir / f"{key}_shared_metrics.csv"
         with history_path.open("w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["step", "l1", "ms_ssim"])
@@ -371,21 +374,21 @@ def write_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) ->
                 )
 
 
-def plot_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) -> None:
-    has_data = any(getattr(trainer, "shared_history", []) for trainer in trainers)
+def plot_shared_metric_histories(trainers: Dict[str, Trainer], out_dir: Path) -> None:
+    has_data = any(getattr(trainer, "shared_history", []) for trainer in trainers.values())
     if not has_data:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Plot L1
     plt.figure(figsize=(8, 5))
-    for trainer in trainers:
+    for key, trainer in trainers.items():
         history = getattr(trainer, "shared_history", [])
         if not history:
             continue
         steps = [item[0] for item in history]
         l1_values = [item[1]["l1"] for item in history]
-        plt.plot(steps, l1_values, label=_display_name(trainer.name))
+        plt.plot(steps, l1_values, label=_display_name(key))
     plt.xlabel("Step")
     plt.ylabel("L1 (shared metric)")
     plt.title("Shared L1 metric (log scale)")
@@ -397,13 +400,13 @@ def plot_shared_metric_histories(trainers: Sequence[Trainer], out_dir: Path) -> 
 
     # Plot MS-SSIM
     plt.figure(figsize=(8, 5))
-    for trainer in trainers:
+    for key, trainer in trainers.items():
         history = getattr(trainer, "shared_history", [])
         if not history:
             continue
         steps = [item[0] for item in history]
         ms_values = [item[1]["ms_ssim"] for item in history]
-        plt.plot(steps, ms_values, label=_display_name(trainer.name))
+        plt.plot(steps, ms_values, label=_display_name(key))
     plt.xlabel("Step")
     plt.ylabel("MS-SSIM (shared metric)")
     plt.title("Shared MS-SSIM metric")
@@ -486,6 +489,24 @@ class Config:
     enable_mario4_spatial_softmax_1024: bool = False
 
 
+def _verify_trainer_config_alignment() -> None:
+    config_flags = {
+        name[len("enable_") :]
+        for name in Config.__dataclass_fields__
+        if name.startswith("enable_")
+    }
+    info_keys = {info.model_key for info in TRAINER_INFOS}
+    missing = info_keys - config_flags
+    if missing:
+        raise RuntimeError(
+            "TrainerInfo keys missing matching Config enable_ flags: "
+            + ", ".join(sorted(missing))
+        )
+
+
+_verify_trainer_config_alignment()
+
+
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
@@ -493,279 +514,242 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def build_trainers(cfg: Config, device: torch.device) -> List[Trainer]:
-    trainers: List[Trainer] = []
+def build_trainers(
+    cfg: Config,
+    device: torch.device,
+    trainer_infos: Mapping[str, TrainerInfo],
+) -> Dict[str, Trainer]:
+    trainers: Dict[str, Trainer] = {}
     if cfg.enable_pretrained_resnet50:
         resnet_enc = _resnet_encoder(ResNet50_Weights.IMAGENET1K_V2)
         resnet_dec = Decoder(2048)
-        trainers.append(
-            ReconstructionTrainer("resnet50", resnet_enc, resnet_dec, device=device, lr=cfg.lr)
+        trainer = ReconstructionTrainer(
+            resnet_enc,
+            resnet_dec,
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["pretrained_resnet50"].loss(),
         )
+        trainers["pretrained_resnet50"] = trainer
     if cfg.enable_pretrained_convnext:
         convnext_enc = _convnext_encoder(ConvNeXt_Base_Weights.IMAGENET1K_V1)
         convnext_dec = Decoder(1024)
-        trainers.append(
-            ReconstructionTrainer(
-                "convnext_base", convnext_enc, convnext_dec, device=device, lr=cfg.lr
-            )
+        trainer = ReconstructionTrainer(
+            convnext_enc,
+            convnext_dec,
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["pretrained_convnext"].loss(),
         )
+        trainers["pretrained_convnext"] = trainer
     if cfg.enable_unet_mse:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_mse",
-                model=LightweightAutoencoderUNet(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.MSELoss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoderUNet(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["unet_mse"].loss(),
         )
+        trainers["unet_mse"] = trainer
     if cfg.enable_unet_l1:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_l1",
-                model=LightweightAutoencoderUNet(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.L1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoderUNet(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["unet_l1"].loss(),
         )
+        trainers["unet_l1"] = trainer
     if cfg.enable_unet_smoothl1:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_smooth_l1",
-                model=LightweightAutoencoderUNet(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoderUNet(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["unet_smoothl1"].loss(),
         )
+        trainers["unet_smoothl1"] = trainer
     if cfg.enable_unet_focal:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_focal",
-                model=LightweightAutoencoderUNet(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=FocalL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoderUNet(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["unet_focal"].loss(),
         )
+        trainers["unet_focal"] = trainer
     if cfg.enable_unet_style_contrast:
         texture_autoencoder = TextureAwareAutoencoderUNet()
         feature_layers = sorted(set(cfg.style_layers + (cfg.patch_layer,)))
         feature_extractor = StyleFeatureExtractor(feature_layers)
-        trainers.append(
-            StyleContrastTrainer(
-                "autoencoder_style_contrast",
-                texture_autoencoder,
-                feature_extractor,
-                device=device,
-                lr=cfg.lr,
-                style_layers=cfg.style_layers,
-                patch_layer=cfg.patch_layer,
-                style_weight=cfg.style_weight,
-                contrast_weight=cfg.contrast_weight,
-                contrast_temperature=cfg.contrast_temperature,
-                contrast_patches=cfg.contrast_patches,
-                reconstruction_weight=cfg.reconstruction_weight,
-            )
+        trainer = StyleContrastTrainer(
+            "unet_style_contrast",
+            texture_autoencoder,
+            feature_extractor,
+            device=device,
+            lr=cfg.lr,
+            style_layers=cfg.style_layers,
+            patch_layer=cfg.patch_layer,
+            style_weight=cfg.style_weight,
+            contrast_weight=cfg.contrast_weight,
+            contrast_temperature=cfg.contrast_temperature,
+            contrast_patches=cfg.contrast_patches,
+            reconstruction_weight=cfg.reconstruction_weight,
         )
+        trainers["unet_style_contrast"] = trainer
     if cfg.enable_unet_cauchy:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_cauchy",
-                model=LightweightAutoencoderUNet(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=CauchyLoss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoderUNet(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["unet_cauchy"].loss(),
         )
+        trainers["unet_cauchy"] = trainer
     if cfg.enable_ae_focal:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_spatial_latent",
-                model=LightweightAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=FocalL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["ae_focal"].loss(),
         )
+        trainers["ae_focal"] = trainer
     if cfg.enable_ae_patch_mse:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_patch",
-                model=LightweightAutoencoderPatch(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=MultiScalePatchLoss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoderPatch(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["ae_patch_mse"].loss(),
         )
+        trainers["ae_patch_mse"] = trainer
     if cfg.enable_ae_skip_train:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_skip_train",
-                model=LightweightAutoencoderUNetSkipTrain(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=FocalL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoderUNetSkipTrain(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["ae_skip_train"].loss(),
         )
+        trainers["ae_skip_train"] = trainer
     if cfg.enable_resnet:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_resnet",
-                model=ResNetAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=ResNetAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["resnet"].loss(),
         )
+        trainers["resnet"] = trainer
     if cfg.enable_resnetv2:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_resnetv2",
-                model=ResNetV2Autoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=ResNetV2Autoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["resnetv2"].loss(),
         )
+        trainers["resnetv2"] = trainer
     if cfg.enable_modern_attn:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_modern_attn",
-                model=ModernResNetAttnAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=ModernResNetAttnAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["modern_attn"].loss(),
         )
+        trainers["modern_attn"] = trainer
     if cfg.enable_ae_flat_l1:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_lightweight_flat_latent",
-                model=LightweightFlatLatentAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=LightweightFlatLatentAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["ae_flat_l1"].loss(),
         )
+        trainers["ae_flat_l1"] = trainer
     if cfg.enable_mario4:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_mario4",
-                model=Mario4Autoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=Mario4Autoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["mario4"].loss(),
         )
+        trainers["mario4"] = trainer
     if cfg.enable_mario4_mirrored:
-        trainers.append(
-            AutoencoderTrainer(
-                name="mario4_mirrored_decoder",
-                model=Mario4MirroredAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=Mario4MirroredAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["mario4_mirrored"].loss(),
         )
+        trainers["mario4_mirrored"] = trainer
     if cfg.enable_mario4_spatial_softmax_192:
-        trainers.append(
-            AutoencoderTrainer(
-                name="mario4_spatial_softmax_192",
-                model=Mario4SpatialSoftmaxAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=Mario4SpatialSoftmaxAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["mario4_spatial_softmax_192"].loss(),
         )
+        trainers["mario4_spatial_softmax_192"] = trainer
     if cfg.enable_mario4_1024:
-        trainers.append(
-            AutoencoderTrainer(
-                name="mario4_latent_1024",
-                model=Mario4LargeAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=Mario4LargeAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["mario4_1024"].loss(),
         )
+        trainers["mario4_1024"] = trainer
     if cfg.enable_mario4_spatial_softmax_1024:
-        trainers.append(
-            AutoencoderTrainer(
-                name="mario4_spatial_softmax_1024",
-                model=Mario4SpatialSoftmaxLargeAutoencoder(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.SmoothL1Loss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=Mario4SpatialSoftmaxLargeAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["mario4_spatial_softmax_1024"].loss(),
         )
+        trainers["mario4_spatial_softmax_1024"] = trainer
     if cfg.enable_unet_msssim:
-        trainers.append(
-            AutoencoderTrainer(
-                name="msssim_autoencoder",
-                model=MSSSIMAutoencoderUNet(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=MSSSIMLoss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=MSSSIMAutoencoderUNet(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["unet_msssim"].loss(),
         )
+        trainers["unet_msssim"] = trainer
     if cfg.enable_unet_focal_msssim:
-        trainers.append(
-            AutoencoderTrainer(
-                name="autoencoder_focal_msssim",
-                model=FocalMSSSIMAutoencoderUNetUNet(),
-                device=device,
-                lr=cfg.lr,
-                loss_fn=FocalMSSSIMLoss(),
-            )
+        trainer = AutoencoderTrainer(
+            model=FocalMSSSIMAutoencoderUNet(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["unet_focal_msssim"].loss(),
         )
-    basic_variants: Tuple[Tuple[bool, str, type[nn.Module]], ...] = (
-        (cfg.enable_basic_mse, "basic_autoencoder_mse", nn.MSELoss),
-        (cfg.enable_basic_l1, "basic_autoencoder_l1", nn.L1Loss),
-        (cfg.enable_basic_focal, "basic_autoencoder_focal", FocalL1Loss),
-        (
-            cfg.enable_basic_hardness,
-            "basic_autoencoder_hardness",
-            HardnessWeightedL1Loss,
-        ),
+        trainers["unet_focal_msssim"] = trainer
+    basic_variants: Tuple[Tuple[bool, str], ...] = (
+        (cfg.enable_basic_mse, "basic_mse"),
+        (cfg.enable_basic_l1, "basic_l1"),
+        (cfg.enable_basic_focal, "basic_focal"),
+        (cfg.enable_basic_hardness, "basic_hardness"),
     )
-    for enabled, trainer_name, loss_ctor in basic_variants:
+    for enabled, model_key in basic_variants:
         if not enabled:
             continue
-        trainers.append(
-            BasicAutoencoderTrainer(
-                name=trainer_name,
-                device=device,
-                lr=cfg.lr,
-                loss_fn=loss_ctor(),
-                weight_decay=0.0,
-            )
+        trainer = BasicAutoencoderTrainer(            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos[model_key].loss(),
+            weight_decay=0.0,
         )
+        trainers[model_key] = trainer
     if cfg.enable_basic_flat_mse:
-        trainers.append(
-            BasicVectorAutoencoderTrainer(
-                device=device,
-                lr=cfg.lr,
-                loss_fn=nn.MSELoss(),
-                weight_decay=0.0,
-            )
+        trainer = BasicVectorAutoencoderTrainer(
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["basic_flat_mse"].loss(),
+            weight_decay=0.0,
         )
+        trainers["basic_flat_mse"] = trainer
     if cfg.enable_best_focal:
-        trainers.append(
-            BestPracticeAutoencoderTrainer(
-                device=device,
-                lr=cfg.lr,
-                loss_fn=FocalL1Loss(),
-            )
+        trainer = BestPracticeAutoencoderTrainer(
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["best_focal"].loss(),
         )
+        trainers["best_focal"] = trainer
     if cfg.enable_best_flat_focal:
-        trainers.append(
-            BestPracticeVectorAutoencoderTrainer(
-                device=device,
-                lr=cfg.lr,
-                loss_fn=FocalL1Loss(),
-            )
+        trainer = BestPracticeVectorAutoencoderTrainer(
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["best_flat_focal"].loss(),
         )
+        trainers["best_flat_focal"] = trainer
     if not trainers:
         raise ValueError("No trainers enabled. Enable at least one model to proceed.")
     return trainers
@@ -804,34 +788,34 @@ def main() -> None:
     fixed_samples_dir.mkdir(parents=True, exist_ok=True)
     rolling_samples_dir.mkdir(parents=True, exist_ok=True)
 
-    trainers = build_trainers(cfg, device)
+    trainers = build_trainers(cfg, device, TRAINER_INFO_MAP)
     logger.info("Parameter summary:")
-    for trainer in trainers:
+    for key, trainer in trainers.items():
         module = getattr(trainer, "model", None)
         if module is None:
             continue
-        _summarize_parameters(trainer.name, module, logger=logger)
+        _summarize_parameters(key, module, logger=logger)
     checkpoint_paths: dict[str, dict[str, Path]] = {}
 
-    for trainer in trainers:
-        trainer_dir = checkpoints_root / trainer.name
+    for key, trainer in trainers.items():
+        trainer_dir = checkpoints_root / key
         trainer_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_paths[trainer.name] = {
+        checkpoint_paths[key] = {
             "last": trainer_dir / "last.pt",
             "best": trainer_dir / "best.pt",
             "final": trainer_dir / "final.pt",
         }
         if cfg.resume_dir is not None:
-            resume_path = checkpoint_paths[trainer.name][cfg.resume_tag]
+            resume_path = checkpoint_paths[key][cfg.resume_tag]
             if not resume_path.exists():
                 raise FileNotFoundError(
-                    f"Checkpoint for {trainer.name!r} not found at {resume_path}"
+                    f"Checkpoint for {key!r} not found at {resume_path}"
                 )
             state = torch.load(resume_path, map_location=device)
             trainer.load_state_dict(state, lr=cfg.lr)
 
     if cfg.resume_dir is not None:
-        step_set = {trainer.global_step for trainer in trainers}
+        step_set = {trainer.global_step for trainer in trainers.values()}
         if len(step_set) != 1:
             raise RuntimeError("Loaded checkpoints have mismatched global steps.")
         start_step = step_set.pop()
@@ -875,15 +859,15 @@ def main() -> None:
             losses: dict[str, float] = {}
             shared_metrics_step: dict[str, Dict[str, float]] = {}
             timing: dict[str, float] = {}
-            for trainer in trainers:
+            for key, trainer in trainers.items():
                 step_start = time.perf_counter()
                 loss, improved, shared = trainer.step(batch)
-                timing[trainer.name] = time.perf_counter() - step_start
-                losses[trainer.name] = loss
-                shared_metrics_step[trainer.name] = shared
-                trainer.save_checkpoint(checkpoint_paths[trainer.name]["last"])
+                timing[key] = time.perf_counter() - step_start
+                losses[key] = loss
+                shared_metrics_step[key] = shared
+                trainer.save_checkpoint(checkpoint_paths[key]["last"])
                 if improved:
-                    trainer.save_checkpoint(checkpoint_paths[trainer.name]["best"])
+                    trainer.save_checkpoint(checkpoint_paths[key]["best"])
             if cfg.log_every > 0 and current_step % cfg.log_every == 0:
                 loss_str = ", ".join(f"{name}: {losses[name]:.4f}" for name in losses)
                 metric_str = ", ".join(
@@ -908,7 +892,7 @@ def main() -> None:
             if current_step % cfg.vis_every == 0 or current_step == target_step:
                 step_tag = f"step_{current_step:05d}"
                 fixed_recons = [
-                    (trainer.name, trainer.reconstruct(vis_batch_device)) for trainer in trainers
+                    (key, trainer.reconstruct(vis_batch_device)) for key, trainer in trainers.items()
                 ]
                 save_recon_grid(
                     vis_batch,
@@ -918,7 +902,8 @@ def main() -> None:
                 rolling_batch = sample_random_batch(dataset, cfg.vis_rows)
                 rolling_batch_device = rolling_batch.to(device)
                 rolling_recons = [
-                    (trainer.name, trainer.reconstruct(rolling_batch_device)) for trainer in trainers
+                    (key, trainer.reconstruct(rolling_batch_device))
+                    for key, trainer in trainers.items()
                 ]
                 save_recon_grid(
                     rolling_batch,
@@ -929,7 +914,7 @@ def main() -> None:
         logger.info("train_steps is 0; skipping decoder optimisation.")
         step_tag = f"step_{target_step:05d}"
         fixed_recons = [
-            (trainer.name, trainer.reconstruct(vis_batch_device)) for trainer in trainers
+            (key, trainer.reconstruct(vis_batch_device)) for key, trainer in trainers.items()
         ]
         save_recon_grid(
             vis_batch,
@@ -939,7 +924,8 @@ def main() -> None:
         rolling_batch = sample_random_batch(dataset, cfg.vis_rows)
         rolling_batch_device = rolling_batch.to(device)
         rolling_recons = [
-            (trainer.name, trainer.reconstruct(rolling_batch_device)) for trainer in trainers
+            (key, trainer.reconstruct(rolling_batch_device))
+            for key, trainer in trainers.items()
         ]
         save_recon_grid(
             rolling_batch,
@@ -951,8 +937,8 @@ def main() -> None:
     write_loss_histories(trainers, metrics_dir)
     write_shared_metric_histories(trainers, metrics_dir)
     plot_shared_metric_histories(trainers, metrics_dir)
-    for trainer in trainers:
-        paths = checkpoint_paths[trainer.name]
+    for key, trainer in trainers.items():
+        paths = checkpoint_paths[key]
         trainer.save_checkpoint(paths["last"])
         if trainer.best_loss is not None and not paths["best"].exists():
             trainer.save_checkpoint(paths["best"])

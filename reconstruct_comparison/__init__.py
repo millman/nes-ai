@@ -24,7 +24,7 @@ from .autoencoder_mario4 import (
 from .metrics import compute_shared_metrics, ms_ssim_per_sample
 from .autoencoder_modern_resnet_attn import ModernResNetAttnAutoencoder
 from .autoencoder_msssim import (
-    FocalMSSSIMAutoencoderUNetUNet,
+    FocalMSSSIMAutoencoderUNet,
     FocalMSSSIMLoss,
     MSSSIMAutoencoderUNet,
     MSSSIMLoss,
@@ -47,7 +47,7 @@ __all__ = [
     "HardnessWeightedL1Loss",
     "CauchyLoss",
     "MultiScalePatchLoss",
-    "FocalMSSSIMAutoencoderUNetUNet",
+    "FocalMSSSIMAutoencoderUNet",
     "FocalMSSSIMLoss",
     "LightweightAutoencoder",
     "LightweightAutoencoderPatch",
