@@ -21,7 +21,7 @@ class ReconstructionTrainer:
         *,
         device: torch.device,
         lr: float,
-        loss_fn: Optional[nn.Module] = None,
+        loss_fn: nn.Module,
         weight_decay: float = 0.0,
         optimizer_factory: Optional[OptimizerFactory] = None,
     ) -> None:
@@ -35,7 +35,7 @@ class ReconstructionTrainer:
             self.optimizer = torch.optim.Adam(
                 self.decoder.parameters(), lr=lr, weight_decay=weight_decay
             )
-        self.loss_fn = loss_fn or nn.MSELoss()
+        self.loss_fn = loss_fn
         self.history: List[Tuple[int, float]] = []
         self.shared_history: List[Tuple[int, Dict[str, float]]] = []
         self.global_step = 0
