@@ -88,16 +88,20 @@ def _trainer_flag(model_key: str) -> str:
 
 
 TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
-    TrainerInfo(model_key="ae_flat_l1", loss=nn.SmoothL1Loss, description="Lightweight Flat Latent"),
-    TrainerInfo(model_key="ae_focal", loss=FocalL1Loss, description="Autoencoder (Spatial Latent)"),
+    TrainerInfo(model_key="ae_flat_l1", loss=nn.SmoothL1Loss, description="Autoencoder Flat (L1)"),
+    TrainerInfo(model_key="ae_flat_focal", loss=FocalL1Loss, description="Autoencoder Flat (Focal)"),
+    TrainerInfo(model_key="ae_focal", loss=FocalL1Loss, description="Autoencoder (Focal)"),
+    TrainerInfo(model_key="ae_l1", loss=nn.SmoothL1Loss, description="Autoencoder (L1)"),
     TrainerInfo(model_key="ae_patch_mse", loss=MultiScalePatchLoss, description="Autoencoder (No Skip Patch)"),
     TrainerInfo(model_key="ae_skip_train", loss=FocalL1Loss, description="Autoencoder (Train Skip, Eval Zero)"),
-    TrainerInfo(model_key="basic_flat_mse", loss=nn.MSELoss, description="Autoencoder (Basic Vector)"),
-    TrainerInfo(model_key="basic_focal", loss=FocalL1Loss, description="Basic Autoencoder (Focal L1)"),
-    TrainerInfo(model_key="basic_hardness", loss=HardnessWeightedL1Loss, description="Basic Autoencoder (Hardness Weighted)"),
+    TrainerInfo(model_key="basic_flat_mse", loss=nn.MSELoss, description="Basic Flat (MSE)"),
+    TrainerInfo(model_key="basic_flat_l1", loss=nn.SmoothL1Loss, description="Basic Flat (L1)"),
+    TrainerInfo(model_key="basic_flat_focal", loss=FocalL1Loss, description="Basic Flat (Focal)"),
+    TrainerInfo(model_key="basic_focal", loss=FocalL1Loss, description="Basic (Focal)"),
+    TrainerInfo(model_key="basic_hardness", loss=HardnessWeightedL1Loss, description="Basic (Hardness)"),
     TrainerInfo(model_key="basic_l1", loss=nn.L1Loss, description="Basic Autoencoder (L1)"),
     TrainerInfo(model_key="basic_mse", loss=nn.MSELoss, description="Basic Autoencoder (MSE)"),
-    TrainerInfo(model_key="best_flat_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice Vector)"),
+    TrainerInfo(model_key="best_flat_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice Flat)"),
     TrainerInfo(model_key="best_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice)"),
     TrainerInfo(model_key="mario4_1024", loss=nn.SmoothL1Loss, description="Mario4 Latent 1024"),
     TrainerInfo(model_key="mario4_mirrored", loss=nn.SmoothL1Loss, description="Mario4 Mirrored Decoder"),
@@ -455,10 +459,14 @@ class Config:
     enable_basic_focal: bool = False
     enable_basic_hardness: bool = False
     enable_basic_flat_mse: bool = False
+    enable_basic_flat_l1: bool = False
+    enable_basic_flat_focal: bool = False
 
     # Standard/Lightweight autoencoders
     enable_ae_focal: bool = False
+    enable_ae_l1: bool = False
     enable_ae_flat_l1: bool = False
+    enable_ae_flat_focal: bool = False
     enable_ae_patch_mse: bool = False
     enable_ae_skip_train: bool = False
 
@@ -609,6 +617,14 @@ def build_trainers(
             loss_fn=trainer_infos["ae_focal"].loss(),
         )
         trainers["ae_focal"] = trainer
+    if cfg.enable_ae_l1:
+        trainer = AutoencoderTrainer(
+            model=LightweightAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["ae_l1"].loss(),
+        )
+        trainers["ae_l1"] = trainer
     if cfg.enable_ae_patch_mse:
         trainer = AutoencoderTrainer(
             model=LightweightAutoencoderPatch(),
@@ -657,6 +673,14 @@ def build_trainers(
             loss_fn=trainer_infos["ae_flat_l1"].loss(),
         )
         trainers["ae_flat_l1"] = trainer
+    if cfg.enable_ae_flat_focal:
+        trainer = AutoencoderTrainer(
+            model=LightweightFlatLatentAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["ae_flat_focal"].loss(),
+        )
+        trainers["ae_flat_focal"] = trainer
     if cfg.enable_mario4:
         trainer = AutoencoderTrainer(
             model=Mario4Autoencoder(),
@@ -736,6 +760,22 @@ def build_trainers(
             weight_decay=0.0,
         )
         trainers["basic_flat_mse"] = trainer
+    if cfg.enable_basic_flat_l1:
+        trainer = BasicVectorAutoencoderTrainer(
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["basic_flat_l1"].loss(),
+            weight_decay=0.0,
+        )
+        trainers["basic_flat_l1"] = trainer
+    if cfg.enable_basic_flat_focal:
+        trainer = BasicVectorAutoencoderTrainer(
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos["basic_flat_focal"].loss(),
+            weight_decay=0.0,
+        )
+        trainers["basic_flat_focal"] = trainer
     if cfg.enable_best_focal:
         trainer = BestPracticeAutoencoderTrainer(
             device=device,
