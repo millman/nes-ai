@@ -88,35 +88,35 @@ def _trainer_flag(model_key: str) -> str:
 
 
 TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
-    TrainerInfo(model_key="pretrained_resnet50", loss=nn.MSELoss, description="ResNet-50 (MSE)"),
-    TrainerInfo(model_key="pretrained_convnext", loss=nn.MSELoss, description="ConvNeXt-Base (MSE)"),
-    TrainerInfo(model_key="unet_mse", loss=nn.MSELoss, description="Autoencoder (MSE)"),
-    TrainerInfo(model_key="unet_l1", loss=nn.L1Loss, description="Autoencoder (L1)"),
-    TrainerInfo(model_key="unet_smoothl1", loss=nn.SmoothL1Loss, description="Autoencoder (Smooth L1)"),
-    TrainerInfo(model_key="unet_focal", loss=FocalL1Loss, description="Autoencoder (Focal L1)"),
-    TrainerInfo(model_key="unet_style_contrast", loss="Style + PatchNCE", description="Autoencoder (Style + PatchNCE)"),
-    TrainerInfo(model_key="unet_cauchy", loss=CauchyLoss, description="Autoencoder (Cauchy)"),
+    TrainerInfo(model_key="ae_flat_l1", loss=nn.SmoothL1Loss, description="Lightweight Flat Latent"),
     TrainerInfo(model_key="ae_focal", loss=FocalL1Loss, description="Autoencoder (Spatial Latent)"),
     TrainerInfo(model_key="ae_patch_mse", loss=MultiScalePatchLoss, description="Autoencoder (No Skip Patch)"),
     TrainerInfo(model_key="ae_skip_train", loss=FocalL1Loss, description="Autoencoder (Train Skip, Eval Zero)"),
-    TrainerInfo(model_key="resnet", loss=nn.SmoothL1Loss, description="Autoencoder (ResNet Blocks)"),
-    TrainerInfo(model_key="resnetv2", loss=nn.SmoothL1Loss, description="Autoencoder (ResNet v2)"),
-    TrainerInfo(model_key="modern_attn", loss=nn.SmoothL1Loss, description="Autoencoder (Modern ResNet + Attn)"),
-    TrainerInfo(model_key="ae_flat_l1", loss=nn.SmoothL1Loss, description="Lightweight Flat Latent"),
-    TrainerInfo(model_key="mario4", loss=nn.SmoothL1Loss, description="Mario4 Autoencoder"),
-    TrainerInfo(model_key="mario4_mirrored", loss=nn.SmoothL1Loss, description="Mario4 Mirrored Decoder"),
-    TrainerInfo(model_key="mario4_spatial_softmax_192", loss=nn.SmoothL1Loss, description="Mario4 Spatial Softmax 192"),
-    TrainerInfo(model_key="mario4_1024", loss=nn.SmoothL1Loss, description="Mario4 Latent 1024"),
-    TrainerInfo(model_key="mario4_spatial_softmax_1024", loss=nn.SmoothL1Loss, description="Mario4 Spatial Softmax 1024"),
-    TrainerInfo(model_key="unet_msssim", loss=MSSSIMLoss, description="Autoencoder (MS-SSIM)"),
-    TrainerInfo(model_key="unet_focal_msssim", loss=FocalMSSSIMLoss, description="Autoencoder (Focal MS-SSIM)"),
-    TrainerInfo(model_key="basic_mse", loss=nn.MSELoss, description="Basic Autoencoder (MSE)"),
-    TrainerInfo(model_key="basic_l1", loss=nn.L1Loss, description="Basic Autoencoder (L1)"),
+    TrainerInfo(model_key="basic_flat_mse", loss=nn.MSELoss, description="Autoencoder (Basic Vector)"),
     TrainerInfo(model_key="basic_focal", loss=FocalL1Loss, description="Basic Autoencoder (Focal L1)"),
     TrainerInfo(model_key="basic_hardness", loss=HardnessWeightedL1Loss, description="Basic Autoencoder (Hardness Weighted)"),
-    TrainerInfo(model_key="basic_flat_mse", loss=nn.MSELoss, description="Autoencoder (Basic Vector)"),
-    TrainerInfo(model_key="best_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice)"),
+    TrainerInfo(model_key="basic_l1", loss=nn.L1Loss, description="Basic Autoencoder (L1)"),
+    TrainerInfo(model_key="basic_mse", loss=nn.MSELoss, description="Basic Autoencoder (MSE)"),
     TrainerInfo(model_key="best_flat_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice Vector)"),
+    TrainerInfo(model_key="best_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice)"),
+    TrainerInfo(model_key="mario4_1024", loss=nn.SmoothL1Loss, description="Mario4 Latent 1024"),
+    TrainerInfo(model_key="mario4_mirrored", loss=nn.SmoothL1Loss, description="Mario4 Mirrored Decoder"),
+    TrainerInfo(model_key="mario4_spatial_softmax_1024", loss=nn.SmoothL1Loss, description="Mario4 Spatial Softmax 1024"),
+    TrainerInfo(model_key="mario4_spatial_softmax_192", loss=nn.SmoothL1Loss, description="Mario4 Spatial Softmax 192"),
+    TrainerInfo(model_key="mario4", loss=nn.SmoothL1Loss, description="Mario4 Autoencoder"),
+    TrainerInfo(model_key="modern_attn", loss=nn.SmoothL1Loss, description="Autoencoder (Modern ResNet + Attn)"),
+    TrainerInfo(model_key="pretrained_convnext", loss=nn.MSELoss, description="ConvNeXt-Base (MSE)"),
+    TrainerInfo(model_key="pretrained_resnet50", loss=nn.MSELoss, description="ResNet-50 (MSE)"),
+    TrainerInfo(model_key="resnet", loss=nn.SmoothL1Loss, description="Autoencoder (ResNet Blocks)"),
+    TrainerInfo(model_key="resnetv2", loss=nn.SmoothL1Loss, description="Autoencoder (ResNet v2)"),
+    TrainerInfo(model_key="unet_cauchy", loss=CauchyLoss, description="Autoencoder (Cauchy)"),
+    TrainerInfo(model_key="unet_focal_msssim", loss=FocalMSSSIMLoss, description="Autoencoder (Focal MS-SSIM)"),
+    TrainerInfo(model_key="unet_focal", loss=FocalL1Loss, description="Autoencoder (Focal L1)"),
+    TrainerInfo(model_key="unet_l1", loss=nn.L1Loss, description="Autoencoder (L1)"),
+    TrainerInfo(model_key="unet_mse", loss=nn.MSELoss, description="Autoencoder (MSE)"),
+    TrainerInfo(model_key="unet_msssim", loss=MSSSIMLoss, description="Autoencoder (MS-SSIM)"),
+    TrainerInfo(model_key="unet_smoothl1", loss=nn.SmoothL1Loss, description="Autoencoder (Smooth L1)"),
+    TrainerInfo(model_key="unet_style_contrast", loss="Style + PatchNCE", description="Autoencoder (Style + PatchNCE)"),
 )
 
 
@@ -449,16 +449,6 @@ class Config:
     enable_pretrained_resnet50: bool = False
     enable_pretrained_convnext: bool = False
 
-    # UNets
-    enable_unet_l1: bool = False
-    enable_unet_smoothl1: bool = False
-    enable_unet_mse: bool = False
-    enable_unet_focal: bool = False
-    enable_unet_style_contrast: bool = False
-    enable_unet_cauchy: bool = False
-    enable_unet_msssim: bool = False
-    enable_unet_focal_msssim: bool = False
-
     # Basic autoencoders
     enable_basic_mse: bool = False
     enable_basic_l1: bool = False
@@ -476,17 +466,27 @@ class Config:
     enable_best_focal: bool = False
     enable_best_flat_focal: bool = False
 
-    # Experimental other autoencoders
-    enable_resnet: bool = False
-    enable_resnetv2: bool = False
-    enable_modern_attn: bool = False
-
     # Autoencoders based on the current predict_mario4 configuration
     enable_mario4: bool = False
     enable_mario4_mirrored: bool = False
     enable_mario4_spatial_softmax_192: bool = False
     enable_mario4_1024: bool = False
     enable_mario4_spatial_softmax_1024: bool = False
+
+    # Experimental other autoencoders
+    enable_resnet: bool = False
+    enable_resnetv2: bool = False
+    enable_modern_attn: bool = False
+
+    # UNets
+    enable_unet_l1: bool = False
+    enable_unet_smoothl1: bool = False
+    enable_unet_mse: bool = False
+    enable_unet_focal: bool = False
+    enable_unet_style_contrast: bool = False
+    enable_unet_cauchy: bool = False
+    enable_unet_msssim: bool = False
+    enable_unet_focal_msssim: bool = False
 
 
 def _verify_trainer_config_alignment() -> None:
