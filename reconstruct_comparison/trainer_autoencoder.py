@@ -64,7 +64,7 @@ class AutoencoderTrainer:
         recon = self.model(batch.to(self.device))
         if was_training:
             self.model.train()
-        return recon.cpu()
+        return recon
 
     @torch.no_grad()
     def encode(self, batch: torch.Tensor) -> torch.Tensor:
@@ -75,7 +75,7 @@ class AutoencoderTrainer:
         latent = self.model.encode(batch.to(self.device))
         if was_training:
             self.model.train()
-        return latent.cpu()
+        return latent
 
     @torch.no_grad()
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
@@ -86,7 +86,7 @@ class AutoencoderTrainer:
         recon = self.model.decode(latent.to(self.device))
         if was_training:
             self.model.train()
-        return recon.cpu()
+        return recon
 
     def state_dict(self) -> dict:
         return {

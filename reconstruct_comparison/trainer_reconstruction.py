@@ -70,7 +70,7 @@ class ReconstructionTrainer:
         recon = self.decoder(feats)
         if was_training:
             self.decoder.train()
-        return recon.cpu()
+        return recon
 
     @torch.no_grad()
     def encode(self, batch: torch.Tensor) -> torch.Tensor:
@@ -79,7 +79,7 @@ class ReconstructionTrainer:
         feats = self.encoder(batch.to(self.device))
         if was_training:
             self.encoder.train()
-        return feats.cpu()
+        return feats
 
     @torch.no_grad()
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
@@ -88,7 +88,7 @@ class ReconstructionTrainer:
         recon = self.decoder(latent.to(self.device))
         if was_training:
             self.decoder.train()
-        return recon.cpu()
+        return recon
 
     def state_dict(self) -> dict:
         decoder_state = self.decoder.state_dict()

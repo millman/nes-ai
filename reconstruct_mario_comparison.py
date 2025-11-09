@@ -314,14 +314,16 @@ def save_recon_grid(
     *,
     out_path: Path,
 ) -> None:
+    inputs_cpu = inputs.detach().cpu()
+    recon_cpu = [(name, tensor.detach().cpu()) for name, tensor in reconstructions]
     image_count = inputs.shape[0]
     rows = max(1, image_count * 2)
-    cols = 1 + len(reconstructions)
+    cols = 1 + len(recon_cpu)
     fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
     if rows == 1:
         axes = axes[None, :]
-    unnorm_inputs = unnormalize(inputs)
-    unnorm_recons = [(name, unnormalize(tensor)) for name, tensor in reconstructions]
+    unnorm_inputs = unnormalize(inputs_cpu)
+    unnorm_recons = [(name, unnormalize(tensor)) for name, tensor in recon_cpu]
     col_titles = ["Input"] + [_display_name(name) for name, _ in unnorm_recons]
     for col, title in enumerate(col_titles):
         axes[0, col].set_title(title)

@@ -171,7 +171,7 @@ class StyleContrastTrainer:
         recon = self.model(batch.to(self.device))
         if was_training:
             self.model.train()
-        return recon.cpu()
+        return recon
 
     def state_dict(self) -> dict:
         return {
