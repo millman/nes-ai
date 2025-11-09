@@ -1,7 +1,7 @@
 from .trainer_autoencoder import AutoencoderTrainer
 from .loss import FocalL1Loss, HardnessWeightedL1Loss, CauchyLoss, MultiScalePatchLoss
-from .autoencoder_basic import BasicAutoencoderTrainer
-from .autoencoder_basic_vector import BasicVectorAutoencoderTrainer
+from .autoencoder_basic import BasicAutoencoder
+from .autoencoder_basic_vector import BasicVectorAutoencoder
 from .autoencoder_best_practice import BestPracticeAutoencoderTrainer
 from .autoencoder_best_practice_vector import BestPracticeVectorAutoencoderTrainer
 from .decoder import Decoder
@@ -38,8 +38,8 @@ from .autoencoder_texture_unet import TextureAwareAutoencoderUNet
 
 __all__ = [
     "AutoencoderTrainer",
-    "BasicAutoencoderTrainer",
-    "BasicVectorAutoencoderTrainer",
+    "BasicAutoencoder",
+    "BasicVectorAutoencoder",
     "BestPracticeAutoencoderTrainer",
     "BestPracticeVectorAutoencoderTrainer",
     "Decoder",

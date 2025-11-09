@@ -4,9 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .trainer_autoencoder import AutoencoderTrainer
-
-
 class BasicAutoencoder(nn.Module):
     """Minimal stride-2 convolutional autoencoder.
 
@@ -19,7 +16,7 @@ class BasicAutoencoder(nn.Module):
     Total parameters: ≈1.51e5 learnable weights.
     """
 
-    def __init__(self, latent_channels: int = 64) -> None:
+    def __init__(self, latent_channels: int = 128) -> None:
         super().__init__()
         self.encoder_net = nn.Sequential(
             # [B, 3, 224, 224] -> [B, 32, 112, 112]; stride-2 conv halves spatial
@@ -68,28 +65,4 @@ class BasicAutoencoder(nn.Module):
                 recon, size=x.shape[-2:], mode="bilinear", align_corners=False
             )
         return recon
-
-
-class BasicAutoencoderTrainer(AutoencoderTrainer):
-    """Trainer for the minimal convolutional autoencoder."""
-
-    def __init__(
-        self,
-        *,
-        device: torch.device,
-        lr: float,
-        loss_fn: nn.Module,
-        latent_channels: int = 64,
-        weight_decay: float = 0.0,
-    ) -> None:
-        model = BasicAutoencoder(latent_channels=latent_channels)
-        super().__init__(
-            model,
-            device=device,
-            lr=lr,
-            loss_fn=loss_fn,
-            weight_decay=weight_decay,
-        )
-
-
-__all__ = ["BasicAutoencoder", "BasicAutoencoderTrainer"]
+__all__ = ["BasicAutoencoder"]

@@ -33,8 +33,8 @@ from PIL import Image
 from predict_mario_ms_ssim import default_transform, pick_device, unnormalize
 from reconstruct_comparison import (
     AutoencoderTrainer,
-    BasicAutoencoderTrainer,
-    BasicVectorAutoencoderTrainer,
+    BasicAutoencoder,
+    BasicVectorAutoencoder,
     BestPracticeAutoencoderTrainer,
     BestPracticeVectorAutoencoderTrainer,
     Decoder,
@@ -768,14 +768,17 @@ def build_trainers(
     for enabled, model_key in basic_variants:
         if not enabled:
             continue
-        trainer = BasicAutoencoderTrainer(            device=device,
+        trainer = AutoencoderTrainer(
+            model=BasicAutoencoder(),
+            device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos[model_key].loss(),
             weight_decay=0.0,
         )
         trainers[model_key] = trainer
     if cfg.enable_basic_flat_mse:
-        trainer = BasicVectorAutoencoderTrainer(
+        trainer = AutoencoderTrainer(
+            model=BasicVectorAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_mse"].loss(),
@@ -783,7 +786,8 @@ def build_trainers(
         )
         trainers["basic_flat_mse"] = trainer
     if cfg.enable_basic_flat_l1:
-        trainer = BasicVectorAutoencoderTrainer(
+        trainer = AutoencoderTrainer(
+            model=BasicVectorAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_l1"].loss(),
@@ -791,7 +795,8 @@ def build_trainers(
         )
         trainers["basic_flat_l1"] = trainer
     if cfg.enable_basic_flat_focal:
-        trainer = BasicVectorAutoencoderTrainer(
+        trainer = AutoencoderTrainer(
+            model=BasicVectorAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_focal"].loss(),
@@ -799,7 +804,8 @@ def build_trainers(
         )
         trainers["basic_flat_focal"] = trainer
     if cfg.enable_basic_flat_hardness:
-        trainer = BasicVectorAutoencoderTrainer(
+        trainer = AutoencoderTrainer(
+            model=BasicVectorAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_hardness"].loss(),

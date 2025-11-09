@@ -4,9 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .trainer_autoencoder import AutoencoderTrainer
-
-
 class BasicVectorAutoencoder(nn.Module):
     """Basic autoencoder that exposes a flattened latent vector.
 
@@ -21,9 +18,9 @@ class BasicVectorAutoencoder(nn.Module):
 
     def __init__(
         self,
-        latent_channels: int = 64,
+        latent_channels: int = 128,
         latent_dim: int = 256,
-        latent_spatial: int = 7,
+        latent_spatial: int = 28,
     ) -> None:
         super().__init__()
         self.latent_channels = latent_channels
@@ -96,34 +93,4 @@ class BasicVectorAutoencoder(nn.Module):
         if recon.shape[-2:] != x.shape[-2:]:
             recon = F.interpolate(recon, size=x.shape[-2:], mode="bilinear", align_corners=False)
         return recon
-
-
-class BasicVectorAutoencoderTrainer(AutoencoderTrainer):
-    """Trainer for the basic vector-latent autoencoder."""
-
-    def __init__(
-        self,
-        *,
-        device: torch.device,
-        lr: float,
-        loss_fn: nn.Module,
-        latent_channels: int = 64,
-        latent_dim: int = 256,
-        latent_spatial: int = 7,
-        weight_decay: float = 0.0,
-    ) -> None:
-        model = BasicVectorAutoencoder(
-            latent_channels=latent_channels,
-            latent_dim=latent_dim,
-            latent_spatial=latent_spatial,
-        )
-        super().__init__(
-            model,
-            device=device,
-            lr=lr,
-            loss_fn=loss_fn,
-            weight_decay=weight_decay,
-        )
-
-
-__all__ = ["BasicVectorAutoencoder", "BasicVectorAutoencoderTrainer"]
+__all__ = ["BasicVectorAutoencoder"]
