@@ -6,11 +6,23 @@ import torch
 import torch.nn as nn
 
 from .autoencoder_lightweight import LightweightDecoder, LightweightEncoder
-from .spatial_softmax import SpatialSoftmax
 
 
-class LightweightFlatLatentAutoencoder(nn.Module):
-    """Lightweight autoencoder that compresses to a flat latent vector."""
+class LightweightFlatAutoencoder(nn.Module):
+    """Lightweight autoencoder that compresses to a flat latent vector.
+
+    Rationale:
+    - Reuses the LightweightEncoder/Decoder stack (28×28×128 latent grid) but
+      pools to a channel-wise summary before projecting into a compact vector.
+    - The latent vector expands back to the 28×28×128 grid with a single linear
+      layer, mirroring the BasicVectorAutoencoder workflow while keeping the
+      convolutional trunk lightweight.
+
+    Total parameters: ≈27.6M learnable weights when base_channels=48,
+    latent_channels=128, and latent_dim=256; ≈25.8M of those live in the
+    latent expansion Linear layer, so reducing `latent_dim` or the encoder’s
+    spatial resolution quickly shrinks the overall count.
+    """
 
     def __init__(
         self,
@@ -28,20 +40,16 @@ class LightweightFlatLatentAutoencoder(nn.Module):
             raise ValueError("input_hw dimensions must be divisible by 8 to match encoder strides.")
         self.latent_hw = (height // 8, width // 8)
         self.pool = nn.AdaptiveAvgPool2d(1)
-        self.spatial = SpatialSoftmax(latent_channels)
-        combined_dim = latent_channels + self.spatial.output_dim
-        self.pre_latent_norm = nn.LayerNorm(combined_dim)
-        self.latent_proj = nn.Linear(combined_dim, latent_dim)
+        self.pre_latent_norm = nn.LayerNorm(latent_channels)
+        self.latent_proj = nn.Linear(latent_channels, latent_dim)
         self.latent_norm = nn.LayerNorm(latent_dim)
         self.expand = nn.Linear(latent_dim, latent_channels * self.latent_hw[0] * self.latent_hw[1])
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         features = self.encoder(x)
         pooled = self.pool(features).flatten(1)
-        spatial = self.spatial(features)
-        combined = torch.cat([pooled, spatial], dim=-1)
-        combined = self.pre_latent_norm(combined)
-        latent = self.latent_proj(combined)
+        pooled = self.pre_latent_norm(pooled)
+        latent = self.latent_proj(pooled)
         return self.latent_norm(latent)
 
     def decode(
@@ -65,4 +73,4 @@ class LightweightFlatLatentAutoencoder(nn.Module):
         return self.decode(latent, target_hw=x.shape[-2:])
 
 
-__all__ = ["LightweightFlatLatentAutoencoder"]
+__all__ = ["LightweightFlatAutoencoder"]

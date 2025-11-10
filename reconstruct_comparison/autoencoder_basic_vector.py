@@ -11,19 +11,20 @@ class BasicVectorAutoencoder(nn.Module):
     - Mirrors the spatial basic encoder so the convolutional trunk stays
       inexpensive while capturing coarse layout cues.
     - Uses adaptive pooling before the linear bottleneck so the latent vector
-      remains compact without the ≈100m parameters of a full 28×28 flatten.
+      stays tractable; flattening the full 28×28×128 tensor would otherwise add
+      ≈52M parameters to the latent MLP and proved numerically brittle.
 
-    Total parameters: ≈52m learnable weights when latent_channels=128,
-    latent_dim=256, and latent_spatial=28; almost all of those weights live in
-    the latent MLP, so halving latent_spatial or latent_dim cuts the total
-    roughly in half while leaving the convolutional trunk unchanged.
+    Total parameters: ≈13M learnable weights when latent_channels=128,
+    latent_dim=256, and latent_spatial=14; almost all of those weights live in
+    the latent MLP, so shrinking latent_spatial or latent_dim further cuts the
+    total while leaving the convolutional trunk unchanged.
     """
 
     def __init__(
         self,
         latent_channels: int = 128,
         latent_dim: int = 256,
-        latent_spatial: int = 28,
+        latent_spatial: int = 14,
     ) -> None:
         super().__init__()
         self.latent_channels = latent_channels

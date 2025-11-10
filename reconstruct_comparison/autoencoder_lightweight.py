@@ -81,7 +81,19 @@ class LightweightDecoder(nn.Module):
 
 
 class LightweightAutoencoder(nn.Module):
-    """Autoencoder without skip connections that mirrors the lightweight encoder."""
+    """Stride-2 lightweight autoencoder without skip connections.
+
+    Rationale:
+    - Mirrors the encoder/down-sampler stack (48→96→144→128 channels) with
+      matching transpose-convolution blocks so the latent stays 28×28×128 and
+      decoding remains inexpensive.
+    - Keeps GroupNorm/Sigmoid Linear Units throughout, giving it the same
+      inductive bias as the BasicAutoencoder while scaling channel capacity.
+
+    Total parameters: ≈1.8M learnable weights when base_channels=48 and
+    latent_channels=128; changing the base width scales quadratically with the
+    channel multipliers defined in the DownBlock/UpBlock pyramid.
+    """
 
     def __init__(self, base_channels: int = 48, latent_channels: int = 128) -> None:
         super().__init__()

@@ -19,7 +19,7 @@ from .autoencoder_lightweight import (
 )
 from .autoencoder_lightweight_unet import LightweightAutoencoderUNet
 from .autoencoder_lightweight_unet_skip_train import LightweightAutoencoderUNetSkipTrain
-from .autoencoder_lightweight_flat_latent import LightweightFlatLatentAutoencoder
+from .autoencoder_lightweight_flat_latent import LightweightFlatAutoencoder
 from .autoencoder_mario4 import (
     Mario4Autoencoder,
     Mario4LargeAutoencoder,
@@ -62,7 +62,7 @@ __all__ = [
     "LightweightAutoencoderUNetSkipTrain",
     "LightweightDecoder",
     "LightweightEncoder",
-    "LightweightFlatLatentAutoencoder",
+    "LightweightFlatAutoencoder",
     "Mario4Autoencoder",
     "Mario4LargeAutoencoder",
     "Mario4MirroredAutoencoder",

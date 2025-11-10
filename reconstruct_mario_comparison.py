@@ -51,7 +51,7 @@ from reconstruct_comparison import (
     LightweightAutoencoderPatch,
     LightweightAutoencoderUNet,
     LightweightAutoencoderUNetSkipTrain,
-    LightweightFlatLatentAutoencoder,
+    LightweightFlatAutoencoder,
     Mario4Autoencoder,
     Mario4LargeAutoencoder,
     Mario4MirroredAutoencoder,
@@ -719,7 +719,7 @@ def build_trainers(
         trainers["modern_attn"] = trainer
     if cfg.enable_ae_flat_l1:
         trainer = AutoencoderTrainer(
-            model=LightweightFlatLatentAutoencoder(),
+            model=LightweightFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["ae_flat_l1"].loss(),
@@ -727,7 +727,7 @@ def build_trainers(
         trainers["ae_flat_l1"] = trainer
     if cfg.enable_ae_flat_focal:
         trainer = AutoencoderTrainer(
-            model=LightweightFlatLatentAutoencoder(),
+            model=LightweightFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["ae_flat_focal"].loss(),
@@ -735,7 +735,7 @@ def build_trainers(
         trainers["ae_flat_focal"] = trainer
     if cfg.enable_ae_flat_hardness:
         trainer = AutoencoderTrainer(
-            model=LightweightFlatLatentAutoencoder(),
+            model=LightweightFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["ae_flat_hardness"].loss(),
