@@ -168,7 +168,10 @@ class BestPracticeAutoencoder(nn.Module):
     - Lightweight self-attention augments global context so small objects are
       not lost during aggressive down-sampling.
 
-    Total parameters: ≈2.89e7 learnable weights.
+    Total parameters: ≈29m learnable weights when base_channels=64 and
+    latent_channels=256; scaling base_channels by k roughly multiplies the
+    total by k^2, while adjusting latent_channels only affects the deepest
+    encoder/decoder stage.
     """
 
     def __init__(self, base_channels: int = 64, latent_channels: int = 256) -> None:

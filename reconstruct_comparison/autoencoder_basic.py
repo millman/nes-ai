@@ -13,7 +13,10 @@ class BasicAutoencoder(nn.Module):
     - Mirrors the encoder with transpose convolutions so every latent feature
       directly informs pixels without expensive skip connections.
 
-    Total parameters: ≈1.51e5 learnable weights.
+    Total parameters: ≈250k learnable weights with the default latent_channels=128.
+    Each extra latent channel adds ≈1.5k weights because only the last encoder
+    and first decoder layers widen, while the count stays independent of the
+    224×224 RGB input resolution.
     """
 
     def __init__(self, latent_channels: int = 128) -> None:

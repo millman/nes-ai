@@ -15,9 +15,12 @@ class BestPracticeVectorAutoencoder(nn.Module):
     - Reuses the expressive convolutional backbone so the encoder maintains
       spatial awareness and attention-driven detail.
     - Down-samples the latent grid before flattening so the vector head adds
-      only ≈2.8e7 parameters instead of hundreds of millions.
+      only ≈28m parameters instead of hundreds of millions.
 
-    Total parameters: ≈5.6e7 learnable weights (vector head + backbone).
+    Total parameters: ≈56m learnable weights when base_channels=64,
+    latent_channels=256, and latent_dim=1024; roughly half of those belong to
+    the latent projection head, so shrinking latent_dim or the reduced spatial
+    size immediately lowers the total while the shared backbone stays ≈29m.
     """
 
     def __init__(
