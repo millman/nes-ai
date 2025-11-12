@@ -10,7 +10,14 @@ from .spatial_softmax import SpatialSoftmax
 
 
 class FocalL1Loss(nn.Module):
-    """Pixel-wise focal weighting applied to an L1 reconstruction objective."""
+    """Focal-style L1 reconstruction loss that upweights harder pixels.
+
+    Loss:
+        L = mean( w_i * |x_i - y_i| )
+    with weights
+        w_i = min(max_weight, (|x_i - y_i| / (mean_batch + eps)) ** gamma)
+    where mean_batch is the per-sample mean absolute error over all pixels.
+    """
 
     def __init__(self, gamma: float = 2.0, max_weight: float = 5.0, eps: float = 1e-6) -> None:
         super().__init__()
@@ -25,6 +32,7 @@ class FocalL1Loss(nn.Module):
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         l1 = torch.abs(input - target)
         norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        # Implements w_i = min(max_weight, (|x_i - y_i| / norm) ** gamma).
         weight = torch.pow(l1 / norm, self.gamma).clamp(max=self.max_weight)
         loss = weight * l1
         return loss.mean()

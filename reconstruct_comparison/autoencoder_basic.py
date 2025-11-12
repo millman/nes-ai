@@ -12,6 +12,8 @@ class BasicAutoencoder(nn.Module):
       extremely cheap while still down-sampling spatially for compression.
     - Mirrors the encoder with transpose convolutions so every latent feature
       directly informs pixels without expensive skip connections.
+    - Encoder output latent: [B, latent_channels, 28, 28] → 28×28×latent_channels
+      elements (100,352 values when latent_channels=128).
 
     Total parameters: ≈250k learnable weights with the default latent_channels=128.
     Each extra latent channel adds ≈1.5k weights because only the last encoder

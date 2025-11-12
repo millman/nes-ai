@@ -13,6 +13,9 @@ class BasicVectorAutoencoder(nn.Module):
     - Uses adaptive pooling before the linear bottleneck so the latent vector
       stays tractable; flattening the full 28×28×128 tensor would otherwise add
       ≈52M parameters to the latent MLP and proved numerically brittle.
+    - Encoder output latent: [B, latent_dim] (default 256) produced from a pooled
+      [B, latent_channels, latent_spatial, latent_spatial] tensor (25,088 values
+      before the linear layer when using the defaults).
 
     Total parameters: ≈13M learnable weights when latent_channels=128,
     latent_dim=256, and latent_spatial=14; almost all of those weights live in

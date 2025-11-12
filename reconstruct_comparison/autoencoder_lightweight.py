@@ -89,6 +89,8 @@ class LightweightAutoencoder(nn.Module):
       decoding remains inexpensive.
     - Keeps GroupNorm/Sigmoid Linear Units throughout, giving it the same
       inductive bias as the BasicAutoencoder while scaling channel capacity.
+    - Encoder output latent: [B, latent_channels, 28, 28] → 28×28×latent_channels
+      elements (100,352 values with the default latent_channels=128).
 
     Total parameters: ≈1.8M learnable weights when base_channels=48 and
     latent_channels=128; changing the base width scales quadratically with the

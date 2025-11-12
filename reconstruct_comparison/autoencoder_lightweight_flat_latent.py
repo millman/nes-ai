@@ -17,6 +17,9 @@ class LightweightFlatAutoencoder(nn.Module):
     - The latent vector expands back to the 28×28×128 grid with a single linear
       layer, mirroring the BasicVectorAutoencoder workflow while keeping the
       convolutional trunk lightweight.
+    - Encoder output latent: [B, latent_dim] (default 256) distilled from the
+      pooled [B, latent_channels, 28, 28] tensor (100,352 pre-pooled values with
+      default geometry).
 
     Total parameters: ≈27.6M learnable weights when base_channels=48,
     latent_channels=128, and latent_dim=256; ≈25.8M of those live in the
