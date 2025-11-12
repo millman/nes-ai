@@ -4,9 +4,9 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .autoencoder_lightweight import LightweightDecoder, LightweightEncoder
+from .latent_vector_adapter import SpatialLatentProjector
 
 
 class LightweightFlatAutoencoder(nn.Module):
@@ -16,26 +16,28 @@ class LightweightFlatAutoencoder(nn.Module):
     - Reuses the LightweightEncoder/Decoder stack (28×28×128 latent grid) but
       pools to a smaller latent_spatial×latent_spatial tensor before flattening,
       mirroring the BasicFlatAutoencoder workflow.
-    - A single Linear layer maps the pooled tensor to the latent vector and a
-      matching Linear reverses the operation before resizing back to the encoder
-      grid, making the flatten/unflatten path easy to follow.
-    - Encoder output latent: [B, latent_dim] (default 256) distilled from the
-      pooled [B, latent_channels, latent_spatial, latent_spatial] tensor (e.g.
-      25,088 values when latent_spatial=14 and latent_channels=128).
+    - A shared SpatialLatentProjector handles pooling, 1×1 channel projections,
+      flattening, and the inverse reshape so both the basic and lightweight
+      variants can opt into large latent vectors without massive dense layers.
+    - Encoder output latent: [B, latent_dim] distilled from the pooled
+      [B, latent_channels, latent_spatial, latent_spatial] tensor, with
+      latent_dim strictly equal to latent_conv_channels × latent_spatial² (25,088
+      values when the defaults are used).
 
-    Total parameters: ≈27.6M learnable weights when base_channels=48,
-    latent_channels=128, latent_spatial=14, and latent_dim=256; ≈25.8M of those
-    live in the latent MLP, so shrinking latent_spatial or latent_dim quickly
-    reduces the total while leaving the convolutional trunk unchanged.
+    Total parameters stay near the ≈1.8M conv trunk plus the projector, which
+    can now swap between tiny (≈256-d) and large (≈16k-d) latents by only
+    adjusting projection settings (latent_spatial/projection_channels).
     """
 
     def __init__(
         self,
         base_channels: int = 48,
         latent_channels: int = 128,
-        latent_dim: int = 256,
+        latent_dim: int = 25088,
         latent_spatial: int = 14,
         input_hw: Tuple[int, int] = (224, 224),
+        latent_conv_channels: int = 128,
+        latent_proj_layers: int = 1,
     ) -> None:
         super().__init__()
         height, width = input_hw
@@ -46,27 +48,33 @@ class LightweightFlatAutoencoder(nn.Module):
             raise ValueError(
                 f"latent_spatial ({latent_spatial}) must be <= encoder latent grid {self.latent_hw}"
             )
+        if latent_dim <= 0:
+            raise ValueError("latent_dim must be positive")
+        if latent_conv_channels <= 0:
+            raise ValueError("latent_conv_channels must be positive")
+        spatial_area = latent_spatial * latent_spatial
+        expected_dim = latent_conv_channels * spatial_area
+        if latent_dim != expected_dim:
+            raise ValueError(
+                "latent_dim must equal latent_conv_channels * latent_spatial^2."
+            )
         self.encoder = LightweightEncoder(base_channels, latent_channels)
         self.decoder = LightweightDecoder(base_channels, latent_channels, output_hw=input_hw)
         self.latent_channels = latent_channels
-        self.latent_dim = latent_dim
         self.latent_spatial = latent_spatial
-        self.pool = nn.AdaptiveAvgPool2d((latent_spatial, latent_spatial))
-        self.flatten = nn.Flatten()
-        self.to_latent = nn.Linear(
-            latent_channels * latent_spatial * latent_spatial,
+        self.latent_adapter = SpatialLatentProjector(
+            latent_channels,
+            self.latent_hw,
+            latent_spatial,
             latent_dim,
+            projection_channels=latent_conv_channels,
+            proj_layers=latent_proj_layers,
         )
-        self.from_latent = nn.Linear(
-            latent_dim,
-            latent_channels * latent_spatial * latent_spatial,
-        )
+        self.latent_dim = self.latent_adapter.latent_dim
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         features = self.encoder(x)
-        pooled = self.pool(features)
-        flat = self.flatten(pooled)
-        return self.to_latent(flat)
+        return self.latent_adapter.grid_to_vector(features)
 
     def decode(
         self,
@@ -74,19 +82,7 @@ class LightweightFlatAutoencoder(nn.Module):
         *,
         target_hw: Optional[Tuple[int, int]] = None,
     ) -> torch.Tensor:
-        expanded = self.from_latent(latent)
-        expanded = expanded.view(
-            latent.size(0),
-            self.latent_channels,
-            self.latent_spatial,
-            self.latent_spatial,
-        )
-        expanded = F.interpolate(
-            expanded,
-            size=self.latent_hw,
-            mode="bilinear",
-            align_corners=False,
-        )
+        expanded = self.latent_adapter.vector_to_grid(latent)
         return self.decoder(expanded, target_hw=target_hw)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
