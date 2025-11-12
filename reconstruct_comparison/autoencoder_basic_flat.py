@@ -20,10 +20,11 @@ class BasicFlatAutoencoder(nn.Module):
       so the latent dimensionality is purely conv-controlled rather than driven
       by a dense bottleneck.
     - Encoder output latent: [B, latent_dim] produced from a pooled
-      [B, latent_channels, pooled_spatial, pooled_spatial] tensor, with the
-      strict requirement that latent_dim = latent_conv_channels × latent_spatial².
-      The defaults (latent_conv_channels=128, latent_dim=25,088) already satisfy
-      this relationship.
+      [B, latent_channels, pooled_spatial, pooled_spatial] tensor.
+      1. Adaptive pooling shrinks 28×28×latent_channels → latent_spatial²×latent_channels.
+      2. A stack of 1×1 convolutions reduces channels to latent_conv_channels.
+      3. Flattening yields latent_conv_channels × latent_spatial² scalars, which
+         define latent_dim automatically (25,088 with defaults).
 
     The total parameters are now dominated by the basic conv trunk plus the
     small projector, so dialing projection settings up or down remains cheap.
@@ -32,7 +33,6 @@ class BasicFlatAutoencoder(nn.Module):
     def __init__(
         self,
         latent_channels: int = 128,
-        latent_dim: int = 25088,
         latent_spatial: int = 14,
         input_hw: Tuple[int, int] = (224, 224),
         latent_conv_channels: int = 128,
@@ -46,16 +46,10 @@ class BasicFlatAutoencoder(nn.Module):
             raise ValueError(
                 f"latent_spatial ({latent_spatial}) must be <= latent grid {latent_hw}"
             )
-        if latent_dim <= 0:
-            raise ValueError("latent_dim must be positive")
         if latent_conv_channels <= 0:
             raise ValueError("latent_conv_channels must be positive")
         spatial_area = latent_spatial * latent_spatial
-        expected_dim = latent_conv_channels * spatial_area
-        if latent_dim != expected_dim:
-            raise ValueError(
-                "latent_dim must equal latent_conv_channels * latent_spatial^2."
-            )
+        self.latent_dim = latent_conv_channels * spatial_area
         self.latent_channels = latent_channels
         self.latent_spatial = latent_spatial
         self.latent_hw = latent_hw
@@ -63,11 +57,9 @@ class BasicFlatAutoencoder(nn.Module):
             latent_channels,
             latent_hw,
             latent_spatial,
-            latent_dim,
             projection_channels=latent_conv_channels,
             proj_layers=latent_proj_layers,
         )
-        self.latent_dim = self.latent_adapter.latent_dim
         self.encoder = BasicEncoder(latent_channels, input_hw)
         self.decoder = BasicDecoder(latent_channels, latent_hw)
 

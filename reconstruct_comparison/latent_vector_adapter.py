@@ -11,8 +11,8 @@ class SpatialLatentProjector(nn.Module):
     """Shared module that maps encoder grids to latent vectors and back.
 
     The projector reduces the encoder's latent grid via adaptive pooling and a
-    stack of 1×1 convolutions, flattens the result, and enforces that the
-    resulting flattened width exactly equals ``latent_dim``. The inverse path
+    stack of 1×1 convolutions, then flattens to a vector whose width is fully
+    determined by ``projection_channels × latent_spatial²``. The inverse path
     reshapes the vector back into a spatial tensor, expands the channels with
     another 1×1 stack, and upsamples to the decoder's expected ``latent_hw``.
     """
@@ -22,7 +22,6 @@ class SpatialLatentProjector(nn.Module):
         in_channels: int,
         latent_hw: Tuple[int, int],
         latent_spatial: int,
-        latent_dim: int,
         *,
         projection_channels: int,
         proj_layers: int = 1,
@@ -36,8 +35,6 @@ class SpatialLatentProjector(nn.Module):
             raise ValueError("latent_hw must be positive")
         if latent_spatial <= 0:
             raise ValueError("latent_spatial must be positive")
-        if latent_dim <= 0:
-            raise ValueError("latent_dim must be positive")
         if projection_channels <= 0:
             raise ValueError("projection_channels must be positive")
         self.latent_hw = latent_hw
@@ -46,14 +43,9 @@ class SpatialLatentProjector(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d((latent_spatial, latent_spatial))
         spatial_area = latent_spatial * latent_spatial
         flat_dim = projection_channels * spatial_area
-        if latent_dim != flat_dim:
-            raise ValueError(
-                "latent_dim must equal projection_channels * latent_spatial^2 for the "
-                "SpatialLatentProjector."
-            )
         self.projection_channels = projection_channels
         self.flat_dim = flat_dim
-        self.latent_dim = latent_dim
+        self.latent_dim = flat_dim
         self.channel_down = self._build_channel_stack(
             in_channels, projection_channels, proj_layers, activation
         )

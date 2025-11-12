@@ -20,9 +20,11 @@ class LightweightFlatAutoencoder(nn.Module):
       flattening, and the inverse reshape so both the basic and lightweight
       variants can opt into large latent vectors without massive dense layers.
     - Encoder output latent: [B, latent_dim] distilled from the pooled
-      [B, latent_channels, latent_spatial, latent_spatial] tensor, with
-      latent_dim strictly equal to latent_conv_channels × latent_spatial² (25,088
-      values when the defaults are used).
+      [B, latent_channels, latent_spatial, latent_spatial] tensor via:
+      1. Adaptive pooling from 28×28×latent_channels to latent_spatial²×latent_channels.
+      2. 1×1 conv projection down to latent_conv_channels channels.
+      3. Flattening the tensor, which yields latent_conv_channels × latent_spatial²
+         scalars and therefore sets latent_dim implicitly (25,088 with defaults).
 
     Total parameters stay near the ≈1.8M conv trunk plus the projector, which
     can now swap between tiny (≈256-d) and large (≈16k-d) latents by only
@@ -33,7 +35,6 @@ class LightweightFlatAutoencoder(nn.Module):
         self,
         base_channels: int = 48,
         latent_channels: int = 128,
-        latent_dim: int = 25088,
         latent_spatial: int = 14,
         input_hw: Tuple[int, int] = (224, 224),
         latent_conv_channels: int = 128,
@@ -48,29 +49,21 @@ class LightweightFlatAutoencoder(nn.Module):
             raise ValueError(
                 f"latent_spatial ({latent_spatial}) must be <= encoder latent grid {self.latent_hw}"
             )
-        if latent_dim <= 0:
-            raise ValueError("latent_dim must be positive")
         if latent_conv_channels <= 0:
             raise ValueError("latent_conv_channels must be positive")
         spatial_area = latent_spatial * latent_spatial
-        expected_dim = latent_conv_channels * spatial_area
-        if latent_dim != expected_dim:
-            raise ValueError(
-                "latent_dim must equal latent_conv_channels * latent_spatial^2."
-            )
-        self.encoder = LightweightEncoder(base_channels, latent_channels)
-        self.decoder = LightweightDecoder(base_channels, latent_channels, output_hw=input_hw)
+        self.latent_dim = latent_conv_channels * spatial_area
         self.latent_channels = latent_channels
         self.latent_spatial = latent_spatial
         self.latent_adapter = SpatialLatentProjector(
             latent_channels,
             self.latent_hw,
             latent_spatial,
-            latent_dim,
             projection_channels=latent_conv_channels,
             proj_layers=latent_proj_layers,
         )
-        self.latent_dim = self.latent_adapter.latent_dim
+        self.encoder = LightweightEncoder(base_channels, latent_channels)
+        self.decoder = LightweightDecoder(base_channels, latent_channels, output_hw=input_hw)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         features = self.encoder(x)
