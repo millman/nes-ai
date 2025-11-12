@@ -24,7 +24,9 @@ class BasicFlatAutoencoder(nn.Module):
       1. Adaptive pooling shrinks 28×28×latent_channels → latent_spatial²×latent_channels.
       2. A stack of 1×1 convolutions reduces channels to latent_conv_channels.
       3. Flattening yields latent_conv_channels × latent_spatial² scalars, which
-         define latent_dim automatically (25,088 with defaults).
+         define latent_dim automatically.
+      With the defaults (latent_spatial=14, latent_conv_channels=128) this becomes
+      28×28 → 14×14 pooling, 128 projected channels, and a 128×14×14 = 25,088 element latent.
 
     The total parameters are now dominated by the basic conv trunk plus the
     small projector, so dialing projection settings up or down remains cheap.

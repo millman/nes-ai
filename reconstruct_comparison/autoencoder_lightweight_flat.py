@@ -24,7 +24,9 @@ class LightweightFlatAutoencoder(nn.Module):
       1. Adaptive pooling from 28×28×latent_channels to latent_spatial²×latent_channels.
       2. 1×1 conv projection down to latent_conv_channels channels.
       3. Flattening the tensor, which yields latent_conv_channels × latent_spatial²
-         scalars and therefore sets latent_dim implicitly (25,088 with defaults).
+         scalars and therefore sets latent_dim implicitly.
+      With the defaults (latent_spatial=14, latent_conv_channels=128) the latent
+      is 14×14×128 = 25,088 elements.
 
     Total parameters stay near the ≈1.8M conv trunk plus the projector, which
     can now swap between tiny (≈256-d) and large (≈16k-d) latents by only
