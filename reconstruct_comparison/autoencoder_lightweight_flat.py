@@ -15,7 +15,7 @@ class LightweightFlatAutoencoder(nn.Module):
     - Reuses the LightweightEncoder/Decoder stack (28×28×128 latent grid) but
       pools to a channel-wise summary before projecting into a compact vector.
     - The latent vector expands back to the 28×28×128 grid with a single linear
-      layer, mirroring the BasicVectorAutoencoder workflow while keeping the
+      layer, mirroring the BasicFlatAutoencoder workflow while keeping the
       convolutional trunk lightweight.
     - Encoder output latent: [B, latent_dim] (default 256) distilled from the
       pooled [B, latent_channels, 28, 28] tensor (100,352 pre-pooled values with

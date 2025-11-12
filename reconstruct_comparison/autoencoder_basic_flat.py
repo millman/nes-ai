@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class BasicVectorAutoencoder(nn.Module):
+class BasicFlatAutoencoder(nn.Module):
     """Basic autoencoder that exposes a flattened latent vector.
 
     Rationale:
@@ -100,4 +100,4 @@ class BasicVectorAutoencoder(nn.Module):
         if recon.shape[-2:] != x.shape[-2:]:
             recon = F.interpolate(recon, size=x.shape[-2:], mode="bilinear", align_corners=False)
         return recon
-__all__ = ["BasicVectorAutoencoder"]
+__all__ = ["BasicFlatAutoencoder"]

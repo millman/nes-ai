@@ -7,7 +7,7 @@ from .loss import (
     FocalSpatialSoftmaxLoss,
 )
 from .autoencoder_basic import BasicAutoencoder
-from .autoencoder_basic_vector import BasicVectorAutoencoder
+from .autoencoder_basic_flat import BasicFlatAutoencoder
 from .autoencoder_best_practice import BestPracticeAutoencoderTrainer
 from .autoencoder_best_practice_vector import BestPracticeVectorAutoencoderTrainer
 from .decoder import Decoder
@@ -19,7 +19,7 @@ from .autoencoder_lightweight import (
 )
 from .autoencoder_lightweight_unet import LightweightAutoencoderUNet
 from .autoencoder_lightweight_unet_skip_train import LightweightAutoencoderUNetSkipTrain
-from .autoencoder_lightweight_flat_latent import LightweightFlatAutoencoder
+from .autoencoder_lightweight_flat import LightweightFlatAutoencoder
 from .autoencoder_mario4 import (
     Mario4Autoencoder,
     Mario4LargeAutoencoder,
@@ -45,7 +45,7 @@ from .autoencoder_texture_unet import TextureAwareAutoencoderUNet
 __all__ = [
     "AutoencoderTrainer",
     "BasicAutoencoder",
-    "BasicVectorAutoencoder",
+    "BasicFlatAutoencoder",
     "BestPracticeAutoencoderTrainer",
     "BestPracticeVectorAutoencoderTrainer",
     "Decoder",

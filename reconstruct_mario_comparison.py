@@ -36,7 +36,7 @@ from predict_mario_ms_ssim import default_transform, pick_device, unnormalize
 from reconstruct_comparison import (
     AutoencoderTrainer,
     BasicAutoencoder,
-    BasicVectorAutoencoder,
+    BasicFlatAutoencoder,
     BestPracticeAutoencoderTrainer,
     BestPracticeVectorAutoencoderTrainer,
     Decoder,
@@ -816,7 +816,7 @@ def build_trainers(
         trainers[model_key] = trainer
     if cfg.enable_basic_flat_mse:
         trainer = AutoencoderTrainer(
-            model=BasicVectorAutoencoder(),
+            model=BasicFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_mse"].loss(),
@@ -825,7 +825,7 @@ def build_trainers(
         trainers["basic_flat_mse"] = trainer
     if cfg.enable_basic_flat_l1:
         trainer = AutoencoderTrainer(
-            model=BasicVectorAutoencoder(),
+            model=BasicFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_l1"].loss(),
@@ -834,7 +834,7 @@ def build_trainers(
         trainers["basic_flat_l1"] = trainer
     if cfg.enable_basic_flat_focal:
         trainer = AutoencoderTrainer(
-            model=BasicVectorAutoencoder(),
+            model=BasicFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_focal"].loss(),
@@ -843,7 +843,7 @@ def build_trainers(
         trainers["basic_flat_focal"] = trainer
     if cfg.enable_basic_flat_focal_spatial:
         trainer = AutoencoderTrainer(
-            model=BasicVectorAutoencoder(),
+            model=BasicFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_focal_spatial"].loss(),
@@ -852,7 +852,7 @@ def build_trainers(
         trainers["basic_flat_focal_spatial"] = trainer
     if cfg.enable_basic_flat_hardness:
         trainer = AutoencoderTrainer(
-            model=BasicVectorAutoencoder(),
+            model=BasicFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos["basic_flat_hardness"].loss(),
