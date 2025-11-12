@@ -6,7 +6,7 @@ from .loss import (
     MultiScalePatchLoss,
     FocalSpatialSoftmaxLoss,
 )
-from .autoencoder_basic import BasicAutoencoder
+from .autoencoder_basic import BasicAutoencoder, BasicDecoder, BasicEncoder
 from .autoencoder_basic_flat import BasicFlatAutoencoder
 from .autoencoder_best_practice import BestPracticeAutoencoderTrainer
 from .autoencoder_best_practice_vector import BestPracticeVectorAutoencoderTrainer
@@ -45,6 +45,8 @@ from .autoencoder_texture_unet import TextureAwareAutoencoderUNet
 __all__ = [
     "AutoencoderTrainer",
     "BasicAutoencoder",
+    "BasicDecoder",
+    "BasicEncoder",
     "BasicFlatAutoencoder",
     "BestPracticeAutoencoderTrainer",
     "BestPracticeVectorAutoencoderTrainer",

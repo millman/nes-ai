@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .autoencoder_basic import BasicDecoder, BasicEncoder
+
 
 class BasicFlatAutoencoder(nn.Module):
     """Basic autoencoder that exposes a flattened latent vector.
 
     Rationale:
-    - Mirrors the spatial basic encoder so the convolutional trunk stays
-      inexpensive while capturing coarse layout cues.
+    - Reuses :class:`BasicEncoder`/:class:`BasicDecoder` so the convolutional trunk
+      matches the spatial autoencoder while remaining easily testable in isolation.
     - Uses adaptive pooling before the linear bottleneck so the latent vector
       stays tractable; flattening the full 28×28×128 tensor would otherwise add
       ≈52M parameters to the latent MLP and proved numerically brittle.
     - Encoder output latent: [B, latent_dim] (default 256) produced from a pooled
-      [B, latent_channels, latent_spatial, latent_spatial] tensor (25,088 values
+      [B, latent_channels, pooled_spatial, pooled_spatial] tensor (25,088 values
       before the linear layer when using the defaults).
 
     Total parameters: ≈13M learnable weights when latent_channels=128,
@@ -28,25 +33,23 @@ class BasicFlatAutoencoder(nn.Module):
         latent_channels: int = 128,
         latent_dim: int = 256,
         latent_spatial: int = 14,
+        input_hw: Tuple[int, int] = (224, 224),
     ) -> None:
         super().__init__()
+        if input_hw[0] % 8 != 0 or input_hw[1] % 8 != 0:
+            raise ValueError("input_hw must be divisible by 8 to match encoder strides.")
+        latent_hw = (input_hw[0] // 8, input_hw[1] // 8)
+        if latent_spatial > latent_hw[0] or latent_spatial > latent_hw[1]:
+            raise ValueError(
+                f"latent_spatial ({latent_spatial}) must be <= latent grid {latent_hw}"
+            )
         self.latent_channels = latent_channels
         self.latent_dim = latent_dim
         self.latent_spatial = latent_spatial
-        self.encoder_conv = nn.Sequential(
-            # [B, 3, 224, 224] -> [B, 32, 112, 112]; stride-2 conv for cheap
-            # down-sampling while expanding representational capacity.
-            nn.Conv2d(3, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            # [B, 32, 112, 112] -> [B, 48, 56, 56]; builds mid-level features.
-            nn.Conv2d(32, 48, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            # [B, 48, 56, 56] -> [B, latent_channels, 28, 28]; compact spatial
-            # latent keeps decoding simple while feeding the MLP.
-            nn.Conv2d(48, latent_channels, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-        )
-        # Pool to smaller spatial grid: [B, latent_channels, 28, 28] ->
+        self.latent_hw = latent_hw
+        self.encoder = BasicEncoder(latent_channels, input_hw)
+        self.decoder = BasicDecoder(latent_channels, latent_hw)
+        # Pool to smaller spatial grid: [B, latent_channels, H/8, W/8] ->
         # [B, latent_channels, latent_spatial, latent_spatial].
         self.pool = nn.AdaptiveAvgPool2d((latent_spatial, latent_spatial))
         # Flatten pooled features and map to latent vector.
@@ -59,19 +62,9 @@ class BasicFlatAutoencoder(nn.Module):
         self.from_latent = nn.Linear(
             latent_dim, latent_channels * latent_spatial * latent_spatial
         )
-        self.decoder_conv = nn.Sequential(
-            # [B, latent_channels, 28, 28] -> [B, 48, 56, 56].
-            nn.ConvTranspose2d(latent_channels, 48, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            # [B, 48, 56, 56] -> [B, 32, 112, 112].
-            nn.ConvTranspose2d(48, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            # [B, 32, 112, 112] -> [B, 3, 224, 224].
-            nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1),
-        )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        feats = self.encoder_conv(x)
+        feats = self.encoder(x)
         pooled = self.pool(feats)
         flat = self.flatten(pooled)
         latent = self.to_latent(flat)
@@ -82,17 +75,13 @@ class BasicFlatAutoencoder(nn.Module):
         feats = feats.view(
             latent.shape[0], self.latent_channels, self.latent_spatial, self.latent_spatial
         )
-        # Bring pooled tensor back to the 28×28 latent grid expected by the decoder.
         feats = F.interpolate(
             feats,
-            size=(28, 28),
+            size=self.latent_hw,
             mode="bilinear",
             align_corners=False,
         )
-        recon = self.decoder_conv(feats)
-        if recon.shape[-2:] != (224, 224):
-            recon = F.interpolate(recon, size=(224, 224), mode="bilinear", align_corners=False)
-        return recon
+        return self.decoder(feats)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         latent = self.encode(x)
