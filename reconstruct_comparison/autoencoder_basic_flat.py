@@ -30,6 +30,17 @@ class BasicFlatAutoencoder(nn.Module):
 
     The total parameters are now dominated by the basic conv trunk plus the
     small projector, so dialing projection settings up or down remains cheap.
+
+    Parameter accounting (defaults: latent_channels=128, latent_conv_channels=128,
+    latent_spatial=14):
+    - The BasicEncoder supplies 124,624 weights (three stride-2 Conv2d layers).
+      The mirrored BasicDecoder adds 124,499 weights (three ConvTranspose2d
+      layers), for 249,123 parameters across the convolutional trunk.
+    - The SpatialLatentProjector contributes 33,024 parameters: each 1×1
+      Conv2d(128→128) used in the down/up stacks holds 128×128 weights + 128
+      biases = 16,512 params, and there are two such stacks.
+    - Total learnable parameters: 249,123 (encoder/decoder) + 33,024 (projector)
+      = 282,147.
     """
 
     def __init__(

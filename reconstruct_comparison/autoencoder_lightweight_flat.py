@@ -31,6 +31,18 @@ class LightweightFlatAutoencoder(nn.Module):
     Total parameters stay near the ≈1.8M conv trunk plus the projector, which
     can now swap between tiny (≈256-d) and large (≈16k-d) latents by only
     adjusting projection settings (latent_spatial/projection_channels).
+
+    Parameter accounting (defaults: base_channels=48, latent_channels=128,
+    latent_conv_channels=128, latent_spatial=14):
+    - The LightweightEncoder/Decoder pair contains 1,792,611 weights. This sum
+      comes from the 3×3 stem (1,440 params), three DownBlocks (124,992 +
+      311,904 + 314,112), the bottleneck (147,840), three UpBlocks (482,400 +
+      304,704 + 94,752), and the two-layer head (10,467).
+    - The SpatialLatentProjector adds 33,024 params. Each of the symmetric 1×1
+      stacks is a single Conv2d(128→128, k=1) containing 128×128 weights + 128
+      biases = 16,512 parameters, so the down/up pair doubles that figure.
+    - Total learnable parameters: 1,792,611 (conv trunk) + 33,024 (projector) =
+      1,825,635.
     """
 
     def __init__(
