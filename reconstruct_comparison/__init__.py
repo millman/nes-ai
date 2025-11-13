@@ -10,6 +10,7 @@ from .autoencoder_basic import BasicAutoencoder, BasicDecoder, BasicEncoder
 from .autoencoder_basic_flat import BasicFlatAutoencoder
 from .autoencoder_best_practice import BestPracticeAutoencoderTrainer
 from .autoencoder_best_practice_vector import BestPracticeVectorAutoencoderTrainer
+from .autoencoder_convnext import ConvNeXtAutoencoder, ConvNeXtAutoencoderConfig
 from .decoder import Decoder
 from .autoencoder_lightweight import (
     LightweightAutoencoder,
@@ -50,6 +51,8 @@ __all__ = [
     "BasicFlatAutoencoder",
     "BestPracticeAutoencoderTrainer",
     "BestPracticeVectorAutoencoderTrainer",
+    "ConvNeXtAutoencoder",
+    "ConvNeXtAutoencoderConfig",
     "Decoder",
     "FocalL1Loss",
     "HardnessWeightedL1Loss",

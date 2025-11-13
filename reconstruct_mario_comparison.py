@@ -39,6 +39,7 @@ from reconstruct_comparison import (
     BasicFlatAutoencoder,
     BestPracticeAutoencoderTrainer,
     BestPracticeVectorAutoencoderTrainer,
+    ConvNeXtAutoencoder,
     Decoder,
     FocalMSSSIMAutoencoderUNet,
     FocalMSSSIMLoss,
@@ -108,6 +109,9 @@ TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
     TrainerInfo(model_key="basic_hardness", loss=HardnessWeightedL1Loss, description="Basic (Hardness)"),
     TrainerInfo(model_key="basic_l1", loss=nn.SmoothL1Loss, description="Basic Autoencoder (L1)"),
     TrainerInfo(model_key="basic_mse", loss=nn.MSELoss, description="Basic Autoencoder (MSE)"),
+    TrainerInfo(model_key="convnext_l1", loss=nn.SmoothL1Loss, description="ConvNeXt Autoencoder (L1)"),
+    TrainerInfo(model_key="convnext_focal", loss=FocalL1Loss, description="ConvNeXt Autoencoder (Focal)"),
+    TrainerInfo(model_key="convnext_hardness", loss=HardnessWeightedL1Loss, description="ConvNeXt Autoencoder (Hardness)"),
     TrainerInfo(model_key="best_flat_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice Flat)"),
     TrainerInfo(model_key="best_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice)"),
     TrainerInfo(model_key="mario4_1024", loss=nn.SmoothL1Loss, description="Mario4 Latent 1024"),
@@ -504,6 +508,11 @@ class Config:
     enable_basic_flat_focal_spatial: bool = False
     enable_basic_flat_hardness: bool = False
 
+    # ConvNeXt autoencoders
+    enable_convnext_l1: bool = False
+    enable_convnext_focal: bool = False
+    enable_convnext_hardness: bool = False
+
     # Standard/Lightweight autoencoders
     enable_ae_focal: bool = False
     enable_ae_l1: bool = False
@@ -859,6 +868,21 @@ def build_trainers(
             weight_decay=0.0,
         )
         trainers["basic_flat_hardness"] = trainer
+    convnext_variants: Tuple[Tuple[bool, str], ...] = (
+        (cfg.enable_convnext_l1, "convnext_l1"),
+        (cfg.enable_convnext_focal, "convnext_focal"),
+        (cfg.enable_convnext_hardness, "convnext_hardness"),
+    )
+    for enabled, model_key in convnext_variants:
+        if not enabled:
+            continue
+        trainer = AutoencoderTrainer(
+            model=ConvNeXtAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos[model_key].loss(),
+        )
+        trainers[model_key] = trainer
     if cfg.enable_best_focal:
         trainer = BestPracticeAutoencoderTrainer(
             device=device,
