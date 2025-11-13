@@ -7,6 +7,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .latent_vector_adapter import (
+    SpatialLatentProjector,
+    ConvNeXtSpatialLatentProjector,
+)
 
 class ChannelsLastLayerNorm(nn.Module):
     """LayerNorm wrapper that keeps tensors in NCHW form internally."""
@@ -112,6 +116,14 @@ class ConvNeXtAutoencoderConfig:
     latent_depth: int = 2
     layer_scale_init_value: float = 1e-6
     input_hw: Tuple[int, int] = (224, 224)
+
+
+@dataclass(frozen=True)
+class ConvNeXtFlatAutoencoderConfig(ConvNeXtAutoencoderConfig):
+    latent_spatial: int = 14
+    latent_conv_channels: int = 128
+    latent_proj_layers: int = 1
+    latent_proj_variant: str = "convnext"
 
 
 class ConvNeXtEncoder(nn.Module):
@@ -256,10 +268,68 @@ class ConvNeXtAutoencoder(nn.Module):
         return self.decode(latent, target_hw=x.shape[-2:])
 
 
+class ConvNeXtFlatAutoencoder(nn.Module):
+    """ConvNeXt autoencoder variant that flattens the latent grid to a vector."""
+
+    def __init__(self, cfg: Optional[ConvNeXtFlatAutoencoderConfig] = None) -> None:
+        super().__init__()
+        self.cfg = cfg or ConvNeXtFlatAutoencoderConfig()
+        height, width = self.cfg.input_hw
+        latent_hw = (height // 8, width // 8)
+        if self.cfg.latent_spatial > latent_hw[0] or self.cfg.latent_spatial > latent_hw[1]:
+            raise ValueError(
+                f"latent_spatial ({self.cfg.latent_spatial}) must be <= latent grid {latent_hw}"
+            )
+        self.latent_hw = latent_hw
+        self.encoder = ConvNeXtEncoder(self.cfg)
+        self.decoder = ConvNeXtDecoder(self.cfg)
+        variant = self.cfg.latent_proj_variant.lower()
+        if variant == "convnext":
+            projector_cls = ConvNeXtSpatialLatentProjector
+            projector_kwargs = {
+                "layer_scale_init_value": self.cfg.layer_scale_init_value,
+            }
+        elif variant == "basic":
+            projector_cls = SpatialLatentProjector
+            projector_kwargs = {}
+        else:
+            raise ValueError(
+                "latent_proj_variant must be either 'convnext' or 'basic'"
+            )
+        self.latent_adapter = projector_cls(
+            self.cfg.latent_channels,
+            latent_hw,
+            self.cfg.latent_spatial,
+            projection_channels=self.cfg.latent_conv_channels,
+            proj_layers=self.cfg.latent_proj_layers,
+            **projector_kwargs,
+        )
+        self.latent_dim = self.latent_adapter.latent_dim
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        grid = self.encoder(x)
+        return self.latent_adapter.grid_to_vector(grid)
+
+    def decode(
+        self,
+        latent: torch.Tensor,
+        *,
+        target_hw: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        grid = self.latent_adapter.vector_to_grid(latent)
+        return self.decoder(grid, target_hw=target_hw)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        latent = self.encode(x)
+        return self.decode(latent, target_hw=x.shape[-2:])
+
+
 __all__ = [
     "ChannelsLastLayerNorm",
     "ConvNeXtAutoencoder",
     "ConvNeXtAutoencoderConfig",
     "ConvNeXtDecoder",
     "ConvNeXtEncoder",
+    "ConvNeXtFlatAutoencoder",
+    "ConvNeXtFlatAutoencoderConfig",
 ]

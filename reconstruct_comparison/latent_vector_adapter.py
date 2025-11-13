@@ -114,4 +114,159 @@ class SpatialLatentProjector(nn.Module):
         return feats
 
 
-__all__ = ["SpatialLatentProjector"]
+class _ChannelsLastLayerNorm(nn.Module):
+    """LayerNorm that keeps tensors in NCHW format for ConvNeXt-style blocks."""
+
+    def __init__(self, channels: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(channels, eps=eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = x.permute(0, 2, 3, 1)
+        h = self.norm(h)
+        return h.permute(0, 3, 1, 2)
+
+
+class _MiniConvNeXtBlock(nn.Module):
+    """Small ConvNeXt-style residual block used inside the latent projector."""
+
+    def __init__(
+        self,
+        dim: int,
+        *,
+        activation: Type[nn.Module],
+        layer_scale_init_value: float,
+        expansion: int = 4,
+    ) -> None:
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
+        self.norm = _ChannelsLastLayerNorm(dim)
+        expanded_dim = dim * expansion
+        self.pwconv1 = nn.Conv2d(dim, expanded_dim, kernel_size=1)
+        self.act = activation()
+        self.pwconv2 = nn.Conv2d(expanded_dim, dim, kernel_size=1)
+        self.gamma = (
+            nn.Parameter(layer_scale_init_value * torch.ones(dim))
+            if layer_scale_init_value > 0
+            else None
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        if self.gamma is not None:
+            x = self.gamma.view(1, -1, 1, 1) * x
+        return residual + x
+
+
+def _make_convnext_blocks(
+    dim: int,
+    num_blocks: int,
+    *,
+    activation: Type[nn.Module],
+    layer_scale_init_value: float,
+) -> nn.Module:
+    if num_blocks <= 0:
+        return nn.Identity()
+    blocks = [
+        _MiniConvNeXtBlock(
+            dim,
+            activation=activation,
+            layer_scale_init_value=layer_scale_init_value,
+        )
+        for _ in range(num_blocks)
+    ]
+    return nn.Sequential(*blocks)
+
+
+class ConvNeXtSpatialLatentProjector(nn.Module):
+    """ConvNeXt-friendly latent projector with learned spatial mixing."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        latent_hw: Tuple[int, int],
+        latent_spatial: int,
+        *,
+        projection_channels: int,
+        proj_layers: int = 1,
+        activation: Type[nn.Module] = nn.GELU,
+        layer_scale_init_value: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        if latent_spatial <= 0:
+            raise ValueError("latent_spatial must be positive")
+        if projection_channels <= 0:
+            raise ValueError("projection_channels must be positive")
+        height, width = latent_hw
+        if height <= 0 or width <= 0:
+            raise ValueError("latent_hw must be positive")
+        self.latent_hw = latent_hw
+        self.latent_spatial = latent_spatial
+        self.in_channels = in_channels
+        self.projection_channels = projection_channels
+        spatial_area = latent_spatial * latent_spatial
+        self.latent_dim = projection_channels * spatial_area
+        self.pool = nn.AdaptiveAvgPool2d((latent_spatial, latent_spatial))
+        self.pre_blocks = _make_convnext_blocks(
+            in_channels,
+            proj_layers,
+            activation=activation,
+            layer_scale_init_value=layer_scale_init_value,
+        )
+        self.channel_down = nn.Conv2d(in_channels, projection_channels, kernel_size=1)
+        self.channel_up = nn.Conv2d(projection_channels, in_channels, kernel_size=1)
+        self.post_blocks = _make_convnext_blocks(
+            in_channels,
+            proj_layers,
+            activation=activation,
+            layer_scale_init_value=layer_scale_init_value,
+        )
+
+    def grid_to_vector(self, grid: torch.Tensor) -> torch.Tensor:
+        if grid.dim() != 4:
+            raise RuntimeError(
+                f"ConvNeXtSpatialLatentProjector.grid_to_vector expected 4D tensor, got shape {grid.shape}"
+            )
+        if grid.size(1) != self.in_channels:
+            raise RuntimeError(
+                f"Expected input with {self.in_channels} channels, got {grid.size(1)}"
+            )
+        feats = self.pre_blocks(grid)
+        pooled = self.pool(feats)
+        projected = self.channel_down(pooled)
+        flat = torch.flatten(projected, start_dim=1)
+        return flat
+
+    def vector_to_grid(self, latent: torch.Tensor) -> torch.Tensor:
+        if latent.dim() != 2:
+            raise RuntimeError(
+                f"ConvNeXtSpatialLatentProjector.vector_to_grid expected [B, latent_dim], got {latent.shape}"
+            )
+        if latent.size(1) != self.latent_dim:
+            raise RuntimeError(
+                f"Expected latent_dim={self.latent_dim}, got {latent.size(1)}"
+            )
+        feats = latent.view(
+            latent.size(0),
+            self.projection_channels,
+            self.latent_spatial,
+            self.latent_spatial,
+        )
+        feats = self.channel_up(feats)
+        if feats.shape[-2:] != self.latent_hw:
+            feats = F.interpolate(
+                feats,
+                size=self.latent_hw,
+                mode="bilinear",
+                align_corners=False,
+            )
+        feats = self.post_blocks(feats)
+        return feats
+
+
+__all__ = ["SpatialLatentProjector", "ConvNeXtSpatialLatentProjector"]

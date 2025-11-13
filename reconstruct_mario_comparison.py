@@ -40,6 +40,7 @@ from reconstruct_comparison import (
     BestPracticeAutoencoderTrainer,
     BestPracticeVectorAutoencoderTrainer,
     ConvNeXtAutoencoder,
+    ConvNeXtFlatAutoencoder,
     Decoder,
     FocalMSSSIMAutoencoderUNet,
     FocalMSSSIMLoss,
@@ -112,6 +113,9 @@ TRAINER_INFOS: Tuple[TrainerInfo, ...] = (
     TrainerInfo(model_key="convnext_l1", loss=nn.SmoothL1Loss, description="ConvNeXt Autoencoder (L1)"),
     TrainerInfo(model_key="convnext_focal", loss=FocalL1Loss, description="ConvNeXt Autoencoder (Focal)"),
     TrainerInfo(model_key="convnext_hardness", loss=HardnessWeightedL1Loss, description="ConvNeXt Autoencoder (Hardness)"),
+    TrainerInfo(model_key="convnext_flat_l1", loss=nn.SmoothL1Loss, description="ConvNeXt Flat Autoencoder (L1)"),
+    TrainerInfo(model_key="convnext_flat_focal", loss=FocalL1Loss, description="ConvNeXt Flat Autoencoder (Focal)"),
+    TrainerInfo(model_key="convnext_flat_hardness", loss=HardnessWeightedL1Loss, description="ConvNeXt Flat Autoencoder (Hardness)"),
     TrainerInfo(model_key="best_flat_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice Flat)"),
     TrainerInfo(model_key="best_focal", loss=FocalL1Loss, description="Autoencoder (Best Practice)"),
     TrainerInfo(model_key="mario4_1024", loss=nn.SmoothL1Loss, description="Mario4 Latent 1024"),
@@ -512,6 +516,9 @@ class Config:
     enable_convnext_l1: bool = False
     enable_convnext_focal: bool = False
     enable_convnext_hardness: bool = False
+    enable_convnext_flat_l1: bool = False
+    enable_convnext_flat_focal: bool = False
+    enable_convnext_flat_hardness: bool = False
 
     # Standard/Lightweight autoencoders
     enable_ae_focal: bool = False
@@ -878,6 +885,21 @@ def build_trainers(
             continue
         trainer = AutoencoderTrainer(
             model=ConvNeXtAutoencoder(),
+            device=device,
+            lr=cfg.lr,
+            loss_fn=trainer_infos[model_key].loss(),
+        )
+        trainers[model_key] = trainer
+    convnext_flat_variants: Tuple[Tuple[bool, str], ...] = (
+        (cfg.enable_convnext_flat_l1, "convnext_flat_l1"),
+        (cfg.enable_convnext_flat_focal, "convnext_flat_focal"),
+        (cfg.enable_convnext_flat_hardness, "convnext_flat_hardness"),
+    )
+    for enabled, model_key in convnext_flat_variants:
+        if not enabled:
+            continue
+        trainer = AutoencoderTrainer(
+            model=ConvNeXtFlatAutoencoder(),
             device=device,
             lr=cfg.lr,
             loss_fn=trainer_infos[model_key].loss(),
