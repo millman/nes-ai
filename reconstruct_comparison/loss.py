@@ -17,9 +17,14 @@ class FocalL1Loss(nn.Module):
     with weights
         w_i = min(max_weight, (|x_i - y_i| / (mean_batch + eps)) ** gamma)
     where mean_batch is the per-sample mean absolute error over all pixels.
+
+    The numerator stays attached to the graph so the focal weights receive
+    gradients, mirroring the original focal-loss behaviour of encouraging the
+    network to focus on hard pixels. The denominator is detached to keep the
+    normalisation statistic fixed during backprop.
     """
 
-    def __init__(self, gamma: float = 2.0, max_weight: float = 5.0, eps: float = 1e-6) -> None:
+    def __init__(self, gamma: float = 2.0, max_weight: float = 10.0, eps: float = 1e-6) -> None:
         super().__init__()
         if gamma <= 0:
             raise ValueError("gamma must be positive.")
@@ -32,16 +37,23 @@ class FocalL1Loss(nn.Module):
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         l1 = torch.abs(input - target)
         norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        rel_error = l1 / norm
         # Implements w_i = min(max_weight, (|x_i - y_i| / norm) ** gamma).
-        weight = torch.pow(l1 / norm, self.gamma).clamp(max=self.max_weight)
-        loss = weight * l1
-        return loss.mean()
+        weight = rel_error.pow(self.gamma).clamp(max=self.max_weight)
+        return (weight * l1).mean()
 
 
 class HardnessWeightedL1Loss(nn.Module):
-    """L1 loss reweighted by per-pixel hardness relative to mean error."""
+    """L1 loss reweighted by per-pixel hardness relative to mean error.
 
-    def __init__(self, beta: float = 1.5, max_weight: float = 10.0, eps: float = 1e-6) -> None:
+    Unlike :class:`FocalL1Loss`, both the numerator and denominator are detached
+    so the hardness weights act as fixed, data-dependent importance weights
+    rather than additional learnable factors. The exponent is named ``beta`` to
+    distinguish this milder hardness weighting from the focal ``gamma``, though
+    they now share the same default of 2.0 for easier comparison.
+    """
+
+    def __init__(self, beta: float = 2.0, max_weight: float = 10.0, eps: float = 1e-6) -> None:
         super().__init__()
         if beta <= 0:
             raise ValueError("beta must be positive.")
@@ -54,8 +66,8 @@ class HardnessWeightedL1Loss(nn.Module):
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         l1 = torch.abs(input - target)
         norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
-        hardness = (l1.detach() / norm).clamp_min(0.0)
-        weight = torch.pow(hardness, self.beta).clamp(max=self.max_weight)
+        rel_error = l1.detach() / norm
+        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
         return (weight * l1).mean()
 
 
