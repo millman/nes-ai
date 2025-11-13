@@ -84,10 +84,19 @@ class ConvNeXtDownsample(nn.Module):
 
 
 class ConvNeXtUpsample(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int) -> None:
+    """ConvNeXt-style upsampling block that mirrors :class:`ConvNeXtDownsample`."""
+
+    def __init__(self, in_ch: int, out_ch: int, *, stride: int = 2) -> None:
         super().__init__()
+        if stride < 1:
+            raise ValueError("stride must be >= 1")
         self.norm = ChannelsLastLayerNorm(in_ch)
-        self.expand = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2)
+        self.expand = nn.ConvTranspose2d(
+            in_ch,
+            out_ch,
+            kernel_size=stride,
+            stride=stride,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.norm(x)
@@ -99,7 +108,7 @@ class ConvNeXtAutoencoderConfig:
     base_channels: int = 48
     latent_channels: int = 128
     encoder_depths: Sequence[int] = (3, 4)
-    decoder_depths: Sequence[int] = (3, 2)
+    decoder_depths: Optional[Sequence[int]] = None
     latent_depth: int = 2
     layer_scale_init_value: float = 1e-6
     input_hw: Tuple[int, int] = (224, 224)
@@ -155,22 +164,30 @@ class ConvNeXtDecoder(nn.Module):
         self.latent_hw = (cfg.input_hw[0] // 8, cfg.input_hw[1] // 8)
         self.output_hw = cfg.input_hw
         self.latent_channels = cfg.latent_channels
-        dec_depths = list(cfg.decoder_depths)
-        if len(dec_depths) != 2:
-            raise ValueError("decoder_depths must contain two stage depths.")
+        enc_depths = list(cfg.encoder_depths)
+        if len(enc_depths) != 2:
+            raise ValueError("encoder_depths must contain two stage depths.")
+        if cfg.decoder_depths is None:
+            dec_depths = [enc_depths[1], enc_depths[0]]
+        else:
+            dec_depths = list(cfg.decoder_depths)
+            if len(dec_depths) != 2:
+                raise ValueError("decoder_depths must contain two stage depths.")
         self.latent_blocks = _make_blocks(
             cfg.latent_channels,
             cfg.latent_depth,
             layer_scale_init_value=cfg.layer_scale_init_value,
         )
-        self.up1 = ConvNeXtUpsample(cfg.latent_channels, hidden)
-        self.stage_mid = _make_blocks(
+        # Mirror encoder ordering: latent -> stage2 -> up -> stage1 -> up -> head.
+        self.from_latent = nn.Conv2d(cfg.latent_channels, hidden, kernel_size=1)
+        self.stage2_dec = _make_blocks(
             hidden, dec_depths[0], layer_scale_init_value=cfg.layer_scale_init_value
         )
-        self.up2 = ConvNeXtUpsample(hidden, stem_out)
-        self.stage_low = _make_blocks(
+        self.up_stage1 = ConvNeXtUpsample(hidden, stem_out)
+        self.stage1_dec = _make_blocks(
             stem_out, dec_depths[1], layer_scale_init_value=cfg.layer_scale_init_value
         )
+        self.up_stem = ConvNeXtUpsample(stem_out, stem_out, stride=4)
         head_hidden = max(16, stem_out // 2)
         self.head = nn.Sequential(
             ChannelsLastLayerNorm(stem_out),
@@ -194,10 +211,11 @@ class ConvNeXtDecoder(nn.Module):
                 f"Expected latent spatial size {self.latent_hw}, got {tuple(latent.shape[-2:])}"
             )
         x = self.latent_blocks(latent)
-        x = self.up1(x)
-        x = self.stage_mid(x)
-        x = self.up2(x)
-        x = self.stage_low(x)
+        x = self.from_latent(x)
+        x = self.stage2_dec(x)
+        x = self.up_stage1(x)
+        x = self.stage1_dec(x)
+        x = self.up_stem(x)
         x = self.head(x)
         final_hw = target_hw or self.output_hw
         if x.shape[-2:] != final_hw:
