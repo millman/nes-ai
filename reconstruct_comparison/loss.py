@@ -24,7 +24,7 @@ class FocalL1Loss(nn.Module):
     normalisation statistic fixed during backprop.
     """
 
-    def __init__(self, gamma: float = 2.0, max_weight: float = 10.0, eps: float = 1e-6) -> None:
+    def __init__(self, gamma: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
         super().__init__()
         if gamma <= 0:
             raise ValueError("gamma must be positive.")
@@ -53,7 +53,7 @@ class HardnessWeightedL1Loss(nn.Module):
     they now share the same default of 2.0 for easier comparison.
     """
 
-    def __init__(self, beta: float = 2.0, max_weight: float = 10.0, eps: float = 1e-6) -> None:
+    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
         super().__init__()
         if beta <= 0:
             raise ValueError("beta must be positive.")
