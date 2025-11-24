@@ -14,6 +14,10 @@ DISPLAY_HEIGHT = INVENTORY_HEIGHT + GRID_ROWS * TILE_SIZE
 DISPLAY_WIDTH = GRID_COLS * TILE_SIZE
 AGENT_SPEED = 2
 AGENT_SIZE = TILE_SIZE
+AGENT_RENDER_INSET = 2
+AGENT_COLLISION_INSET = 2
+KEY_RENDER_INSET = 3
+KEY_COLLISION_INSET = 3
 
 COLOR_FLOOR = np.array([233, 220, 188], dtype=np.uint8)
 COLOR_WALL = np.array([148, 101, 64], dtype=np.uint8)
@@ -112,13 +116,17 @@ class GridworldKeyEnv(gym.Env):
         key_row = max(0, min(GRID_ROWS - 1, self.key_tile[0]))
         x0, y0 = self._tile_top_left(key_row, key_col)
 
-        inset = 2
+        inset = KEY_RENDER_INSET
         frame[y0 + inset : y0 + TILE_SIZE - inset, x0 + inset : x0 + TILE_SIZE - inset] = COLOR_KEY
 
     def _draw_agent(self, frame: np.ndarray):
         x0 = int(self.agent_x)
         y0 = int(self.agent_y)
-        frame[y0 : y0 + AGENT_SIZE, x0 : x0 + AGENT_SIZE] = COLOR_AGENT
+        inset = AGENT_RENDER_INSET
+        frame[
+            y0 + inset : y0 + AGENT_SIZE - inset,
+            x0 + inset : x0 + AGENT_SIZE - inset,
+        ] = COLOR_AGENT
 
     def _draw_inventory(self, frame: np.ndarray):
         if not self.inventory_has_key:
@@ -184,15 +192,20 @@ class GridworldKeyEnv(gym.Env):
         return observation, {}
 
     def _can_occupy(self, x: int, y: int) -> bool:
-        if x < 0 or y < INVENTORY_HEIGHT:
+        left = x + AGENT_COLLISION_INSET
+        top = y + AGENT_COLLISION_INSET
+        right = x + AGENT_SIZE - AGENT_COLLISION_INSET
+        bottom = y + AGENT_SIZE - AGENT_COLLISION_INSET
+
+        if left < 0 or top < INVENTORY_HEIGHT:
             return False
-        if x + AGENT_SIZE > DISPLAY_WIDTH or y + AGENT_SIZE > DISPLAY_HEIGHT:
+        if right > DISPLAY_WIDTH or bottom > DISPLAY_HEIGHT:
             return False
 
-        row_start = int((y - INVENTORY_HEIGHT) // TILE_SIZE)
-        row_end = int((y + AGENT_SIZE - 1 - INVENTORY_HEIGHT) // TILE_SIZE)
-        col_start = int(x // TILE_SIZE)
-        col_end = int((x + AGENT_SIZE - 1) // TILE_SIZE)
+        row_start = int((top - INVENTORY_HEIGHT) // TILE_SIZE)
+        row_end = int((bottom - 1 - INVENTORY_HEIGHT) // TILE_SIZE)
+        col_start = int(left // TILE_SIZE)
+        col_end = int((right - 1) // TILE_SIZE)
 
         row_start = max(0, min(GRID_ROWS - 1, row_start))
         row_end = max(0, min(GRID_ROWS - 1, row_end))
@@ -211,12 +224,17 @@ class GridworldKeyEnv(gym.Env):
 
         key_x, key_y = self._tile_top_left(*self.key_tile)
         agent_rect = (
-            self.agent_x,
-            self.agent_y,
-            self.agent_x + AGENT_SIZE,
-            self.agent_y + AGENT_SIZE,
+            self.agent_x + AGENT_COLLISION_INSET,
+            self.agent_y + AGENT_COLLISION_INSET,
+            self.agent_x + AGENT_SIZE - AGENT_COLLISION_INSET,
+            self.agent_y + AGENT_SIZE - AGENT_COLLISION_INSET,
         )
-        key_rect = (key_x, key_y, key_x + TILE_SIZE, key_y + TILE_SIZE)
+        key_rect = (
+            key_x + KEY_COLLISION_INSET,
+            key_y + KEY_COLLISION_INSET,
+            key_x + TILE_SIZE - KEY_COLLISION_INSET,
+            key_y + TILE_SIZE - KEY_COLLISION_INSET,
+        )
 
         overlap = not (
             agent_rect[2] <= key_rect[0]
