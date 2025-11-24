@@ -78,6 +78,8 @@ class GridworldKeyEnv(gym.Env):
         self.base_frame = self._build_base_frame()
 
         self._episode_steps = 0
+        self._keyboard_toggle_prev = False
+        self._manual_control = False
 
     def _tile_top_left(self, row: int, col: int) -> tuple[int, int]:
         y = INVENTORY_HEIGHT + row * TILE_SIZE
@@ -145,12 +147,25 @@ class GridworldKeyEnv(gym.Env):
         if not keys:
             return None
 
+        toggle_pressed = bool(keys[pygame.K_x])
+        if toggle_pressed and not self._keyboard_toggle_prev:
+            self._manual_control = not self._manual_control
+        self._keyboard_toggle_prev = toggle_pressed
+
         mapping = [
             (pygame.K_w, self.ACTION_UP),
             (pygame.K_a, self.ACTION_LEFT),
             (pygame.K_s, self.ACTION_DOWN),
             (pygame.K_d, self.ACTION_RIGHT),
         ]
+        manual_press_detected = any(keys[key_code] for key_code, _ in mapping)
+
+        if manual_press_detected and not self._manual_control:
+            self._manual_control = True
+
+        if not self._manual_control:
+            return None
+
         for key_code, action_index in mapping:
             if keys[key_code]:
                 return action_index
@@ -162,6 +177,8 @@ class GridworldKeyEnv(gym.Env):
         self._episode_steps = 0
         self.key_present = True
         self.inventory_has_key = False
+        self._manual_control = False
+        self._keyboard_toggle_prev = False
         self._reset_agent()
         observation = self._render_frame()
         return observation, {}
@@ -216,10 +233,12 @@ class GridworldKeyEnv(gym.Env):
         return False
 
     def step(self, action: int):
-        action_index = action
         manual_action = self._read_keyboard_override()
-        if manual_action is not None:
-            action_index = manual_action
+
+        if self._manual_control:
+            action_index = manual_action if manual_action is not None else self.ACTION_IDLE
+        else:
+            action_index = action
 
         dx, dy = self.ACTIONS[action_index]
         target_x = int(self.agent_x + dx)
