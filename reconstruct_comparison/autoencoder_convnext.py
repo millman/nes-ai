@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from .latent_vector_adapter import (
     SpatialLatentProjector,
     ConvNeXtSpatialLatentProjector,
+    LearnedPoolLatentProjector,
+    PatchTokenLatentProjector,
 )
 
 class ChannelsLastLayerNorm(nn.Module):
@@ -123,7 +125,7 @@ class ConvNeXtFlatAutoencoderConfig(ConvNeXtAutoencoderConfig):
     latent_spatial: int = 14
     latent_conv_channels: int = 128
     latent_proj_layers: int = 1
-    latent_proj_variant: str = "convnext"
+    latent_proj_variant: str = "learned_pool"
 
 
 class ConvNeXtEncoder(nn.Module):
@@ -284,7 +286,13 @@ class ConvNeXtFlatAutoencoder(nn.Module):
         self.encoder = ConvNeXtEncoder(self.cfg)
         self.decoder = ConvNeXtDecoder(self.cfg)
         variant = self.cfg.latent_proj_variant.lower()
-        if variant == "convnext":
+        if variant == "learned_pool":
+            projector_cls = LearnedPoolLatentProjector
+            projector_kwargs = {}
+        elif variant == "patch":
+            projector_cls = PatchTokenLatentProjector
+            projector_kwargs = {}
+        elif variant == "convnext":
             projector_cls = ConvNeXtSpatialLatentProjector
             projector_kwargs = {
                 "layer_scale_init_value": self.cfg.layer_scale_init_value,
@@ -294,7 +302,7 @@ class ConvNeXtFlatAutoencoder(nn.Module):
             projector_kwargs = {}
         else:
             raise ValueError(
-                "latent_proj_variant must be either 'convnext' or 'basic'"
+                "latent_proj_variant must be 'learned_pool', 'patch', 'convnext', or 'basic'"
             )
         self.latent_adapter = projector_cls(
             self.cfg.latent_channels,

@@ -269,4 +269,185 @@ class ConvNeXtSpatialLatentProjector(nn.Module):
         return feats
 
 
-__all__ = ["SpatialLatentProjector", "ConvNeXtSpatialLatentProjector"]
+class LearnedPoolLatentProjector(nn.Module):
+    """Spatial projector that replaces adaptive average pooling with learned strides."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        latent_hw: Tuple[int, int],
+        latent_spatial: int,
+        *,
+        projection_channels: int,
+        proj_layers: int = 1,
+        activation: Type[nn.Module] = nn.GELU,
+    ) -> None:
+        super().__init__()
+        if latent_spatial <= 0:
+            raise ValueError("latent_spatial must be positive")
+        if projection_channels <= 0:
+            raise ValueError("projection_channels must be positive")
+        height, width = latent_hw
+        if height <= 0 or width <= 0:
+            raise ValueError("latent_hw must be positive")
+        stride_h = height // latent_spatial
+        stride_w = width // latent_spatial
+        if stride_h * latent_spatial != height or stride_w * latent_spatial != width:
+            raise ValueError(
+                "latent_spatial must evenly divide latent_hw dimensions for learned pooling"
+            )
+        self.latent_hw = latent_hw
+        self.latent_spatial = latent_spatial
+        self.in_channels = in_channels
+        self.projection_channels = projection_channels
+        spatial_area = latent_spatial * latent_spatial
+        self.latent_dim = projection_channels * spatial_area
+        # Learned strided reduction replacing adaptive average pooling.
+        self.reduce = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                stride=(stride_h, stride_w),
+                padding=1,
+                groups=in_channels,
+            ),
+            nn.Conv2d(in_channels, in_channels, kernel_size=1),
+            activation(),
+        )
+        self.channel_down = SpatialLatentProjector._build_channel_stack(
+            in_channels, projection_channels, proj_layers, activation
+        )
+        self.channel_up = SpatialLatentProjector._build_channel_stack(
+            projection_channels, in_channels, proj_layers, activation
+        )
+
+    def grid_to_vector(self, grid: torch.Tensor) -> torch.Tensor:
+        if grid.dim() != 4:
+            raise RuntimeError(
+                f"LearnedPoolLatentProjector.grid_to_vector expected 4D tensor, got shape {grid.shape}"
+            )
+        if grid.size(1) != self.in_channels:
+            raise RuntimeError(
+                f"Expected input with {self.in_channels} channels, got {grid.size(1)}"
+            )
+        pooled = self.reduce(grid)
+        projected = self.channel_down(pooled)
+        flat = torch.flatten(projected, start_dim=1)
+        return flat
+
+    def vector_to_grid(self, latent: torch.Tensor) -> torch.Tensor:
+        if latent.dim() != 2:
+            raise RuntimeError(
+                f"LearnedPoolLatentProjector.vector_to_grid expected [B, latent_dim], got {latent.shape}"
+            )
+        if latent.size(1) != self.latent_dim:
+            raise RuntimeError(
+                f"Expected latent_dim={self.latent_dim}, got {latent.size(1)}"
+            )
+        feats = latent.view(
+            latent.size(0),
+            self.projection_channels,
+            self.latent_spatial,
+            self.latent_spatial,
+        )
+        feats = self.channel_up(feats)
+        if feats.shape[-2:] != self.latent_hw:
+            feats = F.interpolate(
+                feats,
+                size=self.latent_hw,
+                mode="bilinear",
+                align_corners=False,
+            )
+        return feats
+
+
+class PatchTokenLatentProjector(nn.Module):
+    """Latent adapter that flattens ConvNeXt grids via patch tokens."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        latent_hw: Tuple[int, int],
+        latent_spatial: int,
+        *,
+        projection_channels: int,
+        proj_layers: int = 1,
+        activation: Type[nn.Module] = nn.GELU,
+    ) -> None:
+        super().__init__()
+        if latent_spatial <= 0:
+            raise ValueError("latent_spatial must be positive")
+        if projection_channels <= 0:
+            raise ValueError("projection_channels must be positive")
+        height, width = latent_hw
+        if height <= 0 or width <= 0:
+            raise ValueError("latent_hw must be positive")
+        if height % latent_spatial != 0 or width % latent_spatial != 0:
+            raise ValueError(
+                "latent_spatial must evenly divide latent_hw dimensions for patch tokenization"
+            )
+        self.latent_hw = latent_hw
+        self.latent_spatial = latent_spatial
+        self.in_channels = in_channels
+        self.projection_channels = projection_channels
+        patch_h = height // latent_spatial
+        patch_w = width // latent_spatial
+        self.patch_hw = (patch_h, patch_w)
+        self.num_tokens = latent_spatial * latent_spatial
+        self.patch_dim = in_channels * patch_h * patch_w
+        self.latent_dim = projection_channels * self.num_tokens
+        self.to_tokens = nn.Unfold(kernel_size=(patch_h, patch_w), stride=(patch_h, patch_w))
+        proj_layers = max(1, proj_layers)
+        proj_modules = [nn.Linear(self.patch_dim, projection_channels)]
+        for _ in range(proj_layers - 1):
+            proj_modules.append(activation())
+            proj_modules.append(nn.Linear(projection_channels, projection_channels))
+        proj_modules.append(activation())
+        self.token_proj = nn.Sequential(*proj_modules)
+        self.token_expand = nn.Linear(projection_channels, self.patch_dim)
+        self.from_tokens = nn.Fold(
+            output_size=latent_hw,
+            kernel_size=(patch_h, patch_w),
+            stride=(patch_h, patch_w),
+        )
+
+    def grid_to_vector(self, grid: torch.Tensor) -> torch.Tensor:
+        if grid.dim() != 4:
+            raise RuntimeError(
+                f"PatchTokenLatentProjector.grid_to_vector expected 4D tensor, got shape {grid.shape}"
+            )
+        if grid.size(1) != self.in_channels:
+            raise RuntimeError(
+                f"Expected input with {self.in_channels} channels, got {grid.size(1)}"
+            )
+        tokens = self.to_tokens(grid)  # [B, patch_dim, num_tokens]
+        tokens = tokens.transpose(1, 2).reshape(-1, self.patch_dim)
+        tokens = self.token_proj(tokens)
+        flat = tokens.view(grid.size(0), self.num_tokens, self.projection_channels)
+        flat = flat.reshape(grid.size(0), self.latent_dim)
+        return flat
+
+    def vector_to_grid(self, latent: torch.Tensor) -> torch.Tensor:
+        if latent.dim() != 2:
+            raise RuntimeError(
+                f"PatchTokenLatentProjector.vector_to_grid expected [B, latent_dim], got {latent.shape}"
+            )
+        if latent.size(1) != self.latent_dim:
+            raise RuntimeError(
+                f"Expected latent_dim={self.latent_dim}, got {latent.size(1)}"
+            )
+        tokens = latent.view(-1, self.projection_channels)
+        tokens = self.token_expand(tokens)
+        tokens = tokens.view(latent.size(0), self.num_tokens, self.patch_dim)
+        tokens = tokens.transpose(1, 2)
+        grid = self.from_tokens(tokens)
+        return grid
+
+
+__all__ = [
+    "SpatialLatentProjector",
+    "ConvNeXtSpatialLatentProjector",
+    "LearnedPoolLatentProjector",
+    "PatchTokenLatentProjector",
+]
