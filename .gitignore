@@ -146,12 +146,14 @@ dmypy.json
 /roms
 /testroms
 /timm_il_models
+/**/timm_il_models
 
 # Input, output and datasets
 /data
 /data.*
 /out
 /out.*
+/**/out.*
 /predict_outputs
 /runs
 /traj_dumps
