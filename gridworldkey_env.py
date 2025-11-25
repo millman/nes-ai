@@ -285,6 +285,7 @@ class GridworldKeyEnv(gym.Env):
         info = {
             "has_key": self.inventory_has_key,
             "key_collected_this_step": key_collected_now,
+            "controller": controller_action.copy(),
         }
 
         if self.render_mode == "human":
@@ -351,7 +352,8 @@ def _trajectory_info(env: GridworldKeyEnv, step_index: int) -> dict[str, Any]:
     }
 
 
-def _run_random_agent_from_args(args: GridworldRunnerArgs):
+def main():
+    args = tyro.cli(GridworldRunnerArgs)
     random.seed(args.seed)
     np.random.seed(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -390,14 +392,17 @@ def _run_random_agent_from_args(args: GridworldRunnerArgs):
             if stop_running:
                 break
 
-            action = rng.integers(0, 2, size=NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
+            random_action = rng.integers(0, 2, size=NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
+            current_observation = observation
+
+            observation, reward, terminated, truncated, info = env.step(random_action)
+
+            executed_action = info["controller"]
 
             if trajectory_store is not None:
-                action_array = action.copy()
+                action_array = executed_action.copy()
                 info_payload = _trajectory_info(env, step_idx)
-                trajectory_store.record_state_action(observation, action_array, info_payload)
-
-            observation, reward, terminated, truncated, _ = env.step(action)
+                trajectory_store.record_state_action(current_observation, action_array, info_payload)
 
             if terminated or truncated:
                 break
@@ -409,34 +414,6 @@ def _run_random_agent_from_args(args: GridworldRunnerArgs):
         trajectory_store.save()
 
     env.close()
-
-
-def run_random_agent(
-    episodes: int = 3,
-    max_steps: int = 1500,
-    keyboard_override: bool = True,
-    dump_trajectories: bool = True,
-    seed: int = 0,
-    exp_name: Optional[str] = None,
-    render_mode: str = "human",
-    run_root: Path | str = Path("runs"),
-):
-    args = GridworldRunnerArgs(
-        exp_name=exp_name or Path(__file__).stem,
-        seed=seed,
-        episodes=episodes,
-        max_steps=max_steps,
-        keyboard_override=keyboard_override,
-        dump_trajectories=dump_trajectories,
-        render_mode=render_mode,
-        run_root=Path(run_root),
-    )
-    _run_random_agent_from_args(args)
-
-
-def main():
-    args = tyro.cli(GridworldRunnerArgs)
-    _run_random_agent_from_args(args)
 
 
 if __name__ == "__main__":
