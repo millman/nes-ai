@@ -15,11 +15,11 @@ import numpy as np
 ENV_ID = "gridworldkey_env"
 
 
-TILE_SIZE = 14
-GRID_ROWS = 15
+TILE_SIZE = 15
+GRID_PLAY_ROWS = 14
 GRID_COLS = 16
 INVENTORY_HEIGHT = TILE_SIZE
-DISPLAY_HEIGHT = INVENTORY_HEIGHT + GRID_ROWS * TILE_SIZE
+DISPLAY_HEIGHT = INVENTORY_HEIGHT + GRID_PLAY_ROWS * TILE_SIZE
 DISPLAY_WIDTH = GRID_COLS * TILE_SIZE
 AGENT_SPEED = 2
 AGENT_SIZE = TILE_SIZE
@@ -47,7 +47,7 @@ NUM_CONTROLLER_BUTTONS = len(CONTROLLER_STATE_DESC)
 
 
 def _default_grid() -> np.ndarray:
-    grid = np.zeros((GRID_ROWS, GRID_COLS), dtype=np.int8)
+    grid = np.zeros((GRID_PLAY_ROWS, GRID_COLS), dtype=np.int8)
 
     # Surrounding walls.
     grid[0, :] = 1
@@ -98,9 +98,10 @@ class GridworldKeyEnv(gym.Env):
 
     def _build_base_frame(self) -> np.ndarray:
         frame = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
+        frame[:] = COLOR_FLOOR
         frame[:INVENTORY_HEIGHT, :] = COLOR_INVENTORY_BG
 
-        for row in range(GRID_ROWS):
+        for row in range(GRID_PLAY_ROWS):
             for col in range(GRID_COLS):
                 color = COLOR_WALL if self.grid[row, col] else COLOR_FLOOR
                 x0, y0 = self._tile_top_left(row, col)
@@ -109,7 +110,7 @@ class GridworldKeyEnv(gym.Env):
         return frame
 
     def _reset_agent(self):
-        start_tile = (GRID_ROWS - 2, 1)
+        start_tile = (GRID_PLAY_ROWS - 2, 1)
         x, y = self._tile_top_left(*start_tile)
         self.agent_x = x
         self.agent_y = y
@@ -119,7 +120,7 @@ class GridworldKeyEnv(gym.Env):
             return
 
         key_col = max(0, min(GRID_COLS - 1, self.key_tile[1]))
-        key_row = max(0, min(GRID_ROWS - 1, self.key_tile[0]))
+        key_row = max(0, min(GRID_PLAY_ROWS - 1, self.key_tile[0]))
         x0, y0 = self._tile_top_left(key_row, key_col)
 
         inset = KEY_RENDER_INSET
@@ -135,13 +136,12 @@ class GridworldKeyEnv(gym.Env):
         ] = COLOR_AGENT
 
     def _draw_inventory(self, frame: np.ndarray):
-        if not self.inventory_has_key:
-            return
-
+        frame[:INVENTORY_HEIGHT, :] = COLOR_INVENTORY_BG
         inset = 2
-        x0 = DISPLAY_WIDTH - TILE_SIZE + inset
-        y0 = inset
-        frame[y0 : INVENTORY_HEIGHT - inset, x0 : DISPLAY_WIDTH - inset] = COLOR_KEY
+        icon_size = TILE_SIZE - inset * 2
+        if self.inventory_has_key:
+            x0 = DISPLAY_WIDTH - icon_size - inset
+            frame[inset : inset + icon_size, x0 : x0 + icon_size] = COLOR_KEY
 
     def _render_frame(self) -> np.ndarray:
         frame = self.base_frame.copy()
@@ -149,6 +149,23 @@ class GridworldKeyEnv(gym.Env):
         self._draw_agent(frame)
         self._draw_inventory(frame)
         return frame
+
+    def _slide_axis(self, delta: int, axis: str):
+        if delta == 0:
+            return
+        step = 1 if delta > 0 else -1
+        remaining = abs(delta)
+        while remaining > 0:
+            next_x = self.agent_x + step if axis == "x" else self.agent_x
+            next_y = self.agent_y + step if axis == "y" else self.agent_y
+            if self._can_occupy(next_x, next_y):
+                if axis == "x":
+                    self.agent_x = next_x
+                else:
+                    self.agent_y = next_y
+                remaining -= 1
+            else:
+                break
 
     def _read_keyboard_override(self) -> Optional[np.ndarray]:
         if not self.keyboard_override or self.render_mode != "human":
@@ -214,8 +231,8 @@ class GridworldKeyEnv(gym.Env):
         col_start = int(left // TILE_SIZE)
         col_end = int((right - 1) // TILE_SIZE)
 
-        row_start = max(0, min(GRID_ROWS - 1, row_start))
-        row_end = max(0, min(GRID_ROWS - 1, row_end))
+        row_start = max(0, min(GRID_PLAY_ROWS - 1, row_start))
+        row_end = max(0, min(GRID_PLAY_ROWS - 1, row_end))
         col_start = max(0, min(GRID_COLS - 1, col_start))
         col_end = max(0, min(GRID_COLS - 1, col_end))
 
@@ -268,12 +285,8 @@ class GridworldKeyEnv(gym.Env):
         dx = (int(controller_action[BUTTON_RIGHT]) - int(controller_action[BUTTON_LEFT])) * AGENT_SPEED
         dy = (int(controller_action[BUTTON_DOWN]) - int(controller_action[BUTTON_UP])) * AGENT_SPEED
 
-        target_x = int(self.agent_x + dx)
-        target_y = int(self.agent_y + dy)
-
-        if self._can_occupy(target_x, target_y):
-            self.agent_x = target_x
-            self.agent_y = target_y
+        self._slide_axis(dx, axis="x")
+        self._slide_axis(dy, axis="y")
 
         key_collected_now = self._maybe_collect_key()
         reward = 1.0 if key_collected_now else 0.0
