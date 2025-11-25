@@ -842,8 +842,9 @@ def _save_action_history(filepath: Path, world_ram: int, level_ram: int, start_s
 
 class TrajectoryStore:
 
-    def __init__(self, dump_dir: Path):
+    def __init__(self, dump_dir: Path, image_shape: tuple[int, int, int] = (224, 240, 3)):
         self.dump_dir = dump_dir
+        self.image_shape = image_shape
 
         self.traj_id = 0
         self.states = []
@@ -851,8 +852,7 @@ class TrajectoryStore:
         self.infos = {}
 
     def record_state_action(self, state: NdArrayRGB8, action: NdArrayUint8, info: dict[str, Any]):
-        expected_shape = (224, 240, 3)
-        assert state.shape == expected_shape, f"Unexpected state shape: {state.shape} != {expected_shape}"
+        assert state.shape == self.image_shape, f"Unexpected state shape: {state.shape} != {self.image_shape}"
 
         self.states.append(state.copy())
         self.actions.append(action.copy())

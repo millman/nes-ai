@@ -1,9 +1,18 @@
-from typing import Optional
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+import random
 
 import gymnasium as gym
-import numpy as np
 import pygame
+import tyro
 from gymnasium import spaces
+from search_mario import TrajectoryStore
+import numpy as np
+
+ENV_ID = "gridworldkey_env"
 
 
 TILE_SIZE = 14
@@ -312,21 +321,111 @@ class GridworldKeyEnv(gym.Env):
             self.clock = None
 
 
-def run_random_agent(episodes: int = 3, max_steps: int = 1500, keyboard_override: bool = True):
-    env = GridworldKeyEnv(render_mode="human", keyboard_override=keyboard_override)
+@dataclass
+class GridworldRunnerArgs:
+    exp_name: str = Path(__file__).stem
+    seed: int = 0
+    episodes: int = 3
+    max_steps: int = 1500
+    keyboard_override: bool = True
+    dump_trajectories: bool = True
+    render_mode: str = "human"
+    run_root: Path = Path("runs")
+
+
+def _build_run_directory(args: GridworldRunnerArgs) -> tuple[Path, str]:
+    date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_prefix = f"{ENV_ID}__{args.exp_name}__{args.seed}"
+    run_name = f"{run_prefix}__{date_str}"
+    run_dir = Path(args.run_root) / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir, run_name
+
+
+def _trajectory_info(env: GridworldKeyEnv, step_index: int) -> dict[str, Any]:
+    return {
+        "has_key": bool(env.inventory_has_key),
+        "key_collected_this_step": False,
+        "manual_control": bool(getattr(env, "_manual_control", False)),
+        "step_index": int(step_index),
+    }
+
+
+def _run_random_agent_from_args(args: GridworldRunnerArgs):
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    rng = np.random.default_rng(args.seed)
+
+    run_dir, run_name = _build_run_directory(args)
+    print(f"Run dir: {run_dir}")
+    print(f"Run name: {run_name}")
+
+    trajectory_store = None
+    if args.dump_trajectories:
+        traj_dir = run_dir / "trajectories"
+        trajectory_store = TrajectoryStore(traj_dir, image_shape=(DISPLAY_HEIGHT, DISPLAY_WIDTH, 3))
+
+    env = GridworldKeyEnv(render_mode=args.render_mode, keyboard_override=args.keyboard_override)
+
     try:
-        for _ in range(episodes):
+        for episode_idx in range(args.episodes):
             observation, _ = env.reset()
             if env.render_mode == "human":
                 env.render()
-            for _ in range(max_steps):
-                action = env.action_space.sample()
+
+            for step_idx in range(args.max_steps):
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        return
+                    if event.type == pygame.KEYDOWN and event.key == pygame.K_q:
+                        print("Detected 'q' key press. Exiting run.")
+                        return
+
+                action = int(rng.integers(0, env.action_space.n))
+
+                if trajectory_store is not None:
+                    action_array = np.array([action], dtype=np.uint8)
+                    info_payload = _trajectory_info(env, step_idx)
+                    trajectory_store.record_state_action(observation, action_array, info_payload)
+
                 observation, reward, terminated, truncated, _ = env.step(action)
+
                 if terminated or truncated:
                     break
+
+            if trajectory_store is not None:
+                trajectory_store.save(traj_subdir=f"episode_{episode_idx:04d}")
     finally:
         env.close()
 
 
+def run_random_agent(
+    episodes: int = 3,
+    max_steps: int = 1500,
+    keyboard_override: bool = True,
+    dump_trajectories: bool = True,
+    seed: int = 0,
+    exp_name: Optional[str] = None,
+    render_mode: str = "human",
+    run_root: Path | str = Path("runs"),
+):
+    args = GridworldRunnerArgs(
+        exp_name=exp_name or Path(__file__).stem,
+        seed=seed,
+        episodes=episodes,
+        max_steps=max_steps,
+        keyboard_override=keyboard_override,
+        dump_trajectories=dump_trajectories,
+        render_mode=render_mode,
+        run_root=Path(run_root),
+    )
+    _run_random_agent_from_args(args)
+
+
+def main():
+    args = tyro.cli(GridworldRunnerArgs)
+    _run_random_agent_from_args(args)
+
+
 if __name__ == "__main__":
-    run_random_agent()
+    main()
