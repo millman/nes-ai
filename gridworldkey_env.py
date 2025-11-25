@@ -34,6 +34,17 @@ COLOR_AGENT = np.array([66, 167, 70], dtype=np.uint8)
 COLOR_KEY = np.array([250, 220, 90], dtype=np.uint8)
 COLOR_INVENTORY_BG = np.array([60, 60, 60], dtype=np.uint8)
 
+CONTROLLER_STATE_DESC = ["A", "B", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT"]
+BUTTON_A = 0
+BUTTON_B = 1
+BUTTON_SELECT = 2
+BUTTON_START = 3
+BUTTON_UP = 4
+BUTTON_DOWN = 5
+BUTTON_LEFT = 6
+BUTTON_RIGHT = 7
+NUM_CONTROLLER_BUTTONS = len(CONTROLLER_STATE_DESC)
+
 
 def _default_grid() -> np.ndarray:
     grid = np.zeros((GRID_ROWS, GRID_COLS), dtype=np.int8)
@@ -56,25 +67,11 @@ def _default_grid() -> np.ndarray:
 class GridworldKeyEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
-    ACTION_IDLE = 0
-    ACTION_RIGHT = 1
-    ACTION_LEFT = 2
-    ACTION_UP = 3
-    ACTION_DOWN = 4
-
-    ACTIONS = [
-        (0, 0),
-        (AGENT_SPEED, 0),
-        (-AGENT_SPEED, 0),
-        (0, -AGENT_SPEED),
-        (0, AGENT_SPEED),
-    ]
-
     def __init__(self, render_mode: Optional[str] = None, keyboard_override: bool = True):
         self.render_mode = render_mode
         self.keyboard_override = keyboard_override
         self.grid = _default_grid()
-        self.action_space = spaces.Discrete(len(self.ACTIONS))
+        self.action_space = spaces.MultiBinary(NUM_CONTROLLER_BUTTONS)
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8
         )
@@ -153,7 +150,7 @@ class GridworldKeyEnv(gym.Env):
         self._draw_inventory(frame)
         return frame
 
-    def _read_keyboard_override(self) -> Optional[int]:
+    def _read_keyboard_override(self) -> Optional[np.ndarray]:
         if not self.keyboard_override or self.render_mode != "human":
             return None
         if not pygame.get_init():
@@ -170,10 +167,10 @@ class GridworldKeyEnv(gym.Env):
         self._keyboard_toggle_prev = toggle_pressed
 
         mapping = [
-            (pygame.K_w, self.ACTION_UP),
-            (pygame.K_a, self.ACTION_LEFT),
-            (pygame.K_s, self.ACTION_DOWN),
-            (pygame.K_d, self.ACTION_RIGHT),
+            (pygame.K_w, BUTTON_UP),
+            (pygame.K_a, BUTTON_LEFT),
+            (pygame.K_s, BUTTON_DOWN),
+            (pygame.K_d, BUTTON_RIGHT),
         ]
         manual_press_detected = any(keys[key_code] for key_code, _ in mapping)
 
@@ -183,11 +180,12 @@ class GridworldKeyEnv(gym.Env):
         if not self._manual_control:
             return None
 
+        action = np.zeros(NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
         for key_code, action_index in mapping:
             if keys[key_code]:
-                return action_index
+                action[action_index] = 1
 
-        return None
+        return action
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -259,15 +257,17 @@ class GridworldKeyEnv(gym.Env):
 
         return False
 
-    def step(self, action: int):
+    def step(self, action: np.ndarray):
         manual_action = self._read_keyboard_override()
 
         if self._manual_control:
-            action_index = manual_action if manual_action is not None else self.ACTION_IDLE
+            controller_action = manual_action if manual_action is not None else np.zeros(NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
         else:
-            action_index = action
+            controller_action = np.array(action, dtype=np.uint8).reshape(NUM_CONTROLLER_BUTTONS)
 
-        dx, dy = self.ACTIONS[action_index]
+        dx = (int(controller_action[BUTTON_RIGHT]) - int(controller_action[BUTTON_LEFT])) * AGENT_SPEED
+        dy = (int(controller_action[BUTTON_DOWN]) - int(controller_action[BUTTON_UP])) * AGENT_SPEED
+
         target_x = int(self.agent_x + dx)
         target_y = int(self.agent_y + dy)
 
@@ -362,41 +362,53 @@ def _run_random_agent_from_args(args: GridworldRunnerArgs):
 
     trajectory_store = None
     if args.dump_trajectories:
-        traj_dir = run_dir / "trajectories"
+        traj_dir = run_dir / "traj_dumps"
         trajectory_store = TrajectoryStore(traj_dir, image_shape=(DISPLAY_HEIGHT, DISPLAY_WIDTH, 3))
 
     env = GridworldKeyEnv(render_mode=args.render_mode, keyboard_override=args.keyboard_override)
 
-    try:
-        for episode_idx in range(args.episodes):
-            observation, _ = env.reset()
-            if env.render_mode == "human":
-                env.render()
+    stop_running = False
 
-            for step_idx in range(args.max_steps):
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        return
-                    if event.type == pygame.KEYDOWN and event.key == pygame.K_q:
-                        print("Detected 'q' key press. Exiting run.")
-                        return
+    for episode_idx in range(args.episodes):
+        if stop_running:
+            break
 
-                action = int(rng.integers(0, env.action_space.n))
+        observation, _ = env.reset()
+        if env.render_mode == "human":
+            env.render()
 
-                if trajectory_store is not None:
-                    action_array = np.array([action], dtype=np.uint8)
-                    info_payload = _trajectory_info(env, step_idx)
-                    trajectory_store.record_state_action(observation, action_array, info_payload)
-
-                observation, reward, terminated, truncated, _ = env.step(action)
-
-                if terminated or truncated:
+        for step_idx in range(args.max_steps):
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    stop_running = True
+                    break
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_q:
+                    print("Detected 'q' key press. Exiting run.")
+                    stop_running = True
                     break
 
+            if stop_running:
+                break
+
+            action = rng.integers(0, 2, size=NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
+
             if trajectory_store is not None:
-                trajectory_store.save(traj_subdir=f"episode_{episode_idx:04d}")
-    finally:
-        env.close()
+                action_array = action.copy()
+                info_payload = _trajectory_info(env, step_idx)
+                trajectory_store.record_state_action(observation, action_array, info_payload)
+
+            observation, reward, terminated, truncated, _ = env.step(action)
+
+            if terminated or truncated:
+                break
+
+        if trajectory_store is not None and trajectory_store.states:
+            trajectory_store.save()
+
+    if trajectory_store is not None and trajectory_store.states:
+        trajectory_store.save()
+
+    env.close()
 
 
 def run_random_agent(
