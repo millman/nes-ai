@@ -286,6 +286,8 @@ class GridworldKeyEnv(gym.Env):
             "has_key": self.inventory_has_key,
             "key_collected_this_step": key_collected_now,
             "controller": controller_action.copy(),
+            "manual_control": bool(self._manual_control),
+            "step_index": int(self._episode_steps),
         }
 
         if self.render_mode == "human":
@@ -342,16 +344,6 @@ def _build_run_directory(args: GridworldRunnerArgs) -> tuple[Path, str]:
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir, run_name
 
-
-def _trajectory_info(env: GridworldKeyEnv, step_index: int) -> dict[str, Any]:
-    return {
-        "has_key": bool(env.inventory_has_key),
-        "key_collected_this_step": False,
-        "manual_control": bool(getattr(env, "_manual_control", False)),
-        "step_index": int(step_index),
-    }
-
-
 def main():
     args = tyro.cli(GridworldRunnerArgs)
     random.seed(args.seed)
@@ -401,7 +393,8 @@ def main():
 
             if trajectory_store is not None:
                 action_array = executed_action.copy()
-                info_payload = _trajectory_info(env, step_idx)
+                info_payload = info.copy()
+                info_payload["step_index"] = step_idx
                 trajectory_store.record_state_action(current_observation, action_array, info_payload)
 
             if terminated or truncated:
