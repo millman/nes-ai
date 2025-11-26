@@ -31,18 +31,7 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler
 from torchvision.models import resnet18, ResNet18_Weights
 
 from trajectory_utils import list_state_frames, list_traj_dirs
-
-# --------------------------------------------------------------------------------------
-# Device
-# --------------------------------------------------------------------------------------
-def pick_device(pref: Optional[str]) -> torch.device:
-    if pref:
-        dev = torch.device(pref)
-        return dev
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
+from utils.device_utils import pick_device
 
 # --------------------------------------------------------------------------------------
 # Dataset
