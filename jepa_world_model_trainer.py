@@ -110,6 +110,27 @@ class VisualizationAdapter(nn.Module):
         return self.net(embedding)
 
 
+class HardnessWeightedL1Loss(nn.Module):
+    """Standalone copy of the hardness-weighted L1 used by reconstruction scripts."""
+
+    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if beta <= 0:
+            raise ValueError("beta must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.beta = beta
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        l1 = torch.abs(input - target)
+        norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        rel_error = l1.detach() / norm
+        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
+        return (weight * l1).mean()
+
+
 class VisualizationDecoder(nn.Module):
     def __init__(self, latent_dim: int, image_channels: int, image_size: int) -> None:
         super().__init__()
@@ -130,6 +151,9 @@ class VisualizationDecoder(nn.Module):
         decoded = torch.sigmoid(self.net(latent))
         decoded = decoded.view(*original_shape, self.image_channels, self.image_size, self.image_size)
         return decoded
+
+
+RECON_LOSS = HardnessWeightedL1Loss()
 
 
 # ------------------------------------------------------------
@@ -302,7 +326,7 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
 def reconstruction_loss(vis_adapter: VisualizationAdapter, decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
     vis_latent = vis_adapter(embeddings.detach())
     recons = decoder(vis_latent)
-    return F.l1_loss(recons, images)
+    return RECON_LOSS(recons, images)
 
 
 # ------------------------------------------------------------
@@ -623,11 +647,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
     vis_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-        try:
-            sample_batch = next(iter(dataloader))
-            vis_batch_cpu = (sample_batch[0].clone(), sample_batch[1].clone())
-        except StopIteration:
-            vis_batch_cpu = None
+    try:
+        sample_batch = next(iter(dataloader))
+        vis_batch_cpu = (sample_batch[0].clone(), sample_batch[1].clone())
+    except StopIteration:
+        vis_batch_cpu = None
 
     data_iter = iter(dataloader)
     for global_step in range(cfg.total_steps):
