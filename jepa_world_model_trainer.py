@@ -179,7 +179,6 @@ class TrainConfig:
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
     max_trajectories: Optional[int] = None
-    dummy_dataset_size: int = 256
 
 
 class JEPAWorldModel(nn.Module):
