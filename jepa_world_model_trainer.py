@@ -154,7 +154,7 @@ class ModelConfig:
     h_local_dim: int = 128
     h_global_dim: int = 128
     embedding_dim: int = 192
-    action_dim: int = 4
+    action_dim: int = 8
 
 
 @dataclass
@@ -407,25 +407,6 @@ def training_step(
 # ------------------------------------------------------------
 
 
-class DummyTrajectoryDataset(Dataset[Tuple[torch.Tensor, torch.Tensor]]):
-    """Synthetic dataset to exercise the training loop."""
-
-    def __init__(self, length: int, seq_len: int, image_shape: Tuple[int, int, int], action_dim: int) -> None:
-        self.length = length
-        self.seq_len = seq_len
-        self.image_shape = image_shape
-        self.action_dim = action_dim
-
-    def __len__(self) -> int:
-        return self.length
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        c, h, w = self.image_shape
-        obs = torch.rand(self.seq_len, c, h, w)
-        actions = torch.randn(self.seq_len, self.action_dim)
-        return obs, actions
-
-
 def collate_batch(batch: Iterable[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
     obs, actions = zip(*batch)
     obs_tensor = torch.stack(obs, dim=0)
@@ -457,25 +438,23 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor]]):
         for traj_name, frame_paths in items:
             actions_path = (self.root / traj_name) / "actions.npz"
             if not actions_path.is_file():
-                continue
-            try:
-                with np.load(actions_path) as data:
-                    action_arr = data["actions"] if "actions" in data else data[list(data.files)[0]]
-            except Exception:
-                continue
+                raise FileNotFoundError(f"Missing actions.npz for {traj_name}")
+            with np.load(actions_path) as data:
+                action_arr = data["actions"] if "actions" in data else data[list(data.files)[0]]
             if action_arr.ndim == 1:
                 action_arr = action_arr[:, None]
-            if action_arr.shape[0] == len(frame_paths) + 1:
-                action_arr = action_arr[1:]
-            if action_arr.shape[0] < len(frame_paths):
-                continue
+            assert action_arr.shape[0] == len(frame_paths), (
+                f"Action count {action_arr.shape[0]} does not match frame count {len(frame_paths)} in {traj_name}"
+            )
             action_arr = action_arr.astype(np.float32, copy=False)
             if self.action_dim is None:
                 self.action_dim = action_arr.shape[1]
             elif self.action_dim != action_arr.shape[1]:
-                continue
+                raise ValueError(
+                    f"Inconsistent action dimension for {traj_name}: expected {self.action_dim}, got {action_arr.shape[1]}"
+                )
             if len(frame_paths) < self.seq_len:
-                continue
+                raise ValueError(f"Trajectory {traj_name} shorter than seq_len {self.seq_len}")
             max_start = len(frame_paths) - self.seq_len
             for start in range(max_start + 1):
                 self.samples.append((frame_paths, action_arr, start))
@@ -702,21 +681,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     (metrics_dir).mkdir(parents=True, exist_ok=True)
     vis_dir.mkdir(parents=True, exist_ok=True)
     loss_history = LossHistory()
-    if demo:
-        dataset = DummyTrajectoryDataset(
-            length=cfg.dummy_dataset_size,
-            seq_len=cfg.seq_len,
-            image_shape=(model_cfg.in_channels, model_cfg.image_size, model_cfg.image_size),
-            action_dim=model_cfg.action_dim,
-        )
-    else:
-        dataset = TrajectorySequenceDataset(
-            root=cfg.data_root,
-            seq_len=cfg.seq_len,
-            image_hw=(model_cfg.image_size, model_cfg.image_size),
-            max_traj=cfg.max_trajectories,
-        )
+    dataset = TrajectorySequenceDataset(
+        root=cfg.data_root,
+        seq_len=cfg.seq_len,
+        image_hw=(model_cfg.image_size, model_cfg.image_size),
+        max_traj=cfg.max_trajectories,
+    )
     dataset_action_dim = getattr(dataset, "action_dim", model_cfg.action_dim)
+    assert dataset_action_dim == 8, f"Expected action_dim 8, got {dataset_action_dim}"
     if model_cfg.action_dim != dataset_action_dim:
         model_cfg = replace(model_cfg, action_dim=dataset_action_dim)
     model = JEPAWorldModel(model_cfg).to(device)

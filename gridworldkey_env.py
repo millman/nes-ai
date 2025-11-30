@@ -46,6 +46,20 @@ BUTTON_RIGHT = 7
 NUM_CONTROLLER_BUTTONS = len(CONTROLLER_STATE_DESC)
 
 
+def _to_controller_presses(buttons: list[str]) -> np.ndarray:
+    presses = np.zeros(NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
+    for button in buttons:
+        idx = CONTROLLER_STATE_DESC.index(button.upper())
+        presses[idx] = 1
+    return presses
+
+
+SIMPLE_DIRECTIONS = ["UP", "DOWN", "LEFT", "RIGHT"]
+DISCRETE_ACTIONS = [_to_controller_presses([])] + [
+    _to_controller_presses([direction]) for direction in SIMPLE_DIRECTIONS
+]
+
+
 def _default_grid() -> np.ndarray:
     grid = np.zeros((GRID_PLAY_ROWS, GRID_COLS), dtype=np.int8)
 
@@ -71,7 +85,7 @@ class GridworldKeyEnv(gym.Env):
         self.render_mode = render_mode
         self.keyboard_override = keyboard_override
         self.grid = _default_grid()
-        self.action_space = spaces.MultiBinary(NUM_CONTROLLER_BUTTONS)
+        self.action_space = spaces.Discrete(len(DISCRETE_ACTIONS))
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8
         )
@@ -274,13 +288,13 @@ class GridworldKeyEnv(gym.Env):
 
         return False
 
-    def step(self, action: np.ndarray):
+    def step(self, action: int):
         manual_action = self._read_keyboard_override()
 
         if self._manual_control:
             controller_action = manual_action if manual_action is not None else np.zeros(NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
         else:
-            controller_action = np.array(action, dtype=np.uint8).reshape(NUM_CONTROLLER_BUTTONS)
+            controller_action = DISCRETE_ACTIONS[int(action)]
 
         dx = (int(controller_action[BUTTON_RIGHT]) - int(controller_action[BUTTON_LEFT])) * AGENT_SPEED
         dy = (int(controller_action[BUTTON_DOWN]) - int(controller_action[BUTTON_UP])) * AGENT_SPEED
@@ -397,7 +411,7 @@ def main():
             if stop_running:
                 break
 
-            random_action = rng.integers(0, 2, size=NUM_CONTROLLER_BUTTONS, dtype=np.uint8)
+            random_action = int(rng.integers(0, len(DISCRETE_ACTIONS)))
             current_observation = observation
 
             observation, reward, terminated, truncated, info = env.step(random_action)
