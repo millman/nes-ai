@@ -65,24 +65,6 @@ class Encoder(nn.Module):
         return self.pool(feats).flatten(1)
 
 
-class StochasticLatentHead(nn.Module):
-    def __init__(self, in_dim: int, latent_dim: int) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, in_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(in_dim, 2 * latent_dim),
-        )
-
-    def forward(self, feats: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mu_logvar = self.net(feats)
-        mu, logvar = mu_logvar.chunk(2, dim=-1)
-        sigma = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(mu)
-        z = mu + sigma * eps
-        return mu, logvar, z
-
-
 class PredictorNetwork(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int, out_dim: int) -> None:
         super().__init__()
@@ -125,7 +107,8 @@ class HardnessWeightedL1Loss(nn.Module):
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         l1 = torch.abs(input - target)
-        norm = l1.detach().mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        dims = tuple(range(1, l1.dim()))
+        norm = l1.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
         rel_error = l1.detach() / norm
         weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
         return (weight * l1).mean()
@@ -181,6 +164,7 @@ class LossWeights:
     global_pred: float = 0.5
     global_slow: float = 0.1
     sigreg: float = 0.5
+    latent_match: float = 1.0
 
 
 @dataclass
@@ -212,13 +196,27 @@ class JEPAWorldModel(nn.Module):
         self.cfg = cfg
         self.encoder = Encoder(cfg.in_channels, cfg.channel_schedule)
         enc_dim = cfg.channel_schedule[-1]
-        self.stochastic = StochasticLatentHead(enc_dim, cfg.latent_dim)
+        self.obs_proj = nn.Sequential(
+            nn.Linear(enc_dim, cfg.latent_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(cfg.latent_dim, cfg.latent_dim),
+        )
+        self.prior_proj = nn.Sequential(
+            nn.Linear(cfg.hidden_dim, cfg.latent_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(cfg.latent_dim, cfg.latent_dim),
+        )
         self.gru = nn.GRUCell(cfg.latent_dim + cfg.action_dim, cfg.hidden_dim)
         emb_in = cfg.latent_dim + cfg.hidden_dim
         self.proj_e = nn.Sequential(
             nn.Linear(emb_in, cfg.hidden_dim),
             nn.SiLU(inplace=True),
             nn.Linear(cfg.hidden_dim, cfg.embedding_dim),
+        )
+        self.target_proj = nn.Sequential(
+            nn.Linear(cfg.latent_dim, cfg.embedding_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(cfg.embedding_dim, cfg.embedding_dim),
         )
         pred_in = cfg.latent_dim + cfg.hidden_dim + cfg.action_dim
         self.predictor = PredictorNetwork(pred_in, cfg.hidden_dim, cfg.embedding_dim)
@@ -251,27 +249,25 @@ class JEPAWorldModel(nn.Module):
         else:
             h = h0
         h_history: List[torch.Tensor] = []
-        mu_list: List[torch.Tensor] = []
-        logvar_list: List[torch.Tensor] = []
-        z_list: List[torch.Tensor] = []
+        z_obs_list: List[torch.Tensor] = []
+        z_prior_list: List[torch.Tensor] = []
         embeddings: List[torch.Tensor] = []
         for step in range(t):
             h_history.append(h)
             h_local, h_global = self.split_hidden(h)
             feats = self.encoder(images[:, step])
-            mu, logvar, z = self.stochastic(feats)
-            embedding = self.build_embedding(z, h_local, h_global)
-            mu_list.append(mu)
-            logvar_list.append(logvar)
-            z_list.append(z)
+            z_prior = self.prior_proj(h)
+            z_obs = self.obs_proj(feats)
+            embedding = self.build_embedding(z_obs, h_local, h_global)
+            z_obs_list.append(z_obs)
+            z_prior_list.append(z_prior)
             embeddings.append(embedding)
-            h = self.transition(h, z, actions[:, step])
+            h = self.transition(h, z_obs, actions[:, step])
         h_history.append(h)
         h_hist = torch.stack(h_history, dim=1)  # [B, T+1, hidden]
         return {
-            "mu": torch.stack(mu_list, dim=1),
-            "logvar": torch.stack(logvar_list, dim=1),
-            "z": torch.stack(z_list, dim=1),
+            "z_obs": torch.stack(z_obs_list, dim=1),
+            "z_prior": torch.stack(z_prior_list, dim=1),
             "embeddings": torch.stack(embeddings, dim=1),
             "h_history": h_hist,
         }
@@ -283,18 +279,18 @@ class JEPAWorldModel(nn.Module):
 
 
 def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
-    z = outputs["z"]
+    z = outputs["z_obs"]
     embeddings = outputs["embeddings"]
     h_t = outputs["h_history"][:, :-1]
     preds = model.predictor(torch.cat([z[:, :-1], h_t[:, :-1], actions[:, :-1]], dim=-1))
-    target = embeddings[:, 1:].detach()
+    target = model.target_proj(z[:, 1:]).detach()
     return F.mse_loss(preds, target)
 
 
 def specialization_losses(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     h_t = outputs["h_history"][:, :-1]
     h_t1 = outputs["h_history"][:, 1:]
-    z = outputs["z"]
+    z = outputs["z_obs"]
     local_now = h_t[:, :-1, : model.cfg.h_local_dim]
     local_target = h_t1[:, :-1, : model.cfg.h_local_dim].detach()
     global_now = h_t[:, :-1, model.cfg.h_local_dim :]
@@ -324,7 +320,7 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
 
 
 def reconstruction_loss(vis_adapter: VisualizationAdapter, decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
-    vis_latent = vis_adapter(embeddings.detach())
+    vis_latent = vis_adapter(embeddings)
     recons = decoder(vis_latent)
     return RECON_LOSS(recons, images)
 
@@ -341,10 +337,11 @@ def training_step(
     optim_world: torch.optim.Optimizer,
     optim_decoder: torch.optim.Optimizer,
     batch: Tuple[torch.Tensor, torch.Tensor],
-    cfg: TrainingConfig,
+    cfg: TrainConfig,
     weights: LossWeights,
 ) -> Dict[str, float]:
     images, actions = batch
+    world_params = [p for p in model.parameters()]
     device = next(model.parameters()).device
     images = images.to(device)
     actions = actions.to(device)
@@ -353,6 +350,7 @@ def training_step(
     loss_local, loss_global_pred, loss_global_slow = specialization_losses(model, outputs, actions)
     loss_sigreg = sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
     loss_recon = reconstruction_loss(vis_adapter, decoder, outputs["embeddings"], images)
+    loss_prior = F.mse_loss(outputs["z_prior"], outputs["z_obs"].detach())
 
     world_loss = (
         weights.jepa * loss_jepa
@@ -360,17 +358,31 @@ def training_step(
         + weights.global_pred * loss_global_pred
         + weights.global_slow * loss_global_slow
         + weights.sigreg * loss_sigreg
+        + weights.latent_match * loss_prior
+        + cfg.recon_weight * loss_recon
     )
 
     optim_world.zero_grad()
+    optim_decoder.zero_grad()
     world_loss.backward()
     if cfg.grad_clip > 0:
-        nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        world_grad_norm = float(nn.utils.clip_grad_norm_(world_params, cfg.grad_clip).item())
+    else:
+        world_grad_norm = grad_norm(world_params)
     optim_world.step()
 
-    optim_decoder.zero_grad()
-    (cfg.recon_weight * loss_recon).backward()
+    decoder_params = list(vis_adapter.parameters()) + list(decoder.parameters())
+    decoder_grad_norm = grad_norm(decoder_params)
     optim_decoder.step()
+
+    z_obs = outputs["z_obs"]
+    z_mean = float(z_obs.mean().item())
+    z_std = float(z_obs.std().item())
+    h_hist = outputs["h_history"]
+    h_local = h_hist[..., : model.cfg.h_local_dim]
+    h_global = h_hist[..., model.cfg.h_local_dim :]
+    h_local_std = float(h_local.std().item())
+    h_global_std = float(h_global.std().item())
 
     return {
         "loss_jepa": loss_jepa.item(),
@@ -379,7 +391,14 @@ def training_step(
         "loss_global_slow": loss_global_slow.item(),
         "loss_sigreg": loss_sigreg.item(),
         "loss_recon": loss_recon.item(),
+        "loss_prior": loss_prior.item(),
         "loss_world": world_loss.item(),
+        "grad_world": world_grad_norm,
+        "grad_decoder": decoder_grad_norm,
+        "z_mean": z_mean,
+        "z_std": z_std,
+        "h_local_std": h_local_std,
+        "h_global_std": h_global_std,
     }
 
 
@@ -498,6 +517,13 @@ LOSS_COLUMNS = [
     "loss_global_slow",
     "loss_sigreg",
     "loss_recon",
+    "loss_prior_match",
+    "grad_world",
+    "grad_decoder",
+    "z_mean",
+    "z_std",
+    "h_local_std",
+    "h_global_std",
 ]
 
 
@@ -511,6 +537,13 @@ class LossHistory:
     global_slow: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
+    prior_match: List[float] = field(default_factory=list)
+    grad_world: List[float] = field(default_factory=list)
+    grad_decoder: List[float] = field(default_factory=list)
+    z_mean_vals: List[float] = field(default_factory=list)
+    z_std_vals: List[float] = field(default_factory=list)
+    h_local_std_vals: List[float] = field(default_factory=list)
+    h_global_std_vals: List[float] = field(default_factory=list)
 
     def append(self, step: float, metrics: Dict[str, float]) -> None:
         self.steps.append(step)
@@ -521,6 +554,13 @@ class LossHistory:
         self.global_slow.append(metrics["loss_global_slow"])
         self.sigreg.append(metrics["loss_sigreg"])
         self.recon.append(metrics["loss_recon"])
+        self.prior_match.append(metrics["loss_prior"])
+        self.grad_world.append(metrics["grad_world"])
+        self.grad_decoder.append(metrics["grad_decoder"])
+        self.z_mean_vals.append(metrics["z_mean"])
+        self.z_std_vals.append(metrics["z_std"])
+        self.h_local_std_vals.append(metrics["h_local_std"])
+        self.h_global_std_vals.append(metrics["h_global_std"])
 
     def __len__(self) -> int:
         return len(self.steps)
@@ -542,6 +582,13 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.global_slow,
             history.sigreg,
             history.recon,
+            history.prior_match,
+            history.grad_world,
+            history.grad_decoder,
+            history.z_mean_vals,
+            history.z_std_vals,
+            history.h_local_std_vals,
+            history.h_global_std_vals,
         ):
             writer.writerow(row)
 
@@ -566,6 +613,39 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.legend(ncol=2, fontsize=8)
     plt.tight_layout()
     plt.savefig(out_dir / "loss_curves.png", dpi=200)
+    plt.close()
+
+
+def grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
+    total = 0.0
+    for p in parameters:
+        if p.grad is None:
+            continue
+        param_norm = p.grad.data.norm(2).item()
+        total += param_norm * param_norm
+    return float(total**0.5)
+
+
+def save_embedding_projection(embeddings: torch.Tensor, path: Path) -> None:
+    flat = embeddings.detach().cpu().numpy()
+    b, t, d = flat.shape
+    flat = flat.reshape(b * t, d)
+    flat = flat - flat.mean(axis=0, keepdims=True)
+    if flat.shape[0] < 2:
+        return
+    u, s, vt = np.linalg.svd(flat, full_matrices=False)
+    coords = flat @ vt[:2].T
+    colors = np.tile(np.arange(t), b)
+    colors = colors / max(1, t - 1)
+    plt.figure(figsize=(6, 5))
+    plt.scatter(coords[:, 0], coords[:, 1], c=colors, cmap="viridis", s=10, alpha=0.7)
+    plt.title("Embedding Projection (PCA)")
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.colorbar(label="Time step")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
     plt.close()
 
 
@@ -683,7 +763,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 h_t = vis_outputs["h_history"][:, :-1]
                 predictor_in = torch.cat(
                     [
-                        vis_outputs["z"][:, :-1],
+                        vis_outputs["z_obs"][:, :-1],
                         h_t[:, :-1],
                         vis_actions[:, :-1],
                     ],
@@ -700,6 +780,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_rows,
                     cfg.vis_rollout,
                 )
+                save_embedding_projection(
+                    vis_outputs["embeddings"],
+                    vis_dir / f"embeddings_{global_step:07d}.png",
+                )
             model.train()
     if len(loss_history):
         write_loss_csv(loss_history, metrics_dir / "loss.csv")
@@ -711,5 +795,7 @@ def main() -> None:
     model_cfg = ModelConfig()
     weights = LossWeights()
     run_training(cfg, model_cfg, weights, demo=False)
+
+
 if __name__ == "__main__":
     main()
