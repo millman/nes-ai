@@ -54,10 +54,18 @@ def _to_controller_presses(buttons: list[str]) -> np.ndarray:
     return presses
 
 
-SIMPLE_DIRECTIONS = ["UP", "DOWN", "LEFT", "RIGHT"]
-DISCRETE_ACTIONS = [_to_controller_presses([])] + [
-    _to_controller_presses([direction]) for direction in SIMPLE_DIRECTIONS
+COMPLEX_DIRECTIONS = [
+    [],
+    ["up"],
+    ["down"],
+    ["left"],
+    ["right"],
+    ["up", "left"],
+    ["up", "right"],
+    ["down", "left"],
+    ["down", "right"],
 ]
+DISCRETE_ACTIONS = [_to_controller_presses(buttons) for buttons in COMPLEX_DIRECTIONS]
 
 
 def _default_grid() -> np.ndarray:
