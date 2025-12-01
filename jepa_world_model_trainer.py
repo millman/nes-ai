@@ -148,8 +148,8 @@ class VisualizationDecoder(nn.Module):
         return decoded
 
 
-RECON_LOSS = FocalL1Loss()
-JEPA_LOSS = FocalL1Loss()
+RECON_LOSS = HardnessWeightedL1Loss()
+JEPA_LOSS = HardnessWeightedL1Loss()
 SIGREG_LOSS = nn.MSELoss()
 
 
@@ -242,13 +242,35 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
+def _temporal_weights(errors: torch.Tensor, eps: float = 1e-6, clamp: float = 2.0) -> torch.Tensor:
+    """Compute temporal hardness weights from per-step error magnitudes.
+
+    Args:
+        errors: Per-sample error for each transition, shape [B, T-1].
+        eps: Small constant to avoid division by zero.
+        clamp: Symmetric clamp value for ratios (>= 1).
+    """
+    if errors.dim() != 2:
+        raise ValueError("errors must be 2D with shape [B, T-1]")
+    prev = torch.cat([errors[:, :1], errors[:, :-1]], dim=1)
+    ratios = (errors + eps) / (prev + eps)
+    if clamp is not None and clamp > 1.0:
+        ratios = ratios.clamp(1.0 / clamp, clamp)
+    weights = ratios / ratios.mean().clamp_min(eps)
+    return weights.detach()
+
+
 def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
     embeddings = outputs["embeddings"]
     preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
     future = embeddings[:, 1:]
+    diff_for_stats = torch.abs(preds.detach() - future.detach()).mean(dim=-1)
+    weights = _temporal_weights(diff_for_stats)
+    per_step_loss = torch.abs(preds - future.detach()).mean(dim=-1)
+    per_step_loss_enc = torch.abs(future - preds.detach()).mean(dim=-1)
     # Mirror Dreamer's balanced loss: each branch sees its counterpart as a fixed target.
-    loss_predictor = JEPA_LOSS(preds, future.detach())
-    loss_encoder = JEPA_LOSS(future, preds.detach())
+    loss_predictor = (weights * per_step_loss).mean()
+    loss_encoder = (weights * per_step_loss_enc).mean()
     return 0.5 * (loss_predictor + loss_encoder)
 
 
