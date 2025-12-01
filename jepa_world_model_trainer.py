@@ -575,9 +575,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     run_dir = cfg.output_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir = run_dir / "metrics"
-    vis_dir = run_dir / "visualizations"
     (metrics_dir).mkdir(parents=True, exist_ok=True)
-    vis_dir.mkdir(parents=True, exist_ok=True)
+    fixed_vis_dir = run_dir / "fixed"
+    rolling_vis_dir = run_dir / "rolling"
+    fixed_vis_dir.mkdir(parents=True, exist_ok=True)
+    rolling_vis_dir.mkdir(parents=True, exist_ok=True)
     loss_history = LossHistory()
     write_run_metadata(run_dir, cfg, model_cfg)
     dataset = TrajectorySequenceDataset(
@@ -596,12 +598,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     optim_decoder = torch.optim.Adam(decoder.parameters(), lr=cfg.decoder_lr)
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
-    vis_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    fixed_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     try:
         sample_batch = next(iter(dataloader))
-        vis_batch_cpu = (sample_batch[0].clone(), sample_batch[1].clone())
+        fixed_batch_cpu = (sample_batch[0].clone(), sample_batch[1].clone())
     except StopIteration:
-        vis_batch_cpu = None
+        fixed_batch_cpu = None
+    rolling_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
     data_iter = iter(dataloader)
     for global_step in range(cfg.total_steps):
@@ -616,53 +619,62 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             loss_history.append(global_step, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
             plot_loss_curves(loss_history, metrics_dir)
+        rolling_batch_cpu = (batch[0].clone(), batch[1].clone())
         if (
             cfg.vis_every_steps > 0
             and global_step % cfg.vis_every_steps == 0
-            and vis_batch_cpu is not None
         ):
             model.eval()
             with torch.no_grad():
-                vis_frames = vis_batch_cpu[0].to(device)
-                vis_actions = vis_batch_cpu[1].to(device)
-                vis_outputs = model.rollout(vis_frames, vis_actions)
-                vis_embeddings = vis_outputs["embeddings"]
-                recon_frames = decoder(vis_embeddings).clamp(0, 1)
-                seq_index = 0
-                sample_embeddings = vis_embeddings[seq_index]
-                sample_actions = vis_actions[seq_index]
-                pred_rollouts: Optional[torch.Tensor]
-                if cfg.vis_rollout > 0:
-                    rollout_embeds: List[torch.Tensor] = []
-                    current = sample_embeddings
-                    for _ in range(cfg.vis_rollout):
-                        pred_input = torch.cat([current, sample_actions], dim=-1)
-                        pred_embed = model.predictor(pred_input)
-                        rollout_embeds.append(pred_embed)
-                        current = pred_embed
-                    stacked = torch.stack(rollout_embeds, dim=1)
-                    decoded = decoder(stacked.reshape(-1, stacked.shape[-1])).clamp(0, 1)
-                    pred_rollouts = decoded.view(
-                        sample_embeddings.shape[0],
+                def render_sample(
+                    batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]],
+                    out_dir: Path,
+                ) -> None:
+                    if batch_cpu is None:
+                        return
+                    vis_frames = batch_cpu[0].to(device)
+                    vis_actions = batch_cpu[1].to(device)
+                    vis_outputs = model.rollout(vis_frames, vis_actions)
+                    vis_embeddings = vis_outputs["embeddings"]
+                    recon_frames = decoder(vis_embeddings).clamp(0, 1)
+                    seq_index = 0
+                    sample_embeddings = vis_embeddings[seq_index]
+                    sample_actions = vis_actions[seq_index]
+                    pred_rollouts: Optional[torch.Tensor]
+                    if cfg.vis_rollout > 0:
+                        rollout_embeds: List[torch.Tensor] = []
+                        current = sample_embeddings
+                        for _ in range(cfg.vis_rollout):
+                            pred_input = torch.cat([current, sample_actions], dim=-1)
+                            pred_embed = model.predictor(pred_input)
+                            rollout_embeds.append(pred_embed)
+                            current = pred_embed
+                        stacked = torch.stack(rollout_embeds, dim=1)
+                        decoded = decoder(stacked.reshape(-1, stacked.shape[-1])).clamp(0, 1)
+                        pred_rollouts = decoded.view(
+                            sample_embeddings.shape[0],
+                            cfg.vis_rollout,
+                            decoder.image_channels,
+                            decoder.image_size,
+                            decoder.image_size,
+                        )
+                    else:
+                        pred_rollouts = None
+                    save_rollout_visualization(
+                        out_dir / f"rollout_{global_step:07d}.png",
+                        vis_frames[seq_index],
+                        recon_frames[seq_index],
+                        pred_rollouts,
+                        cfg.vis_rows,
                         cfg.vis_rollout,
-                        decoder.image_channels,
-                        decoder.image_size,
-                        decoder.image_size,
                     )
-                else:
-                    pred_rollouts = None
-                save_rollout_visualization(
-                    vis_dir / f"rollout_{global_step:07d}.png",
-                    vis_frames[seq_index],
-                    recon_frames[seq_index],
-                    pred_rollouts,
-                    cfg.vis_rows,
-                    cfg.vis_rollout,
-                )
-                save_embedding_projection(
-                    vis_outputs["embeddings"],
-                    vis_dir / f"embeddings_{global_step:07d}.png",
-                )
+                    save_embedding_projection(
+                        vis_outputs["embeddings"],
+                        out_dir / f"embeddings_{global_step:07d}.png",
+                    )
+
+                render_sample(fixed_batch_cpu, fixed_vis_dir)
+                render_sample(rolling_batch_cpu, rolling_vis_dir)
             model.train()
     if len(loss_history):
         write_loss_csv(loss_history, metrics_dir / "loss.csv")
