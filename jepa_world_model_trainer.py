@@ -80,18 +80,6 @@ class PredictorNetwork(nn.Module):
         return self.net(x)
 
 
-class VisualizationAdapter(nn.Module):
-    def __init__(self, in_dim: int, proj_dim: int) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, proj_dim),
-            nn.SiLU(inplace=True),
-        )
-
-    def forward(self, embedding: torch.Tensor) -> torch.Tensor:
-        return self.net(embedding)
-
-
 class HardnessWeightedL1Loss(nn.Module):
     """Standalone copy of the hardness-weighted L1 used by reconstruction scripts."""
 
@@ -187,36 +175,17 @@ class JEPAWorldModel(nn.Module):
         self.cfg = cfg
         self.encoder = Encoder(cfg.in_channels, cfg.channel_schedule)
         enc_dim = cfg.channel_schedule[-1]
-        self.obs_proj = nn.Sequential(
-            nn.Linear(enc_dim, cfg.latent_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(cfg.latent_dim, cfg.latent_dim),
-        )
-        self.proj_e = nn.Sequential(
-            nn.Linear(cfg.latent_dim, cfg.hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(cfg.hidden_dim, cfg.embedding_dim),
-        )
-        self.target_proj = nn.Sequential(
-            nn.Linear(cfg.latent_dim, cfg.embedding_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(cfg.embedding_dim, cfg.embedding_dim),
-        )
-        pred_in = cfg.latent_dim + cfg.action_dim
-        self.predictor = PredictorNetwork(pred_in, cfg.hidden_dim, cfg.embedding_dim)
+        self.embedding_dim = enc_dim
+        pred_in = self.embedding_dim + cfg.action_dim
+        self.predictor = PredictorNetwork(pred_in, cfg.hidden_dim, self.embedding_dim)
 
     def rollout(self, images: torch.Tensor, actions: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
-        z_obs_list: List[torch.Tensor] = []
         embeddings: List[torch.Tensor] = []
         for step in range(t):
             feats = self.encoder(images[:, step])
-            z_obs = self.obs_proj(feats)
-            embedding = self.proj_e(z_obs)
-            z_obs_list.append(z_obs)
-            embeddings.append(embedding)
+            embeddings.append(feats)
         return {
-            "z_obs": torch.stack(z_obs_list, dim=1),
             "embeddings": torch.stack(embeddings, dim=1),
         }
 
@@ -227,9 +196,9 @@ class JEPAWorldModel(nn.Module):
 
 
 def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
-    z = outputs["z_obs"]
-    preds = model.predictor(torch.cat([z[:, :-1], actions[:, :-1]], dim=-1))
-    target = model.target_proj(z[:, 1:]).detach()
+    embeddings = outputs["embeddings"]
+    preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
+    target = embeddings[:, 1:].detach()
     return F.mse_loss(preds, target)
 
 
@@ -247,9 +216,8 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     return F.mse_loss(sorted_proj, sorted_normal)
 
 
-def reconstruction_loss(vis_adapter: VisualizationAdapter, decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
-    vis_latent = vis_adapter(embeddings)
-    recons = decoder(vis_latent)
+def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
+    recons = decoder(embeddings)
     return RECON_LOSS(recons, images)
 
 
@@ -260,7 +228,6 @@ def reconstruction_loss(vis_adapter: VisualizationAdapter, decoder: Visualizatio
 
 def training_step(
     model: JEPAWorldModel,
-    vis_adapter: VisualizationAdapter,
     decoder: VisualizationDecoder,
     optim_world: torch.optim.Optimizer,
     optim_decoder: torch.optim.Optimizer,
@@ -276,7 +243,7 @@ def training_step(
     outputs = model.rollout(images, actions)
     loss_jepa = jepa_loss(model, outputs, actions)
     loss_sigreg = sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
-    loss_recon = reconstruction_loss(vis_adapter, decoder, outputs["embeddings"], images)
+    loss_recon = reconstruction_loss(decoder, outputs["embeddings"].detach(), images)
 
     world_loss = (
         weights.jepa * loss_jepa
@@ -293,13 +260,8 @@ def training_step(
         world_grad_norm = grad_norm(world_params)
     optim_world.step()
 
-    decoder_params = list(vis_adapter.parameters()) + list(decoder.parameters())
-    decoder_grad_norm = grad_norm(decoder_params)
+    decoder_grad_norm = grad_norm(decoder.parameters())
     optim_decoder.step()
-
-    z_obs = outputs["z_obs"]
-    z_mean = float(z_obs.mean().item())
-    z_std = float(z_obs.std().item())
 
     return {
         "loss_jepa": loss_jepa.item(),
@@ -308,8 +270,6 @@ def training_step(
         "loss_world": world_loss.item(),
         "grad_world": world_grad_norm,
         "grad_decoder": decoder_grad_norm,
-        "z_mean": z_mean,
-        "z_std": z_std,
     }
 
 
@@ -385,6 +345,12 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor]]):
             frame = load_frame_as_tensor(path, size=self.image_hw)
             frames.append(frame)
         action_slice = actions[start : start + self.seq_len]
+        # Each frame/action pair must stay aligned so the predictor knows which action follows each observation.
+        assert len(frames) == self.seq_len, f"Expected {self.seq_len} frames, got {len(frames)}"
+        assert action_slice.shape[0] == self.seq_len, (
+            f"Expected {self.seq_len} actions, got {action_slice.shape[0]}"
+        )
+        assert action_slice.shape[1] == actions.shape[1], "Action dimensionality changed unexpectedly."
         return torch.stack(frames, dim=0), torch.from_numpy(action_slice)
 
 
@@ -406,8 +372,6 @@ LOSS_COLUMNS = [
     "loss_recon",
     "grad_world",
     "grad_decoder",
-    "z_mean",
-    "z_std",
 ]
 
 
@@ -420,8 +384,6 @@ class LossHistory:
     recon: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
-    z_mean_vals: List[float] = field(default_factory=list)
-    z_std_vals: List[float] = field(default_factory=list)
 
     def append(self, step: float, metrics: Dict[str, float]) -> None:
         self.steps.append(step)
@@ -431,8 +393,6 @@ class LossHistory:
         self.recon.append(metrics["loss_recon"])
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
-        self.z_mean_vals.append(metrics["z_mean"])
-        self.z_std_vals.append(metrics["z_std"])
 
     def __len__(self) -> int:
         return len(self.steps)
@@ -453,8 +413,6 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.recon,
             history.grad_world,
             history.grad_decoder,
-            history.z_mean_vals,
-            history.z_std_vals,
         ):
             writer.writerow(row)
 
@@ -576,10 +534,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if model_cfg.action_dim != dataset_action_dim:
         model_cfg = replace(model_cfg, action_dim=dataset_action_dim)
     model = JEPAWorldModel(model_cfg).to(device)
-    vis_adapter = VisualizationAdapter(model_cfg.embedding_dim, model_cfg.latent_dim).to(device)
-    decoder = VisualizationDecoder(model_cfg.latent_dim, model_cfg.in_channels, model_cfg.image_size).to(device)
+    decoder = VisualizationDecoder(model.embedding_dim, model_cfg.in_channels, model_cfg.image_size).to(device)
     optim_world = torch.optim.Adam(model.parameters(), lr=cfg.lr)
-    optim_decoder = torch.optim.Adam(list(vis_adapter.parameters()) + list(decoder.parameters()), lr=cfg.decoder_lr)
+    optim_decoder = torch.optim.Adam(decoder.parameters(), lr=cfg.decoder_lr)
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
     vis_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
@@ -596,9 +553,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         except StopIteration:
             data_iter = iter(dataloader)
             batch = next(data_iter)
-        metrics = training_step(
-            model, vis_adapter, decoder, optim_world, optim_decoder, batch, cfg, weights
-        )
+        metrics = training_step(model, decoder, optim_world, optim_decoder, batch, cfg, weights)
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
             log_metrics(global_step, metrics)
             loss_history.append(global_step, metrics)
@@ -615,16 +570,16 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_actions = vis_batch_cpu[1].to(device)
                 vis_outputs = model.rollout(vis_frames, vis_actions)
                 vis_embeddings = vis_outputs["embeddings"]
-                recon_frames = decoder(vis_adapter(vis_embeddings)).clamp(0, 1)
+                recon_frames = decoder(vis_embeddings).clamp(0, 1)
                 predictor_in = torch.cat(
                     [
-                        vis_outputs["z_obs"][:, :-1],
+                        vis_embeddings[:, :-1],
                         vis_actions[:, :-1],
                     ],
                     dim=-1,
                 )
                 pred_embeddings = model.predictor(predictor_in)
-                pred_frames = decoder(vis_adapter(pred_embeddings)).clamp(0, 1)
+                pred_frames = decoder(pred_embeddings).clamp(0, 1)
                 seq_index = 0
                 save_rollout_visualization(
                     vis_dir / f"rollout_{global_step:07d}.png",
