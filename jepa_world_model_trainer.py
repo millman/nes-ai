@@ -143,14 +143,9 @@ class PredictorNetwork(nn.Module):
             nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, out_dim),
         )
-        self.skip = nn.Linear(out_dim, out_dim, bias=False)
-        nn.init.zeros_(self.skip.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base = self.net(x)
-        # ResNet-style skip: project previous embedding and add to predicted delta.
-        skip = self.skip(x[..., :base.shape[-1]])
-        return base + skip
+        return self.net(x)
 
 
 class FocalL1Loss(nn.Module):
@@ -201,6 +196,10 @@ class VisualizationDecoder(nn.Module):
             nn.Linear(latent_dim, self.start_ch * self.start_hw * self.start_hw),
             nn.SiLU(inplace=True),
         )
+        self.prev_adapter = nn.Sequential(
+            nn.Conv2d(image_channels, self.start_ch, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+        )
         up_blocks: List[nn.Module] = []
         in_ch = self.start_ch
         for out_ch in reversed(channel_schedule[:-1]):
@@ -214,19 +213,23 @@ class VisualizationDecoder(nn.Module):
             nn.Conv2d(head_hidden, image_channels, kernel_size=1),
         )
 
-    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+    def forward(self, latent: torch.Tensor, prev_frame: Optional[torch.Tensor] = None) -> torch.Tensor:
         original_shape = latent.shape[:-1]
         latent = latent.reshape(-1, latent.shape[-1])
         projected = self.project(latent)
         decoded = projected.view(-1, self.start_ch, self.start_hw, self.start_hw)
+        if prev_frame is not None:
+            prev = prev_frame.reshape(-1, self.image_channels, self.image_size, self.image_size)
+            prev = F.interpolate(prev, size=(self.start_hw, self.start_hw), mode="bilinear", align_corners=False)
+            decoded = decoded + self.prev_adapter(prev)
         if len(self.up_blocks) > 0:
             decoded = self.up_blocks(decoded)
-        decoded = torch.sigmoid(self.head(decoded))
-        decoded = decoded.view(*original_shape, self.image_channels, self.image_size, self.image_size)
-        return decoded
+        delta = self.head(decoded)
+        delta = delta.view(*original_shape, self.image_channels, self.image_size, self.image_size)
+        return delta
 
 
-RECON_LOSS = HardnessWeightedMSELoss()
+RECON_LOSS = nn.MSELoss()
 JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
 
@@ -269,6 +272,8 @@ class ModelConfig:
 class LossWeights:
     jepa: float = 1.0
     sigreg: float = 0.5
+    rollout: float = 0.0
+    consistency: float = 0.0
 
 
 @dataclass
@@ -288,8 +293,9 @@ class TrainConfig:
     vis_rollout: int = 4
     input_vis_every_steps: int = 0
     input_vis_rows: int = 4
-    rollout_horizon: int = 0
-    rollout_weight: float = 0.0
+    rollout_horizon: int = 4
+    pair_vis_every_steps: int = 0
+    pair_vis_rows: int = 4
     embedding_projection_samples: int = 256
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
@@ -330,22 +336,26 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
-def jepa_losses(
+def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
+    """Standard one-step JEPA loss."""
+    embeddings = outputs["embeddings"]
+    deltas = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
+    preds = embeddings[:, :-1] + deltas
+    target = embeddings[:, 1:].detach()
+    return JEPA_LOSS(preds, target)
+
+
+def rollout_loss(
     model: JEPAWorldModel,
-    outputs: Dict[str, torch.Tensor],
+    embeddings: torch.Tensor,
     actions: torch.Tensor,
     rollout_horizon: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return single-step JEPA loss plus optional multi-step rollout loss."""
-    embeddings = outputs["embeddings"]
-    preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
-    target = embeddings[:, 1:].detach()
-    base_loss = JEPA_LOSS(preds, target)
+) -> torch.Tensor:
     if rollout_horizon <= 1:
-        return base_loss, embeddings.new_tensor(0.0)
+        return embeddings.new_tensor(0.0)
     b, t, d = embeddings.shape
     if t < 2:
-        return base_loss, embeddings.new_tensor(0.0)
+        return embeddings.new_tensor(0.0)
     total = embeddings.new_tensor(0.0)
     steps = 0
     for start in range(t - 1):
@@ -353,13 +363,20 @@ def jepa_losses(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            pred = model.predictor(torch.cat([current, act], dim=-1))
+            delta = model.predictor(torch.cat([current, act], dim=-1))
+            pred = current + delta
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
             current = pred
-    rollout_loss = total / steps if steps > 0 else embeddings.new_tensor(0.0)
-    return base_loss, rollout_loss
+    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+
+
+def latent_consistency_loss(embeddings: torch.Tensor) -> torch.Tensor:
+    if embeddings.shape[1] < 2:
+        return embeddings.new_tensor(0.0)
+    diffs = embeddings[:, 1:] - embeddings[:, :-1]
+    return diffs.abs().mean()
 
 
 def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
@@ -377,8 +394,11 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
 
 
 def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
-    recons = decoder(embeddings)
-    return RECON_LOSS(recons, images)
+    if embeddings.shape[1] < 2:
+        return embeddings.new_tensor(0.0)
+    delta_pred = decoder(embeddings[:, 1:], images[:, :-1])
+    target_delta = images[:, 1:] - images[:, :-1]
+    return RECON_LOSS(delta_pred, target_delta)
 
 
 # ------------------------------------------------------------
@@ -401,14 +421,33 @@ def training_step(
     images = images.to(device)
     actions = actions.to(device)
     outputs = model.encode_sequence(images)
-    loss_jepa, loss_rollout = jepa_losses(model, outputs, actions, cfg.rollout_horizon)
-    loss_sigreg = sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
-    loss_recon = reconstruction_loss(decoder, outputs["embeddings"].detach(), images)
+    loss_jepa = jepa_loss(model, outputs, actions) if weights.jepa > 0 else images.new_tensor(0.0)
+    loss_rollout = (
+        rollout_loss(model, outputs["embeddings"], actions, cfg.rollout_horizon)
+        if weights.rollout > 0
+        else images.new_tensor(0.0)
+    )
+    loss_consistency = (
+        latent_consistency_loss(outputs["embeddings"])
+        if weights.consistency > 0
+        else images.new_tensor(0.0)
+    )
+    loss_sigreg = (
+        sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
+        if weights.sigreg > 0
+        else images.new_tensor(0.0)
+    )
+    loss_recon = (
+        reconstruction_loss(decoder, outputs["embeddings"].detach(), images)
+        if cfg.recon_weight > 0
+        else images.new_tensor(0.0)
+    )
 
     world_loss = (
         weights.jepa * loss_jepa
         + weights.sigreg * loss_sigreg
-        + cfg.rollout_weight * loss_rollout
+        + weights.rollout * loss_rollout
+        + weights.consistency * loss_consistency
     )
     decoder_loss = cfg.recon_weight * loss_recon
 
@@ -429,6 +468,7 @@ def training_step(
         "loss_jepa": loss_jepa.item(),
         "loss_sigreg": loss_sigreg.item(),
         "loss_rollout": loss_rollout.item(),
+        "loss_consistency": loss_consistency.item(),
         "loss_recon": loss_recon.item(),
         "loss_world": world_loss.item(),
         "grad_world": world_grad_norm,
@@ -533,6 +573,7 @@ LOSS_COLUMNS = [
     "loss_jepa",
     "loss_sigreg",
     "loss_rollout",
+    "loss_consistency",
     "loss_recon",
     "grad_world",
     "grad_decoder",
@@ -546,6 +587,7 @@ class LossHistory:
     jepa: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
     rollout: List[float] = field(default_factory=list)
+    consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
@@ -556,6 +598,7 @@ class LossHistory:
         self.jepa.append(metrics["loss_jepa"])
         self.sigreg.append(metrics["loss_sigreg"])
         self.rollout.append(metrics["loss_rollout"])
+        self.consistency.append(metrics["loss_consistency"])
         self.recon.append(metrics["loss_recon"])
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
@@ -577,6 +620,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.jepa,
             history.sigreg,
             history.rollout,
+            history.consistency,
             history.recon,
             history.grad_world,
             history.grad_decoder,
@@ -594,6 +638,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.plot(history.steps, history.sigreg, label="sigreg")
     if any(val != 0.0 for val in history.rollout):
         plt.plot(history.steps, history.rollout, label="rollout")
+    if any(val != 0.0 for val in history.consistency):
+        plt.plot(history.steps, history.consistency, label="consistency")
     plt.plot(history.steps, history.recon, label="recon")
     plt.xlabel("Step")
     plt.ylabel("Loss")
@@ -653,7 +699,7 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
 
 
 TEXT_FONT = ImageFont.load_default()
-LOSS_CMAP = plt.get_cmap("inferno")
+LOSS_CMAP = plt.get_cmap("coolwarm")
 
 
 def _describe_action_tensor(action: torch.Tensor) -> str:
@@ -677,14 +723,14 @@ def _annotate_with_text(image: np.ndarray, text: str) -> np.ndarray:
 
 
 def _loss_to_heatmap(frame: torch.Tensor, recon: torch.Tensor) -> np.ndarray:
-    diff = (frame.detach() - recon.detach()).abs().mean(dim=0)
+    diff = (recon.detach() - frame.detach()).mean(dim=0)
     diff_np = diff.cpu().numpy()
-    max_val = diff_np.max()
+    max_val = np.max(np.abs(diff_np))
     if max_val <= 0:
         norm = diff_np
     else:
         norm = diff_np / max_val
-    heat = LOSS_CMAP(norm)[..., :3]
+    heat = LOSS_CMAP((norm + 1) / 2)[..., :3]
     return (heat * 255.0).astype(np.uint8)
 
 
@@ -692,15 +738,38 @@ def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> Optional[Visua
     if frames is None:
         return None
     batch_size, seq_len = frames.shape[0], frames.shape[1]
-    if batch_size == 0:
+    if batch_size == 0 or seq_len < 2:
         return None
     num_rows = min(vis_rows, batch_size)
     row_indices = torch.arange(num_rows, dtype=torch.long)
-    if seq_len <= 0:
-        time_indices = torch.zeros(num_rows, dtype=torch.long)
-    else:
-        time_indices = torch.arange(num_rows, dtype=torch.long) % seq_len
+    time_indices = (torch.arange(num_rows, dtype=torch.long) % (seq_len - 1)) + 1
     return VisualizationSelection(row_indices=row_indices, time_indices=time_indices)
+
+
+def save_temporal_pair_visualization(
+    out_path: Path,
+    frames: torch.Tensor,
+    actions: torch.Tensor,
+    rows: int,
+) -> None:
+    if frames.shape[1] < 2:
+        return
+    frames = frames.detach().cpu()
+    actions = actions.detach().cpu()
+    batch_size = frames.shape[0]
+    num_rows = min(rows, batch_size)
+    order = torch.randperm(batch_size)[:num_rows]
+    pairs = []
+    for idx in order:
+        time_idx = torch.randint(1, frames.shape[1], ()).item()
+        prev_frame = tensor_to_uint8_image(frames[idx, time_idx - 1])
+        next_frame = tensor_to_uint8_image(frames[idx, time_idx])
+        prev_frame = _annotate_with_text(prev_frame, _describe_action_tensor(actions[idx, time_idx - 1]))
+        next_frame = _annotate_with_text(next_frame, _describe_action_tensor(actions[idx, time_idx]))
+        pairs.append(np.concatenate([prev_frame, next_frame], axis=1))
+    grid = np.concatenate(pairs, axis=0) if pairs else np.zeros((1, 1, 3), dtype=np.uint8)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(grid).save(out_path)
 
 
 def save_input_batch_visualization(
@@ -800,7 +869,9 @@ def _render_visualization_batch(
     vis_actions = batch_cpu[1].to(device)
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
-    recon_frames = decoder(vis_embeddings).clamp(0, 1)
+    if vis_frames.shape[1] < 2:
+        return None
+    delta_frames = decoder(vis_embeddings[:, 1:], vis_frames[:, :-1])
     batch_size = vis_frames.shape[0]
     if batch_size == 0:
         return None
@@ -811,7 +882,10 @@ def _render_visualization_batch(
     else:
         num_rows = min(rows, batch_size)
         row_indices = torch.randperm(batch_size, device=device)[:num_rows]
-        time_indices = None
+        max_time = vis_frames.shape[1]
+        if max_time < 2:
+            return None
+        time_indices = torch.randint(1, max_time, (num_rows,), device=device)
     sampled_frames: List[torch.Tensor] = []
     sampled_texts: List[str] = []
     sampled_recons: List[torch.Tensor] = []
@@ -820,23 +894,29 @@ def _render_visualization_batch(
     for row_offset, idx in enumerate(row_indices):
         if time_indices is not None:
             time_idx = int(time_indices[row_offset].item())
-            time_idx = max(0, min(time_idx, vis_frames.shape[1] - 1))
         else:
-            time_idx = torch.randint(0, vis_frames.shape[1], ()).item()
-        sampled_frames.append(vis_frames[idx, time_idx])
+            time_idx = torch.randint(1, vis_frames.shape[1], ()).item()
+        true_frame = vis_frames[idx, time_idx]
+        prev_frame = vis_frames[idx, time_idx - 1]
+        delta_frame = delta_frames[idx, time_idx - 1]
+        recon_frame = (prev_frame + delta_frame).clamp(0, 1)
+        sampled_frames.append(true_frame)
         sampled_texts.append(_describe_action_tensor(vis_actions[idx, time_idx]))
-        sampled_recons.append(recon_frames[idx, time_idx])
-        sampled_heatmaps.append(_loss_to_heatmap(vis_frames[idx, time_idx], recon_frames[idx, time_idx]))
+        sampled_recons.append(recon_frame)
+        sampled_heatmaps.append(_loss_to_heatmap(true_frame, recon_frame))
         if rollout_steps > 0:
             seq_preds: List[torch.Tensor] = []
             current_embed = vis_embeddings[idx, time_idx].unsqueeze(0)
             current_action = vis_actions[idx, time_idx].unsqueeze(0)
+            current_frame = recon_frame.clone()
             for _ in range(rollout_steps):
                 pred_input = torch.cat([current_embed, current_action], dim=-1)
-                pred_embed = model.predictor(pred_input)
-                decoded = decoder(pred_embed).clamp(0, 1)[0]
-                seq_preds.append(decoded)
-                current_embed = pred_embed
+                delta_embed = model.predictor(pred_input)
+                next_embed = current_embed + delta_embed
+                delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
+                current_frame = (current_frame + delta_next).clamp(0, 1)
+                seq_preds.append(current_frame)
+                current_embed = next_embed
             sampled_preds.append(torch.stack(seq_preds))
     frames_tensor = torch.stack(sampled_frames, dim=0)
     recon_tensor = torch.stack(sampled_recons, dim=0)
@@ -909,11 +989,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_vis_dir.mkdir(parents=True, exist_ok=True)
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     inputs_vis_dir: Optional[Path]
+    pair_vis_dir: Optional[Path]
     if cfg.input_vis_every_steps > 0:
         inputs_vis_dir = run_dir / "vis_inputs"
         inputs_vis_dir.mkdir(parents=True, exist_ok=True)
     else:
         inputs_vis_dir = None
+    if cfg.pair_vis_every_steps > 0:
+        pair_vis_dir = run_dir / "vis_pairs"
+        pair_vis_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        pair_vis_dir = None
     loss_history = LossHistory()
     write_run_metadata(run_dir, cfg, model_cfg)
     dataset = TrajectorySequenceDataset(
@@ -985,6 +1071,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 rolling_batch_cpu[0],
                 rolling_batch_cpu[1],
                 cfg.input_vis_rows,
+            )
+        if (
+            pair_vis_dir is not None
+            and cfg.pair_vis_every_steps > 0
+            and global_step % cfg.pair_vis_every_steps == 0
+            and rolling_batch_cpu is not None
+        ):
+            save_temporal_pair_visualization(
+                pair_vis_dir / f"pairs_{global_step:07d}.png",
+                rolling_batch_cpu[0],
+                rolling_batch_cpu[1],
+                cfg.pair_vis_rows,
             )
         if (
             cfg.vis_every_steps > 0
