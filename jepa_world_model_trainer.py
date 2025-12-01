@@ -143,9 +143,14 @@ class PredictorNetwork(nn.Module):
             nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, out_dim),
         )
+        self.skip = nn.Linear(out_dim, out_dim, bias=False)
+        nn.init.zeros_(self.skip.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        base = self.net(x)
+        # ResNet-style skip: project previous embedding and add to predicted delta.
+        skip = self.skip(x[..., :base.shape[-1]])
+        return base + skip
 
 
 class FocalL1Loss(nn.Module):
