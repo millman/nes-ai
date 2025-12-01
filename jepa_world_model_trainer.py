@@ -52,6 +52,47 @@ class DownBlock(nn.Module):
         return self.net(x)
 
 
+class UpBlock(nn.Module):
+    """ConvTranspose block that mirrors DownBlock with stride-2 expansion."""
+
+    def __init__(self, in_ch: int, out_ch: int) -> None:
+        super().__init__()
+        groups = _norm_groups(out_ch)
+        self.net = nn.Sequential(
+            nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2),
+            nn.GroupNorm(groups, out_ch),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, out_ch),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class HardnessWeightedL1Loss(nn.Module):
+    """L1 loss with per-sample hardness weighting derived from mean error."""
+
+    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if beta <= 0:
+            raise ValueError("beta must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.beta = beta
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        l1 = torch.abs(input - target)
+        dims = tuple(range(1, l1.dim()))
+        norm = l1.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
+        rel_error = l1.detach() / norm
+        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
+        return (weight * l1).mean()
+
+
 class Encoder(nn.Module):
     def __init__(self, in_channels: int, schedule: Tuple[int, ...]):
         super().__init__()
@@ -106,29 +147,58 @@ class FocalL1Loss(nn.Module):
 
 
 class VisualizationDecoder(nn.Module):
-    def __init__(self, latent_dim: int, image_channels: int, image_size: int) -> None:
+    def __init__(
+        self,
+        latent_dim: int,
+        image_channels: int,
+        image_size: int,
+        channel_schedule: Tuple[int, ...],
+    ) -> None:
         super().__init__()
-        out_dim = image_channels * image_size * image_size
-        self.net = nn.Sequential(
-            nn.Linear(latent_dim, 512),
-            nn.SiLU(inplace=True),
-            nn.Linear(512, 512),
-            nn.SiLU(inplace=True),
-            nn.Linear(512, out_dim),
-        )
+        if not channel_schedule:
+            raise ValueError("channel_schedule must be non-empty for decoder construction.")
+        stages = max(len(channel_schedule) - 1, 0)
+        downscale = 2 ** stages if stages > 0 else 1
+        if image_size % downscale != 0:
+            raise ValueError(
+                f"image_size {image_size} is incompatible with channel schedule length {len(channel_schedule)}"
+            )
+        self.start_hw = image_size // downscale
+        self.start_ch = channel_schedule[-1]
         self.image_channels = image_channels
         self.image_size = image_size
+
+        self.project = nn.Sequential(
+            nn.Linear(latent_dim, self.start_ch * self.start_hw * self.start_hw),
+            nn.SiLU(inplace=True),
+        )
+        up_blocks: List[nn.Module] = []
+        in_ch = self.start_ch
+        for out_ch in reversed(channel_schedule[:-1]):
+            up_blocks.append(UpBlock(in_ch, out_ch))
+            in_ch = out_ch
+        self.up_blocks = nn.Sequential(*up_blocks)
+        head_hidden = max(in_ch // 2, 1)
+        self.head = nn.Sequential(
+            nn.Conv2d(in_ch, head_hidden, kernel_size=3, padding=1),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(head_hidden, image_channels, kernel_size=1),
+        )
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         original_shape = latent.shape[:-1]
         latent = latent.reshape(-1, latent.shape[-1])
-        decoded = torch.sigmoid(self.net(latent))
+        projected = self.project(latent)
+        decoded = projected.view(-1, self.start_ch, self.start_hw, self.start_hw)
+        if len(self.up_blocks) > 0:
+            decoded = self.up_blocks(decoded)
+        decoded = torch.sigmoid(self.head(decoded))
         decoded = decoded.view(*original_shape, self.image_channels, self.image_size, self.image_size)
         return decoded
 
 
-RECON_LOSS = nn.MSELoss(reduction="none")
-JEPA_LOSS = nn.MSELoss(reduction="none")
+RECON_LOSS = HardnessWeightedL1Loss()
+JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
 
 
@@ -213,7 +283,7 @@ class JEPAWorldModel(nn.Module):
         pred_in = self.embedding_dim + cfg.action_dim
         self.predictor = PredictorNetwork(pred_in, cfg.hidden_dim, self.embedding_dim)
 
-    def rollout(self, images: torch.Tensor, actions: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
         embeddings: List[torch.Tensor] = []
         for step in range(t):
@@ -229,7 +299,7 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
-def _temporal_weights(errors: torch.Tensor, eps: float = 1e-6, clamp: float = 2.0) -> torch.Tensor:
+def _temporal_weights(errors: torch.Tensor, eps: float = 1e-6, clamp: float = 10.0) -> torch.Tensor:
     """Compute temporal hardness weights from per-step error magnitudes.
 
     Args:
@@ -247,7 +317,7 @@ def _temporal_weights(errors: torch.Tensor, eps: float = 1e-6, clamp: float = 2.
     return weights.detach()
 
 
-def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
+def jepa_loss_temporal(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
     embeddings = outputs["embeddings"]
     preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
     future = embeddings[:, 1:]
@@ -257,6 +327,13 @@ def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: 
     # Only train the predictor branch; encoder receives gradients via reconstruction/regularizers.
     loss_predictor = (weights * per_step_loss).mean()
     return loss_predictor
+
+
+def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
+    embeddings = outputs["embeddings"]
+    preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
+    target = embeddings[:, 1:].detach()
+    return JEPA_LOSS(preds, target)
 
 
 def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
@@ -273,7 +350,7 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     return SIGREG_LOSS(sorted_proj, sorted_normal)
 
 
-def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
+def reconstruction_loss_temporal(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
     recons = decoder(embeddings)
     if recons.shape != images.shape:
         raise ValueError(f"Decoder output shape {recons.shape} does not match target {images.shape}")
@@ -283,6 +360,11 @@ def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor,
     weight_map = weights.view(weights.shape[0], weights.shape[1], 1, 1, 1)
     loss = (weight_map.detach() * mse).mean()
     return loss
+
+
+def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
+    recons = decoder(embeddings)
+    return RECON_LOSS(recons, images)
 
 
 # ------------------------------------------------------------
@@ -304,10 +386,10 @@ def training_step(
     device = next(model.parameters()).device
     images = images.to(device)
     actions = actions.to(device)
-    outputs = model.rollout(images, actions)
+    outputs = model.encode_sequence(images)
     loss_jepa = jepa_loss(model, outputs, actions)
     loss_sigreg = sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
-    loss_recon = reconstruction_loss(decoder, outputs["embeddings"].detach(), images)
+    loss_recon = reconstruction_loss_temporal(decoder, outputs["embeddings"].detach(), images)
 
     world_loss = (
         weights.jepa * loss_jepa
@@ -549,6 +631,7 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
 
 
 TEXT_FONT = ImageFont.load_default()
+LOSS_CMAP = plt.get_cmap("inferno")
 
 
 def _describe_action_tensor(action: torch.Tensor) -> str:
@@ -569,6 +652,18 @@ def _annotate_with_text(image: np.ndarray, text: str) -> np.ndarray:
     draw.rectangle(rect, fill=(0, 0, 0))
     draw.text((padding, padding), text, fill=(255, 255, 255), font=TEXT_FONT)
     return np.array(pil_image)
+
+
+def _loss_to_heatmap(frame: torch.Tensor, recon: torch.Tensor) -> np.ndarray:
+    diff = (frame.detach() - recon.detach()).abs().mean(dim=0)
+    diff_np = diff.cpu().numpy()
+    max_val = diff_np.max()
+    if max_val <= 0:
+        norm = diff_np
+    else:
+        norm = diff_np / max_val
+    heat = LOSS_CMAP(norm)[..., :3]
+    return (heat * 255.0).astype(np.uint8)
 
 
 def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> Optional[VisualizationSelection]:
@@ -676,6 +771,7 @@ def save_rollout_visualization(
     rows: int,
     rollout_steps: int,
     annotations: Optional[List[str]] = None,
+    heatmaps: Optional[List[np.ndarray]] = None,
 ) -> None:
     frames = frames.detach().cpu()
     recon_frames = recon_frames.detach().cpu()
@@ -700,6 +796,8 @@ def save_rollout_visualization(
                 columns.append(columns[-1])
                 continue
             columns.append(tensor_to_uint8_image(pred_frames[row_idx, horizon]))
+        if heatmaps is not None and row_idx < len(heatmaps):
+            columns.append(heatmaps[row_idx])
         row_image = np.concatenate(columns, axis=1)
         grid_rows.append(row_image)
     grid = np.concatenate(grid_rows, axis=0) if grid_rows else np.zeros((1, 1, 3), dtype=np.uint8)
@@ -722,11 +820,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     fixed_vis_dir = run_dir / "vis_fixed"
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
-    inputs_vis_dir = run_dir / "vis_inputs"
     fixed_vis_dir.mkdir(parents=True, exist_ok=True)
     rolling_vis_dir.mkdir(parents=True, exist_ok=True)
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
-    inputs_vis_dir.mkdir(parents=True, exist_ok=True)
+    inputs_vis_dir: Optional[Path]
+    if cfg.input_vis_every_steps > 0:
+        inputs_vis_dir = run_dir / "vis_inputs"
+        inputs_vis_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        inputs_vis_dir = None
     loss_history = LossHistory()
     write_run_metadata(run_dir, cfg, model_cfg)
     dataset = TrajectorySequenceDataset(
@@ -740,7 +842,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if model_cfg.action_dim != dataset_action_dim:
         model_cfg = replace(model_cfg, action_dim=dataset_action_dim)
     model = JEPAWorldModel(model_cfg).to(device)
-    decoder = VisualizationDecoder(model.embedding_dim, model_cfg.in_channels, model_cfg.image_size).to(device)
+    decoder = VisualizationDecoder(
+        model.embedding_dim,
+        model_cfg.in_channels,
+        model_cfg.image_size,
+        model_cfg.channel_schedule,
+    ).to(device)
     optim_world = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     optim_decoder = torch.optim.Adam(decoder.parameters(), lr=cfg.decoder_lr)
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
@@ -783,7 +890,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             plot_loss_curves(loss_history, metrics_dir)
         rolling_batch_cpu = (batch[0].clone(), batch[1].clone())
         if (
-            cfg.input_vis_every_steps > 0
+            inputs_vis_dir is not None
+            and cfg.input_vis_every_steps > 0
             and global_step % cfg.input_vis_every_steps == 0
             and rolling_batch_cpu is not None
         ):
@@ -808,7 +916,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         return
                     vis_frames = batch_cpu[0].to(device)
                     vis_actions = batch_cpu[1].to(device)
-                    vis_outputs = model.rollout(vis_frames, vis_actions)
+                    vis_outputs = model.encode_sequence(vis_frames)
                     vis_embeddings = vis_outputs["embeddings"]
                     recon_frames = decoder(vis_embeddings).clamp(0, 1)
                     batch_size = vis_frames.shape[0]
@@ -826,6 +934,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     sampled_texts: List[str] = []
                     sampled_recons: List[torch.Tensor] = []
                     sampled_preds: List[torch.Tensor] = []
+                    sampled_heatmaps: List[np.ndarray] = []
                     for row_offset, idx in enumerate(row_indices):
                         if time_indices is not None:
                             time_idx = int(time_indices[row_offset].item())
@@ -835,6 +944,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         sampled_frames.append(vis_frames[idx, time_idx])
                         sampled_texts.append(_describe_action_tensor(vis_actions[idx, time_idx]))
                         sampled_recons.append(recon_frames[idx, time_idx])
+                        sampled_heatmaps.append(_loss_to_heatmap(vis_frames[idx, time_idx], recon_frames[idx, time_idx]))
                         if cfg.vis_rollout > 0:
                             seq_preds: List[torch.Tensor] = []
                             current_embed = vis_embeddings[idx, time_idx].unsqueeze(0)
@@ -861,14 +971,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         cfg.vis_rows,
                         cfg.vis_rollout,
                         sampled_texts,
+                        sampled_heatmaps,
                     )
 
                 render_sample(fixed_batch_cpu, fixed_vis_dir, fixed_selection)
                 render_sample(rolling_batch_cpu, rolling_vis_dir)
                 if embedding_batch_cpu is not None:
                     embed_frames = embedding_batch_cpu[0].to(device)
-                    embed_actions = embedding_batch_cpu[1].to(device)
-                    embed_outputs = model.rollout(embed_frames, embed_actions)
+                    embed_outputs = model.encode_sequence(embed_frames)
                     save_embedding_projection(
                         embed_outputs["embeddings"],
                         embeddings_vis_dir / f"embeddings_{global_step:07d}.png",
