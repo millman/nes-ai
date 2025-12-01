@@ -548,8 +548,19 @@ def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) 
     model_metadata = {
         "train_config": _serialize_for_json(asdict(cfg)),
         "model_config": _serialize_for_json(asdict(model_cfg)),
+        "data_root": str(cfg.data_root),
     }
-    (run_dir / "metadata_model.json").write_text(json.dumps(model_metadata, indent=2, sort_keys=True))
+    toml_lines = []
+    toml_lines.append("[train_config]")
+    for k, v in model_metadata["train_config"].items():
+        toml_lines.append(f"{k} = {json.dumps(v)}")
+    toml_lines.append("")
+    toml_lines.append("[model_config]")
+    for k, v in model_metadata["model_config"].items():
+        toml_lines.append(f"{k} = {json.dumps(v)}")
+    toml_lines.append("")
+    toml_lines.append(f'data_root = "{model_metadata["data_root"]}"')
+    (run_dir / "metadata.txt").write_text("\n".join(toml_lines))
 
 
 def save_rollout_visualization(
