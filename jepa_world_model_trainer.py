@@ -167,6 +167,7 @@ class TrainConfig:
     vis_every_steps: int = 50
     vis_rows: int = 4
     vis_rollout: int = 4
+    embedding_projection_samples: int = 64
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
     max_trajectories: Optional[int] = None
@@ -506,9 +507,7 @@ def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) 
     diff_output = _run_git_command(["git", "diff", "--patch"])
     if not diff_output.strip():
         diff_output = "No uncommitted changes."
-    train_cfg_json = json.dumps(_serialize_for_json(asdict(cfg)), indent=2, sort_keys=True)
-    model_cfg_json = json.dumps(_serialize_for_json(asdict(model_cfg)), indent=2, sort_keys=True)
-    metadata = "\n".join(
+    git_metadata = "\n".join(
         [
             "Git commit:",
             commit_sha or "Unavailable",
@@ -516,15 +515,14 @@ def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) 
             "Git diff (uncommitted changes):",
             diff_output,
             "",
-            "TrainConfig:",
-            train_cfg_json,
-            "",
-            "ModelConfig:",
-            model_cfg_json,
-            "",
         ]
     )
-    (run_dir / "run_metadata.txt").write_text(metadata)
+    (run_dir / "metadata_git.txt").write_text(git_metadata)
+    model_metadata = {
+        "train_config": _serialize_for_json(asdict(cfg)),
+        "model_config": _serialize_for_json(asdict(model_cfg)),
+    }
+    (run_dir / "metadata_model.json").write_text(json.dumps(model_metadata, indent=2, sort_keys=True))
 
 
 def save_rollout_visualization(
@@ -576,10 +574,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir = run_dir / "metrics"
     (metrics_dir).mkdir(parents=True, exist_ok=True)
-    fixed_vis_dir = run_dir / "fixed"
-    rolling_vis_dir = run_dir / "rolling"
+    fixed_vis_dir = run_dir / "vis_fixed"
+    rolling_vis_dir = run_dir / "vis_rolling"
+    embeddings_vis_dir = run_dir / "embeddings"
     fixed_vis_dir.mkdir(parents=True, exist_ok=True)
     rolling_vis_dir.mkdir(parents=True, exist_ok=True)
+    embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     loss_history = LossHistory()
     write_run_metadata(run_dir, cfg, model_cfg)
     dataset = TrajectorySequenceDataset(
@@ -605,6 +605,19 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     except StopIteration:
         fixed_batch_cpu = None
     rolling_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    if cfg.embedding_projection_samples > 0:
+        embed_loader = DataLoader(
+            dataset,
+            batch_size=min(cfg.embedding_projection_samples, len(dataset)),
+            shuffle=True,
+            collate_fn=collate_batch,
+        )
+        try:
+            embed_batch = next(iter(embed_loader))
+            embedding_batch_cpu = (embed_batch[0].clone(), embed_batch[1].clone())
+        except StopIteration:
+            embedding_batch_cpu = None
 
     data_iter = iter(dataloader)
     for global_step in range(cfg.total_steps):
@@ -668,13 +681,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         cfg.vis_rows,
                         cfg.vis_rollout,
                     )
-                    save_embedding_projection(
-                        vis_outputs["embeddings"],
-                        out_dir / f"embeddings_{global_step:07d}.png",
-                    )
 
                 render_sample(fixed_batch_cpu, fixed_vis_dir)
                 render_sample(rolling_batch_cpu, rolling_vis_dir)
+                if embedding_batch_cpu is not None:
+                    embed_frames = embedding_batch_cpu[0].to(device)
+                    embed_actions = embedding_batch_cpu[1].to(device)
+                    embed_outputs = model.rollout(embed_frames, embed_actions)
+                    save_embedding_projection(
+                        embed_outputs["embeddings"],
+                        embeddings_vis_dir / f"embeddings_{global_step:07d}.png",
+                    )
             model.train()
     if len(loss_history):
         write_loss_csv(loss_history, metrics_dir / "loss.csv")
