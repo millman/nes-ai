@@ -93,6 +93,30 @@ class HardnessWeightedL1Loss(nn.Module):
         return (weight * l1).mean()
 
 
+class HardnessWeightedMSELoss(nn.Module):
+    """Simple hardness-weighted MSE mirroring the L1 variant."""
+
+    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if beta <= 0:
+            raise ValueError("beta must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.beta = beta
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if input.shape != target.shape:
+            raise ValueError("input and target must share shape")
+        mse = (input - target).pow(2)
+        dims = tuple(range(1, mse.dim()))
+        norm = mse.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
+        rel_error = mse.detach() / norm
+        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
+        return (weight * mse).mean()
+
+
 class Encoder(nn.Module):
     def __init__(self, in_channels: int, schedule: Tuple[int, ...]):
         super().__init__()
@@ -197,7 +221,7 @@ class VisualizationDecoder(nn.Module):
         return decoded
 
 
-RECON_LOSS = HardnessWeightedL1Loss()
+RECON_LOSS = HardnessWeightedMSELoss()
 JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
 
@@ -301,24 +325,6 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
-def _temporal_weights(errors: torch.Tensor, eps: float = 1e-6, clamp: float = 10.0) -> torch.Tensor:
-    """Compute temporal hardness weights from per-step error magnitudes.
-
-    Args:
-        errors: Per-sample error history with shape [B, K] (K time steps).
-        eps: Small constant to avoid division by zero.
-        clamp: Symmetric clamp value for ratios (>= 1).
-    """
-    if errors.dim() != 2:
-        raise ValueError("errors must be 2D with shape [B, K]")
-    prev = torch.cat([errors[:, :1], errors[:, :-1]], dim=1)
-    ratios = (errors + eps) / (prev + eps)
-    if clamp is not None and clamp > 1.0:
-        ratios = ratios.clamp(1.0 / clamp, clamp)
-    weights = ratios / ratios.mean().clamp_min(eps)
-    return weights.detach()
-
-
 def jepa_losses(
     model: JEPAWorldModel,
     outputs: Dict[str, torch.Tensor],
@@ -365,18 +371,6 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     return SIGREG_LOSS(sorted_proj, sorted_normal)
 
 
-def reconstruction_loss_temporal(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
-    recons = decoder(embeddings)
-    if recons.shape != images.shape:
-        raise ValueError(f"Decoder output shape {recons.shape} does not match target {images.shape}")
-    mse = (recons - images).pow(2)
-    per_step_error = mse.mean(dim=(2, 3, 4))
-    weights = _temporal_weights(per_step_error)
-    weight_map = weights.view(weights.shape[0], weights.shape[1], 1, 1, 1)
-    loss = (weight_map.detach() * mse).mean()
-    return loss
-
-
 def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
     recons = decoder(embeddings)
     return RECON_LOSS(recons, images)
@@ -404,7 +398,7 @@ def training_step(
     outputs = model.encode_sequence(images)
     loss_jepa, loss_rollout = jepa_losses(model, outputs, actions, cfg.rollout_horizon)
     loss_sigreg = sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
-    loss_recon = reconstruction_loss_temporal(decoder, outputs["embeddings"].detach(), images)
+    loss_recon = reconstruction_loss(decoder, outputs["embeddings"].detach(), images)
 
     world_loss = (
         weights.jepa * loss_jepa
