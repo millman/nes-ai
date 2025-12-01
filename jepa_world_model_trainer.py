@@ -128,6 +128,7 @@ class VisualizationDecoder(nn.Module):
 
 RECON_LOSS = HardnessWeightedL1Loss()
 JEPA_LOSS = HardnessWeightedL1Loss()
+SIGREG_LOSS = HardnessWeightedL1Loss()
 
 
 # ------------------------------------------------------------
@@ -137,6 +138,24 @@ JEPA_LOSS = HardnessWeightedL1Loss()
 
 @dataclass
 class ModelConfig:
+    """Dimensional flow (bottlenecks marked with *):
+
+        image (image_size^2·in_channels)
+            │  Encoder(channel_schedule → embedding_dim)
+            ▼
+        embedding_dim*  ─┐
+                        ├─ concat action_dim → Predictor(hidden_dim*) → embedding_dim
+        action_dim ──────┘
+            │
+            └→ VisualizationDecoder(latent_dim* → image_size^2·in_channels)
+
+    • image_size controls the spatial resolution feeding the encoder.
+    • embedding_dim (≈ channel_schedule[-1]) is the latent bottleneck the predictor must match.
+    • action_dim is concatenated to embeddings before the predictor MLP.
+    • hidden_dim is the predictor’s internal width.
+    • latent_dim governs the visualization decoder’s compression when turning embeddings back into images.
+    """
+
     in_channels: int = 3
     image_size: int = 64
     channel_schedule: Tuple[int, ...] = (32, 64, 128, 256)
@@ -149,7 +168,7 @@ class ModelConfig:
 @dataclass
 class LossWeights:
     jepa: float = 1.0
-    sigreg: float = 0.5
+    sigreg: float = 1.0
 
 
 @dataclass
@@ -158,7 +177,7 @@ class TrainConfig:
     batch_size: int = 4
     lr: float = 1e-4
     decoder_lr: float = 1e-4
-    grad_clip: float = 1.0
+    grad_clip: float = 0.0
     sigreg_projections: int = 32
     recon_weight: float = 1.0
     device: Optional[str] = "mps"
@@ -167,7 +186,7 @@ class TrainConfig:
     vis_every_steps: int = 50
     vis_rows: int = 4
     vis_rollout: int = 4
-    embedding_projection_samples: int = 64
+    embedding_projection_samples: int = 128
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
     max_trajectories: Optional[int] = None
@@ -219,7 +238,7 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     sorted_proj, _ = torch.sort(projected, dim=1)
     normal_samples = torch.randn_like(projected)
     sorted_normal, _ = torch.sort(normal_samples, dim=1)
-    return F.mse_loss(sorted_proj, sorted_normal)
+    return SIGREG_LOSS(sorted_proj, sorted_normal)
 
 
 def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
@@ -460,7 +479,15 @@ def save_embedding_projection(embeddings: torch.Tensor, path: Path) -> None:
     flat = flat - flat.mean(axis=0, keepdims=True)
     if flat.shape[0] < 2:
         return
-    u, s, vt = np.linalg.svd(flat, full_matrices=False)
+    try:
+        u, s, vt = np.linalg.svd(flat, full_matrices=False)
+    except np.linalg.LinAlgError:
+        jitter = np.random.normal(scale=1e-6, size=flat.shape)
+        try:
+            u, s, vt = np.linalg.svd(flat + jitter, full_matrices=False)
+        except np.linalg.LinAlgError:
+            print("Warning: embedding SVD failed to converge; skipping projection.")
+            return
     coords = flat @ vt[:2].T
     colors = np.tile(np.arange(t), b)
     colors = colors / max(1, t - 1)
@@ -536,9 +563,8 @@ def save_rollout_visualization(
     frames = frames.detach().cpu()
     recon_frames = recon_frames.detach().cpu()
     pred_frames = pred_rollouts.detach().cpu() if pred_rollouts is not None else None
-    total_frames = frames.shape[0]
-    num_rows = min(rows, total_frames)
-    pred_rows = 0 if pred_frames is None else pred_frames.shape[0]
+    total_rows = frames.shape[0]
+    num_rows = min(rows, total_rows)
     pred_horizons = 0 if pred_frames is None else pred_frames.shape[1]
     grid_rows: List[np.ndarray] = []
     for row_idx in range(num_rows):
@@ -549,7 +575,6 @@ def save_rollout_visualization(
         for horizon in range(rollout_steps):
             if (
                 pred_frames is None
-                or row_idx >= pred_rows
                 or horizon >= pred_horizons
             ):
                 columns.append(columns[-1])
@@ -650,34 +675,41 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     vis_outputs = model.rollout(vis_frames, vis_actions)
                     vis_embeddings = vis_outputs["embeddings"]
                     recon_frames = decoder(vis_embeddings).clamp(0, 1)
-                    seq_index = 0
-                    sample_embeddings = vis_embeddings[seq_index]
-                    sample_actions = vis_actions[seq_index]
-                    pred_rollouts: Optional[torch.Tensor]
-                    if cfg.vis_rollout > 0:
-                        rollout_embeds: List[torch.Tensor] = []
-                        current = sample_embeddings
-                        for _ in range(cfg.vis_rollout):
-                            pred_input = torch.cat([current, sample_actions], dim=-1)
-                            pred_embed = model.predictor(pred_input)
-                            rollout_embeds.append(pred_embed)
-                            current = pred_embed
-                        stacked = torch.stack(rollout_embeds, dim=1)
-                        decoded = decoder(stacked.reshape(-1, stacked.shape[-1])).clamp(0, 1)
-                        pred_rollouts = decoded.view(
-                            sample_embeddings.shape[0],
-                            cfg.vis_rollout,
-                            decoder.image_channels,
-                            decoder.image_size,
-                            decoder.image_size,
-                        )
+                    batch_size = vis_frames.shape[0]
+                    if batch_size == 0:
+                        return
+                    num_rows = min(cfg.vis_rows, batch_size)
+                    row_indices = torch.randperm(batch_size, device=device)[:num_rows]
+                    sampled_frames: List[torch.Tensor] = []
+                    sampled_recons: List[torch.Tensor] = []
+                    sampled_preds: List[torch.Tensor] = []
+                    for idx in row_indices:
+                        time_idx = torch.randint(0, vis_frames.shape[1], ()).item()
+                        sampled_frames.append(vis_frames[idx, time_idx])
+                        sampled_recons.append(recon_frames[idx, time_idx])
+                        if cfg.vis_rollout > 0:
+                            seq_preds: List[torch.Tensor] = []
+                            current_embed = vis_embeddings[idx, time_idx].unsqueeze(0)
+                            current_action = vis_actions[idx, time_idx].unsqueeze(0)
+                            for _ in range(cfg.vis_rollout):
+                                pred_input = torch.cat([current_embed, current_action], dim=-1)
+                                pred_embed = model.predictor(pred_input)
+                                decoded = decoder(pred_embed).clamp(0, 1)[0]
+                                seq_preds.append(decoded)
+                                current_embed = pred_embed
+                            sampled_preds.append(torch.stack(seq_preds))
+                    frames_tensor = torch.stack(sampled_frames, dim=0)
+                    recon_tensor = torch.stack(sampled_recons, dim=0)
+                    pred_tensor: Optional[torch.Tensor]
+                    if cfg.vis_rollout > 0 and len(sampled_preds) == len(sampled_frames):
+                        pred_tensor = torch.stack(sampled_preds, dim=0)
                     else:
-                        pred_rollouts = None
+                        pred_tensor = None
                     save_rollout_visualization(
                         out_dir / f"rollout_{global_step:07d}.png",
-                        vis_frames[seq_index],
-                        recon_frames[seq_index],
-                        pred_rollouts,
+                        frames_tensor,
+                        recon_tensor,
+                        pred_tensor,
                         cfg.vis_rows,
                         cfg.vis_rollout,
                     )
