@@ -2,13 +2,15 @@
 """Training loop for the JEPA world model with local/global specialization and SIGReg."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import csv
+import json
 import numpy as np
 from PIL import Image
+import subprocess
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -125,6 +127,7 @@ class VisualizationDecoder(nn.Module):
 
 
 RECON_LOSS = HardnessWeightedL1Loss()
+JEPA_LOSS = HardnessWeightedL1Loss()
 
 
 # ------------------------------------------------------------
@@ -168,6 +171,8 @@ class TrainConfig:
     data_root: Path = Path("data.gridworldkey")
     max_trajectories: Optional[int] = None
 
+    loss_weights: LossWeights = field(default_factory=LossWeights)
+
 
 class JEPAWorldModel(nn.Module):
     def __init__(self, cfg: ModelConfig) -> None:
@@ -199,7 +204,7 @@ def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: 
     embeddings = outputs["embeddings"]
     preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
     target = embeddings[:, 1:].detach()
-    return F.mse_loss(preds, target)
+    return JEPA_LOSS(preds, target)
 
 
 def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
@@ -475,20 +480,68 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
     return (array * 255.0).round().astype(np.uint8)
 
 
+def _run_git_command(args: List[str]) -> str:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return "git executable not found."
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        return f"Command {' '.join(args)} failed (code {result.returncode}): {stderr}"
+    return result.stdout.strip()
+
+
+def _serialize_for_json(value):
+    if isinstance(value, dict):
+        return {k: _serialize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_for_json(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) -> None:
+    commit_sha = _run_git_command(["git", "rev-parse", "HEAD"])
+    diff_output = _run_git_command(["git", "diff", "--patch"])
+    if not diff_output.strip():
+        diff_output = "No uncommitted changes."
+    train_cfg_json = json.dumps(_serialize_for_json(asdict(cfg)), indent=2, sort_keys=True)
+    model_cfg_json = json.dumps(_serialize_for_json(asdict(model_cfg)), indent=2, sort_keys=True)
+    metadata = "\n".join(
+        [
+            "Git commit:",
+            commit_sha or "Unavailable",
+            "",
+            "Git diff (uncommitted changes):",
+            diff_output,
+            "",
+            "TrainConfig:",
+            train_cfg_json,
+            "",
+            "ModelConfig:",
+            model_cfg_json,
+            "",
+        ]
+    )
+    (run_dir / "run_metadata.txt").write_text(metadata)
+
+
 def save_rollout_visualization(
     out_path: Path,
     frames: torch.Tensor,
     recon_frames: torch.Tensor,
-    pred_frames: torch.Tensor,
+    pred_rollouts: Optional[torch.Tensor],
     rows: int,
     rollout_steps: int,
 ) -> None:
     frames = frames.detach().cpu()
     recon_frames = recon_frames.detach().cpu()
-    pred_frames = pred_frames.detach().cpu()
+    pred_frames = pred_rollouts.detach().cpu() if pred_rollouts is not None else None
     total_frames = frames.shape[0]
     num_rows = min(rows, total_frames)
-    pred_len = pred_frames.shape[0]
+    pred_rows = 0 if pred_frames is None else pred_frames.shape[0]
+    pred_horizons = 0 if pred_frames is None else pred_frames.shape[1]
     grid_rows: List[np.ndarray] = []
     for row_idx in range(num_rows):
         columns = [
@@ -496,11 +549,14 @@ def save_rollout_visualization(
             tensor_to_uint8_image(recon_frames[row_idx]),
         ]
         for horizon in range(rollout_steps):
-            if pred_len == 0:
+            if (
+                pred_frames is None
+                or row_idx >= pred_rows
+                or horizon >= pred_horizons
+            ):
                 columns.append(columns[-1])
                 continue
-            pred_idx = min(pred_len - 1, row_idx + horizon)
-            columns.append(tensor_to_uint8_image(pred_frames[pred_idx]))
+            columns.append(tensor_to_uint8_image(pred_frames[row_idx, horizon]))
         row_image = np.concatenate(columns, axis=1)
         grid_rows.append(row_image)
     grid = np.concatenate(grid_rows, axis=0) if grid_rows else np.zeros((1, 1, 3), dtype=np.uint8)
@@ -523,6 +579,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     (metrics_dir).mkdir(parents=True, exist_ok=True)
     vis_dir.mkdir(parents=True, exist_ok=True)
     loss_history = LossHistory()
+    write_run_metadata(run_dir, cfg, model_cfg)
     dataset = TrajectorySequenceDataset(
         root=cfg.data_root,
         seq_len=cfg.seq_len,
@@ -571,21 +628,34 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_outputs = model.rollout(vis_frames, vis_actions)
                 vis_embeddings = vis_outputs["embeddings"]
                 recon_frames = decoder(vis_embeddings).clamp(0, 1)
-                predictor_in = torch.cat(
-                    [
-                        vis_embeddings[:, :-1],
-                        vis_actions[:, :-1],
-                    ],
-                    dim=-1,
-                )
-                pred_embeddings = model.predictor(predictor_in)
-                pred_frames = decoder(pred_embeddings).clamp(0, 1)
                 seq_index = 0
+                sample_embeddings = vis_embeddings[seq_index]
+                sample_actions = vis_actions[seq_index]
+                pred_rollouts: Optional[torch.Tensor]
+                if cfg.vis_rollout > 0:
+                    rollout_embeds: List[torch.Tensor] = []
+                    current = sample_embeddings
+                    for _ in range(cfg.vis_rollout):
+                        pred_input = torch.cat([current, sample_actions], dim=-1)
+                        pred_embed = model.predictor(pred_input)
+                        rollout_embeds.append(pred_embed)
+                        current = pred_embed
+                    stacked = torch.stack(rollout_embeds, dim=1)
+                    decoded = decoder(stacked.reshape(-1, stacked.shape[-1])).clamp(0, 1)
+                    pred_rollouts = decoded.view(
+                        sample_embeddings.shape[0],
+                        cfg.vis_rollout,
+                        decoder.image_channels,
+                        decoder.image_size,
+                        decoder.image_size,
+                    )
+                else:
+                    pred_rollouts = None
                 save_rollout_visualization(
                     vis_dir / f"rollout_{global_step:07d}.png",
                     vis_frames[seq_index],
                     recon_frames[seq_index],
-                    pred_frames[seq_index],
+                    pred_rollouts,
                     cfg.vis_rows,
                     cfg.vis_rollout,
                 )
@@ -602,8 +672,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 def main() -> None:
     cfg = tyro.cli(TrainConfig)
     model_cfg = ModelConfig()
-    weights = LossWeights()
-    run_training(cfg, model_cfg, weights, demo=False)
+    run_training(cfg, model_cfg, cfg.loss_weights, demo=False)
 
 
 if __name__ == "__main__":
