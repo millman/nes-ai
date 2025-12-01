@@ -157,11 +157,11 @@ class ModelConfig:
     """
 
     in_channels: int = 3
-    image_size: int = 64
+    image_size: int = 128
     channel_schedule: Tuple[int, ...] = (32, 64, 128, 256)
-    latent_dim: int = 128
+    latent_dim: int = 256
     hidden_dim: int = 256
-    embedding_dim: int = 192
+    embedding_dim: int = 384
     action_dim: int = 8
 
 
@@ -174,11 +174,11 @@ class LossWeights:
 @dataclass
 class TrainConfig:
     seq_len: int = 8
-    batch_size: int = 4
+    batch_size: int = 16
     lr: float = 1e-4
     decoder_lr: float = 1e-4
     grad_clip: float = 0.0
-    sigreg_projections: int = 32
+    sigreg_projections: int = 64
     recon_weight: float = 1.0
     device: Optional[str] = "mps"
     total_steps: int = 10_000
@@ -186,7 +186,7 @@ class TrainConfig:
     vis_every_steps: int = 50
     vis_rows: int = 4
     vis_rollout: int = 4
-    embedding_projection_samples: int = 128
+    embedding_projection_samples: int = 256
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
     max_trajectories: Optional[int] = None
@@ -223,8 +223,11 @@ class JEPAWorldModel(nn.Module):
 def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
     embeddings = outputs["embeddings"]
     preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
-    target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(preds, target)
+    future = embeddings[:, 1:]
+    # Mirror Dreamer's balanced loss: each branch sees its counterpart as a fixed target.
+    loss_predictor = JEPA_LOSS(preds, future.detach())
+    loss_encoder = JEPA_LOSS(future, preds.detach())
+    return 0.5 * (loss_predictor + loss_encoder)
 
 
 def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
