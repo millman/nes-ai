@@ -59,6 +59,17 @@ def _describe_controller_vector(is_pressed: NdArrayUint8) -> str:
     return str(pressed)
 
 
+def _describe_controller_vector_compact(is_pressed: NdArrayUint8) -> str:
+    pressed = [
+        desc
+        for is_button_pressed, desc in zip(is_pressed, CONTROLLER_STATE_DESC)
+        if is_button_pressed
+    ]
+    if not pressed:
+        return "NOOP"
+    return "+".join(pressed)
+
+
 def _to_controller_presses(buttons: list[str]) -> NdArrayUint8:
     is_pressed = np.zeros(8, dtype=np.uint8)
     for button in buttons:

@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import csv
 import json
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import subprocess
 import torch
 import torch.nn as nn
@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 from recon.data import list_trajectories, load_frame_as_tensor
+from super_mario_env import _describe_controller_vector, _describe_controller_vector_compact
 from utils.device_utils import pick_device
 
 
@@ -104,28 +105,6 @@ class FocalL1Loss(nn.Module):
         return (weight * l1).mean()
 
 
-class HardnessWeightedL1Loss(nn.Module):
-    """Standalone copy of the hardness-weighted L1 used by reconstruction scripts."""
-
-    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
-        super().__init__()
-        if beta <= 0:
-            raise ValueError("beta must be positive.")
-        if max_weight <= 0:
-            raise ValueError("max_weight must be positive.")
-        self.beta = beta
-        self.max_weight = max_weight
-        self.eps = eps
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        l1 = torch.abs(input - target)
-        dims = tuple(range(1, l1.dim()))
-        norm = l1.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
-        rel_error = l1.detach() / norm
-        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
-        return (weight * l1).mean()
-
-
 class VisualizationDecoder(nn.Module):
     def __init__(self, latent_dim: int, image_channels: int, image_size: int) -> None:
         super().__init__()
@@ -148,8 +127,8 @@ class VisualizationDecoder(nn.Module):
         return decoded
 
 
-RECON_LOSS = HardnessWeightedL1Loss()
-JEPA_LOSS = HardnessWeightedL1Loss()
+RECON_LOSS = nn.MSELoss(reduction="none")
+JEPA_LOSS = nn.MSELoss(reduction="none")
 SIGREG_LOSS = nn.MSELoss()
 
 
@@ -190,7 +169,7 @@ class ModelConfig:
 @dataclass
 class LossWeights:
     jepa: float = 1.0
-    sigreg: float = 1.0
+    sigreg: float = 0.5
 
 
 @dataclass
@@ -208,12 +187,20 @@ class TrainConfig:
     vis_every_steps: int = 50
     vis_rows: int = 4
     vis_rollout: int = 4
+    input_vis_every_steps: int = 0
+    input_vis_rows: int = 4
     embedding_projection_samples: int = 256
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
     max_trajectories: Optional[int] = None
 
     loss_weights: LossWeights = field(default_factory=LossWeights)
+
+
+@dataclass
+class VisualizationSelection:
+    row_indices: torch.Tensor
+    time_indices: torch.Tensor
 
 
 class JEPAWorldModel(nn.Module):
@@ -246,12 +233,12 @@ def _temporal_weights(errors: torch.Tensor, eps: float = 1e-6, clamp: float = 2.
     """Compute temporal hardness weights from per-step error magnitudes.
 
     Args:
-        errors: Per-sample error for each transition, shape [B, T-1].
+        errors: Per-sample error history with shape [B, K] (K time steps).
         eps: Small constant to avoid division by zero.
         clamp: Symmetric clamp value for ratios (>= 1).
     """
     if errors.dim() != 2:
-        raise ValueError("errors must be 2D with shape [B, T-1]")
+        raise ValueError("errors must be 2D with shape [B, K]")
     prev = torch.cat([errors[:, :1], errors[:, :-1]], dim=1)
     ratios = (errors + eps) / (prev + eps)
     if clamp is not None and clamp > 1.0:
@@ -290,7 +277,14 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
 
 def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
     recons = decoder(embeddings)
-    return RECON_LOSS(recons, images)
+    if recons.shape != images.shape:
+        raise ValueError(f"Decoder output shape {recons.shape} does not match target {images.shape}")
+    mse = (recons - images).pow(2)
+    per_step_error = mse.mean(dim=(2, 3, 4))
+    weights = _temporal_weights(per_step_error)
+    weight_map = weights.view(weights.shape[0], weights.shape[1], 1, 1, 1)
+    loss = (weight_map.detach() * mse).mean()
+    return loss
 
 
 # ------------------------------------------------------------
@@ -320,11 +314,10 @@ def training_step(
     world_loss = (
         weights.jepa * loss_jepa
         + weights.sigreg * loss_sigreg
-        + cfg.recon_weight * loss_recon
     )
+    decoder_loss = cfg.recon_weight * loss_recon
 
     optim_world.zero_grad()
-    optim_decoder.zero_grad()
     world_loss.backward()
     if cfg.grad_clip > 0:
         world_grad_norm = float(nn.utils.clip_grad_norm_(world_params, cfg.grad_clip).item())
@@ -332,6 +325,8 @@ def training_step(
         world_grad_norm = grad_norm(world_params)
     optim_world.step()
 
+    optim_decoder.zero_grad()
+    decoder_loss.backward()
     decoder_grad_norm = grad_norm(decoder.parameters())
     optim_decoder.step()
 
@@ -555,6 +550,71 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
     return (array * 255.0).round().astype(np.uint8)
 
 
+TEXT_FONT = ImageFont.load_default()
+
+
+def _describe_action_tensor(action: torch.Tensor) -> str:
+    vector = action.detach().cpu().numpy().reshape(-1)
+    binary = (vector > 0.5).astype(np.uint8)
+    return _describe_controller_vector_compact(binary)
+
+
+def _annotate_with_text(image: np.ndarray, text: str) -> np.ndarray:
+    if not text:
+        return image
+    pil_image = Image.fromarray(image)
+    draw = ImageDraw.Draw(pil_image)
+    padding = 2
+    text = text.strip()
+    bbox = draw.textbbox((padding, padding), text, font=TEXT_FONT)
+    rect = (bbox[0] - padding, bbox[1] - padding, bbox[2] + padding, bbox[3] + padding)
+    draw.rectangle(rect, fill=(0, 0, 0))
+    draw.text((padding, padding), text, fill=(255, 255, 255), font=TEXT_FONT)
+    return np.array(pil_image)
+
+
+def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> Optional[VisualizationSelection]:
+    if frames is None:
+        return None
+    batch_size, seq_len = frames.shape[0], frames.shape[1]
+    if batch_size == 0:
+        return None
+    num_rows = min(vis_rows, batch_size)
+    row_indices = torch.arange(num_rows, dtype=torch.long)
+    if seq_len <= 0:
+        time_indices = torch.zeros(num_rows, dtype=torch.long)
+    else:
+        time_indices = torch.arange(num_rows, dtype=torch.long) % seq_len
+    return VisualizationSelection(row_indices=row_indices, time_indices=time_indices)
+
+
+def save_input_batch_visualization(
+    out_path: Path,
+    frames: torch.Tensor,
+    actions: torch.Tensor,
+    rows: int,
+) -> None:
+    frames = frames.detach().cpu()
+    actions = actions.detach().cpu()
+    batch_size, seq_len = frames.shape[0], frames.shape[1]
+    num_rows = min(rows, batch_size)
+    if num_rows <= 0:
+        return
+    grid_rows: List[np.ndarray] = []
+    for row_idx in range(num_rows):
+        columns: List[np.ndarray] = []
+        for step in range(seq_len):
+            frame_img = tensor_to_uint8_image(frames[row_idx, step])
+            desc = _describe_action_tensor(actions[row_idx, step])
+            frame_img = _annotate_with_text(frame_img, desc)
+            columns.append(frame_img)
+        row_image = np.concatenate(columns, axis=1)
+        grid_rows.append(row_image)
+    grid = np.concatenate(grid_rows, axis=0)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(grid).save(out_path)
+
+
 def _run_git_command(args: List[str]) -> str:
     try:
         result = subprocess.run(args, capture_output=True, text=True, check=False)
@@ -617,6 +677,7 @@ def save_rollout_visualization(
     pred_rollouts: Optional[torch.Tensor],
     rows: int,
     rollout_steps: int,
+    annotations: Optional[List[str]] = None,
 ) -> None:
     frames = frames.detach().cpu()
     recon_frames = recon_frames.detach().cpu()
@@ -626,8 +687,11 @@ def save_rollout_visualization(
     pred_horizons = 0 if pred_frames is None else pred_frames.shape[1]
     grid_rows: List[np.ndarray] = []
     for row_idx in range(num_rows):
+        frame_img = tensor_to_uint8_image(frames[row_idx])
+        if annotations is not None and row_idx < len(annotations):
+            frame_img = _annotate_with_text(frame_img, annotations[row_idx])
         columns = [
-            tensor_to_uint8_image(frames[row_idx]),
+            frame_img,
             tensor_to_uint8_image(recon_frames[row_idx]),
         ]
         for horizon in range(rollout_steps):
@@ -660,9 +724,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     fixed_vis_dir = run_dir / "vis_fixed"
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
+    inputs_vis_dir = run_dir / "vis_inputs"
     fixed_vis_dir.mkdir(parents=True, exist_ok=True)
     rolling_vis_dir.mkdir(parents=True, exist_ok=True)
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
+    inputs_vis_dir.mkdir(parents=True, exist_ok=True)
     loss_history = LossHistory()
     write_run_metadata(run_dir, cfg, model_cfg)
     dataset = TrajectorySequenceDataset(
@@ -682,9 +748,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
     fixed_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    fixed_selection: Optional[VisualizationSelection] = None
     try:
         sample_batch = next(iter(dataloader))
         fixed_batch_cpu = (sample_batch[0].clone(), sample_batch[1].clone())
+        fixed_selection = _make_fixed_selection(fixed_batch_cpu[0], cfg.vis_rows)
     except StopIteration:
         fixed_batch_cpu = None
     rolling_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
@@ -717,6 +785,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             plot_loss_curves(loss_history, metrics_dir)
         rolling_batch_cpu = (batch[0].clone(), batch[1].clone())
         if (
+            cfg.input_vis_every_steps > 0
+            and global_step % cfg.input_vis_every_steps == 0
+            and rolling_batch_cpu is not None
+        ):
+            save_input_batch_visualization(
+                inputs_vis_dir / f"inputs_{global_step:07d}.png",
+                rolling_batch_cpu[0],
+                rolling_batch_cpu[1],
+                cfg.input_vis_rows,
+            )
+        if (
             cfg.vis_every_steps > 0
             and global_step % cfg.vis_every_steps == 0
         ):
@@ -725,6 +804,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 def render_sample(
                     batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]],
                     out_dir: Path,
+                    selection: Optional[VisualizationSelection] = None,
                 ) -> None:
                     if batch_cpu is None:
                         return
@@ -736,14 +816,26 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     batch_size = vis_frames.shape[0]
                     if batch_size == 0:
                         return
-                    num_rows = min(cfg.vis_rows, batch_size)
-                    row_indices = torch.randperm(batch_size, device=device)[:num_rows]
+                    if selection is not None and selection.row_indices.numel() > 0:
+                        num_rows = min(cfg.vis_rows, selection.row_indices.numel())
+                        row_indices = selection.row_indices[:num_rows].to(device=device)
+                        time_indices = selection.time_indices[:num_rows]
+                    else:
+                        num_rows = min(cfg.vis_rows, batch_size)
+                        row_indices = torch.randperm(batch_size, device=device)[:num_rows]
+                        time_indices = None
                     sampled_frames: List[torch.Tensor] = []
+                    sampled_texts: List[str] = []
                     sampled_recons: List[torch.Tensor] = []
                     sampled_preds: List[torch.Tensor] = []
-                    for idx in row_indices:
-                        time_idx = torch.randint(0, vis_frames.shape[1], ()).item()
+                    for row_offset, idx in enumerate(row_indices):
+                        if time_indices is not None:
+                            time_idx = int(time_indices[row_offset].item())
+                            time_idx = max(0, min(time_idx, vis_frames.shape[1] - 1))
+                        else:
+                            time_idx = torch.randint(0, vis_frames.shape[1], ()).item()
                         sampled_frames.append(vis_frames[idx, time_idx])
+                        sampled_texts.append(_describe_action_tensor(vis_actions[idx, time_idx]))
                         sampled_recons.append(recon_frames[idx, time_idx])
                         if cfg.vis_rollout > 0:
                             seq_preds: List[torch.Tensor] = []
@@ -770,9 +862,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         pred_tensor,
                         cfg.vis_rows,
                         cfg.vis_rollout,
+                        sampled_texts,
                     )
 
-                render_sample(fixed_batch_cpu, fixed_vis_dir)
+                render_sample(fixed_batch_cpu, fixed_vis_dir, fixed_selection)
                 render_sample(rolling_batch_cpu, rolling_vis_dir)
                 if embedding_batch_cpu is not None:
                     embed_frames = embedding_batch_cpu[0].to(device)
