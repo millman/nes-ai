@@ -254,11 +254,9 @@ def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: 
     diff_for_stats = torch.abs(preds.detach() - future.detach()).mean(dim=-1)
     weights = _temporal_weights(diff_for_stats)
     per_step_loss = torch.abs(preds - future.detach()).mean(dim=-1)
-    per_step_loss_enc = torch.abs(future - preds.detach()).mean(dim=-1)
-    # Mirror Dreamer's balanced loss: each branch sees its counterpart as a fixed target.
+    # Only train the predictor branch; encoder receives gradients via reconstruction/regularizers.
     loss_predictor = (weights * per_step_loss).mean()
-    loss_encoder = (weights * per_step_loss_enc).mean()
-    return 0.5 * (loss_predictor + loss_encoder)
+    return loss_predictor
 
 
 def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
