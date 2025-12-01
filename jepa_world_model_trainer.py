@@ -259,6 +259,8 @@ class TrainConfig:
     vis_rollout: int = 4
     input_vis_every_steps: int = 0
     input_vis_rows: int = 4
+    rollout_horizon: int = 0
+    rollout_weight: float = 0.0
     embedding_projection_samples: int = 256
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
@@ -317,23 +319,36 @@ def _temporal_weights(errors: torch.Tensor, eps: float = 1e-6, clamp: float = 10
     return weights.detach()
 
 
-def jepa_loss_temporal(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
-    embeddings = outputs["embeddings"]
-    preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
-    future = embeddings[:, 1:]
-    diff_for_stats = torch.abs(preds.detach() - future.detach()).mean(dim=-1)
-    weights = _temporal_weights(diff_for_stats)
-    per_step_loss = torch.abs(preds - future.detach()).mean(dim=-1)
-    # Only train the predictor branch; encoder receives gradients via reconstruction/regularizers.
-    loss_predictor = (weights * per_step_loss).mean()
-    return loss_predictor
-
-
-def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
+def jepa_losses(
+    model: JEPAWorldModel,
+    outputs: Dict[str, torch.Tensor],
+    actions: torch.Tensor,
+    rollout_horizon: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return single-step JEPA loss plus optional multi-step rollout loss."""
     embeddings = outputs["embeddings"]
     preds = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
     target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(preds, target)
+    base_loss = JEPA_LOSS(preds, target)
+    if rollout_horizon <= 1:
+        return base_loss, embeddings.new_tensor(0.0)
+    b, t, d = embeddings.shape
+    if t < 2:
+        return base_loss, embeddings.new_tensor(0.0)
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    for start in range(t - 1):
+        current = embeddings[:, start]
+        max_h = min(rollout_horizon, t - start - 1)
+        for offset in range(max_h):
+            act = actions[:, start + offset]
+            pred = model.predictor(torch.cat([current, act], dim=-1))
+            target_step = embeddings[:, start + offset + 1].detach()
+            total = total + JEPA_LOSS(pred, target_step)
+            steps += 1
+            current = pred
+    rollout_loss = total / steps if steps > 0 else embeddings.new_tensor(0.0)
+    return base_loss, rollout_loss
 
 
 def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
@@ -387,13 +402,14 @@ def training_step(
     images = images.to(device)
     actions = actions.to(device)
     outputs = model.encode_sequence(images)
-    loss_jepa = jepa_loss(model, outputs, actions)
+    loss_jepa, loss_rollout = jepa_losses(model, outputs, actions, cfg.rollout_horizon)
     loss_sigreg = sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
     loss_recon = reconstruction_loss_temporal(decoder, outputs["embeddings"].detach(), images)
 
     world_loss = (
         weights.jepa * loss_jepa
         + weights.sigreg * loss_sigreg
+        + cfg.rollout_weight * loss_rollout
     )
     decoder_loss = cfg.recon_weight * loss_recon
 
@@ -413,6 +429,7 @@ def training_step(
     return {
         "loss_jepa": loss_jepa.item(),
         "loss_sigreg": loss_sigreg.item(),
+        "loss_rollout": loss_rollout.item(),
         "loss_recon": loss_recon.item(),
         "loss_world": world_loss.item(),
         "grad_world": world_grad_norm,
@@ -516,6 +533,7 @@ LOSS_COLUMNS = [
     "loss_world",
     "loss_jepa",
     "loss_sigreg",
+    "loss_rollout",
     "loss_recon",
     "grad_world",
     "grad_decoder",
@@ -528,6 +546,7 @@ class LossHistory:
     world: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
+    rollout: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
@@ -537,6 +556,7 @@ class LossHistory:
         self.world.append(metrics["loss_world"])
         self.jepa.append(metrics["loss_jepa"])
         self.sigreg.append(metrics["loss_sigreg"])
+        self.rollout.append(metrics["loss_rollout"])
         self.recon.append(metrics["loss_recon"])
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
@@ -557,6 +577,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.world,
             history.jepa,
             history.sigreg,
+            history.rollout,
             history.recon,
             history.grad_world,
             history.grad_decoder,
@@ -572,6 +593,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.plot(history.steps, history.world, label="world")
     plt.plot(history.steps, history.jepa, label="jepa")
     plt.plot(history.steps, history.sigreg, label="sigreg")
+    if any(val != 0.0 for val in history.rollout):
+        plt.plot(history.steps, history.rollout, label="rollout")
     plt.plot(history.steps, history.recon, label="recon")
     plt.xlabel("Step")
     plt.ylabel("Loss")
@@ -763,6 +786,69 @@ def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) 
     (run_dir / "metadata.txt").write_text("\n".join(toml_lines))
 
 
+def _render_visualization_batch(
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    rows: int,
+    rollout_steps: int,
+    device: torch.device,
+    selection: Optional[VisualizationSelection] = None,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], List[str], List[np.ndarray]]]:
+    if batch_cpu is None:
+        return None
+    vis_frames = batch_cpu[0].to(device)
+    vis_actions = batch_cpu[1].to(device)
+    vis_outputs = model.encode_sequence(vis_frames)
+    vis_embeddings = vis_outputs["embeddings"]
+    recon_frames = decoder(vis_embeddings).clamp(0, 1)
+    batch_size = vis_frames.shape[0]
+    if batch_size == 0:
+        return None
+    if selection is not None and selection.row_indices.numel() > 0:
+        num_rows = min(rows, selection.row_indices.numel())
+        row_indices = selection.row_indices[:num_rows].to(device=device)
+        time_indices = selection.time_indices[:num_rows]
+    else:
+        num_rows = min(rows, batch_size)
+        row_indices = torch.randperm(batch_size, device=device)[:num_rows]
+        time_indices = None
+    sampled_frames: List[torch.Tensor] = []
+    sampled_texts: List[str] = []
+    sampled_recons: List[torch.Tensor] = []
+    sampled_preds: List[torch.Tensor] = []
+    sampled_heatmaps: List[np.ndarray] = []
+    for row_offset, idx in enumerate(row_indices):
+        if time_indices is not None:
+            time_idx = int(time_indices[row_offset].item())
+            time_idx = max(0, min(time_idx, vis_frames.shape[1] - 1))
+        else:
+            time_idx = torch.randint(0, vis_frames.shape[1], ()).item()
+        sampled_frames.append(vis_frames[idx, time_idx])
+        sampled_texts.append(_describe_action_tensor(vis_actions[idx, time_idx]))
+        sampled_recons.append(recon_frames[idx, time_idx])
+        sampled_heatmaps.append(_loss_to_heatmap(vis_frames[idx, time_idx], recon_frames[idx, time_idx]))
+        if rollout_steps > 0:
+            seq_preds: List[torch.Tensor] = []
+            current_embed = vis_embeddings[idx, time_idx].unsqueeze(0)
+            current_action = vis_actions[idx, time_idx].unsqueeze(0)
+            for _ in range(rollout_steps):
+                pred_input = torch.cat([current_embed, current_action], dim=-1)
+                pred_embed = model.predictor(pred_input)
+                decoded = decoder(pred_embed).clamp(0, 1)[0]
+                seq_preds.append(decoded)
+                current_embed = pred_embed
+            sampled_preds.append(torch.stack(seq_preds))
+    frames_tensor = torch.stack(sampled_frames, dim=0)
+    recon_tensor = torch.stack(sampled_recons, dim=0)
+    pred_tensor: Optional[torch.Tensor]
+    if rollout_steps > 0 and len(sampled_preds) == len(sampled_frames):
+        pred_tensor = torch.stack(sampled_preds, dim=0)
+    else:
+        pred_tensor = None
+    return frames_tensor, recon_tensor, pred_tensor, sampled_texts, sampled_heatmaps
+
+
 def save_rollout_visualization(
     out_path: Path,
     frames: torch.Tensor,
@@ -907,75 +993,48 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         ):
             model.eval()
             with torch.no_grad():
-                def render_sample(
-                    batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]],
-                    out_dir: Path,
-                    selection: Optional[VisualizationSelection] = None,
-                ) -> None:
-                    if batch_cpu is None:
-                        return
-                    vis_frames = batch_cpu[0].to(device)
-                    vis_actions = batch_cpu[1].to(device)
-                    vis_outputs = model.encode_sequence(vis_frames)
-                    vis_embeddings = vis_outputs["embeddings"]
-                    recon_frames = decoder(vis_embeddings).clamp(0, 1)
-                    batch_size = vis_frames.shape[0]
-                    if batch_size == 0:
-                        return
-                    if selection is not None and selection.row_indices.numel() > 0:
-                        num_rows = min(cfg.vis_rows, selection.row_indices.numel())
-                        row_indices = selection.row_indices[:num_rows].to(device=device)
-                        time_indices = selection.time_indices[:num_rows]
-                    else:
-                        num_rows = min(cfg.vis_rows, batch_size)
-                        row_indices = torch.randperm(batch_size, device=device)[:num_rows]
-                        time_indices = None
-                    sampled_frames: List[torch.Tensor] = []
-                    sampled_texts: List[str] = []
-                    sampled_recons: List[torch.Tensor] = []
-                    sampled_preds: List[torch.Tensor] = []
-                    sampled_heatmaps: List[np.ndarray] = []
-                    for row_offset, idx in enumerate(row_indices):
-                        if time_indices is not None:
-                            time_idx = int(time_indices[row_offset].item())
-                            time_idx = max(0, min(time_idx, vis_frames.shape[1] - 1))
-                        else:
-                            time_idx = torch.randint(0, vis_frames.shape[1], ()).item()
-                        sampled_frames.append(vis_frames[idx, time_idx])
-                        sampled_texts.append(_describe_action_tensor(vis_actions[idx, time_idx]))
-                        sampled_recons.append(recon_frames[idx, time_idx])
-                        sampled_heatmaps.append(_loss_to_heatmap(vis_frames[idx, time_idx], recon_frames[idx, time_idx]))
-                        if cfg.vis_rollout > 0:
-                            seq_preds: List[torch.Tensor] = []
-                            current_embed = vis_embeddings[idx, time_idx].unsqueeze(0)
-                            current_action = vis_actions[idx, time_idx].unsqueeze(0)
-                            for _ in range(cfg.vis_rollout):
-                                pred_input = torch.cat([current_embed, current_action], dim=-1)
-                                pred_embed = model.predictor(pred_input)
-                                decoded = decoder(pred_embed).clamp(0, 1)[0]
-                                seq_preds.append(decoded)
-                                current_embed = pred_embed
-                            sampled_preds.append(torch.stack(seq_preds))
-                    frames_tensor = torch.stack(sampled_frames, dim=0)
-                    recon_tensor = torch.stack(sampled_recons, dim=0)
-                    pred_tensor: Optional[torch.Tensor]
-                    if cfg.vis_rollout > 0 and len(sampled_preds) == len(sampled_frames):
-                        pred_tensor = torch.stack(sampled_preds, dim=0)
-                    else:
-                        pred_tensor = None
+                rendered = _render_visualization_batch(
+                    model,
+                    decoder,
+                    fixed_batch_cpu,
+                    cfg.vis_rows,
+                    cfg.vis_rollout,
+                    device,
+                    fixed_selection,
+                )
+                if rendered is not None:
+                    frames_tensor, recon_tensor, pred_tensor, texts, heatmaps = rendered
                     save_rollout_visualization(
-                        out_dir / f"rollout_{global_step:07d}.png",
+                        fixed_vis_dir / f"rollout_{global_step:07d}.png",
                         frames_tensor,
                         recon_tensor,
                         pred_tensor,
                         cfg.vis_rows,
                         cfg.vis_rollout,
-                        sampled_texts,
-                        sampled_heatmaps,
+                        texts,
+                        heatmaps,
                     )
-
-                render_sample(fixed_batch_cpu, fixed_vis_dir, fixed_selection)
-                render_sample(rolling_batch_cpu, rolling_vis_dir)
+                rendered = _render_visualization_batch(
+                    model,
+                    decoder,
+                    rolling_batch_cpu,
+                    cfg.vis_rows,
+                    cfg.vis_rollout,
+                    device,
+                    None,
+                )
+                if rendered is not None:
+                    frames_tensor, recon_tensor, pred_tensor, texts, heatmaps = rendered
+                    save_rollout_visualization(
+                        rolling_vis_dir / f"rollout_{global_step:07d}.png",
+                        frames_tensor,
+                        recon_tensor,
+                        pred_tensor,
+                        cfg.vis_rows,
+                        cfg.vis_rollout,
+                        texts,
+                        heatmaps,
+                    )
                 if embedding_batch_cpu is not None:
                     embed_frames = embedding_batch_cpu[0].to(device)
                     embed_outputs = model.encode_sequence(embed_frames)
