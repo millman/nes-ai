@@ -82,6 +82,28 @@ class PredictorNetwork(nn.Module):
         return self.net(x)
 
 
+class FocalL1Loss(nn.Module):
+    """Focal-style L1 reconstruction loss that upweights harder pixels."""
+
+    def __init__(self, gamma: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if gamma <= 0:
+            raise ValueError("gamma must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.gamma = gamma
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        l1 = torch.abs(input - target)
+        dims = tuple(range(1, l1.dim()))
+        norm = l1.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
+        rel_error = l1 / norm
+        weight = rel_error.pow(self.gamma).clamp(max=self.max_weight)
+        return (weight * l1).mean()
+
+
 class HardnessWeightedL1Loss(nn.Module):
     """Standalone copy of the hardness-weighted L1 used by reconstruction scripts."""
 
@@ -126,9 +148,9 @@ class VisualizationDecoder(nn.Module):
         return decoded
 
 
-RECON_LOSS = HardnessWeightedL1Loss()
-JEPA_LOSS = HardnessWeightedL1Loss()
-SIGREG_LOSS = HardnessWeightedL1Loss()
+RECON_LOSS = FocalL1Loss()
+JEPA_LOSS = FocalL1Loss()
+SIGREG_LOSS = nn.MSELoss()
 
 
 # ------------------------------------------------------------
@@ -161,7 +183,7 @@ class ModelConfig:
     channel_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     latent_dim: int = 256
     hidden_dim: int = 256
-    embedding_dim: int = 384
+    embedding_dim: int = 256
     action_dim: int = 8
 
 
@@ -174,7 +196,7 @@ class LossWeights:
 @dataclass
 class TrainConfig:
     seq_len: int = 8
-    batch_size: int = 16
+    batch_size: int = 8
     lr: float = 1e-4
     decoder_lr: float = 1e-4
     grad_clip: float = 0.0
