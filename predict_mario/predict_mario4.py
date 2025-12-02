@@ -30,6 +30,7 @@ from recon.data import list_trajectories, load_frame_as_tensor
 
 
 plt.switch_backend("Agg")
+torch.multiprocessing.set_sharing_strategy("file_system")
 logger = logging.getLogger(__name__)
 
 
@@ -67,7 +68,7 @@ class TrainConfig:
     epochs: int = 1000
     batch_size: int = 4
     learning_rate: float = 1e-4
-    num_workers: int = 4
+    num_workers: int = 0
     device: str = "mps"
     seed: int = 0
     warmup_steps: int = 4
@@ -118,20 +119,10 @@ class MarioWarmupDataset(Dataset):
             if not actions_path.is_file():
                 logger.warning("Missing actions.npz for %s; skipping.", traj_name)
                 continue
-            try:
-                with np.load(actions_path) as data:
-                    if "actions" in data:
-                        actions = data["actions"]
-                    else:
-                        actions = data[list(data.files)[0]]
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.warning("Failed to read %s: %s", actions_path, exc)
+            actions = _load_action_sequence(actions_path, len(frame_paths))
+            if actions is None:
                 continue
 
-            if actions.ndim == 1:
-                actions = actions[:, None]
-            if actions.shape[0] == len(frame_paths) + 1:
-                actions = actions[1:]
             if actions.shape[0] < len(frame_paths):
                 logger.warning(
                     "Action count %d shorter than frames %d in %s; skipping.",
@@ -141,7 +132,6 @@ class MarioWarmupDataset(Dataset):
                 )
                 continue
 
-            actions = actions.astype(np.float32)
             if self.action_dim is None:
                 self.action_dim = actions.shape[1]
             elif self.action_dim != actions.shape[1]:
@@ -186,6 +176,23 @@ class MarioWarmupDataset(Dataset):
             "actions": torch.from_numpy(action_slice),
             "frame_paths": path_slice,
         }
+
+
+def _load_action_sequence(actions_path: Path, frame_count: int) -> Optional[np.ndarray]:
+    """Load an action matrix from an NPZ while ensuring the file handle closes."""
+    try:
+        with np.load(actions_path) as data:
+            files = list(data.files)
+            key = "actions" if "actions" in data.files else files[0]
+            actions = np.asarray(data[key], dtype=np.float32)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("Failed to read %s: %s", actions_path, exc)
+        return None
+    if actions.ndim == 1:
+        actions = actions[:, None]
+    if actions.shape[0] == frame_count + 1:
+        actions = actions[1:]
+    return np.ascontiguousarray(actions)
 
 
 def extract_traj_state_label(frame_path: str) -> str:

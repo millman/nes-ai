@@ -60,13 +60,13 @@ class MarioTrajectoryDataset(Dataset):
             # require at least 8 frames for 4 inputs + 4 outputs
             if len(files) < 8:
                 continue
-            data = np.load(actions_file)
-            if 'actions' in data.files:
-                actions = data['actions']
-            elif len(data.files) == 1:
-                actions = data[data.files[0]]
-            else:
-                raise ValueError(f"Missing 'actions' in {actions_file}: {data.files}")
+            with np.load(actions_file) as data:
+                if 'actions' in data.files:
+                    actions = data['actions']
+                elif len(data.files) == 1:
+                    actions = data[data.files[0]]
+                else:
+                    raise ValueError(f"Missing 'actions' in {actions_file}: {data.files}")
             traj_dirs.add(str(traj_path))
             # slide window for input 4 frames + next 4 frames
             for i in range(len(files) - 7):

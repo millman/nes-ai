@@ -9,7 +9,10 @@ def time_individual_npz_read(npz_dir):
         return
 
     start = time.perf_counter()
-    imgs = [np.load(f)["img"] for f in npz_files]
+    imgs = []
+    for f in npz_files:
+        with np.load(f) as data:
+            imgs.append(data["img"])
     elapsed = time.perf_counter() - start
     n = len(imgs)
     print(f"Loaded {n} images from {npz_dir} in {elapsed:.3f} seconds")

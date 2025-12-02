@@ -4,8 +4,8 @@ import numpy as np
 
 def time_npz_read(npz_file):
     start = time.perf_counter()
-    data = np.load(npz_file)
-    imgs = data['imgs']
+    with np.load(npz_file) as data:
+        imgs = data['imgs']
     elapsed = time.perf_counter() - start
     n = imgs.shape[0]
     print(f"Loaded {n} images from {npz_file} in {elapsed:.3f} seconds")
