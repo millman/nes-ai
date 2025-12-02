@@ -159,18 +159,28 @@ class Encoder(nn.Module):
 
 
 class PredictorNetwork(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int) -> None:
+    def __init__(self, embedding_dim: int, hidden_dim: int, action_dim: int, film_layers: int) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, out_dim),
-        )
+        self.in_proj = nn.Linear(embedding_dim, hidden_dim)
+        self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, embedding_dim)
+        self.activation = nn.SiLU(inplace=True)
+        self.action_embed = ActionEmbedding(action_dim, hidden_dim)
+        self.action_embed_dim = hidden_dim
+        self.film = ActionFiLM(hidden_dim, hidden_dim, film_layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+    def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        if embeddings.shape[:-1] != actions.shape[:-1]:
+            raise ValueError("Embeddings and actions must share leading dimensions for predictor conditioning.")
+        original_shape = embeddings.shape[:-1]
+        emb_flat = embeddings.reshape(-1, embeddings.shape[-1])
+        act_embed = self.action_embed(actions).reshape(-1, self.action_embed_dim)
+        hidden = self.activation(self.in_proj(emb_flat))
+        hidden = self.film(hidden, act_embed)
+        hidden = self.activation(self.hidden_proj(hidden))
+        hidden = self.film(hidden, act_embed)
+        delta = self.out_proj(hidden)
+        return delta.view(*original_shape, delta.shape[-1])
 
 
 class FocalL1Loss(nn.Module):
@@ -193,6 +203,56 @@ class FocalL1Loss(nn.Module):
         rel_error = l1 / norm
         weight = rel_error.pow(self.gamma).clamp(max=self.max_weight)
         return (weight * l1).mean()
+
+
+class ActionEmbedding(nn.Module):
+    """Embed controller actions for FiLM modulation."""
+
+    def __init__(self, action_dim: int, embed_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(action_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
+
+    def forward(self, actions: torch.Tensor) -> torch.Tensor:
+        original_shape = actions.shape[:-1]
+        flat = actions.reshape(-1, actions.shape[-1])
+        embedded = self.net(flat)
+        return embedded.view(*original_shape, embedded.shape[-1])
+
+
+class FiLMLayer(nn.Module):
+    """Single FiLM modulation layer."""
+
+    def __init__(self, hidden_dim: int, action_dim: int) -> None:
+        super().__init__()
+        self.gamma = nn.Linear(action_dim, hidden_dim)
+        self.beta = nn.Linear(action_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, hidden: torch.Tensor, action_embed: torch.Tensor) -> torch.Tensor:
+        conditioned = self.norm(hidden)
+        gamma = self.gamma(action_embed)
+        beta = self.beta(action_embed)
+        return conditioned * (1.0 + gamma) + beta
+
+
+class ActionFiLM(nn.Module):
+    """Stack multiple FiLM layers for action conditioning."""
+
+    def __init__(self, hidden_dim: int, action_dim: int, layers: int) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([FiLMLayer(hidden_dim, action_dim) for _ in range(layers)])
+        self.act = nn.GELU()
+
+    def forward(self, hidden: torch.Tensor, action_embed: torch.Tensor) -> torch.Tensor:
+        out = hidden
+        for layer in self.layers:
+            out = layer(out, action_embed)
+            out = self.act(out)
+        return out
 
 
 class VisualizationDecoder(nn.Module):
@@ -275,14 +335,14 @@ class ModelConfig:
             ├─ MotionEncoder(motion_channel_schedule → motion_dim)
             ▼
         (appearance_dim + motion_dim)*  ─┐
-                        ├─ concat action_dim → Predictor(hidden_dim*) → embedding_dim
+                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → embedding_dim
         action_dim ──────┘
             │
             └→ VisualizationDecoder(latent_dim* → image_size^2·in_channels)
 
     • image_size controls the spatial resolution feeding the encoder.
     • embedding_dim (≈ channel_schedule[-1] + motion_channel_schedule[-1]) is the latent bottleneck the predictor must match.
-    • action_dim is concatenated to embeddings before the predictor MLP.
+    • action_dim defines the controller space that modulates the predictor through FiLM layers.
     • hidden_dim is the predictor’s internal width.
     • latent_dim governs the visualization decoder’s compression when turning embeddings back into images.
     """
@@ -294,6 +354,7 @@ class ModelConfig:
     hidden_dim: int = 256
     embedding_dim: int = 256
     action_dim: int = 8
+    predictor_film_layers: int = 2
     motion_channel_schedule: Optional[Tuple[int, ...]] = (32, 64)
 
 
@@ -353,8 +414,12 @@ class JEPAWorldModel(nn.Module):
             self.motion_encoder = None
             motion_dim = 0
         self.embedding_dim = enc_dim + motion_dim
-        pred_in = self.embedding_dim + cfg.action_dim
-        self.predictor = PredictorNetwork(pred_in, cfg.hidden_dim, self.embedding_dim)
+        self.predictor = PredictorNetwork(
+            self.embedding_dim,
+            cfg.hidden_dim,
+            cfg.action_dim,
+            cfg.predictor_film_layers,
+        )
 
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
@@ -385,8 +450,10 @@ class JEPAWorldModel(nn.Module):
 def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
     """Standard one-step JEPA loss."""
     embeddings = outputs["embeddings"]
-    deltas = model.predictor(torch.cat([embeddings[:, :-1], actions[:, :-1]], dim=-1))
-    preds = embeddings[:, :-1] + deltas
+    prev_embed = embeddings[:, :-1]
+    prev_actions = actions[:, :-1]
+    deltas = model.predictor(prev_embed, prev_actions)
+    preds = prev_embed + deltas
     target = embeddings[:, 1:].detach()
     return JEPA_LOSS(preds, target)
 
@@ -409,7 +476,7 @@ def rollout_loss(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            delta = model.predictor(torch.cat([current, act], dim=-1))
+            delta = model.predictor(current, act)
             pred = current + delta
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
@@ -987,8 +1054,7 @@ def _render_visualization_batch(
             current_action = vis_actions[idx, time_idx].unsqueeze(0)
             current_frame = recon_frame.clone()
             for _ in range(rollout_steps):
-                pred_input = torch.cat([current_embed, current_action], dim=-1)
-                delta_embed = model.predictor(pred_input)
+                delta_embed = model.predictor(current_embed, current_action)
                 next_embed = current_embed + delta_embed
                 delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
                 current_frame = (current_frame + delta_next).clamp(0, 1)
