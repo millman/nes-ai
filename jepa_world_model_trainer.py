@@ -381,6 +381,7 @@ class TrainConfig:
     vis_every_steps: int = 50
     vis_rows: int = 2
     vis_rollout: int = 4
+    vis_columns: int = 8
     vis_gradient_norms: bool = False
     input_vis_every_steps: int = 0
     input_vis_rows: int = 4
@@ -1042,6 +1043,7 @@ def _render_visualization_batch(
     batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]],
     rows: int,
     rollout_steps: int,
+    max_columns: Optional[int],
     device: torch.device,
     selection: Optional[VisualizationSelection] = None,
     show_gradients: bool = False,
@@ -1061,6 +1063,8 @@ def _render_visualization_batch(
         return None
     min_start = 1
     target_window = max(2, rollout_steps + 1)
+    if max_columns is not None:
+        target_window = max(target_window, max(2, max_columns))
     max_window = min(target_window, vis_frames.shape[1] - min_start)
     if max_window < 2:
         return None
@@ -1357,6 +1361,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     fixed_batch_cpu,
                     cfg.vis_rows,
                     cfg.vis_rollout,
+                    cfg.vis_columns,
                     device,
                     fixed_selection,
                     cfg.vis_gradient_norms,
@@ -1375,6 +1380,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     rolling_batch_cpu,
                     cfg.vis_rows,
                     cfg.vis_rollout,
+                    cfg.vis_columns,
                     device,
                     None,
                     cfg.vis_gradient_norms,
