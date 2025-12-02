@@ -30,7 +30,6 @@ from recon.data import list_trajectories, load_frame_as_tensor
 
 
 plt.switch_backend("Agg")
-torch.multiprocessing.set_sharing_strategy("file_system")
 logger = logging.getLogger(__name__)
 
 
