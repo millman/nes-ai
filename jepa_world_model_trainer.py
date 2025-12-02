@@ -271,16 +271,17 @@ class ModelConfig:
     """Dimensional flow (bottlenecks marked with *):
 
         image (image_size^2·in_channels)
-            │  Encoder(channel_schedule → embedding_dim)
+            ├─ Encoder(channel_schedule → appearance_dim)
+            ├─ MotionEncoder(motion_channel_schedule → motion_dim)
             ▼
-        embedding_dim*  ─┐
+        (appearance_dim + motion_dim)*  ─┐
                         ├─ concat action_dim → Predictor(hidden_dim*) → embedding_dim
         action_dim ──────┘
             │
             └→ VisualizationDecoder(latent_dim* → image_size^2·in_channels)
 
     • image_size controls the spatial resolution feeding the encoder.
-    • embedding_dim (≈ channel_schedule[-1]) is the latent bottleneck the predictor must match.
+    • embedding_dim (≈ channel_schedule[-1] + motion_channel_schedule[-1]) is the latent bottleneck the predictor must match.
     • action_dim is concatenated to embeddings before the predictor MLP.
     • hidden_dim is the predictor’s internal width.
     • latent_dim governs the visualization decoder’s compression when turning embeddings back into images.
@@ -293,6 +294,7 @@ class ModelConfig:
     hidden_dim: int = 256
     embedding_dim: int = 256
     action_dim: int = 8
+    motion_channel_schedule: Optional[Tuple[int, ...]] = (32, 64)
 
 
 @dataclass
@@ -318,9 +320,10 @@ class TrainConfig:
     vis_every_steps: int = 50
     vis_rows: int = 4
     vis_rollout: int = 4
+    vis_gradient_norms: bool = False
     input_vis_every_steps: int = 0
     input_vis_rows: int = 4
-    rollout_horizon: int = 4
+    rollout_horizon: int = 8
     pair_vis_every_steps: int = 0
     pair_vis_rows: int = 4
     embedding_projection_samples: int = 256
@@ -343,16 +346,32 @@ class JEPAWorldModel(nn.Module):
         self.cfg = cfg
         self.encoder = Encoder(cfg.in_channels, cfg.channel_schedule)
         enc_dim = cfg.channel_schedule[-1]
-        self.embedding_dim = enc_dim
+        if cfg.motion_channel_schedule:
+            self.motion_encoder: Optional[Encoder] = Encoder(cfg.in_channels, cfg.motion_channel_schedule)
+            motion_dim = cfg.motion_channel_schedule[-1]
+        else:
+            self.motion_encoder = None
+            motion_dim = 0
+        self.embedding_dim = enc_dim + motion_dim
         pred_in = self.embedding_dim + cfg.action_dim
         self.predictor = PredictorNetwork(pred_in, cfg.hidden_dim, self.embedding_dim)
 
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
         embeddings: List[torch.Tensor] = []
+        prev_frame: Optional[torch.Tensor] = None
         for step in range(t):
-            feats = self.encoder(images[:, step])
+            current = images[:, step]
+            feats = self.encoder(current)
+            if self.motion_encoder is not None:
+                if prev_frame is None:
+                    delta = torch.zeros_like(current)
+                else:
+                    delta = current - prev_frame
+                motion_feats = self.motion_encoder(delta)
+                feats = torch.cat([feats, motion_feats], dim=1)
             embeddings.append(feats)
+            prev_frame = current
         return {
             "embeddings": torch.stack(embeddings, dim=1),
         }
@@ -727,6 +746,7 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
 
 TEXT_FONT = ImageFont.load_default()
 LOSS_CMAP = plt.get_cmap("coolwarm")
+GRAD_CMAP = plt.get_cmap("magma")
 
 
 def _describe_action_tensor(action: torch.Tensor) -> str:
@@ -759,6 +779,27 @@ def _loss_to_heatmap(frame: torch.Tensor, recon: torch.Tensor) -> np.ndarray:
         norm = diff_np / max_val
     heat = LOSS_CMAP((norm + 1) / 2)[..., :3]
     return (heat * 255.0).astype(np.uint8)
+
+
+def _gradient_norm_to_heatmap(grad_map: torch.Tensor) -> np.ndarray:
+    grad_np = grad_map.detach().cpu().numpy()
+    max_val = np.max(grad_np)
+    if not np.isfinite(max_val) or max_val <= 0:
+        norm = np.zeros_like(grad_np)
+    else:
+        norm = grad_np / max_val
+    heat = GRAD_CMAP(norm)[..., :3]
+    return (heat * 255.0).astype(np.uint8)
+
+
+def _per_pixel_gradient_heatmap(delta_frame: torch.Tensor, target_delta: torch.Tensor) -> np.ndarray:
+    with torch.enable_grad():
+        delta_leaf = delta_frame.detach().unsqueeze(0).clone().requires_grad_(True)
+        target = target_delta.detach().unsqueeze(0)
+        loss = RECON_LOSS(delta_leaf, target)
+        grad = torch.autograd.grad(loss, delta_leaf, retain_graph=False, create_graph=False)[0]
+    grad_norm = grad.squeeze(0).pow(2).sum(dim=0).sqrt()
+    return _gradient_norm_to_heatmap(grad_norm)
 
 
 def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> Optional[VisualizationSelection]:
@@ -889,6 +930,7 @@ def _render_visualization_batch(
     rollout_steps: int,
     device: torch.device,
     selection: Optional[VisualizationSelection] = None,
+    show_gradients: bool = False,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], List[str], List[np.ndarray]]]:
     if batch_cpu is None:
         return None
@@ -927,10 +969,18 @@ def _render_visualization_batch(
         prev_frame = vis_frames[idx, time_idx - 1]
         delta_frame = delta_frames[idx, time_idx - 1]
         recon_frame = (prev_frame + delta_frame).clamp(0, 1)
+        target_delta = true_frame - prev_frame
         sampled_frames.append(true_frame)
         sampled_texts.append(_describe_action_tensor(vis_actions[idx, time_idx]))
         sampled_recons.append(recon_frame)
-        sampled_heatmaps.append(_loss_to_heatmap(true_frame, recon_frame))
+        if show_gradients:
+            try:
+                heatmap = _per_pixel_gradient_heatmap(delta_frame, target_delta)
+            except RuntimeError:
+                heatmap = _loss_to_heatmap(true_frame, recon_frame)
+        else:
+            heatmap = _loss_to_heatmap(true_frame, recon_frame)
+        sampled_heatmaps.append(heatmap)
         if rollout_steps > 0:
             seq_preds: List[torch.Tensor] = []
             current_embed = vis_embeddings[idx, time_idx].unsqueeze(0)
@@ -1125,6 +1175,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_rollout,
                     device,
                     fixed_selection,
+                    cfg.vis_gradient_norms,
                 )
                 if rendered is not None:
                     frames_tensor, recon_tensor, pred_tensor, texts, heatmaps = rendered
@@ -1146,6 +1197,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_rollout,
                     device,
                     None,
+                    cfg.vis_gradient_norms,
                 )
                 if rendered is not None:
                     frames_tensor, recon_tensor, pred_tensor, texts, heatmaps = rendered
