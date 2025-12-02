@@ -379,7 +379,7 @@ class TrainConfig:
     total_steps: int = 10_000
     log_every_steps: int = 10
     vis_every_steps: int = 50
-    vis_rows: int = 4
+    vis_rows: int = 2
     vis_rollout: int = 4
     vis_gradient_norms: bool = False
     input_vis_every_steps: int = 0
@@ -399,6 +399,16 @@ class TrainConfig:
 class VisualizationSelection:
     row_indices: torch.Tensor
     time_indices: torch.Tensor
+
+
+@dataclass
+class VisualizationSequence:
+    ground_truth: torch.Tensor
+    rollout: List[Optional[torch.Tensor]]
+    gradients: List[Optional[np.ndarray]]
+    reconstructions: torch.Tensor
+    labels: List[str]
+    actions: List[str] = field(default_factory=list)
 
 
 class JEPAWorldModel(nn.Module):
@@ -524,11 +534,11 @@ def training_step(
     decoder: VisualizationDecoder,
     optim_world: torch.optim.Optimizer,
     optim_decoder: torch.optim.Optimizer,
-    batch: Tuple[torch.Tensor, torch.Tensor],
+    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]]],
     cfg: TrainConfig,
     weights: LossWeights,
 ) -> Dict[str, float]:
-    images, actions = batch
+    images, actions = batch[:2]
     world_params = [p for p in model.parameters()]
     device = next(model.parameters()).device
     images = images.to(device)
@@ -594,14 +604,17 @@ def training_step(
 # ------------------------------------------------------------
 
 
-def collate_batch(batch: Iterable[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
-    obs, actions = zip(*batch)
+def collate_batch(
+    batch: Iterable[Tuple[torch.Tensor, torch.Tensor, List[str]]]
+) -> Tuple[torch.Tensor, torch.Tensor, List[List[str]]]:
+    obs, actions, paths = zip(*batch)
     obs_tensor = torch.stack(obs, dim=0)
     act_tensor = torch.stack(actions, dim=0)
-    return obs_tensor, act_tensor
+    path_batch = [list(seq) for seq in paths]
+    return obs_tensor, act_tensor, path_batch
 
 
-class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor]]):
+class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[str]]]):
     """Load contiguous frame/action sequences from recorded trajectories."""
 
     def __init__(
@@ -653,13 +666,15 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor]]):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
         frame_paths, actions, start = self.samples[index]
         frames: List[torch.Tensor] = []
+        path_slice: List[str] = []
         for offset in range(self.seq_len):
             path = frame_paths[start + offset]
             frame = load_frame_as_tensor(path, size=self.image_hw)
             frames.append(frame)
+            path_slice.append(str(path))
         action_slice = actions[start : start + self.seq_len]
         # Each frame/action pair must stay aligned so the predictor knows which action follows each observation.
         assert len(frames) == self.seq_len, f"Expected {self.seq_len} frames, got {len(frames)}"
@@ -667,7 +682,7 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor]]):
             f"Expected {self.seq_len} actions, got {action_slice.shape[0]}"
         )
         assert action_slice.shape[1] == actions.shape[1], "Action dimensionality changed unexpectedly."
-        return torch.stack(frames, dim=0), torch.from_numpy(action_slice)
+        return torch.stack(frames, dim=0), torch.from_numpy(action_slice), path_slice
 
 
 # ------------------------------------------------------------
@@ -811,6 +826,28 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
     return (array * 255.0).round().astype(np.uint8)
 
 
+def _short_traj_state_label(frame_path: str) -> str:
+    path = Path(frame_path)
+    traj = next((part for part in path.parts if part.startswith("traj_")), path.parent.name)
+    return f"{traj}/{path.stem}"
+
+
+def _extract_frame_labels(
+    batch_paths: Optional[List[List[str]]],
+    sample_idx: int,
+    start_idx: int,
+    length: int,
+) -> List[str]:
+    if batch_paths is None or sample_idx >= len(batch_paths):
+        return [f"t={start_idx + offset}" for offset in range(length)]
+    sample_paths = batch_paths[sample_idx]
+    end = min(start_idx + length, len(sample_paths))
+    slice_paths = sample_paths[start_idx:end]
+    if len(slice_paths) < length:
+        slice_paths = sample_paths[-length:]
+    return [_short_traj_state_label(path) for path in slice_paths]
+
+
 TEXT_FONT = ImageFont.load_default()
 LOSS_CMAP = plt.get_cmap("coolwarm")
 GRAD_CMAP = plt.get_cmap("magma")
@@ -865,6 +902,16 @@ def _per_pixel_gradient_heatmap(delta_frame: torch.Tensor, target_delta: torch.T
         target = target_delta.detach().unsqueeze(0)
         loss = RECON_LOSS(delta_leaf, target)
         grad = torch.autograd.grad(loss, delta_leaf, retain_graph=False, create_graph=False)[0]
+    grad_norm = grad.squeeze(0).pow(2).sum(dim=0).sqrt()
+    return _gradient_norm_to_heatmap(grad_norm)
+
+
+def _prediction_gradient_heatmap(pred_frame: torch.Tensor, target_frame: torch.Tensor) -> np.ndarray:
+    with torch.enable_grad():
+        pred_leaf = pred_frame.detach().unsqueeze(0).clone().requires_grad_(True)
+        target = target_frame.detach().unsqueeze(0)
+        loss = RECON_LOSS(pred_leaf, target)
+        grad = torch.autograd.grad(loss, pred_leaf, retain_graph=False, create_graph=False)[0]
     grad_norm = grad.squeeze(0).pow(2).sum(dim=0).sqrt()
     return _gradient_norm_to_heatmap(grad_norm)
 
@@ -992,17 +1039,18 @@ def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) 
 def _render_visualization_batch(
     model: JEPAWorldModel,
     decoder: VisualizationDecoder,
-    batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]],
     rows: int,
     rollout_steps: int,
     device: torch.device,
     selection: Optional[VisualizationSelection] = None,
     show_gradients: bool = False,
-) -> Optional[Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], List[str], List[np.ndarray]]]:
+) -> Optional[Tuple[List[VisualizationSequence], str]]:
     if batch_cpu is None:
         return None
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
+    frame_paths = batch_cpu[2] if len(batch_cpu) > 2 else None
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
     if vis_frames.shape[1] < 2:
@@ -1011,106 +1059,168 @@ def _render_visualization_batch(
     batch_size = vis_frames.shape[0]
     if batch_size == 0:
         return None
+    min_start = 1
+    target_window = max(2, rollout_steps + 1)
+    max_window = min(target_window, vis_frames.shape[1] - min_start)
+    if max_window < 2:
+        return None
+    max_start = max(min_start, vis_frames.shape[1] - max_window)
     if selection is not None and selection.row_indices.numel() > 0:
         num_rows = min(rows, selection.row_indices.numel())
         row_indices = selection.row_indices[:num_rows].to(device=device)
-        time_indices = selection.time_indices[:num_rows]
+        base_starts = selection.time_indices[:num_rows].to(device=device)
     else:
         num_rows = min(rows, batch_size)
         row_indices = torch.randperm(batch_size, device=device)[:num_rows]
-        max_time = vis_frames.shape[1]
-        if max_time < 2:
-            return None
-        time_indices = torch.randint(1, max_time, (num_rows,), device=device)
-    sampled_frames: List[torch.Tensor] = []
-    sampled_texts: List[str] = []
-    sampled_recons: List[torch.Tensor] = []
-    sampled_preds: List[torch.Tensor] = []
-    sampled_heatmaps: List[np.ndarray] = []
+        base_starts = torch.randint(min_start, max_start + 1, (num_rows,), device=device)
+    sequences: List[VisualizationSequence] = []
     for row_offset, idx in enumerate(row_indices):
-        if time_indices is not None:
-            time_idx = int(time_indices[row_offset].item())
-        else:
-            time_idx = torch.randint(1, vis_frames.shape[1], ()).item()
-        true_frame = vis_frames[idx, time_idx]
-        prev_frame = vis_frames[idx, time_idx - 1]
-        delta_frame = delta_frames[idx, time_idx - 1]
-        recon_frame = (prev_frame + delta_frame).clamp(0, 1)
-        target_delta = true_frame - prev_frame
-        sampled_frames.append(true_frame)
-        sampled_texts.append(_describe_action_tensor(vis_actions[idx, time_idx]))
-        sampled_recons.append(recon_frame)
-        if show_gradients:
-            try:
-                heatmap = _per_pixel_gradient_heatmap(delta_frame, target_delta)
-            except RuntimeError:
-                heatmap = _loss_to_heatmap(true_frame, recon_frame)
-        else:
-            heatmap = _loss_to_heatmap(true_frame, recon_frame)
-        sampled_heatmaps.append(heatmap)
-        if rollout_steps > 0:
-            seq_preds: List[torch.Tensor] = []
-            current_embed = vis_embeddings[idx, time_idx].unsqueeze(0)
-            current_action = vis_actions[idx, time_idx].unsqueeze(0)
-            current_frame = recon_frame.clone()
-            for _ in range(rollout_steps):
-                delta_embed = model.predictor(current_embed, current_action)
-                next_embed = current_embed + delta_embed
-                delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
-                current_frame = (current_frame + delta_next).clamp(0, 1)
-                seq_preds.append(current_frame)
-                current_embed = next_embed
-            sampled_preds.append(torch.stack(seq_preds))
-    frames_tensor = torch.stack(sampled_frames, dim=0)
-    recon_tensor = torch.stack(sampled_recons, dim=0)
-    pred_tensor: Optional[torch.Tensor]
-    if rollout_steps > 0 and len(sampled_preds) == len(sampled_frames):
-        pred_tensor = torch.stack(sampled_preds, dim=0)
-    else:
-        pred_tensor = None
-    return frames_tensor, recon_tensor, pred_tensor, sampled_texts, sampled_heatmaps
+        start_idx = int(base_starts[row_offset].item()) if base_starts is not None else min_start
+        start_idx = max(min_start, min(start_idx, max_start))
+        gt_slice = vis_frames[idx, start_idx : start_idx + max_window]
+        if gt_slice.shape[0] < max_window:
+            continue
+        action_texts: List[str] = []
+        for offset in range(max_window):
+            action_idx = min(start_idx + offset, vis_actions.shape[1] - 1)
+            action_texts.append(_describe_action_tensor(vis_actions[idx, action_idx]))
+        recon_seq: List[torch.Tensor] = []
+        for offset in range(max_window):
+            delta_idx = start_idx + offset - 1
+            prev_frame = vis_frames[idx, delta_idx]
+            delta_frame = delta_frames[idx, delta_idx]
+            recon_seq.append((prev_frame + delta_frame).clamp(0, 1))
+        recon_tensor = torch.stack(recon_seq, dim=0)
+        rollout_frames: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
+        gradient_maps: List[Optional[np.ndarray]] = [None for _ in range(max_window)]
+        current_frame = gt_slice[0]
+        current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
+        for step in range(1, max_window):
+            action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
+            delta_embed = model.predictor(current_embed, action)
+            next_embed = current_embed + delta_embed
+            delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
+            current_frame = (current_frame + delta_next).clamp(0, 1)
+            if show_gradients:
+                try:
+                    gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
+                except RuntimeError:
+                    gradient_maps[step] = _loss_to_heatmap(gt_slice[step], current_frame)
+            else:
+                gradient_maps[step] = _loss_to_heatmap(gt_slice[step], current_frame)
+            rollout_frames[step] = current_frame.detach().cpu()
+            current_embed = next_embed
+        labels = _extract_frame_labels(frame_paths, int(idx.item()), start_idx, max_window)
+        sequences.append(
+            VisualizationSequence(
+                ground_truth=gt_slice.detach().cpu(),
+                rollout=rollout_frames,
+                gradients=gradient_maps,
+                reconstructions=recon_tensor.detach().cpu(),
+                labels=labels,
+                actions=action_texts,
+            )
+        )
+    if not sequences:
+        return None
+    grad_label = "Gradient Norm" if show_gradients else "Error Heatmap"
+    return sequences, grad_label
 
 
 def save_rollout_visualization(
     out_path: Path,
-    frames: torch.Tensor,
-    recon_frames: torch.Tensor,
-    pred_rollouts: Optional[torch.Tensor],
-    rows: int,
-    rollout_steps: int,
-    annotations: Optional[List[str]] = None,
-    heatmaps: Optional[List[np.ndarray]] = None,
+    sequence: VisualizationSequence,
+    grad_label: str,
 ) -> None:
-    frames = frames.detach().cpu()
-    recon_frames = recon_frames.detach().cpu()
-    pred_frames = pred_rollouts.detach().cpu() if pred_rollouts is not None else None
-    total_rows = frames.shape[0]
-    num_rows = min(rows, total_rows)
-    pred_horizons = 0 if pred_frames is None else pred_frames.shape[1]
-    grid_rows: List[np.ndarray] = []
-    for row_idx in range(num_rows):
-        frame_img = tensor_to_uint8_image(frames[row_idx])
-        if annotations is not None and row_idx < len(annotations):
-            frame_img = _annotate_with_text(frame_img, annotations[row_idx])
-        columns = [
-            frame_img,
-            tensor_to_uint8_image(recon_frames[row_idx]),
-        ]
-        for horizon in range(rollout_steps):
-            if (
-                pred_frames is None
-                or horizon >= pred_horizons
-            ):
-                columns.append(columns[-1])
-                continue
-            columns.append(tensor_to_uint8_image(pred_frames[row_idx, horizon]))
-        if heatmaps is not None and row_idx < len(heatmaps):
-            columns.append(heatmaps[row_idx])
-        row_image = np.concatenate(columns, axis=1)
-        grid_rows.append(row_image)
-    grid = np.concatenate(grid_rows, axis=0) if grid_rows else np.zeros((1, 1, 3), dtype=np.uint8)
+    seq_cols = len(sequence.labels)
+    if seq_cols == 0:
+        return
+    row_block = 4
+    fig, axes = plt.subplots(
+        row_block,
+        seq_cols,
+        figsize=(seq_cols * 2, row_block * 1.5),
+    )
+    axes = np.atleast_2d(axes)
+
+    def _imshow_tensor(ax: plt.Axes, tensor: torch.Tensor) -> None:
+        ax.imshow(tensor.clamp(0, 1).permute(1, 2, 0).numpy())
+        ax.axis("off")
+
+    def _imshow_array(ax: plt.Axes, array: np.ndarray) -> None:
+        if array.dtype != np.float32 and array.dtype != np.float64:
+            data = array.astype(np.float32) / 255.0
+        else:
+            data = array
+        ax.imshow(data)
+        ax.axis("off")
+
+    sample_tensor = sequence.ground_truth[0]
+    height, width = sample_tensor.shape[1], sample_tensor.shape[2]
+    blank = np.full((height, width, 3), 0.5, dtype=np.float32)
+    row_labels = [
+        "Ground Truth",
+        "Rollout Prediction",
+        grad_label,
+        "Direct Reconstruction",
+    ]
+
+    for row_idx in range(row_block):
+        axes[row_idx, 0].text(
+            -0.12,
+            0.5,
+            row_labels[row_idx],
+            transform=axes[row_idx, 0].transAxes,
+            va="center",
+            ha="right",
+            fontsize=8,
+            rotation=90,
+        )
+    for col in range(seq_cols):
+        gt_ax = axes[0, col]
+        rollout_ax = axes[1, col]
+        grad_ax = axes[2, col]
+        recon_ax = axes[3, col]
+        gt_img = tensor_to_uint8_image(sequence.ground_truth[col])
+        if sequence.actions and col < len(sequence.actions):
+            gt_img = _annotate_with_text(gt_img, sequence.actions[col])
+        gt_ax.imshow(gt_img)
+        gt_ax.axis("off")
+        gt_ax.set_title(sequence.labels[col], fontsize=8)
+        recon_tensor = sequence.reconstructions[col]
+        _imshow_tensor(recon_ax, recon_tensor)
+        rollout_frame = sequence.rollout[col]
+        if rollout_frame is None:
+            _imshow_array(rollout_ax, blank)
+        else:
+            _imshow_tensor(rollout_ax, rollout_frame)
+        grad_map = sequence.gradients[col]
+        if grad_map is None:
+            _imshow_array(grad_ax, blank)
+        else:
+            _imshow_array(grad_ax, grad_map)
+    fig.suptitle("JEPA Rollout Visualization", fontsize=12)
+    fig.tight_layout(rect=(0.08, 0.02, 1.0, 0.95))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(grid).save(out_path)
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def save_rollout_sequence_batch(
+    template_dir: Path,
+    sequences: List[VisualizationSequence],
+    grad_label: str,
+    global_step: int,
+) -> None:
+    if not sequences:
+        return
+    base_parent = template_dir.parent
+    base_name = template_dir.name
+    for idx, sequence in enumerate(sequences):
+        sample_dir = base_parent / f"{base_name}_{idx}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        out_path = sample_dir / f"rollout_{global_step:07d}.png"
+        save_rollout_visualization(out_path, sequence, grad_label)
 
 
 # ------------------------------------------------------------
@@ -1128,8 +1238,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     fixed_vis_dir = run_dir / "vis_fixed"
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
-    fixed_vis_dir.mkdir(parents=True, exist_ok=True)
-    rolling_vis_dir.mkdir(parents=True, exist_ok=True)
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     inputs_vis_dir: Optional[Path]
     pair_vis_dir: Optional[Path]
@@ -1166,15 +1274,20 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     optim_decoder = torch.optim.Adam(decoder.parameters(), lr=cfg.decoder_lr)
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
-    fixed_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    fixed_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
     fixed_selection: Optional[VisualizationSelection] = None
     try:
         sample_batch = next(iter(dataloader))
-        fixed_batch_cpu = (sample_batch[0].clone(), sample_batch[1].clone())
+        fixed_paths = sample_batch[2] if len(sample_batch) > 2 else None
+        fixed_batch_cpu = (
+            sample_batch[0].clone(),
+            sample_batch[1].clone(),
+            [list(paths) for paths in fixed_paths] if fixed_paths is not None else None,
+        )
         fixed_selection = _make_fixed_selection(fixed_batch_cpu[0], cfg.vis_rows)
     except StopIteration:
         fixed_batch_cpu = None
-    rolling_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    rolling_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
     embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     if cfg.embedding_projection_samples > 0:
         embed_loader = DataLoader(
@@ -1202,7 +1315,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             loss_history.append(global_step, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
             plot_loss_curves(loss_history, metrics_dir)
-        rolling_batch_cpu = (batch[0].clone(), batch[1].clone())
+        batch_paths = batch[2] if len(batch) > 2 else None
+        rolling_batch_cpu = (
+            batch[0].clone(),
+            batch[1].clone(),
+            [list(paths) for paths in batch_paths] if batch_paths is not None else None,
+        )
         if (
             inputs_vis_dir is not None
             and cfg.input_vis_every_steps > 0
@@ -1244,16 +1362,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_gradient_norms,
                 )
                 if rendered is not None:
-                    frames_tensor, recon_tensor, pred_tensor, texts, heatmaps = rendered
-                    save_rollout_visualization(
-                        fixed_vis_dir / f"rollout_{global_step:07d}.png",
-                        frames_tensor,
-                        recon_tensor,
-                        pred_tensor,
-                        cfg.vis_rows,
-                        cfg.vis_rollout,
-                        texts,
-                        heatmaps,
+                    sequences, grad_label = rendered
+                    save_rollout_sequence_batch(
+                        fixed_vis_dir,
+                        sequences,
+                        grad_label,
+                        global_step,
                     )
                 rendered = _render_visualization_batch(
                     model,
@@ -1266,16 +1380,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_gradient_norms,
                 )
                 if rendered is not None:
-                    frames_tensor, recon_tensor, pred_tensor, texts, heatmaps = rendered
-                    save_rollout_visualization(
-                        rolling_vis_dir / f"rollout_{global_step:07d}.png",
-                        frames_tensor,
-                        recon_tensor,
-                        pred_tensor,
-                        cfg.vis_rows,
-                        cfg.vis_rollout,
-                        texts,
-                        heatmaps,
+                    sequences, grad_label = rendered
+                    save_rollout_sequence_batch(
+                        rolling_vis_dir,
+                        sequences,
+                        grad_label,
+                        global_step,
                     )
                 if embedding_batch_cpu is not None:
                     embed_frames = embedding_batch_cpu[0].to(device)
