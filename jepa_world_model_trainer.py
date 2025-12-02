@@ -316,7 +316,7 @@ class VisualizationDecoder(nn.Module):
         return delta
 
 
-RECON_LOSS = HardnessWeightedMedianLoss()
+RECON_LOSS = HardnessWeightedL1Loss()
 JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
 
@@ -349,13 +349,13 @@ class ModelConfig:
 
     in_channels: int = 3
     image_size: int = 128
-    channel_schedule: Tuple[int, ...] = (32, 64, 128, 256)
-    latent_dim: int = 256
-    hidden_dim: int = 256
-    embedding_dim: int = 256
+    channel_schedule: Tuple[int, ...] = (32, 64, 128)
+    latent_dim: int = 192
+    hidden_dim: int = 192
+    embedding_dim: int = 192
     action_dim: int = 8
-    predictor_film_layers: int = 2
-    motion_channel_schedule: Optional[Tuple[int, ...]] = (32, 64)
+    predictor_film_layers: int = 1
+    motion_channel_schedule: Optional[Tuple[int, ...]] = (16, 32)
 
 
 @dataclass
@@ -697,6 +697,25 @@ def log_metrics(step: int, metrics: Dict[str, float]) -> None:
     print(f"[step {step}] {pretty}")
 
 
+def _filtered_metrics_for_logging(
+    metrics: Dict[str, float],
+    weights: LossWeights,
+    recon_weight: float,
+) -> Dict[str, float]:
+    filtered = dict(metrics)
+    if weights.jepa <= 0:
+        filtered.pop("loss_jepa", None)
+    if weights.sigreg <= 0:
+        filtered.pop("loss_sigreg", None)
+    if weights.rollout <= 0:
+        filtered.pop("loss_rollout", None)
+    if weights.consistency <= 0:
+        filtered.pop("loss_consistency", None)
+    if recon_weight <= 0:
+        filtered.pop("loss_recon", None)
+    return filtered
+
+
 LOSS_COLUMNS = [
     "step",
     "loss_world",
@@ -763,14 +782,29 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(8, 5))
-    plt.plot(history.steps, history.world, label="world")
-    plt.plot(history.steps, history.jepa, label="jepa")
-    plt.plot(history.steps, history.sigreg, label="sigreg")
+    default_colors = plt.rcParams.get("axes.prop_cycle", None)
+    color_cycle = default_colors.by_key().get("color", []) if default_colors is not None else []
+    palette = (
+        color_cycle
+        if len(color_cycle) >= 6
+        else ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    )
+    color_map = {
+        "world": palette[0],
+        "jepa": palette[1],
+        "sigreg": palette[2],
+        "recon": palette[3],
+        "rollout": palette[4],
+        "consistency": palette[5],
+    }
+    plt.plot(history.steps, history.world, label="world", color=color_map["world"])
+    plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
+    plt.plot(history.steps, history.sigreg, label="sigreg", color=color_map["sigreg"])
+    plt.plot(history.steps, history.recon, label="recon", color=color_map["recon"])
     if any(val != 0.0 for val in history.rollout):
-        plt.plot(history.steps, history.rollout, label="rollout")
+        plt.plot(history.steps, history.rollout, label="rollout", color=color_map["rollout"])
     if any(val != 0.0 for val in history.consistency):
-        plt.plot(history.steps, history.consistency, label="consistency")
-    plt.plot(history.steps, history.recon, label="recon")
+        plt.plot(history.steps, history.consistency, label="consistency", color=color_map["consistency"])
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
@@ -1314,7 +1348,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             batch = next(data_iter)
         metrics = training_step(model, decoder, optim_world, optim_decoder, batch, cfg, weights)
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
-            log_metrics(global_step, metrics)
+            loggable = _filtered_metrics_for_logging(metrics, weights, cfg.recon_weight)
+            log_metrics(global_step, loggable)
             loss_history.append(global_step, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
             plot_loss_curves(loss_history, metrics_dir)
