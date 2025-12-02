@@ -367,12 +367,19 @@ class LossWeights:
 
 
 @dataclass
+class DebugVisualization:
+    input_vis_every_steps: int = 0
+    input_vis_rows: int = 4
+    pair_vis_every_steps: int = 0
+    pair_vis_rows: int = 4
+
+
+@dataclass
 class TrainConfig:
     seq_len: int = 8
     batch_size: int = 8
     lr: float = 1e-4
     decoder_lr: float = 1e-4
-    grad_clip: float = 0.0
     sigreg_projections: int = 64
     recon_weight: float = 1.0
     device: Optional[str] = "mps"
@@ -383,17 +390,14 @@ class TrainConfig:
     vis_rollout: int = 4
     vis_columns: int = 8
     vis_gradient_norms: bool = False
-    input_vis_every_steps: int = 0
-    input_vis_rows: int = 4
     rollout_horizon: int = 8
-    pair_vis_every_steps: int = 0
-    pair_vis_rows: int = 4
     embedding_projection_samples: int = 256
     output_dir: Path = Path("out.jepa_world_model_trainer")
     data_root: Path = Path("data.gridworldkey")
     max_trajectories: Optional[int] = None
 
     loss_weights: LossWeights = field(default_factory=LossWeights)
+    debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
 
 
 @dataclass
@@ -577,10 +581,7 @@ def training_step(
 
     optim_world.zero_grad()
     world_loss.backward()
-    if cfg.grad_clip > 0:
-        world_grad_norm = float(nn.utils.clip_grad_norm_(world_params, cfg.grad_clip).item())
-    else:
-        world_grad_norm = grad_norm(world_params)
+    world_grad_norm = grad_norm(world_params)
     optim_world.step()
 
     optim_decoder.zero_grad()
@@ -1106,10 +1107,7 @@ def _render_visualization_batch(
             delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
             current_frame = (current_frame + delta_next).clamp(0, 1)
             if show_gradients:
-                try:
-                    gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
-                except RuntimeError:
-                    gradient_maps[step] = _loss_to_heatmap(gt_slice[step], current_frame)
+                gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
             else:
                 gradient_maps[step] = _loss_to_heatmap(gt_slice[step], current_frame)
             rollout_frames[step] = current_frame.detach().cpu()
@@ -1243,14 +1241,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
+    debug_vis = cfg.debug_visualization
     inputs_vis_dir: Optional[Path]
     pair_vis_dir: Optional[Path]
-    if cfg.input_vis_every_steps > 0:
+    if debug_vis.input_vis_every_steps > 0:
         inputs_vis_dir = run_dir / "vis_inputs"
         inputs_vis_dir.mkdir(parents=True, exist_ok=True)
     else:
         inputs_vis_dir = None
-    if cfg.pair_vis_every_steps > 0:
+    if debug_vis.pair_vis_every_steps > 0:
         pair_vis_dir = run_dir / "vis_pairs"
         pair_vis_dir.mkdir(parents=True, exist_ok=True)
     else:
@@ -1327,27 +1326,27 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         )
         if (
             inputs_vis_dir is not None
-            and cfg.input_vis_every_steps > 0
-            and global_step % cfg.input_vis_every_steps == 0
+            and debug_vis.input_vis_every_steps > 0
+            and global_step % debug_vis.input_vis_every_steps == 0
             and rolling_batch_cpu is not None
         ):
             save_input_batch_visualization(
                 inputs_vis_dir / f"inputs_{global_step:07d}.png",
                 rolling_batch_cpu[0],
                 rolling_batch_cpu[1],
-                cfg.input_vis_rows,
+                debug_vis.input_vis_rows,
             )
         if (
             pair_vis_dir is not None
-            and cfg.pair_vis_every_steps > 0
-            and global_step % cfg.pair_vis_every_steps == 0
+            and debug_vis.pair_vis_every_steps > 0
+            and global_step % debug_vis.pair_vis_every_steps == 0
             and rolling_batch_cpu is not None
         ):
             save_temporal_pair_visualization(
                 pair_vis_dir / f"pairs_{global_step:07d}.png",
                 rolling_batch_cpu[0],
                 rolling_batch_cpu[1],
-                cfg.pair_vis_rows,
+                debug_vis.pair_vis_rows,
             )
         if (
             cfg.vis_every_steps > 0
