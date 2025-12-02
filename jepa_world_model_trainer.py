@@ -117,6 +117,31 @@ class HardnessWeightedMSELoss(nn.Module):
         return (weight * mse).mean()
 
 
+class HardnessWeightedMedianLoss(nn.Module):
+    """Twin of :class:`HardnessWeightedL1Loss` using a median baseline on residual deltas."""
+
+    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        if beta <= 0:
+            raise ValueError("beta must be positive.")
+        if max_weight <= 0:
+            raise ValueError("max_weight must be positive.")
+        self.beta = beta
+        self.max_weight = max_weight
+        self.eps = eps
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if input.shape != target.shape:
+            raise ValueError("input and target must share shape")
+        residual = (input - target).abs()
+        b = residual.shape[0]
+        flat = residual.detach().flatten(start_dim=1)
+        median = flat.median(dim=1).values.view(b, *((1,) * (residual.dim() - 1))).clamp_min(self.eps)
+        rel_error = residual.detach() / median
+        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
+        return (weight * residual).mean()
+
+
 class Encoder(nn.Module):
     def __init__(self, in_channels: int, schedule: Tuple[int, ...]):
         super().__init__()
@@ -201,7 +226,7 @@ class VisualizationDecoder(nn.Module):
             nn.SiLU(inplace=True),
         )
         up_blocks: List[nn.Module] = []
-        in_ch = self.start_ch
+        in_ch = self.start_ch * 2
         for out_ch in reversed(channel_schedule[:-1]):
             up_blocks.append(UpBlock(in_ch, out_ch))
             in_ch = out_ch
@@ -221,15 +246,17 @@ class VisualizationDecoder(nn.Module):
         if prev_frame is not None:
             prev = prev_frame.reshape(-1, self.image_channels, self.image_size, self.image_size)
             prev = F.interpolate(prev, size=(self.start_hw, self.start_hw), mode="bilinear", align_corners=False)
-            decoded = decoded + self.prev_adapter(prev)
-        if len(self.up_blocks) > 0:
-            decoded = self.up_blocks(decoded)
+            prev_feat = self.prev_adapter(prev)
+            decoded = torch.cat([decoded, prev_feat], dim=1)
+        else:
+            decoded = torch.cat([decoded, torch.zeros_like(decoded)], dim=1)
+        decoded = self.up_blocks(decoded)
         delta = self.head(decoded)
         delta = delta.view(*original_shape, self.image_channels, self.image_size, self.image_size)
         return delta
 
 
-RECON_LOSS = nn.MSELoss()
+RECON_LOSS = HardnessWeightedMedianLoss()
 JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
 
