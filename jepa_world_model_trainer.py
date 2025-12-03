@@ -349,13 +349,13 @@ class ModelConfig:
 
     in_channels: int = 3
     image_size: int = 128
-    channel_schedule: Tuple[int, ...] = (32, 64, 128)
-    latent_dim: int = 192
-    hidden_dim: int = 192
-    embedding_dim: int = 192
+    channel_schedule: Tuple[int, ...] = (32, 64, 128, 256)
+    latent_dim: int = 256
+    hidden_dim: int = 512
+    embedding_dim: int = 256
     action_dim: int = 8
-    predictor_film_layers: int = 1
-    motion_channel_schedule: Optional[Tuple[int, ...]] = (16, 32)
+    predictor_film_layers: int = 2
+    motion_channel_schedule: Optional[Tuple[int, ...]] = (32, 64)
 
 
 @dataclass
@@ -390,6 +390,7 @@ class TrainConfig:
     vis_rollout: int = 4
     vis_columns: int = 8
     vis_gradient_norms: bool = False
+    vis_log_deltas: bool = False
     rollout_horizon: int = 8
     embedding_projection_samples: int = 256
     output_dir: Path = Path("out.jepa_world_model_trainer")
@@ -1082,6 +1083,7 @@ def _render_visualization_batch(
     device: torch.device,
     selection: Optional[VisualizationSelection] = None,
     show_gradients: bool = False,
+    log_deltas: bool = False,
 ) -> Optional[Tuple[List[VisualizationSequence], str]]:
     if batch_cpu is None:
         return None
@@ -1113,6 +1115,7 @@ def _render_visualization_batch(
         row_indices = torch.randperm(batch_size, device=device)[:num_rows]
         base_starts = torch.randint(min_start, max_start + 1, (num_rows,), device=device)
     sequences: List[VisualizationSequence] = []
+    debug_lines: List[str] = []
     for row_offset, idx in enumerate(row_indices):
         start_idx = int(base_starts[row_offset].item()) if base_starts is not None else min_start
         start_idx = max(min_start, min(start_idx, max_start))
@@ -1139,6 +1142,7 @@ def _render_visualization_batch(
             delta_embed = model.predictor(current_embed, action)
             next_embed = current_embed + delta_embed
             delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
+            predicted_delta = delta_next.detach().clone()
             current_frame = (current_frame + delta_next).clamp(0, 1)
             if show_gradients:
                 gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
@@ -1146,6 +1150,17 @@ def _render_visualization_batch(
                 gradient_maps[step] = _loss_to_heatmap(gt_slice[step], current_frame)
             rollout_frames[step] = current_frame.detach().cpu()
             current_embed = next_embed
+            if log_deltas and row_offset < 2:
+                latent_norm = delta_embed.norm().item()
+                pixel_delta = predicted_delta.abs().mean().item()
+                frame_mse = F.mse_loss(current_frame, gt_slice[step]).item()
+                debug_lines.append(
+                    (
+                        f"[viz] row={int(idx)} step={step} "
+                        f"latent_norm={latent_norm:.4f} pixel_delta={pixel_delta:.4f} "
+                        f"frame_mse={frame_mse:.4f}"
+                    )
+                )
         labels = _extract_frame_labels(frame_paths, int(idx.item()), start_idx, max_window)
         sequences.append(
             VisualizationSequence(
@@ -1159,6 +1174,8 @@ def _render_visualization_batch(
         )
     if not sequences:
         return None
+    if debug_lines:
+        print("\n".join(debug_lines))
     grad_label = "Gradient Norm" if show_gradients else "Error Heatmap"
     return sequences, grad_label
 
@@ -1399,6 +1416,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     device,
                     fixed_selection,
                     cfg.vis_gradient_norms,
+                    cfg.vis_log_deltas,
                 )
                 if rendered is not None:
                     sequences, grad_label = rendered
@@ -1418,6 +1436,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     device,
                     None,
                     cfg.vis_gradient_norms,
+                    cfg.vis_log_deltas,
                 )
                 if rendered is not None:
                     sequences, grad_label = rendered
