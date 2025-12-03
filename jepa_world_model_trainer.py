@@ -2,7 +2,7 @@
 """Training loop for the JEPA world model with local/global specialization and SIGReg."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -11,10 +11,8 @@ import random
 
 import csv
 import json
-import tomli_w
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-import subprocess
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,6 +24,8 @@ from datetime import datetime
 from recon.data import list_trajectories, load_frame_as_tensor
 from super_mario_env import _describe_controller_vector, _describe_controller_vector_compact
 from utils.device_utils import pick_device
+from jepa_world_model.loss import HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
+from jepa_world_model.metadata import write_run_metadata
 
 
 # ------------------------------------------------------------
@@ -73,77 +73,6 @@ class UpBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
-
-
-class HardnessWeightedL1Loss(nn.Module):
-    """L1 loss with per-sample hardness weighting derived from mean error."""
-
-    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
-        super().__init__()
-        if beta <= 0:
-            raise ValueError("beta must be positive.")
-        if max_weight <= 0:
-            raise ValueError("max_weight must be positive.")
-        self.beta = beta
-        self.max_weight = max_weight
-        self.eps = eps
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        l1 = torch.abs(input - target)
-        dims = tuple(range(1, l1.dim()))
-        norm = l1.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
-        rel_error = l1.detach() / norm
-        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
-        return (weight * l1).mean()
-
-
-class HardnessWeightedMSELoss(nn.Module):
-    """Simple hardness-weighted MSE mirroring the L1 variant."""
-
-    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
-        super().__init__()
-        if beta <= 0:
-            raise ValueError("beta must be positive.")
-        if max_weight <= 0:
-            raise ValueError("max_weight must be positive.")
-        self.beta = beta
-        self.max_weight = max_weight
-        self.eps = eps
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if input.shape != target.shape:
-            raise ValueError("input and target must share shape")
-        mse = (input - target).pow(2)
-        dims = tuple(range(1, mse.dim()))
-        norm = mse.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
-        rel_error = mse.detach() / norm
-        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
-        return (weight * mse).mean()
-
-
-class HardnessWeightedMedianLoss(nn.Module):
-    """Twin of :class:`HardnessWeightedL1Loss` using a median baseline on residual deltas."""
-
-    def __init__(self, beta: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
-        super().__init__()
-        if beta <= 0:
-            raise ValueError("beta must be positive.")
-        if max_weight <= 0:
-            raise ValueError("max_weight must be positive.")
-        self.beta = beta
-        self.max_weight = max_weight
-        self.eps = eps
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if input.shape != target.shape:
-            raise ValueError("input and target must share shape")
-        residual = (input - target).abs()
-        b = residual.shape[0]
-        flat = residual.detach().flatten(start_dim=1)
-        median = flat.median(dim=1).values.view(b, *((1,) * (residual.dim() - 1))).clamp_min(self.eps)
-        rel_error = residual.detach() / median
-        weight = rel_error.pow(self.beta).clamp(max=self.max_weight)
-        return (weight * residual).mean()
 
 
 class Encoder(nn.Module):
@@ -225,28 +154,6 @@ class PredictorNetwork(nn.Module):
             "action_dim": self.action_dim,
             "film_layers": self.film_layers,
         }
-
-
-class FocalL1Loss(nn.Module):
-    """Focal-style L1 reconstruction loss that upweights harder pixels."""
-
-    def __init__(self, gamma: float = 2.0, max_weight: float = 100.0, eps: float = 1e-6) -> None:
-        super().__init__()
-        if gamma <= 0:
-            raise ValueError("gamma must be positive.")
-        if max_weight <= 0:
-            raise ValueError("max_weight must be positive.")
-        self.gamma = gamma
-        self.max_weight = max_weight
-        self.eps = eps
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        l1 = torch.abs(input - target)
-        dims = tuple(range(1, l1.dim()))
-        norm = l1.detach().mean(dim=dims, keepdim=True).clamp_min(self.eps)
-        rel_error = l1 / norm
-        weight = rel_error.pow(self.gamma).clamp(max=self.max_weight)
-        return (weight * l1).mean()
 
 
 class ActionEmbedding(nn.Module):
@@ -1415,60 +1322,6 @@ def save_hard_example_grid(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
-
-
-def _run_git_command(args: List[str]) -> str:
-    try:
-        result = subprocess.run(args, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        return "git executable not found."
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        return f"Command {' '.join(args)} failed (code {result.returncode}): {stderr}"
-    return result.stdout.strip()
-
-
-_TOML_NULL_SENTINEL = "__TOML_NULL__3d67a1c3a66a4d62ad0f0dec1d18454b__"
-
-
-def _serialize_for_json(value):
-    if value is None:
-        return _TOML_NULL_SENTINEL
-    if isinstance(value, dict):
-        return {k: _serialize_for_json(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_serialize_for_json(v) for v in value]
-    if isinstance(value, Path):
-        return str(value)
-    return value
-
-
-def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) -> None:
-    commit_sha = _run_git_command(["git", "rev-parse", "HEAD"])
-    diff_output = _run_git_command(["git", "diff", "--patch"])
-    if not diff_output.strip():
-        diff_output = "No uncommitted changes."
-    git_metadata = "\n".join(
-        [
-            "Git commit:",
-            commit_sha or "Unavailable",
-            "",
-            "Git diff (uncommitted changes):",
-            diff_output,
-            "",
-        ]
-    )
-    (run_dir / "metadata_git.txt").write_text(git_metadata)
-    train_config = _serialize_for_json(asdict(cfg))
-    model_config = _serialize_for_json(asdict(model_cfg))
-    toml_payload = {
-        "train_config": train_config,
-        "model_config": model_config,
-        "data_root": str(cfg.data_root),
-    }
-    metadata_text = tomli_w.dumps(toml_payload)
-    metadata_text = metadata_text.replace(f'"{_TOML_NULL_SENTINEL}"', "null")
-    (run_dir / "metadata.txt").write_text(metadata_text)
 
 
 def _render_visualization_batch(
