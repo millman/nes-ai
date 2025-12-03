@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import math
+import random
 
 import csv
 import json
@@ -143,7 +146,7 @@ class HardnessWeightedMedianLoss(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels: int, schedule: Tuple[int, ...]):
+    def __init__(self, in_channels: int, schedule: Tuple[int, ...], input_hw: int):
         super().__init__()
         blocks: List[nn.Module] = []
         ch_prev = in_channels
@@ -152,10 +155,35 @@ class Encoder(nn.Module):
             ch_prev = ch
         self.blocks = nn.Sequential(*blocks)
         self.pool = nn.AdaptiveAvgPool2d(1)
+        self.in_channels = in_channels
+        self.channel_schedule = schedule
+        self.input_hw = input_hw
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feats = self.blocks(x)
         return self.pool(feats).flatten(1)
+
+    def shape_info(self) -> Dict[str, Any]:
+        info: Dict[str, Any] = {
+            "module": "Encoder",
+            "input": (self.input_hw, self.input_hw, self.in_channels),
+            "stages": [],
+        }
+        h = self.input_hw
+        w = self.input_hw
+        c = self.in_channels
+        for idx, out_ch in enumerate(self.channel_schedule, start=1):
+            next_h = max(1, h // 2)
+            next_w = max(1, w // 2)
+            stage = {
+                "stage": idx,
+                "in": (h, w, c),
+                "out": (next_h, next_w, out_ch),
+            }
+            info["stages"].append(stage)
+            h, w, c = next_h, next_w, out_ch
+        info["latent_dim"] = self.channel_schedule[-1] if self.channel_schedule else c
+        return info
 
 
 class PredictorNetwork(nn.Module):
@@ -169,6 +197,10 @@ class PredictorNetwork(nn.Module):
         self.action_embed = ActionEmbedding(action_dim, hidden_dim)
         self.action_embed_dim = hidden_dim
         self.film = ActionFiLM(hidden_dim, hidden_dim, film_layers)
+        self.embedding_dim = embedding_dim
+        self.hidden_dim = hidden_dim
+        self.action_dim = action_dim
+        self.film_layers = film_layers
 
     def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if embeddings.shape[:-1] != actions.shape[:-1]:
@@ -183,6 +215,15 @@ class PredictorNetwork(nn.Module):
         delta = self.out_proj(hidden)
         action_logits = self.action_head(hidden)
         return delta.view(*original_shape, delta.shape[-1]), action_logits.view(*original_shape, action_logits.shape[-1])
+
+    def shape_info(self) -> Dict[str, Any]:
+        return {
+            "module": "Predictor",
+            "latent_dim": self.embedding_dim,
+            "hidden_dim": self.hidden_dim,
+            "action_dim": self.action_dim,
+            "film_layers": self.film_layers,
+        }
 
 
 class FocalL1Loss(nn.Module):
@@ -264,17 +305,13 @@ class VisualizationDecoder(nn.Module):
         image_channels: int,
         image_size: int,
         channel_schedule: Tuple[int, ...],
+        latent_hw: int,
     ) -> None:
         super().__init__()
         if not channel_schedule:
             raise ValueError("channel_schedule must be non-empty for decoder construction.")
         stages = max(len(channel_schedule) - 1, 0)
-        downscale = 2 ** stages if stages > 0 else 1
-        if image_size % downscale != 0:
-            raise ValueError(
-                f"image_size {image_size} is incompatible with channel schedule length {len(channel_schedule)}"
-            )
-        self.start_hw = image_size // downscale
+        self.start_hw = max(1, latent_hw)
         self.start_ch = channel_schedule[-1]
         self.image_channels = image_channels
         self.image_size = image_size
@@ -295,6 +332,8 @@ class VisualizationDecoder(nn.Module):
             nn.SiLU(inplace=True),
             nn.Conv2d(head_hidden, image_channels, kernel_size=1),
         )
+        self.channel_schedule = channel_schedule
+        self.latent_hw = latent_hw
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         original_shape = latent.shape[:-1]
@@ -303,19 +342,61 @@ class VisualizationDecoder(nn.Module):
         decoded = projected.view(-1, self.start_ch, self.start_hw, self.start_hw)
         decoded = self.up_blocks(decoded)
         frame = self.head(decoded)
+        if frame.shape[-1] != self.image_size:
+            frame = F.interpolate(frame, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
         frame = frame.view(*original_shape, self.image_channels, self.image_size, self.image_size)
         return frame
+
+    def shape_info(self) -> Dict[str, Any]:
+        info: Dict[str, Any] = {
+            "module": "Decoder",
+            "projection": (self.start_hw, self.start_hw, self.start_ch),
+            "upsample": [],
+            "final_target": (self.image_size, self.image_size, self.image_channels),
+        }
+        hw = self.start_hw
+        ch = self.start_ch
+        for idx, out_ch in enumerate(reversed(self.channel_schedule[:-1]), start=1):
+            prev_hw = hw
+            hw = max(1, hw * 2)
+            stage = {
+                "stage": idx,
+                "in": (prev_hw, prev_hw, ch),
+                "out": (hw, hw, out_ch),
+            }
+            info["upsample"].append(stage)
+            ch = out_ch
+        info["pre_resize"] = (hw, hw, self.image_channels)
+        info["needs_resize"] = hw != self.image_size
+        return info
 
 
 RECON_LOSS = HardnessWeightedL1Loss()
 JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
 ACTION_RECON_LOSS = nn.BCEWithLogitsLoss()
+EMA_CONSISTENCY_LOSS = nn.MSELoss()
 
 
 # ------------------------------------------------------------
 # Configs and containers
 # ------------------------------------------------------------
+
+
+def _derive_channel_schedule(embedding_dim: int, num_layers: int) -> Tuple[int, ...]:
+    if num_layers < 1:
+        raise ValueError("num_downsample_layers must be positive.")
+    factor = 2 ** (num_layers - 1)
+    if embedding_dim % factor != 0:
+        raise ValueError("embedding_dim must be divisible by 2^(num_downsample_layers - 1) for automatic schedule.")
+    base_channels = max(1, embedding_dim // factor)
+    schedule: List[int] = []
+    current = base_channels
+    for _ in range(num_layers):
+        schedule.append(current)
+        current *= 2
+    schedule[-1] = embedding_dim
+    return tuple(schedule)
 
 
 @dataclass
@@ -340,12 +421,17 @@ class ModelConfig:
 
     in_channels: int = 3
     image_size: int = 128
-    channel_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     latent_dim: int = 256
     hidden_dim: int = 512
     embedding_dim: int = 256
+    num_downsample_layers: int = 4
+    latent_hw: int = 16
     action_dim: int = 8
     predictor_film_layers: int = 2
+    channel_schedule: Tuple[int, ...] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.channel_schedule = _derive_channel_schedule(self.embedding_dim, self.num_downsample_layers)
 
 
 @dataclass
@@ -354,6 +440,7 @@ class LossWeights:
     sigreg: float = 0.5
     rollout: float = 0.0
     consistency: float = 0.0
+    ema_consistency: float = 1.0
     action_recon: float = 1.0
 
 
@@ -371,7 +458,7 @@ class TrainConfig:
     batch_size: int = 8
     lr: float = 1e-4
     sigreg_projections: int = 64
-    recon_weight: float = 0.1
+    recon_weight: float = 1.0
     device: Optional[str] = "mps"
     total_steps: int = 100_000
     log_every_steps: int = 10
@@ -379,13 +466,18 @@ class TrainConfig:
     vis_rows: int = 2
     vis_rollout: int = 4
     vis_columns: int = 8
-    vis_gradient_norms: bool = False
+    vis_gradient_norms: bool = True
     vis_log_deltas: bool = False
     rollout_horizon: int = 8
+    ema_momentum: float = 0.99
     embedding_projection_samples: int = 256
     output_dir: Path = Path("out.jepa_world_model_trainer")
-    data_root: Path = Path("data.gridworldkey")
+    data_root: Path = Path("data.gridworldkey_wander_to_key")
     max_trajectories: Optional[int] = None
+    hard_example_reservoir: int = 256
+    hard_example_mix_ratio: float = 0.5
+    hard_example_vis_rows: int = 6
+    hard_example_vis_columns: int = 8
 
     loss_weights: LossWeights = field(default_factory=LossWeights)
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
@@ -411,7 +503,7 @@ class JEPAWorldModel(nn.Module):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.encoder = Encoder(cfg.in_channels, cfg.channel_schedule)
+        self.encoder = Encoder(cfg.in_channels, cfg.channel_schedule, cfg.image_size)
         enc_dim = cfg.channel_schedule[-1]
         self.embedding_dim = enc_dim
         self.predictor = PredictorNetwork(
@@ -489,6 +581,14 @@ def latent_consistency_loss(embeddings: torch.Tensor) -> torch.Tensor:
     return diffs.abs().mean()
 
 
+def ema_latent_consistency_loss(
+    embeddings: torch.Tensor, ema_embeddings: torch.Tensor
+) -> torch.Tensor:
+    if embeddings.shape != ema_embeddings.shape:
+        raise ValueError("EMA and online embeddings must share shape for consistency loss.")
+    return EMA_CONSISTENCY_LOSS(embeddings, ema_embeddings.detach())
+
+
 def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     b, t, d = embeddings.shape
     flat = embeddings.reshape(b * t, d)
@@ -503,11 +603,24 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     return SIGREG_LOSS(sorted_proj, sorted_normal)
 
 
-def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
-    if embeddings.numel() == 0:
-        return embeddings.new_tensor(0.0)
-    recon = decoder(embeddings)
-    return RECON_LOSS(recon, images)
+def build_ema_model(model: JEPAWorldModel) -> JEPAWorldModel:
+    device = next(model.parameters()).device
+    ema_model = JEPAWorldModel(model.cfg).to(device)
+    ema_model.load_state_dict(model.state_dict())
+    for param in ema_model.parameters():
+        param.requires_grad_(False)
+    ema_model.eval()
+    return ema_model
+
+
+def update_ema_model(source: JEPAWorldModel, target: JEPAWorldModel, momentum: float) -> None:
+    if not (0.0 <= momentum <= 1.0):
+        raise ValueError("EMA momentum must be between 0 and 1.")
+    if momentum == 1.0:
+        return
+    with torch.no_grad():
+        for tgt_param, src_param in zip(target.parameters(), source.parameters()):
+            tgt_param.data.mul_(momentum).add_(src_param.data, alpha=1.0 - momentum)
 
 
 # ------------------------------------------------------------
@@ -515,19 +628,36 @@ def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor,
 # ------------------------------------------------------------
 
 
+@dataclass
+class BatchDifficultyInfo:
+    indices: List[int]
+    paths: List[List[str]]
+    scores: List[float]
+    frame_indices: List[int]
+
+
 def training_step(
     model: JEPAWorldModel,
     decoder: VisualizationDecoder,
     optimizer: torch.optim.Optimizer,
-    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]]],
+    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
     cfg: TrainConfig,
     weights: LossWeights,
-) -> Dict[str, float]:
-    images, actions = batch[:2]
+    ema_model: Optional[JEPAWorldModel] = None,
+    ema_momentum: float = 0.0,
+) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo]]:
+    images, actions = batch[0], batch[1]
+    batch_paths = batch[2] if len(batch) > 2 else None
+    batch_indices = batch[3] if len(batch) > 3 else None
+    track_hard_examples = cfg.hard_example_reservoir > 0
     device = next(model.parameters()).device
     images = images.to(device)
     actions = actions.to(device)
     outputs = model.encode_sequence(images)
+    need_recon = cfg.recon_weight > 0 or track_hard_examples
+    recon: Optional[torch.Tensor] = None
+    if need_recon:
+        recon = decoder(outputs["embeddings"])
     loss_jepa_raw, action_logits = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
     prev_actions = actions[:, :-1]
@@ -550,17 +680,22 @@ def training_step(
         if weights.sigreg > 0
         else images.new_tensor(0.0)
     )
-    loss_recon = (
-        reconstruction_loss(decoder, outputs["embeddings"], images)
-        if cfg.recon_weight > 0
-        else images.new_tensor(0.0)
-    )
+    loss_ema_consistency = images.new_tensor(0.0)
+    if ema_model is not None and weights.ema_consistency > 0:
+        with torch.no_grad():
+            ema_outputs = ema_model.encode_sequence(images)
+        loss_ema_consistency = ema_latent_consistency_loss(outputs["embeddings"], ema_outputs["embeddings"])
+    if cfg.recon_weight > 0 and recon is not None:
+        loss_recon = RECON_LOSS(recon, images)
+    else:
+        loss_recon = images.new_tensor(0.0)
 
     world_loss = (
         weights.jepa * loss_jepa
         + weights.sigreg * loss_sigreg
         + weights.rollout * loss_rollout
         + weights.consistency * loss_consistency
+        + weights.ema_consistency * loss_ema_consistency
         + weights.action_recon * loss_action
         + cfg.recon_weight * loss_recon
     )
@@ -569,18 +704,39 @@ def training_step(
     world_grad_norm = grad_norm(model.parameters())
     decoder_grad_norm = grad_norm(decoder.parameters())
     optimizer.step()
+    if ema_model is not None:
+        update_ema_model(model, ema_model, ema_momentum)
 
-    return {
+    difficulty_info: Optional[BatchDifficultyInfo] = None
+    if (
+        track_hard_examples
+        and recon is not None
+        and batch_paths is not None
+        and batch_indices is not None
+        and len(batch_paths) == images.shape[0]
+    ):
+        per_frame_errors = (recon.detach() - images.detach()).abs().mean(dim=(2, 3, 4))
+        sample_scores, hardest_frames = torch.max(per_frame_errors, dim=1)
+        difficulty_info = BatchDifficultyInfo(
+            indices=batch_indices.detach().cpu().tolist(),
+            paths=[list(paths) for paths in batch_paths],
+            scores=sample_scores.detach().cpu().tolist(),
+            frame_indices=hardest_frames.detach().cpu().tolist(),
+        )
+
+    metrics = {
         "loss_jepa": loss_jepa.item(),
         "loss_sigreg": loss_sigreg.item(),
         "loss_rollout": loss_rollout.item(),
         "loss_consistency": loss_consistency.item(),
+        "loss_ema_consistency": loss_ema_consistency.item(),
         "loss_recon": loss_recon.item(),
         "loss_action": loss_action.item(),
         "loss_world": world_loss.item(),
         "grad_world": world_grad_norm,
         "grad_decoder": decoder_grad_norm,
     }
+    return metrics, difficulty_info
 
 
 # ------------------------------------------------------------
@@ -589,16 +745,17 @@ def training_step(
 
 
 def collate_batch(
-    batch: Iterable[Tuple[torch.Tensor, torch.Tensor, List[str]]]
-) -> Tuple[torch.Tensor, torch.Tensor, List[List[str]]]:
-    obs, actions, paths = zip(*batch)
+    batch: Iterable[Tuple[torch.Tensor, torch.Tensor, List[str], int]]
+) -> Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor]:
+    obs, actions, paths, indices = zip(*batch)
     obs_tensor = torch.stack(obs, dim=0)
     act_tensor = torch.stack(actions, dim=0)
     path_batch = [list(seq) for seq in paths]
-    return obs_tensor, act_tensor, path_batch
+    idx_tensor = torch.tensor(indices, dtype=torch.long)
+    return obs_tensor, act_tensor, path_batch, idx_tensor
 
 
-class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[str]]]):
+class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[str], int]]):
     """Load contiguous frame/action sequences from recorded trajectories."""
 
     def __init__(
@@ -666,7 +823,7 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
             f"Expected {self.seq_len} actions, got {action_slice.shape[0]}"
         )
         assert action_slice.shape[1] == actions.shape[1], "Action dimensionality changed unexpectedly."
-        return torch.stack(frames, dim=0), torch.from_numpy(action_slice), path_slice
+        return torch.stack(frames, dim=0), torch.from_numpy(action_slice), path_slice, index
 
 
 # ------------------------------------------------------------
@@ -693,6 +850,8 @@ def _filtered_metrics_for_logging(
         filtered.pop("loss_rollout", None)
     if weights.consistency <= 0:
         filtered.pop("loss_consistency", None)
+    if weights.ema_consistency <= 0:
+        filtered.pop("loss_ema_consistency", None)
     if recon_weight <= 0:
         filtered.pop("loss_recon", None)
     if weights.action_recon <= 0:
@@ -707,6 +866,7 @@ LOSS_COLUMNS = [
     "loss_sigreg",
     "loss_rollout",
     "loss_consistency",
+    "loss_ema_consistency",
     "loss_recon",
     "loss_action",
     "grad_world",
@@ -722,6 +882,7 @@ class LossHistory:
     sigreg: List[float] = field(default_factory=list)
     rollout: List[float] = field(default_factory=list)
     consistency: List[float] = field(default_factory=list)
+    ema_consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
@@ -734,6 +895,7 @@ class LossHistory:
         self.sigreg.append(metrics["loss_sigreg"])
         self.rollout.append(metrics["loss_rollout"])
         self.consistency.append(metrics["loss_consistency"])
+        self.ema_consistency.append(metrics["loss_ema_consistency"])
         self.recon.append(metrics["loss_recon"])
         self.action.append(metrics["loss_action"])
         self.grad_world.append(metrics["grad_world"])
@@ -757,6 +919,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.sigreg,
             history.rollout,
             history.consistency,
+            history.ema_consistency,
             history.recon,
             history.action,
             history.grad_world,
@@ -770,21 +933,21 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(8, 5))
-    default_colors = plt.rcParams.get("axes.prop_cycle", None)
-    color_cycle = default_colors.by_key().get("color", []) if default_colors is not None else []
-    palette = (
-        color_cycle
-        if len(color_cycle) >= 7
-        else ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2"]
-    )
+    default_cycle = plt.rcParams.get("axes.prop_cycle")
+    color_cycle = default_cycle.by_key().get("color", []) if default_cycle is not None else []
+
+    def _color(idx: int) -> str:
+        return color_cycle[idx % len(color_cycle)]
+
     color_map = {
-        "world": palette[0],
-        "jepa": palette[1],
-        "sigreg": palette[2],
-        "recon": palette[3],
-        "rollout": palette[4],
-        "consistency": palette[5],
-        "action": palette[6],
+        "world": _color(0),
+        "jepa": _color(1),
+        "sigreg": _color(2),
+        "recon": _color(3),
+        "rollout": _color(4),
+        "consistency": _color(5),
+        "action": _color(6),
+        "ema_consistency": _color(7),
     }
     plt.plot(history.steps, history.world, label="world", color=color_map["world"])
     plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
@@ -794,6 +957,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         plt.plot(history.steps, history.rollout, label="rollout", color=color_map["rollout"])
     if any(val != 0.0 for val in history.consistency):
         plt.plot(history.steps, history.consistency, label="consistency", color=color_map["consistency"])
+    if any(val != 0.0 for val in history.ema_consistency):
+        plt.plot(history.steps, history.ema_consistency, label="ema_consistency", color=color_map["ema_consistency"])
     if any(val != 0.0 for val in history.action):
         plt.plot(history.steps, history.action, label="action_recon", color=color_map["action"])
     plt.xlabel("Step")
@@ -857,6 +1022,215 @@ def _short_traj_state_label(frame_path: str) -> str:
     path = Path(frame_path)
     traj = next((part for part in path.parts if part.startswith("traj_")), path.parent.name)
     return f"{traj}/{path.stem}"
+
+
+@dataclass
+class HardSampleRecord:
+    dataset_index: int
+    score: float
+    frame_path: str
+    label: str
+    sequence_paths: List[str]
+    frame_index: int
+
+
+class HardSampleReservoir:
+    def __init__(self, capacity: int, sample_decay: float = 0.9) -> None:
+        self.capacity = max(0, capacity)
+        self.sample_decay = sample_decay
+        self._samples: Dict[int, HardSampleRecord] = {}
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def update(
+        self,
+        indices: List[int],
+        paths: List[List[str]],
+        scores: List[float],
+        frame_indices: List[int],
+    ) -> None:
+        if self.capacity <= 0:
+            return
+        for idx, seq_paths, score, frame_idx in zip(indices, paths, scores, frame_indices):
+            if seq_paths is None or not seq_paths:
+                continue
+            score_val = float(score)
+            if not math.isfinite(score_val):
+                continue
+            idx_int = int(idx)
+            frame_list = list(seq_paths)
+            frame_pos = max(0, min(int(frame_idx), len(frame_list) - 1))
+            frame_path = frame_list[frame_pos]
+            label = _short_traj_state_label(frame_path)
+            record = self._samples.get(idx_int)
+            if record is None:
+                self._samples[idx_int] = HardSampleRecord(idx_int, score_val, frame_path, label, frame_list, frame_pos)
+            else:
+                if score_val >= record.score:
+                    record.score = score_val
+                    record.frame_path = frame_path
+                    record.label = label
+                    record.sequence_paths = frame_list
+                    record.frame_index = frame_pos
+                else:
+                    record.score = (record.score * 0.75) + (score_val * 0.25)
+        self._prune()
+
+    def sample_records(self, count: int) -> List[HardSampleRecord]:
+        if count <= 0 or not self._samples:
+            return []
+        population = list(self._samples.values())
+        count = min(count, len(population))
+        weights = [max(record.score, 1e-6) for record in population]
+        chosen = random.choices(population=population, weights=weights, k=count)
+        return chosen
+
+    def mark_sampled(self, dataset_index: int) -> None:
+        record = self._samples.get(dataset_index)
+        if record is None:
+            return
+        record.score *= self.sample_decay
+        if record.score <= 1e-6:
+            self._samples.pop(dataset_index, None)
+
+    def topk(self, limit: int) -> List[HardSampleRecord]:
+        if limit <= 0 or not self._samples:
+            return []
+        limit = min(limit, len(self._samples))
+        return sorted(self._samples.values(), key=lambda rec: rec.score, reverse=True)[:limit]
+
+    def _prune(self) -> None:
+        if self.capacity <= 0 or len(self._samples) <= self.capacity:
+            return
+        ordered = sorted(self._samples.items(), key=lambda item: item[1].score, reverse=True)
+        self._samples = dict(ordered[: self.capacity])
+
+
+def inject_hard_examples_into_batch(
+    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
+    dataset: TrajectorySequenceDataset,
+    reservoir: Optional[HardSampleReservoir],
+    mix_ratio: float,
+) -> None:
+    if reservoir is None or mix_ratio <= 0:
+        return
+    images, actions, paths, indices = batch
+    batch_size = images.shape[0]
+    if batch_size == 0 or len(reservoir) == 0:
+        return
+    ratio = max(0.0, min(1.0, mix_ratio))
+    desired = min(int(round(batch_size * ratio)), len(reservoir))
+    if desired <= 0:
+        return
+    hard_records = reservoir.sample_records(desired)
+    for slot, record in enumerate(hard_records):
+        hard_obs, hard_actions, hard_paths, hard_index = dataset[record.dataset_index]
+        images[slot].copy_(hard_obs)
+        actions[slot].copy_(hard_actions)
+        paths[slot] = list(hard_paths)
+        indices[slot] = hard_index
+        reservoir.mark_sampled(record.dataset_index)
+
+
+def _motion_blur_image(record: HardSampleRecord, image_hw: Tuple[int, int], window: int = 4) -> np.ndarray:
+    weights: List[float] = []
+    frames: List[torch.Tensor] = []
+    weight = 1.0
+    for offset in range(window):
+        frame_idx = record.frame_index - offset
+        if frame_idx < 0 or frame_idx >= len(record.sequence_paths):
+            break
+        path = Path(record.sequence_paths[frame_idx])
+        tensor = load_frame_as_tensor(path, size=image_hw)
+        frames.append(tensor)
+        weights.append(weight)
+        weight *= 0.5
+    if not frames:
+        tensor = load_frame_as_tensor(Path(record.frame_path), size=image_hw)
+        return tensor_to_uint8_image(tensor)
+    stacked = torch.stack(frames, dim=0)
+    weight_tensor = torch.tensor(weights, dtype=stacked.dtype).view(-1, 1, 1, 1)
+    weight_tensor = weight_tensor / weight_tensor.sum()
+    ema = (stacked * weight_tensor).sum(dim=0).clamp(0, 1)
+    return tensor_to_uint8_image(ema)
+
+
+def _infer_raw_frame_shape(dataset: TrajectorySequenceDataset) -> Optional[Tuple[int, int, int]]:
+    if not dataset.samples:
+        return None
+    frame_paths, _, start = dataset.samples[0]
+    if not frame_paths:
+        return None
+    index = min(max(start, 0), len(frame_paths) - 1)
+    path = frame_paths[index]
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            channels = len(img.getbands())
+    except (FileNotFoundError, OSError):
+        return None
+    return height, width, channels
+
+
+def _format_hwc(height: int, width: int, channels: int) -> str:
+    return f"{height}×{width}×{channels}"
+
+
+def format_shape_summary(
+    raw_shape: Optional[Tuple[int, int, int]],
+    encoder_info: Dict[str, Any],
+    predictor_info: Dict[str, Any],
+    decoder_info: Dict[str, Any],
+    cfg: ModelConfig,
+) -> str:
+    lines: List[str] = []
+    lines.append("Model Shape Summary (H×W×C)")
+    if raw_shape is not None:
+        lines.append(f"Raw frame {_format_hwc(*raw_shape)}")
+    input_shape = encoder_info.get("input")
+    if input_shape is not None:
+        line = f"Input to encoder {_format_hwc(*input_shape)}"
+        if raw_shape is not None:
+            line = f"  └─ Data loader resize → {_format_hwc(*input_shape)}"
+        lines.append(line)
+    lines.append("")
+    auto_schedule = _derive_channel_schedule(cfg.embedding_dim, cfg.num_downsample_layers)
+    lines.append(f"Channel schedule: {auto_schedule}")
+    lines.append("Encoder:")
+    for stage in encoder_info.get("stages", []):
+        lines.append(
+            f"  • Stage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
+        )
+    latent_dim = encoder_info.get("latent_dim")
+    if latent_dim is not None:
+        lines.append(f"AdaptiveAvgPool → Latent vector 1×1×{latent_dim}")
+    lines.append("")
+    lines.append("Predictor:")
+    lines.append(
+        f"  latent {predictor_info.get('latent_dim')} → hidden {predictor_info.get('hidden_dim')} "
+        f"(action_dim={predictor_info.get('action_dim')}, FiLM layers={predictor_info.get('film_layers')})"
+    )
+    lines.append("")
+    lines.append("Decoder:")
+    proj_shape = decoder_info.get("projection")
+    if proj_shape is not None:
+        lines.append(f"  Projection reshape → {_format_hwc(*proj_shape)}")
+    for stage in decoder_info.get("upsample", []):
+        lines.append(
+            f"  • UpStage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
+        )
+    pre_resize = decoder_info.get("pre_resize")
+    target = decoder_info.get("final_target")
+    needs_resize = decoder_info.get("needs_resize")
+    if pre_resize is not None and target is not None:
+        if needs_resize:
+            lines.append(
+                f"  Final conv output {_format_hwc(*pre_resize)} → bilinear resize → {_format_hwc(*target)}"
+            )
+        else:
+            lines.append(f"  Final output {_format_hwc(*pre_resize)}")
+    return "\n".join(lines)
 
 
 def _extract_frame_labels(
@@ -1006,6 +1380,40 @@ def save_input_batch_visualization(
     grid = np.concatenate(grid_rows, axis=0)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(grid).save(out_path)
+
+
+def save_hard_example_grid(
+    out_path: Path,
+    hard_samples: List[HardSampleRecord],
+    columns: int,
+    rows: int,
+    image_hw: Tuple[int, int],
+) -> None:
+    if not hard_samples:
+        return
+    columns = max(1, columns)
+    rows = max(1, rows)
+    limit = columns * rows
+    subset = hard_samples[:limit]
+    blank = np.zeros((image_hw[0], image_hw[1], 3), dtype=np.uint8)
+    fig, axes = plt.subplots(rows, columns, figsize=(columns * 2, rows * 2))
+    axes = np.atleast_2d(axes)
+    for idx in range(rows * columns):
+        ax = axes[idx // columns, idx % columns]
+        if idx < len(subset):
+            record = subset[idx]
+            image = _motion_blur_image(record, image_hw)
+            ax.imshow(image)
+            ax.set_title(f"{record.label}\n diff {record.score:.4f}", fontsize=8)
+        else:
+            ax.imshow(blank)
+            ax.set_title("")
+        ax.axis("off")
+    fig.suptitle("Hard Examples", fontsize=12)
+    plt.tight_layout(rect=(0, 0.02, 1, 0.98))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
 def _run_git_command(args: List[str]) -> str:
@@ -1277,6 +1685,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
+    samples_hard_dir = run_dir / "samples_hard"
+    samples_hard_dir.mkdir(parents=True, exist_ok=True)
     debug_vis = cfg.debug_visualization
     inputs_vis_dir: Optional[Path]
     pair_vis_dir: Optional[Path]
@@ -1298,17 +1708,31 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         image_hw=(model_cfg.image_size, model_cfg.image_size),
         max_traj=cfg.max_trajectories,
     )
+    raw_shape = _infer_raw_frame_shape(dataset)
+    hard_reservoir = HardSampleReservoir(cfg.hard_example_reservoir) if cfg.hard_example_reservoir > 0 else None
     dataset_action_dim = getattr(dataset, "action_dim", model_cfg.action_dim)
     assert dataset_action_dim == 8, f"Expected action_dim 8, got {dataset_action_dim}"
     if model_cfg.action_dim != dataset_action_dim:
         model_cfg = replace(model_cfg, action_dim=dataset_action_dim)
     model = JEPAWorldModel(model_cfg).to(device)
+    ema_model: Optional[JEPAWorldModel] = None
+    if cfg.ema_momentum >= 0.0:
+        ema_model = build_ema_model(model)
     decoder = VisualizationDecoder(
         model.embedding_dim,
         model_cfg.in_channels,
         model_cfg.image_size,
         model_cfg.channel_schedule,
+        model_cfg.latent_hw,
     ).to(device)
+    summary = format_shape_summary(
+        raw_shape,
+        model.encoder.shape_info(),
+        model.predictor.shape_info(),
+        decoder.shape_info(),
+        model_cfg,
+    )
+    print(summary)
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(decoder.parameters()),
         lr=cfg.lr,
@@ -1350,7 +1774,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         except StopIteration:
             data_iter = iter(dataloader)
             batch = next(data_iter)
-        metrics = training_step(model, decoder, optimizer, batch, cfg, weights)
+        inject_hard_examples_into_batch(batch, dataset, hard_reservoir, cfg.hard_example_mix_ratio)
+        metrics, difficulty_info = training_step(
+            model, decoder, optimizer, batch, cfg, weights, ema_model, cfg.ema_momentum
+        )
+        if hard_reservoir is not None and difficulty_info is not None:
+            hard_reservoir.update(
+                difficulty_info.indices, difficulty_info.paths, difficulty_info.scores, difficulty_info.frame_indices
+            )
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
             loggable = _filtered_metrics_for_logging(metrics, weights, cfg.recon_weight)
             log_metrics(global_step, loggable)
@@ -1439,6 +1870,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     save_embedding_projection(
                         embed_outputs["embeddings"],
                         embeddings_vis_dir / f"embeddings_{global_step:07d}.png",
+                    )
+                if hard_reservoir is not None:
+                    hard_samples = hard_reservoir.topk(cfg.hard_example_vis_rows * cfg.hard_example_vis_columns)
+                    save_hard_example_grid(
+                        samples_hard_dir / f"hard_{global_step:07d}.png",
+                        hard_samples,
+                        cfg.hard_example_vis_columns,
+                        cfg.hard_example_vis_rows,
+                        dataset.image_hw,
                     )
             model.train()
     if len(loss_history):
