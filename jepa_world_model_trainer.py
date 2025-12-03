@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 from recon.data import list_trajectories, load_frame_as_tensor
-from super_mario_env import _describe_controller_vector, _describe_controller_vector_compact
+from nes_controller import _describe_controller_vector, _describe_controller_vector_compact
 from utils.device_utils import pick_device
 from jepa_world_model.loss import HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
 from jepa_world_model.metadata import write_run_metadata
