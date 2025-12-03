@@ -164,12 +164,13 @@ class PredictorNetwork(nn.Module):
         self.in_proj = nn.Linear(embedding_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
+        self.action_head = nn.Linear(hidden_dim, action_dim)
         self.activation = nn.SiLU(inplace=True)
         self.action_embed = ActionEmbedding(action_dim, hidden_dim)
         self.action_embed_dim = hidden_dim
         self.film = ActionFiLM(hidden_dim, hidden_dim, film_layers)
 
-    def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if embeddings.shape[:-1] != actions.shape[:-1]:
             raise ValueError("Embeddings and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -180,7 +181,8 @@ class PredictorNetwork(nn.Module):
         hidden = self.activation(self.hidden_proj(hidden))
         hidden = self.film(hidden, act_embed)
         delta = self.out_proj(hidden)
-        return delta.view(*original_shape, delta.shape[-1])
+        action_logits = self.action_head(hidden)
+        return delta.view(*original_shape, delta.shape[-1]), action_logits.view(*original_shape, action_logits.shape[-1])
 
 
 class FocalL1Loss(nn.Module):
@@ -319,6 +321,7 @@ class VisualizationDecoder(nn.Module):
 RECON_LOSS = HardnessWeightedL1Loss()
 JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
+ACTION_RECON_LOSS = nn.BCEWithLogitsLoss()
 
 
 # ------------------------------------------------------------
@@ -364,6 +367,7 @@ class LossWeights:
     sigreg: float = 0.5
     rollout: float = 0.0
     consistency: float = 0.0
+    action_recon: float = 0.0
 
 
 @dataclass
@@ -383,7 +387,7 @@ class TrainConfig:
     sigreg_projections: int = 64
     recon_weight: float = 1.0
     device: Optional[str] = "mps"
-    total_steps: int = 10_000
+    total_steps: int = 100_000
     log_every_steps: int = 10
     vis_every_steps: int = 50
     vis_rows: int = 2
@@ -463,15 +467,21 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
-def jepa_loss(model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor) -> torch.Tensor:
-    """Standard one-step JEPA loss."""
+def jepa_loss(
+    model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Standard one-step JEPA loss plus action logits from the predictor."""
     embeddings = outputs["embeddings"]
+    if embeddings.shape[1] < 2:
+        zero = embeddings.new_tensor(0.0)
+        logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
+        return zero, logits
     prev_embed = embeddings[:, :-1]
     prev_actions = actions[:, :-1]
-    deltas = model.predictor(prev_embed, prev_actions)
+    deltas, action_logits = model.predictor(prev_embed, prev_actions)
     preds = prev_embed + deltas
     target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(preds, target)
+    return JEPA_LOSS(preds, target), action_logits
 
 
 def rollout_loss(
@@ -492,7 +502,7 @@ def rollout_loss(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            delta = model.predictor(current, act)
+            delta, _ = model.predictor(current, act)
             pred = current + delta
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
@@ -550,7 +560,13 @@ def training_step(
     images = images.to(device)
     actions = actions.to(device)
     outputs = model.encode_sequence(images)
-    loss_jepa = jepa_loss(model, outputs, actions) if weights.jepa > 0 else images.new_tensor(0.0)
+    loss_jepa_raw, action_logits = jepa_loss(model, outputs, actions)
+    loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
+    prev_actions = actions[:, :-1]
+    if weights.action_recon > 0 and prev_actions.numel() > 0:
+        loss_action = ACTION_RECON_LOSS(action_logits, prev_actions)
+    else:
+        loss_action = images.new_tensor(0.0)
     loss_rollout = (
         rollout_loss(model, outputs["embeddings"], actions, cfg.rollout_horizon)
         if weights.rollout > 0
@@ -577,6 +593,7 @@ def training_step(
         + weights.sigreg * loss_sigreg
         + weights.rollout * loss_rollout
         + weights.consistency * loss_consistency
+        + weights.action_recon * loss_action
     )
     decoder_loss = cfg.recon_weight * loss_recon
 
@@ -596,6 +613,7 @@ def training_step(
         "loss_rollout": loss_rollout.item(),
         "loss_consistency": loss_consistency.item(),
         "loss_recon": loss_recon.item(),
+        "loss_action": loss_action.item(),
         "loss_world": world_loss.item(),
         "grad_world": world_grad_norm,
         "grad_decoder": decoder_grad_norm,
@@ -714,6 +732,8 @@ def _filtered_metrics_for_logging(
         filtered.pop("loss_consistency", None)
     if recon_weight <= 0:
         filtered.pop("loss_recon", None)
+    if weights.action_recon <= 0:
+        filtered.pop("loss_action", None)
     return filtered
 
 
@@ -725,6 +745,7 @@ LOSS_COLUMNS = [
     "loss_rollout",
     "loss_consistency",
     "loss_recon",
+    "loss_action",
     "grad_world",
     "grad_decoder",
 ]
@@ -739,6 +760,7 @@ class LossHistory:
     rollout: List[float] = field(default_factory=list)
     consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
+    action: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
 
@@ -750,6 +772,7 @@ class LossHistory:
         self.rollout.append(metrics["loss_rollout"])
         self.consistency.append(metrics["loss_consistency"])
         self.recon.append(metrics["loss_recon"])
+        self.action.append(metrics["loss_action"])
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
 
@@ -772,6 +795,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.rollout,
             history.consistency,
             history.recon,
+            history.action,
             history.grad_world,
             history.grad_decoder,
         ):
@@ -787,8 +811,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     color_cycle = default_colors.by_key().get("color", []) if default_colors is not None else []
     palette = (
         color_cycle
-        if len(color_cycle) >= 6
-        else ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+        if len(color_cycle) >= 7
+        else ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2"]
     )
     color_map = {
         "world": palette[0],
@@ -797,6 +821,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         "recon": palette[3],
         "rollout": palette[4],
         "consistency": palette[5],
+        "action": palette[6],
     }
     plt.plot(history.steps, history.world, label="world", color=color_map["world"])
     plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
@@ -806,6 +831,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         plt.plot(history.steps, history.rollout, label="rollout", color=color_map["rollout"])
     if any(val != 0.0 for val in history.consistency):
         plt.plot(history.steps, history.consistency, label="consistency", color=color_map["consistency"])
+    if any(val != 0.0 for val in history.action):
+        plt.plot(history.steps, history.action, label="action_recon", color=color_map["action"])
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
@@ -1139,7 +1166,7 @@ def _render_visualization_batch(
         current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
-            delta_embed = model.predictor(current_embed, action)
+            delta_embed, _ = model.predictor(current_embed, action)
             next_embed = current_embed + delta_embed
             delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
             predicted_delta = delta_next.detach().clone()
