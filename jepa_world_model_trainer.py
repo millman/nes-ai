@@ -354,7 +354,7 @@ class LossWeights:
     sigreg: float = 0.5
     rollout: float = 0.0
     consistency: float = 0.0
-    action_recon: float = 0.0
+    action_recon: float = 1.0
 
 
 @dataclass
@@ -370,9 +370,8 @@ class TrainConfig:
     seq_len: int = 8
     batch_size: int = 8
     lr: float = 1e-4
-    decoder_lr: float = 1e-4
     sigreg_projections: int = 64
-    recon_weight: float = 1.0
+    recon_weight: float = 0.1
     device: Optional[str] = "mps"
     total_steps: int = 100_000
     log_every_steps: int = 10
@@ -519,14 +518,12 @@ def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor,
 def training_step(
     model: JEPAWorldModel,
     decoder: VisualizationDecoder,
-    optim_world: torch.optim.Optimizer,
-    optim_decoder: torch.optim.Optimizer,
+    optimizer: torch.optim.Optimizer,
     batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]]],
     cfg: TrainConfig,
     weights: LossWeights,
 ) -> Dict[str, float]:
     images, actions = batch[:2]
-    world_params = [p for p in model.parameters()]
     device = next(model.parameters()).device
     images = images.to(device)
     actions = actions.to(device)
@@ -554,7 +551,7 @@ def training_step(
         else images.new_tensor(0.0)
     )
     loss_recon = (
-        reconstruction_loss(decoder, outputs["embeddings"].detach(), images)
+        reconstruction_loss(decoder, outputs["embeddings"], images)
         if cfg.recon_weight > 0
         else images.new_tensor(0.0)
     )
@@ -565,18 +562,13 @@ def training_step(
         + weights.rollout * loss_rollout
         + weights.consistency * loss_consistency
         + weights.action_recon * loss_action
+        + cfg.recon_weight * loss_recon
     )
-    decoder_loss = cfg.recon_weight * loss_recon
-
-    optim_world.zero_grad()
+    optimizer.zero_grad()
     world_loss.backward()
-    world_grad_norm = grad_norm(world_params)
-    optim_world.step()
-
-    optim_decoder.zero_grad()
-    decoder_loss.backward()
+    world_grad_norm = grad_norm(model.parameters())
     decoder_grad_norm = grad_norm(decoder.parameters())
-    optim_decoder.step()
+    optimizer.step()
 
     return {
         "loss_jepa": loss_jepa.item(),
@@ -1317,8 +1309,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         model_cfg.image_size,
         model_cfg.channel_schedule,
     ).to(device)
-    optim_world = torch.optim.Adam(model.parameters(), lr=cfg.lr)
-    optim_decoder = torch.optim.Adam(decoder.parameters(), lr=cfg.decoder_lr)
+    optimizer = torch.optim.Adam(
+        list(model.parameters()) + list(decoder.parameters()),
+        lr=cfg.lr,
+    )
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
     fixed_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
@@ -1356,7 +1350,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         except StopIteration:
             data_iter = iter(dataloader)
             batch = next(data_iter)
-        metrics = training_step(model, decoder, optim_world, optim_decoder, batch, cfg, weights)
+        metrics = training_step(model, decoder, optimizer, batch, cfg, weights)
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
             loggable = _filtered_metrics_for_logging(metrics, weights, cfg.recon_weight)
             log_metrics(global_step, loggable)
