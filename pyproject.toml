@@ -38,6 +38,7 @@ dependencies = [
     "torcheval",
     "torchrl",
     "torchvision",
+    "tomli-w",
     "transformers",
     "tyro",
     "umap-learn",

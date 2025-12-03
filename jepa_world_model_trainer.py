@@ -11,6 +11,7 @@ import random
 
 import csv
 import json
+import tomli_w
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import subprocess
@@ -1427,7 +1428,12 @@ def _run_git_command(args: List[str]) -> str:
     return result.stdout.strip()
 
 
+_TOML_NULL_SENTINEL = "__TOML_NULL__3d67a1c3a66a4d62ad0f0dec1d18454b__"
+
+
 def _serialize_for_json(value):
+    if value is None:
+        return _TOML_NULL_SENTINEL
     if isinstance(value, dict):
         return {k: _serialize_for_json(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -1453,22 +1459,16 @@ def write_run_metadata(run_dir: Path, cfg: TrainConfig, model_cfg: ModelConfig) 
         ]
     )
     (run_dir / "metadata_git.txt").write_text(git_metadata)
-    model_metadata = {
-        "train_config": _serialize_for_json(asdict(cfg)),
-        "model_config": _serialize_for_json(asdict(model_cfg)),
+    train_config = _serialize_for_json(asdict(cfg))
+    model_config = _serialize_for_json(asdict(model_cfg))
+    toml_payload = {
+        "train_config": train_config,
+        "model_config": model_config,
         "data_root": str(cfg.data_root),
     }
-    toml_lines = []
-    toml_lines.append("[train_config]")
-    for k, v in model_metadata["train_config"].items():
-        toml_lines.append(f"{k} = {json.dumps(v)}")
-    toml_lines.append("")
-    toml_lines.append("[model_config]")
-    for k, v in model_metadata["model_config"].items():
-        toml_lines.append(f"{k} = {json.dumps(v)}")
-    toml_lines.append("")
-    toml_lines.append(f'data_root = "{model_metadata["data_root"]}"')
-    (run_dir / "metadata.txt").write_text("\n".join(toml_lines))
+    metadata_text = tomli_w.dumps(toml_payload)
+    metadata_text = metadata_text.replace(f'"{_TOML_NULL_SENTINEL}"', "null")
+    (run_dir / "metadata.txt").write_text(metadata_text)
 
 
 def _render_visualization_batch(
