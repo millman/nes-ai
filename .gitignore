@@ -3,8 +3,6 @@ caches
 lightning_logs
 uv.lock
 
-nes/cycore/*.html
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -161,6 +159,7 @@ dmypy.json
 
 # Cython objects
 /nes/cycore/*.c
+/nes/cycore/*.html
 /nes/cycore/*.so
 
 # Agent files
