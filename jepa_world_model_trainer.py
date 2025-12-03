@@ -283,12 +283,8 @@ class VisualizationDecoder(nn.Module):
             nn.Linear(latent_dim, self.start_ch * self.start_hw * self.start_hw),
             nn.SiLU(inplace=True),
         )
-        self.prev_adapter = nn.Sequential(
-            nn.Conv2d(image_channels, self.start_ch, kernel_size=3, padding=1),
-            nn.SiLU(inplace=True),
-        )
         up_blocks: List[nn.Module] = []
-        in_ch = self.start_ch * 2
+        in_ch = self.start_ch
         for out_ch in reversed(channel_schedule[:-1]):
             up_blocks.append(UpBlock(in_ch, out_ch))
             in_ch = out_ch
@@ -300,22 +296,15 @@ class VisualizationDecoder(nn.Module):
             nn.Conv2d(head_hidden, image_channels, kernel_size=1),
         )
 
-    def forward(self, latent: torch.Tensor, prev_frame: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
         original_shape = latent.shape[:-1]
         latent = latent.reshape(-1, latent.shape[-1])
         projected = self.project(latent)
         decoded = projected.view(-1, self.start_ch, self.start_hw, self.start_hw)
-        if prev_frame is not None:
-            prev = prev_frame.reshape(-1, self.image_channels, self.image_size, self.image_size)
-            prev = F.interpolate(prev, size=(self.start_hw, self.start_hw), mode="bilinear", align_corners=False)
-            prev_feat = self.prev_adapter(prev)
-            decoded = torch.cat([decoded, prev_feat], dim=1)
-        else:
-            decoded = torch.cat([decoded, torch.zeros_like(decoded)], dim=1)
         decoded = self.up_blocks(decoded)
-        delta = self.head(decoded)
-        delta = delta.view(*original_shape, self.image_channels, self.image_size, self.image_size)
-        return delta
+        frame = self.head(decoded)
+        frame = frame.view(*original_shape, self.image_channels, self.image_size, self.image_size)
+        return frame
 
 
 RECON_LOSS = HardnessWeightedL1Loss()
@@ -334,17 +323,16 @@ class ModelConfig:
     """Dimensional flow (bottlenecks marked with *):
 
         image (image_size^2·in_channels)
-            ├─ Encoder(channel_schedule → appearance_dim)
-            ├─ MotionEncoder(motion_channel_schedule → motion_dim)
+            └─ Encoder(channel_schedule → embedding_dim*)
             ▼
-        (appearance_dim + motion_dim)*  ─┐
+        embedding_dim*  ────────────────┐
                         ├─ FiLM(action_dim) → Predictor(hidden_dim*) → embedding_dim
         action_dim ──────┘
             │
             └→ VisualizationDecoder(latent_dim* → image_size^2·in_channels)
 
     • image_size controls the spatial resolution feeding the encoder.
-    • embedding_dim (≈ channel_schedule[-1] + motion_channel_schedule[-1]) is the latent bottleneck the predictor must match.
+    • embedding_dim (≈ channel_schedule[-1]) is the latent bottleneck the predictor must match.
     • action_dim defines the controller space that modulates the predictor through FiLM layers.
     • hidden_dim is the predictor’s internal width.
     • latent_dim governs the visualization decoder’s compression when turning embeddings back into images.
@@ -358,7 +346,6 @@ class ModelConfig:
     embedding_dim: int = 256
     action_dim: int = 8
     predictor_film_layers: int = 2
-    motion_channel_schedule: Optional[Tuple[int, ...]] = (32, 64)
 
 
 @dataclass
@@ -427,13 +414,7 @@ class JEPAWorldModel(nn.Module):
         self.cfg = cfg
         self.encoder = Encoder(cfg.in_channels, cfg.channel_schedule)
         enc_dim = cfg.channel_schedule[-1]
-        if cfg.motion_channel_schedule:
-            self.motion_encoder: Optional[Encoder] = Encoder(cfg.in_channels, cfg.motion_channel_schedule)
-            motion_dim = cfg.motion_channel_schedule[-1]
-        else:
-            self.motion_encoder = None
-            motion_dim = 0
-        self.embedding_dim = enc_dim + motion_dim
+        self.embedding_dim = enc_dim
         self.predictor = PredictorNetwork(
             self.embedding_dim,
             cfg.hidden_dim,
@@ -444,19 +425,10 @@ class JEPAWorldModel(nn.Module):
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
         embeddings: List[torch.Tensor] = []
-        prev_frame: Optional[torch.Tensor] = None
         for step in range(t):
             current = images[:, step]
             feats = self.encoder(current)
-            if self.motion_encoder is not None:
-                if prev_frame is None:
-                    delta = torch.zeros_like(current)
-                else:
-                    delta = current - prev_frame
-                motion_feats = self.motion_encoder(delta)
-                feats = torch.cat([feats, motion_feats], dim=1)
             embeddings.append(feats)
-            prev_frame = current
         return {
             "embeddings": torch.stack(embeddings, dim=1),
         }
@@ -533,11 +505,10 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
 
 
 def reconstruction_loss(decoder: VisualizationDecoder, embeddings: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
-    if embeddings.shape[1] < 2:
+    if embeddings.numel() == 0:
         return embeddings.new_tensor(0.0)
-    delta_pred = decoder(embeddings[:, 1:], images[:, :-1])
-    target_delta = images[:, 1:] - images[:, :-1]
-    return RECON_LOSS(delta_pred, target_delta)
+    recon = decoder(embeddings)
+    return RECON_LOSS(recon, images)
 
 
 # ------------------------------------------------------------
@@ -1119,13 +1090,13 @@ def _render_visualization_batch(
     frame_paths = batch_cpu[2] if len(batch_cpu) > 2 else None
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
-    if vis_frames.shape[1] < 2:
+    if vis_frames.shape[1] < 1:
         return None
-    delta_frames = decoder(vis_embeddings[:, 1:], vis_frames[:, :-1])
+    decoded_frames = decoder(vis_embeddings)
     batch_size = vis_frames.shape[0]
     if batch_size == 0:
         return None
-    min_start = 1
+    min_start = 0
     target_window = max(2, rollout_steps + 1)
     if max_columns is not None:
         target_window = max(target_window, max(2, max_columns))
@@ -1153,24 +1124,18 @@ def _render_visualization_batch(
         for offset in range(max_window):
             action_idx = min(start_idx + offset, vis_actions.shape[1] - 1)
             action_texts.append(_describe_action_tensor(vis_actions[idx, action_idx]))
-        recon_seq: List[torch.Tensor] = []
-        for offset in range(max_window):
-            delta_idx = start_idx + offset - 1
-            prev_frame = vis_frames[idx, delta_idx]
-            delta_frame = delta_frames[idx, delta_idx]
-            recon_seq.append((prev_frame + delta_frame).clamp(0, 1))
-        recon_tensor = torch.stack(recon_seq, dim=0)
+        recon_tensor = decoded_frames[idx, start_idx : start_idx + max_window].clamp(0, 1)
         rollout_frames: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
         gradient_maps: List[Optional[np.ndarray]] = [None for _ in range(max_window)]
-        current_frame = gt_slice[0]
         current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
+        prev_pred_frame = decoded_frames[idx, start_idx].detach()
+        current_frame = prev_pred_frame
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
             delta_embed, _ = model.predictor(current_embed, action)
             next_embed = current_embed + delta_embed
-            delta_next = decoder(next_embed, current_frame.unsqueeze(0))[0]
-            predicted_delta = delta_next.detach().clone()
-            current_frame = (current_frame + delta_next).clamp(0, 1)
+            decoded_next = decoder(next_embed)[0]
+            current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
                 gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
             else:
@@ -1179,7 +1144,7 @@ def _render_visualization_batch(
             current_embed = next_embed
             if log_deltas and row_offset < 2:
                 latent_norm = delta_embed.norm().item()
-                pixel_delta = predicted_delta.abs().mean().item()
+                pixel_delta = (current_frame - prev_pred_frame).abs().mean().item()
                 frame_mse = F.mse_loss(current_frame, gt_slice[step]).item()
                 debug_lines.append(
                     (
@@ -1188,6 +1153,7 @@ def _render_visualization_batch(
                         f"frame_mse={frame_mse:.4f}"
                     )
                 )
+            prev_pred_frame = current_frame.detach()
         labels = _extract_frame_labels(frame_paths, int(idx.item()), start_idx, max_window)
         sequences.append(
             VisualizationSequence(
