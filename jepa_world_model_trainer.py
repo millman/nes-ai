@@ -1169,7 +1169,7 @@ def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> Optional[Visua
 def _render_visualization_batch(
     model: JEPAWorldModel,
     decoder: VisualizationDecoder,
-    batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]],
+    batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]],
     rows: int,
     rollout_steps: int,
     max_columns: Optional[int],
@@ -1177,27 +1177,25 @@ def _render_visualization_batch(
     selection: Optional[VisualizationSelection] = None,
     show_gradients: bool = False,
     log_deltas: bool = False,
-) -> Optional[Tuple[List[VisualizationSequence], str]]:
-    if batch_cpu is None:
-        return None
+) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
-    frame_paths = batch_cpu[2] if len(batch_cpu) > 2 else None
+    frame_paths = batch_cpu[2]
+    if vis_frames.shape[0] == 0:
+        raise ValueError("Visualization batch must include at least one sequence.")
+    if vis_frames.shape[1] < 2:
+        raise ValueError("Visualization batch must include at least two frames.")
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
-    if vis_frames.shape[1] < 1:
-        return None
     decoded_frames = decoder(vis_embeddings)
     batch_size = vis_frames.shape[0]
-    if batch_size == 0:
-        return None
     min_start = 0
     target_window = max(2, rollout_steps + 1)
     if max_columns is not None:
         target_window = max(target_window, max(2, max_columns))
     max_window = min(target_window, vis_frames.shape[1] - min_start)
     if max_window < 2:
-        return None
+        raise ValueError("Visualization window must be at least two frames wide.")
     max_start = max(min_start, vis_frames.shape[1] - max_window)
     if selection is not None and selection.row_indices.numel() > 0:
         num_rows = min(rows, selection.row_indices.numel())
@@ -1261,7 +1259,7 @@ def _render_visualization_batch(
             )
         )
     if not sequences:
-        return None
+        raise RuntimeError("Failed to build any visualization sequences.")
     if debug_lines:
         print("\n".join(debug_lines))
     grad_label = "Gradient Norm" if show_gradients else "Error Heatmap"
@@ -1338,20 +1336,26 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     )
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
-    fixed_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
-    fixed_selection: Optional[VisualizationSelection] = None
     try:
         sample_batch = next(iter(dataloader))
-        fixed_paths = sample_batch[2] if len(sample_batch) > 2 else None
-        fixed_batch_cpu = (
-            sample_batch[0].clone(),
-            sample_batch[1].clone(),
-            [list(paths) for paths in fixed_paths] if fixed_paths is not None else None,
-        )
-        fixed_selection = _make_fixed_selection(fixed_batch_cpu[0], cfg.vis_rows)
-    except StopIteration:
-        fixed_batch_cpu = None
-    rolling_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
+    except StopIteration as exc:
+        raise RuntimeError("Trajectory dataset yielded no samples for visualization.") from exc
+    frames_cpu, actions_cpu = sample_batch[0], sample_batch[1]
+    if frames_cpu.shape[0] == 0:
+        raise RuntimeError("Visualization requires at least one sequence in the dataset.")
+    if frames_cpu.shape[1] < 2:
+        raise RuntimeError("Visualization requires sequences with at least two frames.")
+    fixed_paths = sample_batch[2] if len(sample_batch) > 2 else None
+    fixed_batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]] = (
+        frames_cpu.clone(),
+        actions_cpu.clone(),
+        [list(paths) for paths in fixed_paths] if fixed_paths is not None else None,
+    )
+    fixed_selection_opt = _make_fixed_selection(fixed_batch_cpu[0], cfg.vis_rows)
+    if fixed_selection_opt is None:
+        raise RuntimeError("Failed to build a fixed visualization selection.")
+    fixed_selection = fixed_selection_opt
+    rolling_batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]] = fixed_batch_cpu
     embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     if cfg.embedding_projection_samples > 0:
         embed_loader = DataLoader(
@@ -1397,7 +1401,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             inputs_vis_dir is not None
             and debug_vis.input_vis_every_steps > 0
             and global_step % debug_vis.input_vis_every_steps == 0
-            and rolling_batch_cpu is not None
         ):
             save_input_batch_visualization(
                 inputs_vis_dir / f"inputs_{global_step:07d}.png",
@@ -1409,7 +1412,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             pair_vis_dir is not None
             and debug_vis.pair_vis_every_steps > 0
             and global_step % debug_vis.pair_vis_every_steps == 0
-            and rolling_batch_cpu is not None
         ):
             save_temporal_pair_visualization(
                 pair_vis_dir / f"pairs_{global_step:07d}.png",
@@ -1423,7 +1425,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         ):
             model.eval()
             with torch.no_grad():
-                rendered = _render_visualization_batch(
+                sequences, grad_label = _render_visualization_batch(
                     model,
                     decoder,
                     fixed_batch_cpu,
@@ -1435,15 +1437,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_gradient_norms,
                     cfg.vis_log_deltas,
                 )
-                if rendered is not None:
-                    sequences, grad_label = rendered
-                    save_rollout_sequence_batch(
-                        fixed_vis_dir,
-                        sequences,
-                        grad_label,
-                        global_step,
-                    )
-                rendered = _render_visualization_batch(
+                save_rollout_sequence_batch(
+                    fixed_vis_dir,
+                    sequences,
+                    grad_label,
+                    global_step,
+                )
+                sequences, grad_label = _render_visualization_batch(
                     model,
                     decoder,
                     rolling_batch_cpu,
@@ -1455,14 +1455,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_gradient_norms,
                     cfg.vis_log_deltas,
                 )
-                if rendered is not None:
-                    sequences, grad_label = rendered
-                    save_rollout_sequence_batch(
-                        rolling_vis_dir,
-                        sequences,
-                        grad_label,
-                        global_step,
-                    )
+                save_rollout_sequence_batch(
+                    rolling_vis_dir,
+                    sequences,
+                    grad_label,
+                    global_step,
+                )
                 if embedding_batch_cpu is not None:
                     embed_frames = embedding_batch_cpu[0].to(device)
                     embed_outputs = model.encode_sequence(embed_frames)
