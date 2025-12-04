@@ -380,11 +380,39 @@ class ModelConfig:
 class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
+    recon: float = 1.0
+    action_recon: float = 1.0
     rollout: float = 0.0
     consistency: float = 0.0
     ema_consistency: float = 0.0
-    action_recon: float = 1.0
 
+@dataclass
+class LossEMAConfig:
+    momentum: float = 0.99
+
+@dataclass
+class LossRolloutConfig:
+    horizon: int = 8
+
+@dataclass
+class LossSigRegConfig:
+    projections: int = 64
+
+@dataclass
+class VisConfig:
+    rows: int = 2
+    rollout: int = 4
+    columns: int = 8
+    gradient_norms: bool = True
+    log_deltas: bool = False
+    embedding_projection_samples: int = 256
+
+@dataclass
+class HardExampleConfig:
+    reservoir: int = 256
+    mix_ratio: float = 0.5
+    vis_rows: int = 4
+    vis_columns: int = 6
 
 @dataclass
 class DebugVisualization:
@@ -396,42 +424,33 @@ class DebugVisualization:
 
 @dataclass
 class TrainConfig:
-    # Dataset & batching
     data_root: Path = Path("data.gridworldkey_wander_to_key")
+    output_dir: Path = Path("out.jepa_world_model_trainer")
+    log_every_steps: int = 10
+    vis_every_steps: int = 50
+    steps: int = 100_000
+
+    # Dataset & batching
     max_trajectories: Optional[int] = None
     seq_len: int = 8
     batch_size: int = 8
 
-    # Optimization & dynamics
+    # Optimization
     lr: float = 1e-4
-    total_steps: int = 100_000
     weight_decay: float = 0.03
     device: Optional[str] = "mps"
-    recon_weight: float = 1.0
-    rollout_horizon: int = 8
-    sigreg_projections: int = 64
-    ema_momentum: float = 0.99
 
-    # Logging & outputs
-    output_dir: Path = Path("out.jepa_world_model_trainer")
-    log_every_steps: int = 10
-
-    # Visualization cadence
-    vis_every_steps: int = 50
-    vis_rows: int = 2
-    vis_rollout: int = 4
-    vis_columns: int = 8
-    vis_gradient_norms: bool = True
-    vis_log_deltas: bool = False
-    embedding_projection_samples: int = 256
-
-    # Hard example mining
-    hard_example_reservoir: int = 256
-    hard_example_mix_ratio: float = 0.5
-    hard_example_vis_rows: int = 4
-    hard_example_vis_columns: int = 6
-
+    # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
+
+    # Specific losses
+    ema: LossEMAConfig = field(default_factory=LossEMAConfig)
+    rollout: LossRolloutConfig = field(default_factory=LossRolloutConfig)
+    sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
+
+    # Visualization
+    vis: VisConfig = field(default_factory=VisConfig)
+    hard_example: HardExampleConfig = field(default_factory=HardExampleConfig)
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
 
 
@@ -602,7 +621,7 @@ def training_step(
     images, actions = batch[0], batch[1]
     batch_paths = batch[2] if len(batch) > 2 else None
     batch_indices = batch[3] if len(batch) > 3 else None
-    track_hard_examples = cfg.hard_example_reservoir > 0
+    track_hard_examples = cfg.hard_example.reservoir > 0
     device = next(model.parameters()).device
     images = images.to(device)
     actions = actions.to(device)
@@ -611,7 +630,7 @@ def training_step(
     outputs = model.encode_sequence(images)
 
     # Optional reconstruction for loss + difficulty tracking.
-    need_recon = cfg.recon_weight > 0 or track_hard_examples
+    need_recon = weights.recon > 0 or track_hard_examples
     recon: Optional[torch.Tensor] = None
     if need_recon:
         recon = decoder(outputs["embeddings"])
@@ -627,7 +646,7 @@ def training_step(
 
     # Auxiliary latent penalties and rollout objectives.
     loss_rollout = (
-        rollout_loss(model, outputs["embeddings"], actions, cfg.rollout_horizon)
+        rollout_loss(model, outputs["embeddings"], actions, cfg.rollout.horizon)
         if weights.rollout > 0
         else images.new_tensor(0.0)
     )
@@ -637,7 +656,7 @@ def training_step(
         else images.new_tensor(0.0)
     )
     loss_sigreg = (
-        sigreg_loss(outputs["embeddings"], cfg.sigreg_projections)
+        sigreg_loss(outputs["embeddings"], cfg.sigreg.projections)
         if weights.sigreg > 0
         else images.new_tensor(0.0)
     )
@@ -648,7 +667,7 @@ def training_step(
         loss_ema_consistency = ema_latent_consistency_loss(outputs["embeddings"], ema_outputs["embeddings"])
 
     # Pixel-space reconstruction.
-    if cfg.recon_weight > 0 and recon is not None:
+    if weights.recon > 0 and recon is not None:
         loss_recon = RECON_LOSS(recon, images)
     else:
         loss_recon = images.new_tensor(0.0)
@@ -661,7 +680,7 @@ def training_step(
         + weights.consistency * loss_consistency
         + weights.ema_consistency * loss_ema_consistency
         + weights.action_recon * loss_action
-        + cfg.recon_weight * loss_recon
+        + weights.recon * loss_recon
     )
     optimizer.zero_grad()
     world_loss.backward()
@@ -764,9 +783,9 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
             for start in range(max_start + 1):
                 self.samples.append((frame_paths, action_arr, start))
         if not self.samples:
-            raise RuntimeError(f"No usable sequences found under {self.root}")
+            raise AssertionError(f"No usable sequences found under {self.root}")
         if self.action_dim is None:
-            raise RuntimeError("Failed to infer action dimensionality.")
+            raise AssertionError("Failed to infer action dimensionality.")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -803,7 +822,6 @@ def log_metrics(step: int, metrics: Dict[str, float]) -> None:
 def _filtered_metrics_for_logging(
     metrics: Dict[str, float],
     weights: LossWeights,
-    recon_weight: float,
 ) -> Dict[str, float]:
     filtered = dict(metrics)
     if weights.jepa <= 0:
@@ -816,7 +834,7 @@ def _filtered_metrics_for_logging(
         filtered.pop("loss_consistency", None)
     if weights.ema_consistency <= 0:
         filtered.pop("loss_ema_consistency", None)
-    if recon_weight <= 0:
+    if weights.recon <= 0:
         filtered.pop("loss_recon", None)
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
@@ -1061,20 +1079,17 @@ def inject_hard_examples_into_batch(
         reservoir.mark_sampled(record.dataset_index)
 
 
-def _infer_raw_frame_shape(dataset: TrajectorySequenceDataset) -> Optional[Tuple[int, int, int]]:
+def _infer_raw_frame_shape(dataset: TrajectorySequenceDataset) -> Tuple[int, int, int]:
     if not dataset.samples:
-        return None
+        raise ValueError("Cannot infer frame shape without dataset samples.")
     frame_paths, _, start = dataset.samples[0]
     if not frame_paths:
-        return None
+        raise ValueError("Dataset sample contains no frame paths for shape inference.")
     index = min(max(start, 0), len(frame_paths) - 1)
     path = frame_paths[index]
-    try:
-        with Image.open(path) as img:
-            width, height = img.size
-            channels = len(img.getbands())
-    except (FileNotFoundError, OSError):
-        return None
+    with Image.open(path) as img:
+        width, height = img.size
+        channels = len(img.getbands())
     return height, width, channels
 
 
@@ -1083,7 +1098,7 @@ def _format_hwc(height: int, width: int, channels: int) -> str:
 
 
 def format_shape_summary(
-    raw_shape: Optional[Tuple[int, int, int]],
+    raw_shape: Tuple[int, int, int],
     encoder_info: Dict[str, Any],
     predictor_info: Dict[str, Any],
     decoder_info: Dict[str, Any],
@@ -1091,50 +1106,38 @@ def format_shape_summary(
 ) -> str:
     lines: List[str] = []
     lines.append("Model Shape Summary (H×W×C)")
-    if raw_shape is not None:
-        lines.append(f"Raw frame {_format_hwc(*raw_shape)}")
-    input_shape = encoder_info.get("input")
-    if input_shape is not None:
-        line = f"Input to encoder {_format_hwc(*input_shape)}"
-        if raw_shape is not None:
-            line = f"  └─ Data loader resize → {_format_hwc(*input_shape)}"
-        lines.append(line)
+    lines.append(f"Raw frame {_format_hwc(*raw_shape)}")
+    lines.append(f"  └─ Data loader resize → {_format_hwc(*encoder_info['input'])}")
     lines.append("")
     auto_schedule = _derive_channel_schedule(cfg.embedding_dim, cfg.num_downsample_layers)
     lines.append(f"Channel schedule: {auto_schedule}")
     lines.append("Encoder:")
-    for stage in encoder_info.get("stages", []):
+    for stage in encoder_info["stages"]:
         lines.append(
             f"  • Stage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
-    latent_dim = encoder_info.get("latent_dim")
-    if latent_dim is not None:
-        lines.append(f"AdaptiveAvgPool → Latent vector 1×1×{latent_dim}")
+    lines.append(f"AdaptiveAvgPool → Latent vector 1×1×{encoder_info['latent_dim']}")
     lines.append("")
     lines.append("Predictor:")
     lines.append(
-        f"  latent {predictor_info.get('latent_dim')} → hidden {predictor_info.get('hidden_dim')} "
-        f"(action_dim={predictor_info.get('action_dim')}, FiLM layers={predictor_info.get('film_layers')})"
+        f"  latent {predictor_info['latent_dim']} → hidden {predictor_info['hidden_dim']} "
+        f"(action_dim={predictor_info['action_dim']}, FiLM layers={predictor_info['film_layers']})"
     )
     lines.append("")
     lines.append("Decoder:")
-    proj_shape = decoder_info.get("projection")
-    if proj_shape is not None:
-        lines.append(f"  Projection reshape → {_format_hwc(*proj_shape)}")
-    for stage in decoder_info.get("upsample", []):
+    lines.append(f"  Projection reshape → {_format_hwc(*decoder_info['projection'])}")
+    for stage in decoder_info["upsample"]:
         lines.append(
             f"  • UpStage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
-    pre_resize = decoder_info.get("pre_resize")
-    target = decoder_info.get("final_target")
-    needs_resize = decoder_info.get("needs_resize")
-    if pre_resize is not None and target is not None:
-        if needs_resize:
-            lines.append(
-                f"  Final conv output {_format_hwc(*pre_resize)} → bilinear resize → {_format_hwc(*target)}"
-            )
-        else:
-            lines.append(f"  Final output {_format_hwc(*pre_resize)}")
+    pre_resize = decoder_info["pre_resize"]
+    target = decoder_info["final_target"]
+    if decoder_info["needs_resize"]:
+        lines.append(
+            f"  Final conv output {_format_hwc(*pre_resize)} → bilinear resize → {_format_hwc(*target)}"
+        )
+    else:
+        lines.append(f"  Final output {_format_hwc(*pre_resize)}")
     return "\n".join(lines)
 
 
@@ -1201,16 +1204,55 @@ def _prediction_gradient_heatmap(pred_frame: torch.Tensor, target_frame: torch.T
     return _gradient_norm_to_heatmap(grad_norm)
 
 
-def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> Optional[VisualizationSelection]:
+def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> VisualizationSelection:
     if frames is None:
-        return None
+        raise ValueError("Frames tensor must not be None for visualization selection.")
     batch_size, seq_len = frames.shape[0], frames.shape[1]
-    if batch_size == 0 or seq_len < 2:
-        return None
+    if batch_size == 0:
+        raise ValueError("Need at least one sequence to build visualization selection.")
+    if seq_len < 2:
+        raise ValueError("Visualization selection requires sequences with at least two frames.")
     num_rows = min(vis_rows, batch_size)
+    if num_rows <= 0:
+        raise ValueError("vis_rows must be positive to build a selection.")
     row_indices = torch.arange(num_rows, dtype=torch.long)
     time_indices = (torch.arange(num_rows, dtype=torch.long) % (seq_len - 1)) + 1
     return VisualizationSelection(row_indices=row_indices, time_indices=time_indices)
+
+
+def _build_fixed_vis_batch(
+    dataloader: DataLoader,
+    vis_rows: int,
+) -> Tuple[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]], VisualizationSelection]:
+    sample_batch = next(iter(dataloader))
+    frames_cpu, actions_cpu = sample_batch[0], sample_batch[1]
+    if frames_cpu.shape[0] == 0:
+        raise AssertionError("Visualization requires at least one sequence in the dataset.")
+    if frames_cpu.shape[1] < 2:
+        raise AssertionError("Visualization requires sequences with at least two frames.")
+    fixed_paths = sample_batch[2] if len(sample_batch) > 2 else None
+    fixed_batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]] = (
+        frames_cpu.clone(),
+        actions_cpu.clone(),
+        [list(paths) for paths in fixed_paths] if fixed_paths is not None else None,
+    )
+    return fixed_batch_cpu, _make_fixed_selection(fixed_batch_cpu[0], vis_rows)
+
+
+def _build_embedding_batch(
+    dataset: TrajectorySequenceDataset,
+    sample_count: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if sample_count <= 0:
+        raise ValueError("sample_count must be positive for embedding projection batches.")
+    embed_loader = DataLoader(
+        dataset,
+        batch_size=min(sample_count, len(dataset)),
+        shuffle=True,
+        collate_fn=collate_batch,
+    )
+    embed_batch = next(iter(embed_loader))
+    return (embed_batch[0].clone(), embed_batch[1].clone())
 
 
 def _render_visualization_batch(
@@ -1306,7 +1348,7 @@ def _render_visualization_batch(
             )
         )
     if not sequences:
-        raise RuntimeError("Failed to build any visualization sequences.")
+        raise AssertionError("Failed to build any visualization sequences.")
     if debug_lines:
         print("\n".join(debug_lines))
     grad_label = "Gradient Norm" if show_gradients else "Error Heatmap"
@@ -1321,51 +1363,59 @@ def _render_visualization_batch(
 def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, demo: bool = True) -> None:
     # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
-    run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[run] Writing outputs to {run_dir}")
     metrics_dir = run_dir / "metrics"
-    (metrics_dir).mkdir(parents=True, exist_ok=True)
     fixed_vis_dir = run_dir / "vis_fixed"
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
-    embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir = run_dir / "samples_hard"
+    inputs_vis_dir = run_dir / "vis_inputs"
+    pair_vis_dir = run_dir / "vis_pairs"
+
+    print(f"[run] Writing outputs to {run_dir}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
+
     debug_vis = cfg.debug_visualization
-    inputs_vis_dir: Optional[Path]
-    pair_vis_dir: Optional[Path]
     if debug_vis.input_vis_every_steps > 0:
-        inputs_vis_dir = run_dir / "vis_inputs"
         inputs_vis_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        inputs_vis_dir = None
     if debug_vis.pair_vis_every_steps > 0:
-        pair_vis_dir = run_dir / "vis_pairs"
         pair_vis_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        pair_vis_dir = None
+
     loss_history = LossHistory()
+
     write_run_metadata(run_dir, cfg, model_cfg)
 
-    # --- Dataset + model initialization ---
+    # --- Dataset initialization ---
     dataset = TrajectorySequenceDataset(
         root=cfg.data_root,
         seq_len=cfg.seq_len,
         image_hw=(model_cfg.image_size, model_cfg.image_size),
         max_traj=cfg.max_trajectories,
     )
-    raw_shape = _infer_raw_frame_shape(dataset)
-    hard_reservoir = HardSampleReservoir(cfg.hard_example_reservoir) if cfg.hard_example_reservoir > 0 else None
+
     dataset_action_dim = getattr(dataset, "action_dim", model_cfg.action_dim)
     assert dataset_action_dim == 8, f"Expected action_dim 8, got {dataset_action_dim}"
     if model_cfg.action_dim != dataset_action_dim:
         model_cfg = replace(model_cfg, action_dim=dataset_action_dim)
+
+    hard_reservoir = HardSampleReservoir(cfg.hard_example.reservoir) if cfg.hard_example.reservoir > 0 else None
+
+    if len(dataset) == 0:
+        raise AssertionError(f"No training samples available in dataset at {cfg.data_root}")
+    dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
+
+    # --- Model initialization ---
     model = JEPAWorldModel(model_cfg).to(device)
+
     ema_model: Optional[JEPAWorldModel] = None
-    if cfg.ema_momentum >= 0.0:
+    if cfg.loss_weights.ema_consistency > 0 and cfg.ema.momentum >= 0.0:
         ema_model = build_ema_model(model)
+
     decoder = VisualizationDecoder(
         model.embedding_dim,
         model_cfg.in_channels,
@@ -1373,6 +1423,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         model_cfg.channel_schedule,
         model_cfg.latent_hw,
     ).to(device)
+
+    raw_shape = _infer_raw_frame_shape(dataset)
     summary = format_shape_summary(
         raw_shape,
         model.encoder.shape_info(),
@@ -1381,71 +1433,58 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         model_cfg,
     )
     print(summary)
+
+    # --- Optimizer initialization ---
     optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(decoder.parameters()),
         lr=cfg.lr,
         weight_decay=cfg.weight_decay,
     )
-    dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
     # --- Fixed visualization batch (required later) ---
-
-    try:
-        sample_batch = next(iter(dataloader))
-    except StopIteration as exc:
-        raise RuntimeError("Trajectory dataset yielded no samples for visualization.") from exc
-    frames_cpu, actions_cpu = sample_batch[0], sample_batch[1]
-    if frames_cpu.shape[0] == 0:
-        raise RuntimeError("Visualization requires at least one sequence in the dataset.")
-    if frames_cpu.shape[1] < 2:
-        raise RuntimeError("Visualization requires sequences with at least two frames.")
-    fixed_paths = sample_batch[2] if len(sample_batch) > 2 else None
-    fixed_batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]] = (
-        frames_cpu.clone(),
-        actions_cpu.clone(),
-        [list(paths) for paths in fixed_paths] if fixed_paths is not None else None,
-    )
-    fixed_selection_opt = _make_fixed_selection(fixed_batch_cpu[0], cfg.vis_rows)
-    if fixed_selection_opt is None:
-        raise RuntimeError("Failed to build a fixed visualization selection.")
-    fixed_selection = fixed_selection_opt
+    fixed_batch_cpu, fixed_selection = _build_fixed_vis_batch(dataloader, cfg.vis.rows)
     rolling_batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]] = fixed_batch_cpu
-    embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-    if cfg.embedding_projection_samples > 0:
-        embed_loader = DataLoader(
-            dataset,
-            batch_size=min(cfg.embedding_projection_samples, len(dataset)),
-            shuffle=True,
-            collate_fn=collate_batch,
-        )
-        try:
-            embed_batch = next(iter(embed_loader))
-            embedding_batch_cpu = (embed_batch[0].clone(), embed_batch[1].clone())
-        except StopIteration:
-            embedding_batch_cpu = None
+    embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]]
+    if cfg.vis.embedding_projection_samples > 0:
+        embedding_batch_cpu = _build_embedding_batch(dataset, cfg.vis.embedding_projection_samples)
+    else:
+        embedding_batch_cpu = None
 
     # --- Main optimization loop ---
     data_iter = iter(dataloader)
-    for global_step in range(cfg.total_steps):
+    for global_step in range(cfg.steps):
+        # Get next batch of inputs.
         try:
             batch = next(data_iter)
         except StopIteration:
             data_iter = iter(dataloader)
             batch = next(data_iter)
-        inject_hard_examples_into_batch(batch, dataset, hard_reservoir, cfg.hard_example_mix_ratio)
+
+        # Update batch with hard examples.
+        inject_hard_examples_into_batch(batch, dataset, hard_reservoir, cfg.hard_example.mix_ratio)
+
+        # Take a training step.
         metrics, difficulty_info = training_step(
-            model, decoder, optimizer, batch, cfg, weights, ema_model, cfg.ema_momentum
+            model, decoder, optimizer, batch, cfg, weights, ema_model, cfg.ema.momentum
         )
+
+        # Update hard examples.
         if hard_reservoir is not None and difficulty_info is not None:
             hard_reservoir.update(
                 difficulty_info.indices, difficulty_info.paths, difficulty_info.scores, difficulty_info.frame_indices
             )
+
+        # Log outputs.
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
-            loggable = _filtered_metrics_for_logging(metrics, weights, cfg.recon_weight)
+            loggable = _filtered_metrics_for_logging(metrics, weights)
             log_metrics(global_step, loggable)
+
             loss_history.append(global_step, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
+
             plot_loss_curves(loss_history, metrics_dir)
+
+        # --- Visualization of raw inputs/pairs ---
         batch_paths = batch[2] if len(batch) > 2 else None
         rolling_batch_cpu = (
             batch[0].clone(),
@@ -1453,10 +1492,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             [list(paths) for paths in batch_paths] if batch_paths is not None else None,
         )
 
-        # --- Visualization of raw inputs/pairs ---
         if (
-            inputs_vis_dir is not None
-            and debug_vis.input_vis_every_steps > 0
+            debug_vis.input_vis_every_steps > 0
             and global_step % debug_vis.input_vis_every_steps == 0
         ):
             save_input_batch_visualization(
@@ -1466,8 +1503,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 debug_vis.input_vis_rows,
             )
         if (
-            pair_vis_dir is not None
-            and debug_vis.pair_vis_every_steps > 0
+            debug_vis.pair_vis_every_steps > 0
             and global_step % debug_vis.pair_vis_every_steps == 0
         ):
             save_temporal_pair_visualization(
@@ -1483,17 +1519,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         ):
             model.eval()
             with torch.no_grad():
+                # Render fixed batch.
                 sequences, grad_label = _render_visualization_batch(
-                    model,
-                    decoder,
-                    fixed_batch_cpu,
-                    cfg.vis_rows,
-                    cfg.vis_rollout,
-                    cfg.vis_columns,
-                    device,
-                    fixed_selection,
-                    cfg.vis_gradient_norms,
-                    cfg.vis_log_deltas,
+                    model=model,
+                    decoder=decoder,
+                    batch_cpu=fixed_batch_cpu,
+                    rows=cfg.vis.rows,
+                    rollout_steps=cfg.vis.rollout,
+                    max_columns=cfg.vis.columns,
+                    device=device,
+                    selection=fixed_selection,
+                    show_gradients=cfg.vis.gradient_norms,
+                    log_deltas=cfg.vis.log_deltas,
                 )
                 save_rollout_sequence_batch(
                     fixed_vis_dir,
@@ -1501,17 +1538,19 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     grad_label,
                     global_step,
                 )
+
+                # Render rolling batch.
                 sequences, grad_label = _render_visualization_batch(
-                    model,
-                    decoder,
-                    rolling_batch_cpu,
-                    cfg.vis_rows,
-                    cfg.vis_rollout,
-                    cfg.vis_columns,
-                    device,
-                    None,
-                    cfg.vis_gradient_norms,
-                    cfg.vis_log_deltas,
+                    model=model,
+                    decoder=decoder,
+                    batch_cpu=rolling_batch_cpu,
+                    rows=cfg.vis.rows,
+                    rollout_steps=cfg.vis.rollout,
+                    max_columns=cfg.vis.columns,
+                    device=device,
+                    selection=None,
+                    show_gradients=cfg.vis.gradient_norms,
+                    log_deltas=cfg.vis.log_deltas,
                 )
                 save_rollout_sequence_batch(
                     rolling_vis_dir,
@@ -1519,6 +1558,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     grad_label,
                     global_step,
                 )
+
                 if embedding_batch_cpu is not None:
                     embed_frames = embedding_batch_cpu[0].to(device)
                     embed_outputs = model.encode_sequence(embed_frames)
@@ -1527,15 +1567,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         embeddings_vis_dir / f"embeddings_{global_step:07d}.png",
                     )
                 if hard_reservoir is not None:
-                    hard_samples = hard_reservoir.topk(cfg.hard_example_vis_rows * cfg.hard_example_vis_columns)
+                    hard_samples = hard_reservoir.topk(cfg.hard_example.vis_rows * cfg.hard_example.vis_columns)
                     save_hard_example_grid(
                         samples_hard_dir / f"hard_{global_step:07d}.png",
                         hard_samples,
-                        cfg.hard_example_vis_columns,
-                        cfg.hard_example_vis_rows,
+                        cfg.hard_example.vis_columns,
+                        cfg.hard_example.vis_rows,
                         dataset.image_hw,
                     )
+
+            # --- Train ---
             model.train()
+
     # --- Final metrics export ---
     if len(loss_history):
         write_loss_csv(loss_history, metrics_dir / "loss.csv")
@@ -1543,7 +1586,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
 
 def main() -> None:
-    cfg = tyro.cli(TrainConfig)
+    cfg = tyro.cli(
+        TrainConfig,
+        config=(tyro.conf.HelptextFromCommentsOff,),
+    )
     model_cfg = ModelConfig()
     run_training(cfg, model_cfg, cfg.loss_weights, demo=False)
 
