@@ -12,7 +12,7 @@ import random
 import csv
 import json
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,6 +26,15 @@ from nes_controller import _describe_controller_vector, _describe_controller_vec
 from utils.device_utils import pick_device
 from jepa_world_model.loss import HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
 from jepa_world_model.metadata import write_run_metadata
+from jepa_world_model.vis import (
+    describe_action_tensor,
+    save_embedding_projection,
+    save_input_batch_visualization,
+    save_rollout_sequence_batch,
+    save_rollout_visualization,
+    save_temporal_pair_visualization,
+)
+from jepa_world_model.vis_hard_samples import save_hard_example_grid
 
 
 # ------------------------------------------------------------
@@ -890,42 +899,6 @@ def grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
     return float(total**0.5)
 
 
-def save_embedding_projection(embeddings: torch.Tensor, path: Path) -> None:
-    flat = embeddings.detach().cpu().numpy()
-    b, t, d = flat.shape
-    flat = flat.reshape(b * t, d)
-    flat = flat - flat.mean(axis=0, keepdims=True)
-    if flat.shape[0] < 2:
-        return
-    try:
-        u, s, vt = np.linalg.svd(flat, full_matrices=False)
-    except np.linalg.LinAlgError:
-        jitter = np.random.normal(scale=1e-6, size=flat.shape)
-        try:
-            u, s, vt = np.linalg.svd(flat + jitter, full_matrices=False)
-        except np.linalg.LinAlgError:
-            print("Warning: embedding SVD failed to converge; skipping projection.")
-            return
-    coords = flat @ vt[:2].T
-    colors = np.tile(np.arange(t), b)
-    colors = colors / max(1, t - 1)
-    plt.figure(figsize=(6, 5))
-    plt.scatter(coords[:, 0], coords[:, 1], c=colors, cmap="viridis", s=10, alpha=0.7)
-    plt.title("Embedding Projection (PCA)")
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.colorbar(label="Time step")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(path, dpi=200)
-    plt.close()
-
-
-def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
-    array = frame.detach().cpu().clamp(0, 1).permute(1, 2, 0).numpy()
-    return (array * 255.0).round().astype(np.uint8)
-
-
 def _short_traj_state_label(frame_path: str) -> str:
     path = Path(frame_path)
     traj = next((part for part in path.parts if part.startswith("traj_")), path.parent.name)
@@ -1041,29 +1014,6 @@ def inject_hard_examples_into_batch(
         reservoir.mark_sampled(record.dataset_index)
 
 
-def _motion_blur_image(record: HardSampleRecord, image_hw: Tuple[int, int], window: int = 4) -> np.ndarray:
-    weights: List[float] = []
-    frames: List[torch.Tensor] = []
-    weight = 1.0
-    for offset in range(window):
-        frame_idx = record.frame_index - offset
-        if frame_idx < 0 or frame_idx >= len(record.sequence_paths):
-            break
-        path = Path(record.sequence_paths[frame_idx])
-        tensor = load_frame_as_tensor(path, size=image_hw)
-        frames.append(tensor)
-        weights.append(weight)
-        weight *= 0.5
-    if not frames:
-        tensor = load_frame_as_tensor(Path(record.frame_path), size=image_hw)
-        return tensor_to_uint8_image(tensor)
-    stacked = torch.stack(frames, dim=0)
-    weight_tensor = torch.tensor(weights, dtype=stacked.dtype).view(-1, 1, 1, 1)
-    weight_tensor = weight_tensor / weight_tensor.sum()
-    ema = (stacked * weight_tensor).sum(dim=0).clamp(0, 1)
-    return tensor_to_uint8_image(ema)
-
-
 def _infer_raw_frame_shape(dataset: TrajectorySequenceDataset) -> Optional[Tuple[int, int, int]]:
     if not dataset.samples:
         return None
@@ -1157,29 +1107,8 @@ def _extract_frame_labels(
     return [_short_traj_state_label(path) for path in slice_paths]
 
 
-TEXT_FONT = ImageFont.load_default()
 LOSS_CMAP = plt.get_cmap("coolwarm")
 GRAD_CMAP = plt.get_cmap("magma")
-
-
-def _describe_action_tensor(action: torch.Tensor) -> str:
-    vector = action.detach().cpu().numpy().reshape(-1)
-    binary = (vector > 0.5).astype(np.uint8)
-    return _describe_controller_vector_compact(binary)
-
-
-def _annotate_with_text(image: np.ndarray, text: str) -> np.ndarray:
-    if not text:
-        return image
-    pil_image = Image.fromarray(image)
-    draw = ImageDraw.Draw(pil_image)
-    padding = 2
-    text = text.strip()
-    bbox = draw.textbbox((padding, padding), text, font=TEXT_FONT)
-    rect = (bbox[0] - padding, bbox[1] - padding, bbox[2] + padding, bbox[3] + padding)
-    draw.rectangle(rect, fill=(0, 0, 0))
-    draw.text((padding, padding), text, fill=(255, 255, 255), font=TEXT_FONT)
-    return np.array(pil_image)
 
 
 def _loss_to_heatmap(frame: torch.Tensor, recon: torch.Tensor) -> np.ndarray:
@@ -1237,93 +1166,6 @@ def _make_fixed_selection(frames: torch.Tensor, vis_rows: int) -> Optional[Visua
     return VisualizationSelection(row_indices=row_indices, time_indices=time_indices)
 
 
-def save_temporal_pair_visualization(
-    out_path: Path,
-    frames: torch.Tensor,
-    actions: torch.Tensor,
-    rows: int,
-) -> None:
-    if frames.shape[1] < 2:
-        return
-    frames = frames.detach().cpu()
-    actions = actions.detach().cpu()
-    batch_size = frames.shape[0]
-    num_rows = min(rows, batch_size)
-    order = torch.randperm(batch_size)[:num_rows]
-    pairs = []
-    for idx in order:
-        time_idx = torch.randint(1, frames.shape[1], ()).item()
-        prev_frame = tensor_to_uint8_image(frames[idx, time_idx - 1])
-        next_frame = tensor_to_uint8_image(frames[idx, time_idx])
-        prev_frame = _annotate_with_text(prev_frame, _describe_action_tensor(actions[idx, time_idx - 1]))
-        next_frame = _annotate_with_text(next_frame, _describe_action_tensor(actions[idx, time_idx]))
-        pairs.append(np.concatenate([prev_frame, next_frame], axis=1))
-    grid = np.concatenate(pairs, axis=0) if pairs else np.zeros((1, 1, 3), dtype=np.uint8)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(grid).save(out_path)
-
-
-def save_input_batch_visualization(
-    out_path: Path,
-    frames: torch.Tensor,
-    actions: torch.Tensor,
-    rows: int,
-) -> None:
-    frames = frames.detach().cpu()
-    actions = actions.detach().cpu()
-    batch_size, seq_len = frames.shape[0], frames.shape[1]
-    num_rows = min(rows, batch_size)
-    if num_rows <= 0:
-        return
-    grid_rows: List[np.ndarray] = []
-    for row_idx in range(num_rows):
-        columns: List[np.ndarray] = []
-        for step in range(seq_len):
-            frame_img = tensor_to_uint8_image(frames[row_idx, step])
-            desc = _describe_action_tensor(actions[row_idx, step])
-            frame_img = _annotate_with_text(frame_img, desc)
-            columns.append(frame_img)
-        row_image = np.concatenate(columns, axis=1)
-        grid_rows.append(row_image)
-    grid = np.concatenate(grid_rows, axis=0)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(grid).save(out_path)
-
-
-def save_hard_example_grid(
-    out_path: Path,
-    hard_samples: List[HardSampleRecord],
-    columns: int,
-    rows: int,
-    image_hw: Tuple[int, int],
-) -> None:
-    if not hard_samples:
-        return
-    columns = max(1, columns)
-    rows = max(1, rows)
-    limit = columns * rows
-    subset = hard_samples[:limit]
-    blank = np.zeros((image_hw[0], image_hw[1], 3), dtype=np.uint8)
-    fig, axes = plt.subplots(rows, columns, figsize=(columns * 2, rows * 2))
-    axes = np.atleast_2d(axes)
-    for idx in range(rows * columns):
-        ax = axes[idx // columns, idx % columns]
-        if idx < len(subset):
-            record = subset[idx]
-            image = _motion_blur_image(record, image_hw)
-            ax.imshow(image)
-            ax.set_title(f"{record.label}\n diff {record.score:.4f}", fontsize=8)
-        else:
-            ax.imshow(blank)
-            ax.set_title("")
-        ax.axis("off")
-    fig.suptitle("Hard Examples", fontsize=12)
-    plt.tight_layout(rect=(0, 0.02, 1, 0.98))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
-
-
 def _render_visualization_batch(
     model: JEPAWorldModel,
     decoder: VisualizationDecoder,
@@ -1376,7 +1218,7 @@ def _render_visualization_batch(
         action_texts: List[str] = []
         for offset in range(max_window):
             action_idx = min(start_idx + offset, vis_actions.shape[1] - 1)
-            action_texts.append(_describe_action_tensor(vis_actions[idx, action_idx]))
+            action_texts.append(describe_action_tensor(vis_actions[idx, action_idx]))
         recon_tensor = decoded_frames[idx, start_idx : start_idx + max_window].clamp(0, 1)
         rollout_frames: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
         gradient_maps: List[Optional[np.ndarray]] = [None for _ in range(max_window)]
@@ -1424,102 +1266,6 @@ def _render_visualization_batch(
         print("\n".join(debug_lines))
     grad_label = "Gradient Norm" if show_gradients else "Error Heatmap"
     return sequences, grad_label
-
-
-def save_rollout_visualization(
-    out_path: Path,
-    sequence: VisualizationSequence,
-    grad_label: str,
-) -> None:
-    seq_cols = len(sequence.labels)
-    if seq_cols == 0:
-        return
-    row_block = 4
-    fig, axes = plt.subplots(
-        row_block,
-        seq_cols,
-        figsize=(seq_cols * 2, row_block * 1.5),
-    )
-    axes = np.atleast_2d(axes)
-
-    def _imshow_tensor(ax: plt.Axes, tensor: torch.Tensor) -> None:
-        ax.imshow(tensor.clamp(0, 1).permute(1, 2, 0).numpy())
-        ax.axis("off")
-
-    def _imshow_array(ax: plt.Axes, array: np.ndarray) -> None:
-        if array.dtype != np.float32 and array.dtype != np.float64:
-            data = array.astype(np.float32) / 255.0
-        else:
-            data = array
-        ax.imshow(data)
-        ax.axis("off")
-
-    sample_tensor = sequence.ground_truth[0]
-    height, width = sample_tensor.shape[1], sample_tensor.shape[2]
-    blank = np.full((height, width, 3), 0.5, dtype=np.float32)
-    row_labels = [
-        "Ground Truth",
-        "Rollout Prediction",
-        grad_label,
-        "Direct Reconstruction",
-    ]
-
-    for row_idx in range(row_block):
-        axes[row_idx, 0].text(
-            -0.12,
-            0.5,
-            row_labels[row_idx],
-            transform=axes[row_idx, 0].transAxes,
-            va="center",
-            ha="right",
-            fontsize=8,
-            rotation=90,
-        )
-    for col in range(seq_cols):
-        gt_ax = axes[0, col]
-        rollout_ax = axes[1, col]
-        grad_ax = axes[2, col]
-        recon_ax = axes[3, col]
-        gt_img = tensor_to_uint8_image(sequence.ground_truth[col])
-        if sequence.actions and col < len(sequence.actions):
-            gt_img = _annotate_with_text(gt_img, sequence.actions[col])
-        gt_ax.imshow(gt_img)
-        gt_ax.axis("off")
-        gt_ax.set_title(sequence.labels[col], fontsize=8)
-        recon_tensor = sequence.reconstructions[col]
-        _imshow_tensor(recon_ax, recon_tensor)
-        rollout_frame = sequence.rollout[col]
-        if rollout_frame is None:
-            _imshow_array(rollout_ax, blank)
-        else:
-            _imshow_tensor(rollout_ax, rollout_frame)
-        grad_map = sequence.gradients[col]
-        if grad_map is None:
-            _imshow_array(grad_ax, blank)
-        else:
-            _imshow_array(grad_ax, grad_map)
-    fig.suptitle("JEPA Rollout Visualization", fontsize=12)
-    fig.tight_layout(rect=(0.08, 0.02, 1.0, 0.95))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path)
-    plt.close(fig)
-
-
-def save_rollout_sequence_batch(
-    template_dir: Path,
-    sequences: List[VisualizationSequence],
-    grad_label: str,
-    global_step: int,
-) -> None:
-    if not sequences:
-        return
-    base_parent = template_dir.parent
-    base_name = template_dir.name
-    for idx, sequence in enumerate(sequences):
-        sample_dir = base_parent / f"{base_name}_{idx}"
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        out_path = sample_dir / f"rollout_{global_step:07d}.png"
-        save_rollout_visualization(out_path, sequence, grad_label)
 
 
 # ------------------------------------------------------------
