@@ -405,6 +405,7 @@ class TrainConfig:
     # Optimization & dynamics
     lr: float = 1e-4
     total_steps: int = 100_000
+    weight_decay: float = 0.03
     device: Optional[str] = "mps"
     recon_weight: float = 1.0
     rollout_horizon: int = 8
@@ -1380,9 +1381,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         model_cfg,
     )
     print(summary)
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(decoder.parameters()),
         lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
     )
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
