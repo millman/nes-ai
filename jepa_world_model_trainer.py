@@ -227,8 +227,19 @@ class VisualizationDecoder(nn.Module):
         super().__init__()
         if not channel_schedule:
             raise ValueError("channel_schedule must be non-empty for decoder construction.")
-        stages = max(len(channel_schedule) - 1, 0)
-        self.start_hw = max(1, latent_hw)
+        scale = 2 ** len(channel_schedule)
+        if image_size % scale != 0:
+            raise ValueError(
+                f"image_size={image_size} must be divisible by 2**len(channel_schedule)={scale} "
+                "so the decoder can mirror the encoder."
+            )
+        expected_hw = image_size // scale
+        if latent_hw != expected_hw:
+            raise ValueError(
+                f"latent_hw must equal image_size // 2**len(channel_schedule) ({expected_hw}), "
+                f"got {latent_hw}. Adjust ModelConfig.latent_hw or image_size."
+            )
+        self.start_hw = expected_hw
         self.start_ch = channel_schedule[-1]
         self.image_channels = image_channels
         self.image_size = image_size
@@ -239,7 +250,7 @@ class VisualizationDecoder(nn.Module):
         )
         up_blocks: List[nn.Module] = []
         in_ch = self.start_ch
-        for out_ch in reversed(channel_schedule[:-1]):
+        for out_ch in reversed(channel_schedule):
             up_blocks.append(UpBlock(in_ch, out_ch))
             in_ch = out_ch
         self.up_blocks = nn.Sequential(*up_blocks)
@@ -259,8 +270,6 @@ class VisualizationDecoder(nn.Module):
         decoded = projected.view(-1, self.start_ch, self.start_hw, self.start_hw)
         decoded = self.up_blocks(decoded)
         frame = self.head(decoded)
-        if frame.shape[-1] != self.image_size:
-            frame = F.interpolate(frame, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
         frame = frame.view(*original_shape, self.image_channels, self.image_size, self.image_size)
         return frame
 
@@ -273,7 +282,7 @@ class VisualizationDecoder(nn.Module):
         }
         hw = self.start_hw
         ch = self.start_ch
-        for idx, out_ch in enumerate(reversed(self.channel_schedule[:-1]), start=1):
+        for idx, out_ch in enumerate(reversed(self.channel_schedule), start=1):
             prev_hw = hw
             hw = max(1, hw * 2)
             stage = {
@@ -334,7 +343,8 @@ class ModelConfig:
     • action_dim defines the controller space that modulates the predictor through FiLM layers.
     • hidden_dim is the predictor’s internal width.
     • latent_dim governs the visualization decoder’s compression when turning embeddings back into images.
-    • latent_hw is the decoder’s initial spatial side-length before upsampling back to image_size.
+    • latent_hw is the decoder’s initial spatial side-length before upsampling back to image_size (must equal image_size / 2**num_downsample_layers; e.g., multiples of 16 when num_downsample_layers=4).
+    • image_size must be divisible by 2**num_downsample_layers so encoder/decoder resolutions stay aligned.
     """
 
     in_channels: int = 3
@@ -343,13 +353,27 @@ class ModelConfig:
     hidden_dim: int = 512
     embedding_dim: int = 256
     num_downsample_layers: int = 4
-    latent_hw: int = 16
+    latent_hw: Optional[int] = None
     action_dim: int = 8
     predictor_film_layers: int = 2
     channel_schedule: Tuple[int, ...] = field(init=False)
 
     def __post_init__(self) -> None:
         self.channel_schedule = _derive_channel_schedule(self.embedding_dim, self.num_downsample_layers)
+        stride = 2 ** self.num_downsample_layers
+        if self.image_size % stride != 0:
+            raise ValueError(
+                f"image_size={self.image_size} must be divisible by 2**num_downsample_layers={stride} "
+                "to mirror encoder/decoder resolutions."
+            )
+        expected_hw = self.image_size // stride
+        if self.latent_hw is None:
+            self.latent_hw = expected_hw
+        elif self.latent_hw != expected_hw:
+            raise ValueError(
+                f"latent_hw must equal image_size // 2**num_downsample_layers ({expected_hw}), "
+                f"got {self.latent_hw}. Adjust ModelConfig."
+            )
 
 
 @dataclass
@@ -1299,6 +1323,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[run] Writing outputs to {run_dir}")
     metrics_dir = run_dir / "metrics"
     (metrics_dir).mkdir(parents=True, exist_ok=True)
     fixed_vis_dir = run_dir / "vis_fixed"
