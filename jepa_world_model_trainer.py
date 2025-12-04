@@ -10,7 +10,6 @@ import math
 import random
 
 import csv
-import json
 import numpy as np
 from PIL import Image
 import torch
@@ -22,7 +21,6 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 from recon.data import list_trajectories, load_frame_as_tensor
-from nes_controller import _describe_controller_vector, _describe_controller_vector_compact
 from utils.device_utils import pick_device
 from jepa_world_model.loss import HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
 from jepa_world_model.metadata import write_run_metadata
@@ -31,7 +29,6 @@ from jepa_world_model.vis import (
     save_embedding_projection,
     save_input_batch_visualization,
     save_rollout_sequence_batch,
-    save_rollout_visualization,
     save_temporal_pair_visualization,
 )
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
@@ -348,7 +345,7 @@ class ModelConfig:
     """
 
     in_channels: int = 3
-    image_size: int = 224
+    image_size: int = 128
     latent_dim: int = 256
     hidden_dim: int = 512
     embedding_dim: int = 256
@@ -814,15 +811,7 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
 # ------------------------------------------------------------
 
 
-def log_metrics(step: int, metrics: Dict[str, float]) -> None:
-    pretty = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
-    print(f"[step {step}] {pretty}")
-
-
-def _filtered_metrics_for_logging(
-    metrics: Dict[str, float],
-    weights: LossWeights,
-) -> Dict[str, float]:
+def log_metrics(step: int, metrics: Dict[str, float], weights: LossWeights) -> None:
     filtered = dict(metrics)
     if weights.jepa <= 0:
         filtered.pop("loss_jepa", None)
@@ -838,7 +827,8 @@ def _filtered_metrics_for_logging(
         filtered.pop("loss_recon", None)
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
-    return filtered
+    pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
+    print(f"[step {step}] {pretty}")
 
 
 LOSS_COLUMNS = [
@@ -1476,8 +1466,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
         # Log outputs.
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
-            loggable = _filtered_metrics_for_logging(metrics, weights)
-            log_metrics(global_step, loggable)
+            log_metrics(global_step, metrics, weights)
 
             loss_history.append(global_step, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
@@ -1512,6 +1501,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 rolling_batch_cpu[1],
                 debug_vis.pair_vis_rows,
             )
+
         # --- Rollout/embedding/hard-sample visualizations ---
         if (
             cfg.vis_every_steps > 0
