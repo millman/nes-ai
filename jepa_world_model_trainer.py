@@ -334,6 +334,7 @@ class ModelConfig:
     • action_dim defines the controller space that modulates the predictor through FiLM layers.
     • hidden_dim is the predictor’s internal width.
     • latent_dim governs the visualization decoder’s compression when turning embeddings back into images.
+    • latent_hw is the decoder’s initial spatial side-length before upsampling back to image_size.
     """
 
     in_channels: int = 3
@@ -354,10 +355,10 @@ class ModelConfig:
 @dataclass
 class LossWeights:
     jepa: float = 1.0
-    sigreg: float = 0.5
+    sigreg: float = 1.0
     rollout: float = 0.0
     consistency: float = 0.0
-    ema_consistency: float = 1.0
+    ema_consistency: float = 0.0
     action_recon: float = 1.0
 
 
@@ -371,30 +372,39 @@ class DebugVisualization:
 
 @dataclass
 class TrainConfig:
+    # Dataset & batching
+    data_root: Path = Path("data.gridworldkey_wander_to_key")
+    max_trajectories: Optional[int] = None
     seq_len: int = 8
     batch_size: int = 8
+
+    # Optimization & dynamics
     lr: float = 1e-4
-    sigreg_projections: int = 64
-    recon_weight: float = 1.0
-    device: Optional[str] = "mps"
     total_steps: int = 100_000
+    device: Optional[str] = "mps"
+    recon_weight: float = 1.0
+    rollout_horizon: int = 8
+    sigreg_projections: int = 64
+    ema_momentum: float = 0.99
+
+    # Logging & outputs
+    output_dir: Path = Path("out.jepa_world_model_trainer")
     log_every_steps: int = 10
+
+    # Visualization cadence
     vis_every_steps: int = 50
     vis_rows: int = 2
     vis_rollout: int = 4
     vis_columns: int = 8
     vis_gradient_norms: bool = True
     vis_log_deltas: bool = False
-    rollout_horizon: int = 8
-    ema_momentum: float = 0.99
     embedding_projection_samples: int = 256
-    output_dir: Path = Path("out.jepa_world_model_trainer")
-    data_root: Path = Path("data.gridworldkey_wander_to_key")
-    max_trajectories: Optional[int] = None
+
+    # Hard example mining
     hard_example_reservoir: int = 256
     hard_example_mix_ratio: float = 0.5
-    hard_example_vis_rows: int = 6
-    hard_example_vis_columns: int = 8
+    hard_example_vis_rows: int = 4
+    hard_example_vis_columns: int = 6
 
     loss_weights: LossWeights = field(default_factory=LossWeights)
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
@@ -563,6 +573,7 @@ def training_step(
     ema_model: Optional[JEPAWorldModel] = None,
     ema_momentum: float = 0.0,
 ) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo]]:
+    # Unpack batch and move tensors to the training device.
     images, actions = batch[0], batch[1]
     batch_paths = batch[2] if len(batch) > 2 else None
     batch_indices = batch[3] if len(batch) > 3 else None
@@ -570,11 +581,17 @@ def training_step(
     device = next(model.parameters()).device
     images = images.to(device)
     actions = actions.to(device)
+
+    # Encode frames once up front.
     outputs = model.encode_sequence(images)
+
+    # Optional reconstruction for loss + difficulty tracking.
     need_recon = cfg.recon_weight > 0 or track_hard_examples
     recon: Optional[torch.Tensor] = None
     if need_recon:
         recon = decoder(outputs["embeddings"])
+
+    # Core JEPA + action prediction losses.
     loss_jepa_raw, action_logits = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
     prev_actions = actions[:, :-1]
@@ -582,6 +599,8 @@ def training_step(
         loss_action = ACTION_RECON_LOSS(action_logits, prev_actions)
     else:
         loss_action = images.new_tensor(0.0)
+
+    # Auxiliary latent penalties and rollout objectives.
     loss_rollout = (
         rollout_loss(model, outputs["embeddings"], actions, cfg.rollout_horizon)
         if weights.rollout > 0
@@ -602,11 +621,14 @@ def training_step(
         with torch.no_grad():
             ema_outputs = ema_model.encode_sequence(images)
         loss_ema_consistency = ema_latent_consistency_loss(outputs["embeddings"], ema_outputs["embeddings"])
+
+    # Pixel-space reconstruction.
     if cfg.recon_weight > 0 and recon is not None:
         loss_recon = RECON_LOSS(recon, images)
     else:
         loss_recon = images.new_tensor(0.0)
 
+    # Accumulate and backpropagate the weighted loss.
     world_loss = (
         weights.jepa * loss_jepa
         + weights.sigreg * loss_sigreg
@@ -1272,6 +1294,7 @@ def _render_visualization_batch(
 
 
 def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, demo: bool = True) -> None:
+    # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
@@ -1299,6 +1322,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         pair_vis_dir = None
     loss_history = LossHistory()
     write_run_metadata(run_dir, cfg, model_cfg)
+
+    # --- Dataset + model initialization ---
     dataset = TrajectorySequenceDataset(
         root=cfg.data_root,
         seq_len=cfg.seq_len,
@@ -1336,6 +1361,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     )
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
 
+    # --- Fixed visualization batch (required later) ---
+
     try:
         sample_batch = next(iter(dataloader))
     except StopIteration as exc:
@@ -1370,6 +1397,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         except StopIteration:
             embedding_batch_cpu = None
 
+    # --- Main optimization loop ---
     data_iter = iter(dataloader)
     for global_step in range(cfg.total_steps):
         try:
@@ -1397,6 +1425,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             batch[1].clone(),
             [list(paths) for paths in batch_paths] if batch_paths is not None else None,
         )
+
+        # --- Visualization of raw inputs/pairs ---
         if (
             inputs_vis_dir is not None
             and debug_vis.input_vis_every_steps > 0
@@ -1419,6 +1449,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 rolling_batch_cpu[1],
                 debug_vis.pair_vis_rows,
             )
+        # --- Rollout/embedding/hard-sample visualizations ---
         if (
             cfg.vis_every_steps > 0
             and global_step % cfg.vis_every_steps == 0
@@ -1478,6 +1509,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         dataset.image_hw,
                     )
             model.train()
+    # --- Final metrics export ---
     if len(loss_history):
         write_loss_csv(loss_history, metrics_dir / "loss.csv")
         plot_loss_curves(loss_history, metrics_dir)
