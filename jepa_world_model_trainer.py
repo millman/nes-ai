@@ -19,6 +19,7 @@ import tyro
 from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
 from datetime import datetime
+from time import perf_counter
 
 from recon.data import list_trajectories, load_frame_as_tensor
 from utils.device_utils import pick_device
@@ -1440,6 +1441,23 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     else:
         embedding_batch_cpu = None
 
+    def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
+        total_time = sum(totals.values())
+        if total_time <= 0:
+            return
+        parts = []
+        for key, label in (
+            ("train", "train"),
+            ("log", "log"),
+            ("vis", "vis"),
+        ):
+            value = totals.get(key, 0.0)
+            fraction = (value / total_time) if total_time > 0 else 0.0
+            parts.append(f"{label}: {value:.2f}s ({fraction:.1%})")
+        print(f"[timing up to step {step}] " + ", ".join(parts))
+
+    timing_totals: Dict[str, float] = {"train": 0.0, "log": 0.0, "vis": 0.0}
+
     # --- Main optimization loop ---
     data_iter = iter(dataloader)
     for global_step in range(cfg.steps):
@@ -1454,9 +1472,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         inject_hard_examples_into_batch(batch, dataset, hard_reservoir, cfg.hard_example.mix_ratio)
 
         # Take a training step.
+        train_start = perf_counter()
         metrics, difficulty_info = training_step(
             model, decoder, optimizer, batch, cfg, weights, ema_model, cfg.ema.momentum
         )
+        timing_totals["train"] += perf_counter() - train_start
 
         # Update hard examples.
         if hard_reservoir is not None and difficulty_info is not None:
@@ -1466,12 +1486,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
         # Log outputs.
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
+            log_start = perf_counter()
             log_metrics(global_step, metrics, weights)
 
             loss_history.append(global_step, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
 
             plot_loss_curves(loss_history, metrics_dir)
+            timing_totals["log"] += perf_counter() - log_start
+            _print_timing_summary(global_step, timing_totals)
 
         # --- Visualization of raw inputs/pairs ---
         batch_paths = batch[2] if len(batch) > 2 else None
@@ -1507,6 +1530,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             cfg.vis_every_steps > 0
             and global_step % cfg.vis_every_steps == 0
         ):
+            vis_start = perf_counter()
             model.eval()
             with torch.no_grad():
                 # Render fixed batch.
@@ -1568,6 +1592,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
             # --- Train ---
             model.train()
+            timing_totals["vis"] += perf_counter() - vis_start
 
     # --- Final metrics export ---
     if len(loss_history):
