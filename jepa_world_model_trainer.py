@@ -427,6 +427,7 @@ class TrainConfig:
     log_every_steps: int = 10
     vis_every_steps: int = 50
     steps: int = 100_000
+    show_timing_breakdown: bool = True
 
     # Dataset & batching
     max_trajectories: Optional[int] = None
@@ -812,7 +813,20 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
 # ------------------------------------------------------------
 
 
-def log_metrics(step: int, metrics: Dict[str, float], weights: LossWeights) -> None:
+def _format_elapsed_time(seconds: float) -> str:
+    total_seconds = max(int(seconds), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def log_metrics(
+    step: int,
+    metrics: Dict[str, float],
+    weights: LossWeights,
+    samples_per_sec: Optional[float] = None,
+    elapsed_seconds: Optional[float] = None,
+) -> None:
     filtered = dict(metrics)
     if weights.jepa <= 0:
         filtered.pop("loss_jepa", None)
@@ -829,7 +843,18 @@ def log_metrics(step: int, metrics: Dict[str, float], weights: LossWeights) -> N
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
-    print(f"[step {step}] {pretty}")
+    summary_parts: List[str] = []
+    if pretty:
+        summary_parts.append(pretty)
+    if samples_per_sec is not None:
+        summary_parts.append(f"{samples_per_sec:.1f} samples/s")
+    if elapsed_seconds is not None and elapsed_seconds >= 0:
+        summary_parts.append(f"elapsed {_format_elapsed_time(elapsed_seconds)}")
+    summary = " | ".join(summary_parts)
+    if summary:
+        print(f"[step {step}] {summary}")
+    else:
+        print(f"[step {step}]")
 
 
 LOSS_COLUMNS = [
@@ -1457,6 +1482,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         print(f"[timing up to step {step}] " + ", ".join(parts))
 
     timing_totals: Dict[str, float] = {"train": 0.0, "log": 0.0, "vis": 0.0}
+    total_samples_processed = 0
+    run_start_time = perf_counter()
 
     # --- Main optimization loop ---
     data_iter = iter(dataloader)
@@ -1470,6 +1497,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
         # Update batch with hard examples.
         inject_hard_examples_into_batch(batch, dataset, hard_reservoir, cfg.hard_example.mix_ratio)
+
+        batch_size = int(batch[0].shape[0]) if hasattr(batch[0], "shape") else cfg.batch_size
+        total_samples_processed += batch_size
 
         # Take a training step.
         train_start = perf_counter()
@@ -1487,14 +1517,27 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         # Log outputs.
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
             log_start = perf_counter()
-            log_metrics(global_step, metrics, weights)
+            elapsed_seconds = max(log_start - run_start_time, 0.0)
+            samples_per_sec: Optional[float]
+            if elapsed_seconds > 0:
+                samples_per_sec = total_samples_processed / elapsed_seconds
+            else:
+                samples_per_sec = None
+            log_metrics(
+                global_step,
+                metrics,
+                weights,
+                samples_per_sec=samples_per_sec,
+                elapsed_seconds=elapsed_seconds,
+            )
 
             loss_history.append(global_step, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
 
             plot_loss_curves(loss_history, metrics_dir)
             timing_totals["log"] += perf_counter() - log_start
-            _print_timing_summary(global_step, timing_totals)
+            if cfg.show_timing_breakdown:
+                _print_timing_summary(global_step, timing_totals)
 
         # --- Visualization of raw inputs/pairs ---
         batch_paths = batch[2] if len(batch) > 2 else None
