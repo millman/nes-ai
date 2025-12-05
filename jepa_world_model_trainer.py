@@ -379,7 +379,7 @@ class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
     recon: float = 1.0
-    action_recon: float = 1.0
+    action_recon: float = 0.0
     rollout: float = 0.0
     consistency: float = 0.0
     ema_consistency: float = 0.0
