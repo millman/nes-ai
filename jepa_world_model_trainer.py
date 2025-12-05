@@ -1113,12 +1113,43 @@ def _format_hwc(height: int, width: int, channels: int) -> str:
     return f"{height}×{width}×{channels}"
 
 
+def _format_param_count(count: int) -> str:
+    if count < 0:
+        raise ValueError("Parameter count cannot be negative.")
+    if count < 1_000:
+        return str(count)
+    for divisor, suffix in (
+        (1_000_000_000, "B"),
+        (1_000_000, "M"),
+        (1_000, "k"),
+    ):
+        if count >= divisor:
+            value = count / divisor
+            if value >= 100:
+                formatted = f"{value:.0f}"
+            elif value >= 10:
+                formatted = f"{value:.1f}"
+            else:
+                formatted = f"{value:.2f}"
+            formatted = formatted.rstrip("0").rstrip(".")
+            return f"{formatted}{suffix}"
+    return str(count)
+
+
+def _count_parameters(modules: Iterable[nn.Module]) -> int:
+    total = 0
+    for module in modules:
+        total += sum(p.numel() for p in module.parameters())
+    return total
+
+
 def format_shape_summary(
     raw_shape: Tuple[int, int, int],
     encoder_info: Dict[str, Any],
     predictor_info: Dict[str, Any],
     decoder_info: Dict[str, Any],
     cfg: ModelConfig,
+    total_param_text: Optional[str] = None,
 ) -> str:
     lines: List[str] = []
     lines.append("Model Shape Summary (H×W×C)")
@@ -1154,6 +1185,9 @@ def format_shape_summary(
         )
     else:
         lines.append(f"  Final output {_format_hwc(*pre_resize)}")
+    if total_param_text:
+        lines.append("")
+        lines.append(f"Total parameters: {total_param_text}")
     return "\n".join(lines)
 
 
@@ -1441,12 +1475,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     ).to(device)
 
     raw_shape = _infer_raw_frame_shape(dataset)
+    total_params = _count_parameters((model, decoder))
     summary = format_shape_summary(
         raw_shape,
         model.encoder.shape_info(),
         model.predictor.shape_info(),
         decoder.shape_info(),
         model_cfg,
+        total_param_text=_format_param_count(total_params),
     )
     print(summary)
 
