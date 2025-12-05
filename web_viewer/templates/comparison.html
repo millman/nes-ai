@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script defer src="{{ url_for('static', filename='comparison.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+{% if experiments|length >= 2 %}
+<section class="comparison-controls">
+    <label for="comparison-select">Select experiments to compare:</label>
+    <select id="comparison-select" multiple size="8">
+        {% for exp in experiments %}
+        <option value="{{ exp.id }}">{{ exp.name }}</option>
+        {% endfor %}
+    </select>
+    <button id="comparison-run">Compare</button>
+    <p class="hint">Hold Cmd/Ctrl to select multiple runs. A minimum of two is required.</p>
+</section>
+<section class="plot-wrapper">
+    <div id="comparison-plot" class="plot-area">
+        <p class="empty-state">Select experiments to view overlapping loss curves.</p>
+    </div>
+</section>
+<section>
+    <div id="comparison-grid" class="comparison-grid"></div>
+</section>
+{% else %}
+<p>Need at least two experiments in {{ cfg.output_dir }} to run A/B comparisons.</p>
+{% endif %}
+{% endblock %}

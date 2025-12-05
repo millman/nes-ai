@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<script defer src="{{ url_for('static', filename='grid.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+{% if experiments %}
+<table class="exp-table">
+    <thead>
+    <tr>
+        <th>Notes</th>
+        <th>Experiment</th>
+        <th>metadata.txt</th>
+        <th>metrics/loss_curves.png</th>
+    </tr>
+    </thead>
+    <tbody>
+    {% for exp in experiments %}
+    <tr data-exp-id="{{ exp.id }}">
+        <td class="notes-cell">
+            <form class="notes-form" data-exp-id="{{ exp.id }}">
+                <textarea rows="6" placeholder="Add experiment notes...">{{- exp.notes_text -}}</textarea>
+                <div class="notes-actions">
+                    <button type="button" class="save-notes">Save</button>
+                    <span class="notes-status" aria-live="polite"></span>
+                </div>
+            </form>
+        </td>
+        <td>
+            <div class="exp-name">{{ exp.name }}</div>
+            <div class="exp-commit">{{ exp.git_commit }}</div>
+        </td>
+        <td>
+            <pre class="metadata-block">{{ exp.metadata_text }}</pre>
+        </td>
+        <td class="image-cell">
+            {% if exp.loss_image %}
+            <img src="{{ url_for('serve_asset', exp_id=exp.id, filename='metrics/loss_curves.png') }}" alt="Loss curves for {{ exp.name }}">
+            {% else %}
+            <div class="empty-state">metrics/loss_curves.png missing</div>
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No experiments found in {{ cfg.output_dir }}.</p>
+{% endif %}
+{% endblock %}

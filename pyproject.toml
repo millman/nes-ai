@@ -30,6 +30,7 @@ dependencies = [
     "openai",
     "Pillow",
     "plotly",
+    "Flask",
     # "plyvel",
     "pydantic",
     "pygame",

@@ -1,0 +1,208 @@
+:root {
+    color-scheme: light;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+    margin: 0;
+    background: #f8fafc;
+    color: #0f172a;
+}
+
+.app-header {
+    background: #0f172a;
+    color: white;
+    padding: 1rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.app-header h1 {
+    margin: 0;
+    font-size: 1.25rem;
+}
+
+.app-header nav a {
+    color: #e2e8f0;
+    margin-left: 1rem;
+    text-decoration: none;
+}
+
+.app-header nav a:hover {
+    text-decoration: underline;
+}
+
+main {
+    padding: 1.5rem 2rem 3rem;
+}
+
+.exp-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+    border-radius: 0.75rem;
+    overflow: hidden;
+    box-shadow: 0 5px 30px rgba(15, 23, 42, 0.08);
+}
+
+.exp-table th,
+.exp-table td {
+    border: 1px solid #e2e8f0;
+    padding: 0.75rem;
+    vertical-align: top;
+}
+
+.exp-table th {
+    background: #f1f5f9;
+    text-align: left;
+    font-weight: 600;
+}
+
+.exp-name {
+    font-weight: 600;
+}
+
+.exp-commit {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+    color: #475569;
+}
+
+.notes-cell textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border-radius: 0.5rem;
+    border: 1px solid #94a3b8;
+    padding: 0.5rem;
+    font-size: 0.95rem;
+    resize: vertical;
+}
+
+.notes-actions {
+    display: flex;
+    align-items: center;
+    margin-top: 0.25rem;
+    gap: 0.5rem;
+}
+
+.notes-actions button {
+    background: #2563eb;
+    color: white;
+    border: none;
+    padding: 0.35rem 0.9rem;
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.notes-actions button:disabled {
+    background: #94a3b8;
+    cursor: not-allowed;
+}
+
+.notes-status {
+    font-size: 0.85rem;
+    color: #0f172a;
+}
+
+.metadata-block {
+    max-height: 320px;
+    overflow: auto;
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+}
+
+.image-cell img {
+    max-width: 360px;
+    width: 100%;
+    border-radius: 0.5rem;
+    border: 1px solid #cbd5f5;
+}
+
+.empty-state {
+    color: #64748b;
+    font-style: italic;
+}
+
+.comparison-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.comparison-controls select {
+    min-height: 12rem;
+    padding: 0.5rem;
+}
+
+.comparison-controls button {
+    width: fit-content;
+    background: #2563eb;
+    color: white;
+    border: none;
+    padding: 0.4rem 1.2rem;
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.plot-wrapper {
+    background: white;
+    border-radius: 0.75rem;
+    padding: 0.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 5px 30px rgba(15, 23, 42, 0.08);
+}
+
+.plot-area {
+    min-height: 360px;
+}
+
+.comparison-grid {
+    display: grid;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.comparison-row {
+    display: grid;
+    gap: 1rem;
+}
+
+.comparison-row.names,
+.comparison-row.images,
+.comparison-row.metadata {
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.comparison-card {
+    background: white;
+    border-radius: 0.75rem;
+    padding: 0.75rem;
+    box-shadow: 0 5px 30px rgba(15, 23, 42, 0.08);
+}
+
+.comparison-card img {
+    width: 100%;
+    border-radius: 0.5rem;
+    border: 1px solid #e2e8f0;
+}
+
+.comparison-card pre {
+    max-height: 280px;
+    overflow: auto;
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.hint {
+    color: #475569;
+    font-size: 0.9rem;
+    margin: 0;
+}

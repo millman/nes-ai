@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>JEPA Experiment Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <header class="app-header">
+        <h1>JEPA Experiment Viewer</h1>
+        <nav>
+            <a href="{{ url_for('index') }}">Experiments</a>
+            <a href="{{ url_for('comparison') }}">A/B Comparison</a>
+        </nav>
+    </header>
+    <main>
+        {% block body %}{% endblock %}
+    </main>
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>
