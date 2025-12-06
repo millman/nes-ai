@@ -2,8 +2,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const forms = document.querySelectorAll(".notes-form");
   forms.forEach((form) => wireNotesForm(form));
   wireTitleForms(document);
-  setupColumnResizing();
-  setupRowHeightSync();
 });
 
 function wireNotesForm(form) {
@@ -121,84 +119,4 @@ function wireTitleForm(form) {
     }
   });
   updateState();
-}
-
-function setupColumnResizing() {
-  const table = document.querySelector(".exp-table");
-  if (!table) {
-    return;
-  }
-  const headers = table.querySelectorAll("thead th");
-  headers.forEach((header, index) => {
-    const colId = header.dataset.colId;
-    if (!colId) {
-      return;
-    }
-    const cssVar = `--col-${colId}-width`;
-    const handle = document.createElement("div");
-    handle.className = "resize-handle";
-    header.appendChild(handle);
-    handle.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      const startX = event.clientX;
-      const startWidth = header.offsetWidth;
-      handle.classList.add("is-resizing");
-      const onMouseMove = (moveEvent) => {
-        const delta = moveEvent.clientX - startX;
-        const newWidth = Math.max(120, startWidth + delta);
-        document.documentElement.style.setProperty(cssVar, `${newWidth}px`);
-      };
-      const onMouseUp = () => {
-        handle.classList.remove("is-resizing");
-        document.removeEventListener("mousemove", onMouseMove);
-        document.removeEventListener("mouseup", onMouseUp);
-        syncRowHeights();
-      };
-      document.addEventListener("mousemove", onMouseMove);
-      document.addEventListener("mouseup", onMouseUp);
-    });
-  });
-}
-
-function setupRowHeightSync() {
-  const sync = () => syncRowHeights();
-  window.addEventListener("resize", sync);
-  const images = document.querySelectorAll(".image-cell img");
-  images.forEach((img) => {
-    if (img.complete) {
-      sync();
-    } else {
-      img.addEventListener("load", sync);
-    }
-  });
-  window.addEventListener("load", sync);
-  requestAnimationFrame(sync);
-  setTimeout(sync, 0);
-}
-
-function syncRowHeights() {
-  const rows = document.querySelectorAll(".exp-table tbody tr");
-  rows.forEach((row) => {
-    const image = row.querySelector(".image-cell img");
-    const targetHeight = image ? image.clientHeight : null;
-    if (!targetHeight) {
-      return;
-    }
-    row.style.height = `${targetHeight}px`;
-    const metadata = row.querySelector(".metadata-block");
-    if (metadata) {
-      metadata.style.height = `${targetHeight}px`;
-    }
-    const form = row.querySelector(".notes-form");
-    if (form) {
-      form.style.height = `${targetHeight}px`;
-      const textarea = form.querySelector("textarea");
-      if (textarea) {
-        const actions = form.querySelector(".notes-actions");
-        const reserve = actions ? actions.offsetHeight + 12 : 12;
-        const newHeight = Math.max(60, targetHeight - reserve);
-        textarea.style.height = `${newHeight}px`;
-      }
-    }
-  });
 }

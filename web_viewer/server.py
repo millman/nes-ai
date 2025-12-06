@@ -75,11 +75,13 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         experiments = _load_all()
         selected = request.args.get("ids", "")
         selected_ids = [exp_id for exp_id in selected.split(",") if exp_id]
+        selected_map = {exp.id: exp for exp in experiments if exp.id in selected_ids}
         return render_template(
             "comparison.html",
             experiments=experiments,
             cfg=cfg,
             selected_ids=selected_ids,
+            selected_map=selected_map,
             active_nav="comparison",
         )
 

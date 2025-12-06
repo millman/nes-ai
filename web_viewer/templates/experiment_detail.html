@@ -6,34 +6,36 @@
 {% endblock %}
 
 {% block body %}
-<a href="{{ url_for('experiments_index') }}">&larr; Back to all experiments</a>
+<a href="{{ url_for('experiments_index') }}" class="btn btn-outline-secondary btn-sm mb-3">&larr; Back to all experiments</a>
 {% set heading_title = experiment.title if experiment.title != "Untitled" else "Untitled" %}
-<h2 class="detail-heading">{{ heading_title }} ({{ experiment.name }})</h2>
+<h2 class="mb-4">{{ heading_title }} <small class="text-muted">({{ experiment.name }})</small></h2>
 
-<section class="plot-wrapper">
-    <div id="detail-plot" class="plot-area detail-plot">
-        {% if figure %}
-        <script>
-            document.addEventListener("DOMContentLoaded", () => {
-                const figure = {{ figure|tojson }};
-                Plotly.react("detail-plot", figure.data, figure.layout, figure.config || {});
-            });
-        </script>
-        {% else %}
-        <p class="empty-state">No metrics available for this experiment.</p>
-        {% endif %}
+<div class="card mb-4">
+    <div class="card-body">
+        <div id="detail-plot" class="plot-area">
+            {% if figure %}
+            <script>
+                document.addEventListener("DOMContentLoaded", () => {
+                    const figure = {{ figure|tojson }};
+                    Plotly.react("detail-plot", figure.data, figure.layout, figure.config || {});
+                });
+            </script>
+            {% else %}
+            <p class="text-muted fst-italic">No metrics available for this experiment.</p>
+            {% endif %}
+        </div>
     </div>
-</section>
+</div>
 
-<section>
-    <table class="exp-table">
+<div class="table-responsive">
+    <table class="table table-bordered align-top exp-table">
         <colgroup>
             <col data-col-id="notes">
             <col data-col-id="name">
             <col data-col-id="metadata">
             <col data-col-id="image">
         </colgroup>
-        <thead>
+        <thead class="table-light">
         <tr>
             <th data-col-id="notes">Notes</th>
             <th data-col-id="name">Experiment</th>
@@ -44,41 +46,41 @@
         <tbody>
         <tr data-exp-id="{{ experiment.id }}">
             <td class="notes-cell" data-col-id="notes">
-                <form class="notes-form" data-exp-id="{{ experiment.id }}">
-                    <textarea rows="6" placeholder="Add experiment notes...">{{- experiment.notes_text -}}</textarea>
-                    <div class="notes-actions">
-                        <button type="button" class="save-notes">Save</button>
-                        <span class="notes-status" aria-live="polite"></span>
+                <form class="notes-form d-flex flex-column h-100" data-exp-id="{{ experiment.id }}">
+                    <textarea class="form-control font-monospace flex-grow-1 mb-2" rows="6" placeholder="Add experiment notes...">{{- experiment.notes_text -}}</textarea>
+                    <div class="d-flex align-items-center gap-2">
+                        <button type="button" class="btn btn-primary btn-sm save-notes">Save</button>
+                        <span class="notes-status small text-muted" aria-live="polite"></span>
                     </div>
                 </form>
             </td>
             <td data-col-id="name">
                 {% set title_value = "" if experiment.title == "Untitled" else experiment.title %}
-                <form class="title-form" data-exp-id="{{ experiment.id }}">
+                <form class="title-form mb-2" data-exp-id="{{ experiment.id }}">
                     <input
                         type="text"
-                        class="exp-title-input"
+                        class="form-control form-control-sm font-monospace exp-title-input"
                         value="{{ title_value }}"
                         placeholder="Untitled"
                         aria-label="Experiment title"
                     >
-                    <span class="title-status" aria-live="polite"></span>
+                    <span class="title-status small text-muted" aria-live="polite"></span>
                 </form>
-                <div class="exp-name">{{ experiment.name }}</div>
-                <div class="exp-commit">{{ experiment.git_commit }}</div>
+                <div class="fw-semibold">{{ experiment.name }}</div>
+                <div class="font-monospace text-muted small mt-1">{{ experiment.git_commit }}</div>
             </td>
             <td data-col-id="metadata">
-                <pre class="metadata-block">{{ experiment.metadata_text }}</pre>
+                <pre class="metadata-block bg-dark text-light p-2 rounded h-100 overflow-auto mb-0">{{ experiment.metadata_text }}</pre>
             </td>
             <td class="image-cell" data-col-id="image">
                 {% if experiment.loss_image %}
-                <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/metrics/loss_curves.png') }}" alt="Loss curves for {{ experiment.name }}">
+                <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/metrics/loss_curves.png') }}" alt="Loss curves for {{ experiment.name }}" class="img-fluid rounded border h-100 w-100 object-fit-contain">
                 {% else %}
-                <div class="empty-state">metrics/loss_curves.png missing</div>
+                <div class="text-muted fst-italic">metrics/loss_curves.png missing</div>
                 {% endif %}
             </td>
         </tr>
         </tbody>
     </table>
-</section>
+</div>
 {% endblock %}

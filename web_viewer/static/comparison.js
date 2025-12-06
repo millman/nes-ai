@@ -1,38 +1,15 @@
 let hasRenderedPlot = false;
 
 document.addEventListener("DOMContentLoaded", () => {
-  const select = document.getElementById("comparison-select");
-  const trigger = document.getElementById("comparison-run");
-  if (!select || !trigger) {
-    return;
-  }
-  trigger.addEventListener("click", () => {
-    const ids = Array.from(select.selectedOptions).map((option) => option.value);
-    if (ids.length < 2) {
-      alert("Select at least two experiments.");
-      return;
-    }
+  const ids = getIdsFromDataset();
+  if (ids.length >= 2) {
     runComparison(ids);
-  });
-  const preset = (select.dataset.selected || "")
-    .split(",")
-    .filter((id) => id && Array.from(select.options).some((opt) => opt.value === id));
-  if (preset.length >= 2) {
-    runComparison(preset);
-  } else if (select.options.length >= 2) {
-    const defaults = [select.options[0].value, select.options[1].value];
-    defaults.forEach((value) => {
-      const option = Array.from(select.options).find((opt) => opt.value === value);
-      if (option) option.selected = true;
-    });
-    runComparison(defaults);
   }
 });
 
 function runComparison(ids) {
   const plot = document.getElementById("comparison-plot");
   const grid = document.getElementById("comparison-grid");
-  syncQuery(ids);
   showPlotLoading(plot);
   grid.innerHTML = "";
   fetch("/comparison/data", {
@@ -51,7 +28,7 @@ function runComparison(ids) {
     .then((payload) => renderComparison(payload))
     .catch((error) => {
       hasRenderedPlot = false;
-      plot.innerHTML = `<p class="empty-state">${error.message}</p>`;
+      plot.innerHTML = `<p class="text-muted fst-italic">${error.message}</p>`;
     });
 }
 
@@ -59,7 +36,7 @@ function renderComparison(payload) {
   const plot = document.getElementById("comparison-plot");
   const grid = document.getElementById("comparison-grid");
   if (!payload || !Array.isArray(payload.experiments) || payload.experiments.length === 0) {
-    plot.innerHTML = "<p class='empty-state'>No comparison data available.</p>";
+    plot.innerHTML = "<p class='text-muted fst-italic'>No comparison data available.</p>";
     grid.innerHTML = "";
     return;
   }
@@ -70,7 +47,7 @@ function renderComparison(payload) {
     hasRenderedPlot = true;
   } else {
     hasRenderedPlot = false;
-    plot.innerHTML = "<p class='empty-state'>No overlapping CSV metrics found.</p>";
+    plot.innerHTML = "<p class='text-muted fst-italic'>No overlapping CSV metrics found.</p>";
   }
   const experiments = payload.experiments;
   grid.innerHTML = "";
@@ -82,41 +59,47 @@ function renderComparison(payload) {
 
 function buildRow(name, experiments, cellFactory) {
   const row = document.createElement("div");
-  row.className = `comparison-row ${name}`;
+  row.className = "row g-3 mb-3";
   experiments.forEach((exp, index) => {
+    const col = document.createElement("div");
+    col.className = "col";
     const cell = cellFactory(exp, index);
-    row.appendChild(cell);
+    col.appendChild(cell);
+    row.appendChild(col);
   });
   return row;
 }
 
 function buildNameCell(exp) {
   const card = document.createElement("div");
-  card.className = "comparison-card";
+  card.className = "card h-100";
+  const cardBody = document.createElement("div");
+  cardBody.className = "card-body";
   const form = document.createElement("form");
-  form.className = "title-form";
+  form.className = "title-form mb-2";
   form.dataset.expId = exp.id;
   const input = document.createElement("input");
   input.type = "text";
-  input.className = "exp-title-input";
+  input.className = "form-control form-control-sm font-monospace exp-title-input";
   input.placeholder = "Untitled";
   if (exp.title && exp.title !== "Untitled") {
     input.value = exp.title;
   }
   const status = document.createElement("span");
-  status.className = "title-status";
+  status.className = "title-status small text-muted";
   status.setAttribute("aria-live", "polite");
   form.appendChild(input);
   form.appendChild(status);
   const name = document.createElement("div");
-  name.className = "exp-name";
+  name.className = "fw-semibold";
   name.textContent = exp.name;
   const commit = document.createElement("div");
-  commit.className = "exp-commit";
+  commit.className = "font-monospace text-muted small mt-1";
   commit.textContent = exp.git_commit || "Unknown commit";
-  card.appendChild(form);
-  card.appendChild(name);
-  card.appendChild(commit);
+  cardBody.appendChild(form);
+  cardBody.appendChild(name);
+  cardBody.appendChild(commit);
+  card.appendChild(cardBody);
   return card;
 }
 
@@ -156,14 +139,12 @@ function toggleTraceVisibility(gd, visibility) {
   Plotly.restyle(gd, { visible: visibility }, indices);
 }
 
-function syncQuery(ids) {
-  const url = new URL(window.location.href);
-  if (ids.length >= 1) {
-    url.searchParams.set("ids", ids.join(","));
-  } else {
-    url.searchParams.delete("ids");
+function getIdsFromDataset() {
+  const container = document.querySelector("[data-selected-ids]");
+  if (!container) {
+    return [];
   }
-  window.history.replaceState(null, "", url.toString());
+  return container.dataset.selectedIds.split(",").filter(Boolean);
 }
 
 const PLOTLY_SHOW_ICON = {
@@ -180,31 +161,40 @@ const PLOTLY_HIDE_ICON = {
 
 function buildImageCell(exp) {
   const card = document.createElement("div");
-  card.className = "comparison-card";
+  card.className = "card h-100";
+  const cardBody = document.createElement("div");
+  cardBody.className = "card-body";
   if (exp.loss_image) {
     const img = document.createElement("img");
     img.loading = "lazy";
     img.src = exp.loss_image;
     img.alt = `Loss curves for ${exp.name}`;
-    card.appendChild(img);
+    img.className = "img-fluid rounded border";
+    cardBody.appendChild(img);
   } else {
     const placeholder = document.createElement("div");
-    placeholder.className = "empty-state";
+    placeholder.className = "text-muted fst-italic";
     placeholder.textContent = "metrics/loss_curves.png missing";
-    card.appendChild(placeholder);
+    cardBody.appendChild(placeholder);
   }
+  card.appendChild(cardBody);
   return card;
 }
 
 function buildMetadataCell(exp, index) {
   const card = document.createElement("div");
-  card.className = "comparison-card";
+  card.className = "card h-100";
+  const cardBody = document.createElement("div");
+  cardBody.className = "card-body";
   const pre = document.createElement("pre");
+  pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
+  pre.style.maxHeight = "280px";
   if (index === 0) {
     pre.textContent = exp.metadata;
   } else {
     pre.textContent = exp.metadata_diff || "(no diff)";
   }
-  card.appendChild(pre);
+  cardBody.appendChild(pre);
+  card.appendChild(cardBody);
   return card;
 }
