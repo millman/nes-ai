@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block body %}
+<section class="dashboard-hero">
+    <div>
+        <h2>Experiment Dashboard</h2>
+        <p>Select a run to inspect metrics or open the full experiment grid.</p>
+    </div>
+    <a class="primary-link" href="{{ url_for('experiments_index') }}">Open Experiment Grid</a>
+</section>
+
+{% if experiments %}
+<form class="dashboard-form" action="{{ url_for('comparison') }}" method="get">
+    <div class="dashboard-actions">
+        <button type="submit">Compare selected</button>
+    </div>
+    <table class="dashboard-table">
+        <thead>
+        <tr>
+            <th>Select</th>
+            <th>Title</th>
+            <th>Folder</th>
+            <th>Actions</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for exp in experiments %}
+        {% set title_text = exp.title if exp.title != "Untitled" else "Untitled" %}
+        <tr>
+            <td>
+                <input type="checkbox" name="ids" value="{{ exp.id }}">
+            </td>
+            <td>{{ title_text }}</td>
+            <td><code>{{ exp.name }}</code></td>
+            <td>
+                <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}">Detail view</a>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</form>
+{% else %}
+<p>No experiments found in {{ cfg.output_dir }}.</p>
+{% endif %}
+{% endblock %}

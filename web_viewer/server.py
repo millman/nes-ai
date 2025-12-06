@@ -23,6 +23,7 @@ from .experiments import (
     load_experiment,
     load_loss_curves,
     write_notes,
+    write_title,
 )
 from .plots import build_overlay
 
@@ -50,21 +51,48 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         return experiment
 
     @app.route("/")
-    def index():
+    def dashboard():
+        experiments = _load_all()
+        return render_template(
+            "dashboard.html",
+            experiments=experiments,
+            cfg=cfg,
+            active_nav="dashboard",
+        )
+
+    @app.route("/experiments")
+    def experiments_index():
         experiments = _load_all()
         return render_template(
             "experiments.html",
             experiments=experiments,
             cfg=cfg,
+            active_nav="experiments",
         )
 
     @app.route("/comparison")
     def comparison():
         experiments = _load_all()
+        selected = request.args.get("ids", "")
+        selected_ids = [exp_id for exp_id in selected.split(",") if exp_id]
         return render_template(
             "comparison.html",
             experiments=experiments,
             cfg=cfg,
+            selected_ids=selected_ids,
+            active_nav="comparison",
+        )
+
+    @app.route("/experiments/<exp_id>")
+    def experiment_detail(exp_id: str):
+        experiment = _get_experiment_or_404(exp_id)
+        figure = _build_single_experiment_figure(experiment)
+        return render_template(
+            "experiment_detail.html",
+            experiment=experiment,
+            cfg=cfg,
+            figure=figure,
+            active_nav="detail",
         )
 
     @app.post("/experiments/<exp_id>/notes")
@@ -73,6 +101,15 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         payload = request.get_json(force=True, silent=True) or {}
         new_notes = payload.get("notes", "")
         write_notes(experiment.path / "notes.txt", new_notes)
+        return jsonify({"status": "ok"})
+
+    @app.post("/experiments/<exp_id>/title")
+    def update_title(exp_id: str):
+        experiment = _get_experiment_or_404(exp_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        new_title = payload.get("title", "")
+        metadata_path = experiment.path / "experiment_metadata.txt"
+        write_title(metadata_path, new_title)
         return jsonify({"status": "ok"})
 
     @app.post("/comparison/data")
@@ -91,17 +128,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             }
         )
 
-    @app.route("/assets/<exp_id>/<path:filename>")
-    def serve_asset(exp_id: str, filename: str):
-        experiment = _get_experiment_or_404(exp_id)
-        safe_path = safe_join(str(experiment.path), filename)
-        if safe_path is None:
-            abort(404)
-        target = Path(safe_path)
+    @app.route("/assets/<path:relative_path>")
+    def serve_asset(relative_path: str):
+        target = _resolve_asset_path(cfg.output_dir, relative_path)
         if not target.exists():
             abort(404)
-        directory = target.parent
-        return send_from_directory(directory, target.name)
+        return send_from_directory(str(target.parent), target.name)
 
     return app
 
@@ -114,7 +146,15 @@ def _build_overlay_data(experiments: List[Experiment]):
         curves = load_loss_curves(experiment.loss_csv)
         if curves is None:
             continue
-        curve_map[experiment.name] = curves
+        filtered = {
+            name: values
+            for name, values in curves.series.items()
+            if "loss" in name.lower()
+        }
+        if not filtered:
+            continue
+        label = experiment.title if experiment.title and experiment.title != "Untitled" else experiment.name
+        curve_map[label] = LossCurveData(steps=curves.steps, series=filtered)
     return build_overlay(curve_map)
 
 
@@ -132,11 +172,39 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "id": exp.id,
                 "name": exp.name,
                 "git_commit": exp.git_commit,
+                "title": exp.title,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
-                "loss_image": url_for("serve_asset", exp_id=exp.id, filename="metrics/loss_curves.png")
+                "loss_image": url_for("serve_asset", relative_path=f"{exp.id}/metrics/loss_curves.png")
                 if exp.loss_image
                 else None,
             }
         )
     return rows
+
+
+def _build_single_experiment_figure(experiment: Experiment):
+    if experiment.loss_csv is None:
+        return None
+    curves = load_loss_curves(experiment.loss_csv)
+    if curves is None:
+        return None
+    filtered = {
+        name: values
+        for name, values in curves.series.items()
+        if "loss" in name.lower()
+    }
+    if not filtered:
+        return None
+    loss_curves = LossCurveData(steps=curves.steps, series=filtered)
+    return build_overlay({experiment.title or experiment.name: loss_curves}, include_experiment_in_trace=False)
+
+
+def _resolve_asset_path(root: Path, relative_path: str) -> Path:
+    root_path = root.resolve()
+    target = (root_path / relative_path).resolve()
+    try:
+        target.relative_to(root_path)
+    except ValueError:
+        abort(404)
+    return target

@@ -31,6 +31,7 @@ dependencies = [
     "Pillow",
     "plotly",
     "Flask",
+    "tomli",
     # "plyvel",
     "pydantic",
     "pygame",

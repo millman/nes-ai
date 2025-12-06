@@ -2,6 +2,7 @@
 
 {% block extra_head %}
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script defer src="{{ url_for('static', filename='grid.js') }}"></script>
 <script defer src="{{ url_for('static', filename='comparison.js') }}"></script>
 {% endblock %}
 
@@ -9,12 +10,14 @@
 {% if experiments|length >= 2 %}
 <section class="comparison-controls">
     <label for="comparison-select">Select experiments to compare:</label>
-    <select id="comparison-select" multiple size="8">
+    <select id="comparison-select" multiple size="8" data-selected="{{ selected_ids|join(',') }}">
         {% for exp in experiments %}
-        <option value="{{ exp.id }}">{{ exp.name }}</option>
+        {% set label_title = exp.title if exp.title != "Untitled" else "Untitled" %}
+        {% set selected = "selected" if exp.id in selected_ids else "" %}
+        <option value="{{ exp.id }}" {{ selected }}>{{ label_title }} ({{ exp.name }})</option>
         {% endfor %}
     </select>
-    <button id="comparison-run">Compare</button>
+    <button type="button" id="comparison-run">Compare</button>
     <p class="hint">Hold Cmd/Ctrl to select multiple runs. A minimum of two is required.</p>
 </section>
 <section class="plot-wrapper">

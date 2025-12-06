@@ -10,9 +10,11 @@
 <body>
     <header class="app-header">
         <h1>JEPA Experiment Viewer</h1>
+        {% set current_nav = active_nav | default('') %}
         <nav>
-            <a href="{{ url_for('index') }}">Experiments</a>
-            <a href="{{ url_for('comparison') }}">A/B Comparison</a>
+            <a href="{{ url_for('dashboard') }}" class="{{ 'active' if current_nav == 'dashboard' else '' }}">Dashboard</a>
+            <a href="{{ url_for('experiments_index') }}" class="{{ 'active' if current_nav in ['experiments', 'detail'] else '' }}">Experiments</a>
+            <a href="{{ url_for('comparison') }}" class="{{ 'active' if current_nav == 'comparison' else '' }}">A/B Comparison</a>
         </nav>
     </header>
     <main>

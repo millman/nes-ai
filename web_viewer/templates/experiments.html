@@ -9,16 +9,16 @@
 <table class="exp-table">
     <thead>
     <tr>
-        <th>Notes</th>
-        <th>Experiment</th>
-        <th>metadata.txt</th>
-        <th>metrics/loss_curves.png</th>
+        <th data-col-id="notes">Notes</th>
+        <th data-col-id="name">Experiment</th>
+        <th data-col-id="metadata">metadata.txt</th>
+        <th data-col-id="image">metrics/loss_curves.png</th>
     </tr>
     </thead>
     <tbody>
     {% for exp in experiments %}
     <tr data-exp-id="{{ exp.id }}">
-        <td class="notes-cell">
+        <td class="notes-cell" data-col-id="notes">
             <form class="notes-form" data-exp-id="{{ exp.id }}">
                 <textarea rows="6" placeholder="Add experiment notes...">{{- exp.notes_text -}}</textarea>
                 <div class="notes-actions">
@@ -27,16 +27,29 @@
                 </div>
             </form>
         </td>
-        <td>
+        <td data-col-id="name">
+            <form class="title-form" data-exp-id="{{ exp.id }}">
+                {% set title_value = "" if exp.title == "Untitled" else exp.title %}
+                <input
+                    type="text"
+                    class="exp-title-input"
+                    value="{{ title_value }}"
+                    placeholder="Untitled"
+                    aria-label="Experiment title"
+                >
+                <span class="title-status" aria-live="polite"></span>
+            </form>
             <div class="exp-name">{{ exp.name }}</div>
             <div class="exp-commit">{{ exp.git_commit }}</div>
         </td>
-        <td>
+        <td data-col-id="metadata">
             <pre class="metadata-block">{{ exp.metadata_text }}</pre>
         </td>
-        <td class="image-cell">
+        <td class="image-cell" data-col-id="image">
             {% if exp.loss_image %}
-            <img src="{{ url_for('serve_asset', exp_id=exp.id, filename='metrics/loss_curves.png') }}" alt="Loss curves for {{ exp.name }}">
+            <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}" class="loss-link">
+                <img src="{{ url_for('serve_asset', relative_path=exp.id ~ '/metrics/loss_curves.png') }}" alt="Loss curves for {{ exp.name }}">
+            </a>
             {% else %}
             <div class="empty-state">metrics/loss_curves.png missing</div>
             {% endif %}

@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import csv
+import tomli
+import tomli_w
 
 ALL_ZERO_EPS = 1e-12
 
@@ -20,6 +22,7 @@ class Experiment:
     git_metadata_text: str
     git_commit: str
     notes_text: str
+    title: str
     loss_image: Optional[Path]
     loss_csv: Optional[Path]
 
@@ -54,10 +57,12 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     loss_png = metrics_dir / "loss_curves.png"
     loss_csv = _resolve_loss_csv(metrics_dir)
     notes_path = path / "notes.txt"
+    metadata_custom_path = path / "experiment_metadata.txt"
     metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
     git_metadata_text = metadata_git_path.read_text() if metadata_git_path.exists() else "metadata_git.txt missing."
     git_commit = _extract_git_commit(git_metadata_text)
     notes_text = _read_or_create_notes(notes_path)
+    title = _read_title(metadata_custom_path)
     return Experiment(
         id=path.name,
         name=path.name,
@@ -66,6 +71,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         git_metadata_text=git_metadata_text,
         git_commit=git_commit or "Unknown commit",
         notes_text=notes_text,
+        title=title,
         loss_image=loss_png if loss_png.exists() else None,
         loss_csv=loss_csv if loss_csv and loss_csv.exists() else None,
     )
@@ -107,11 +113,31 @@ def write_notes(path: Path, text: str) -> None:
     path.write_text(normalized)
 
 
+def write_title(path: Path, title: str) -> None:
+    clean = title.strip()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"title": clean or "Untitled"}
+    path.write_text(tomli_w.dumps(payload))
+
+
 def _read_or_create_notes(path: Path) -> str:
     if not path.exists():
         path.write_text("")
         return ""
     return path.read_text()
+
+
+def _read_title(path: Path) -> str:
+    if not path.exists():
+        return "Untitled"
+    try:
+        data = tomli.loads(path.read_text())
+    except (tomli.TOMLDecodeError, OSError):
+        return "Untitled"
+    title = data.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return "Untitled"
 
 
 def _extract_git_commit(metadata_git_text: str) -> str:
