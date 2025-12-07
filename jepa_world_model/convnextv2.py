@@ -410,4 +410,6 @@ class ConvNeXtV2Decoder(nn.Module):
             "upsample": up_info,
             "final_target": (self.image_size, self.image_size, self.image_channels),
             "detail_skip": (self.image_size // 2, self.image_size // 2, self.channel_schedule[0]),
+            "pre_resize": (final_hw, final_hw, self.image_channels),
+            "needs_resize": final_hw != self.image_size,
         }
