@@ -51,12 +51,80 @@
 }
 
 /* Metadata block - fit content width */
+.metadata-wrapper {
+    height: 300px;
+    overflow: auto;
+    width: 100%;
+}
+
+.metadata-wrapper.expanded {
+    height: auto;
+}
+
 .metadata-block {
     width: max-content;
     max-width: 100%;
 }
 
-/* Image cell object-fit */
-.image-cell img {
-    object-fit: contain;
+.experiment-cell {
+    overflow-x: auto;
+}
+
+.title-input-group {
+    max-width: 100%;
+    position: relative;
+}
+
+.title-input-group::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0 10px 10px 0;
+    border-color: transparent #cbd5f5 transparent transparent;
+    opacity: 0.6;
+}
+
+.title-input-group:hover::after {
+    border-color: transparent #94a3b8 transparent transparent;
+    opacity: 1;
+}
+
+.title-form {
+    margin-bottom: 0.25rem;
+}
+
+.title-form .exp-title-input {
+    background-color: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    cursor: pointer;
+    padding-left: 0;
+}
+
+.title-form .exp-title-input:not([readonly]) {
+    background-color: #fff;
+    border-color: #ced4da;
+    cursor: text;
+    padding-left: 0.5rem;
+}
+
+
+.title-input-group:hover .exp-title-input[readonly] {
+    background-color: #f8fafc;
+}
+
+.notes-form textarea,
+.metadata-block {
+    font-size: 0.9rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.notes-form textarea {
+    width: 100%;
+    height: 100%;
+    resize: none;
 }

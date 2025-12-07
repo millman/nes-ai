@@ -78,17 +78,20 @@ function buildNameCell(exp) {
   const form = document.createElement("form");
   form.className = "title-form mb-2";
   form.dataset.expId = exp.id;
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "input-group input-group-sm title-input-group";
   const input = document.createElement("input");
   input.type = "text";
-  input.className = "form-control form-control-sm font-monospace exp-title-input";
+  input.className = "form-control form-control-sm exp-title-input";
   input.placeholder = "Untitled";
   if (exp.title && exp.title !== "Untitled") {
     input.value = exp.title;
   }
+  input.readOnly = true;
   const status = document.createElement("span");
   status.className = "title-status small text-muted";
   status.setAttribute("aria-live", "polite");
-  form.appendChild(input);
+  form.appendChild(titleGroup);
   form.appendChild(status);
   const name = document.createElement("div");
   name.className = "fw-semibold";

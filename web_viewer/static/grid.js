@@ -2,6 +2,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const forms = document.querySelectorAll(".notes-form");
   forms.forEach((form) => wireNotesForm(form));
   wireTitleForms(document);
+  wireMetadataToggles(document);
 });
 
 function wireNotesForm(form) {
@@ -71,10 +72,28 @@ function wireTitleForm(form) {
   const expId = form.dataset.expId;
   const input = form.querySelector(".exp-title-input");
   const status = form.querySelector(".title-status");
+  const group = form.querySelector(".title-input-group");
   if (!input) {
     return;
   }
+  input.readOnly = true;
   let lastValue = input.value;
+  let editing = false;
+  const enterEdit = () => {
+    if (editing) {
+      return;
+    }
+    editing = true;
+    input.readOnly = false;
+    form.classList.add("editing");
+    input.focus();
+    input.select();
+  };
+  const exitEdit = () => {
+    editing = false;
+    input.readOnly = true;
+    form.classList.remove("editing");
+  };
   const updateState = () => {
     if (input.value !== lastValue) {
       status.textContent = "Unsaved";
@@ -83,7 +102,12 @@ function wireTitleForm(form) {
     }
   };
   const save = () => {
+    if (!editing) {
+      return;
+    }
     if (input.value === lastValue) {
+      exitEdit();
+      status.textContent = "";
       return;
     }
     status.textContent = "Saving…";
@@ -101,22 +125,72 @@ function wireTitleForm(form) {
       .then(() => {
         lastValue = input.value;
         status.textContent = "Saved";
+        exitEdit();
       })
       .catch(() => {
         status.textContent = "Save failed";
+        input.readOnly = false;
+        form.classList.add("editing");
+        editing = true;
       });
   };
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     save();
   });
-  input.addEventListener("input", updateState);
-  input.addEventListener("blur", save);
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
+  input.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!editing) {
+      enterEdit();
+    }
+  });
+  group?.addEventListener("keydown", (event) => {
+    if (!editing && event.key === "Enter") {
       event.preventDefault();
+      enterEdit();
+    }
+  });
+  input.addEventListener("input", updateState);
+  input.addEventListener("blur", () => {
+    if (editing) {
       save();
     }
   });
+  input.addEventListener("keydown", (event) => {
+    if (!editing) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        enterEdit();
+      }
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      save();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      input.value = lastValue;
+      exitEdit();
+      status.textContent = "";
+    }
+  });
   updateState();
+}
+
+function wireMetadataToggles(root) {
+  const buttons = root.querySelectorAll(".metadata-toggle");
+  buttons.forEach((button) => {
+    const targetId = button.dataset.target;
+    if (!targetId) {
+      return;
+    }
+    const wrapper = root.querySelector(`.metadata-wrapper[data-exp-id="${targetId}"]`);
+    if (!wrapper) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      const expanded = wrapper.classList.toggle("expanded");
+      button.textContent = expanded ? "Collapse" : "Expand";
+    });
+  });
 }

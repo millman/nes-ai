@@ -73,8 +73,13 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     @app.route("/comparison")
     def comparison():
         experiments = _load_all()
-        selected = request.args.get("ids", "")
-        selected_ids = [exp_id for exp_id in selected.split(",") if exp_id]
+        raw_ids = request.args.getlist("ids")
+        if not raw_ids:
+            ids_param = request.args.get("ids", "")
+            raw_ids = ids_param.split(",") if ids_param else []
+        selected_ids = [exp_id for exp_id in raw_ids if exp_id]
+        if len(selected_ids) < 2 and len(experiments) >= 2:
+            selected_ids = [exp.id for exp in experiments[:2]]
         selected_map = {exp.id: exp for exp in experiments if exp.id in selected_ids}
         return render_template(
             "comparison.html",

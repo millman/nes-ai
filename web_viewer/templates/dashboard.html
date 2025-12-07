@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 
+{% block extra_head %}
+<script defer src="{{ url_for('static', filename='grid.js') }}"></script>
+{% endblock %}
+
 {% block body %}
 <div class="card mb-4">
     <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-3">
@@ -12,9 +16,8 @@
 </div>
 
 {% if experiments %}
-<form action="{{ url_for('comparison') }}" method="get">
-    <div class="mb-3 text-end">
-        <button type="submit" class="btn btn-primary">Compare selected</button>
+<div class="mb-3 text-end">
+        <button type="button" id="dashboard-compare" class="btn btn-primary">Compare selected</button>
     </div>
     <div class="table-responsive">
         <table class="table table-sm table-hover">
@@ -34,13 +37,21 @@
                     <input class="form-check-input" type="checkbox" name="ids" value="{{ exp.id }}">
                 </td>
                 <td>
-                    {% if title_text %}
-                        {{ title_text }}
-                    {% else %}
-                        <span class="text-muted">Untitled</span>
-                    {% endif %}
+                    <form class="title-form" data-exp-id="{{ exp.id }}">
+                        <div class="input-group input-group-sm title-input-group">
+                            <input
+                                type="text"
+                                class="form-control form-control-sm exp-title-input"
+                                value="{{ title_text }}"
+                                placeholder="Untitled"
+                                aria-label="Experiment title"
+                                readonly
+                            >
+                        </div>
+                        <span class="title-status small text-muted" aria-live="polite"></span>
+                    </form>
                 </td>
-                <td><code>{{ exp.name }}</code></td>
+                <td><span class="font-monospace text-reset">{{ exp.name }}</span></td>
                 <td>
                     <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}" class="btn btn-outline-secondary btn-sm">Detail view</a>
                 </td>
@@ -49,7 +60,26 @@
             </tbody>
         </table>
     </div>
-</form>
+{% block extra_scripts %}
+{{ super() }}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const button = document.getElementById("dashboard-compare");
+  if (!button) return;
+  button.addEventListener("click", () => {
+    const ids = Array.from(document.querySelectorAll("input[name='ids']:checked"))
+      .map((input) => input.value);
+    if (ids.length < 2) {
+      alert("Select at least two experiments to compare.");
+      return;
+    }
+    const params = new URLSearchParams();
+    ids.forEach((id) => params.append("ids", id));
+    window.location = "{{ url_for('comparison') }}" + "?" + params.toString();
+  });
+});
+</script>
+{% endblock %}
 {% else %}
 <div class="alert alert-info">No experiments found in {{ cfg.output_dir }}.</div>
 {% endif %}
