@@ -24,6 +24,8 @@ from datetime import datetime
 from recon.data import list_trajectories, load_frame_as_tensor
 from nes_controller import _describe_controller_vector, _describe_controller_vector_compact
 from utils.device_utils import pick_device
+from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
+from jepa_world_model.convnextv2 import ConvNeXtV2Decoder, ConvNeXtV2Encoder
 from jepa_world_model.loss import HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
 from jepa_world_model.metadata import write_run_metadata
 from jepa_world_model.vis import (
@@ -37,92 +39,16 @@ from jepa_world_model.vis import (
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
 
 
+
 # ------------------------------------------------------------
 # Model components
 # ------------------------------------------------------------
 
+Encoder = ConvNeXtV2Encoder
+VisualizationDecoder = ConvNeXtV2Decoder
+LegacyEncoder = ConvEncoder
+LegacyVisualizationDecoder = ConvVisualizationDecoder
 
-def _norm_groups(out_ch: int) -> int:
-    return max(1, out_ch // 8)
-
-
-class DownBlock(nn.Module):
-    """Conv block with stride-2 contraction followed by local refinement."""
-
-    def __init__(self, in_ch: int, out_ch: int) -> None:
-        super().__init__()
-        groups = _norm_groups(out_ch)
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(groups, out_ch),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, out_ch),
-            nn.SiLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-class UpBlock(nn.Module):
-    """ConvTranspose block that mirrors DownBlock with stride-2 expansion."""
-
-    def __init__(self, in_ch: int, out_ch: int) -> None:
-        super().__init__()
-        groups = _norm_groups(out_ch)
-        self.net = nn.Sequential(
-            nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2),
-            nn.GroupNorm(groups, out_ch),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, out_ch),
-            nn.SiLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-class Encoder(nn.Module):
-    def __init__(self, in_channels: int, schedule: Tuple[int, ...], input_hw: int):
-        super().__init__()
-        blocks: List[nn.Module] = []
-        ch_prev = in_channels
-        for ch in schedule:
-            blocks.append(DownBlock(ch_prev, ch))
-            ch_prev = ch
-        self.blocks = nn.Sequential(*blocks)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.in_channels = in_channels
-        self.channel_schedule = schedule
-        self.input_hw = input_hw
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feats = self.blocks(x)
-        return self.pool(feats).flatten(1)
-
-    def shape_info(self) -> Dict[str, Any]:
-        info: Dict[str, Any] = {
-            "module": "Encoder",
-            "input": (self.input_hw, self.input_hw, self.in_channels),
-            "stages": [],
-        }
-        h = self.input_hw
-        w = self.input_hw
-        c = self.in_channels
-        for idx, out_ch in enumerate(self.channel_schedule, start=1):
-            next_h = max(1, h // 2)
-            next_w = max(1, w // 2)
-            stage = {
-                "stage": idx,
-                "in": (h, w, c),
-                "out": (next_h, next_w, out_ch),
-            }
-            info["stages"].append(stage)
-            h, w, c = next_h, next_w, out_ch
-        info["latent_dim"] = self.channel_schedule[-1] if self.channel_schedule else c
-        return info
 
 
 class PredictorNetwork(nn.Module):
@@ -213,88 +139,6 @@ class ActionFiLM(nn.Module):
             out = layer(out, action_embed)
             out = self.act(out)
         return out
-
-
-class VisualizationDecoder(nn.Module):
-    def __init__(
-        self,
-        latent_dim: int,
-        image_channels: int,
-        image_size: int,
-        channel_schedule: Tuple[int, ...],
-        latent_hw: int,
-    ) -> None:
-        super().__init__()
-        if not channel_schedule:
-            raise ValueError("channel_schedule must be non-empty for decoder construction.")
-        scale = 2 ** len(channel_schedule)
-        if image_size % scale != 0:
-            raise ValueError(
-                f"image_size={image_size} must be divisible by 2**len(channel_schedule)={scale} "
-                "so the decoder can mirror the encoder."
-            )
-        expected_hw = image_size // scale
-        if latent_hw != expected_hw:
-            raise ValueError(
-                f"latent_hw must equal image_size // 2**len(channel_schedule) ({expected_hw}), "
-                f"got {latent_hw}. Adjust ModelConfig.latent_hw or image_size."
-            )
-        self.start_hw = expected_hw
-        self.start_ch = channel_schedule[-1]
-        self.image_channels = image_channels
-        self.image_size = image_size
-
-        self.project = nn.Sequential(
-            nn.Linear(latent_dim, self.start_ch * self.start_hw * self.start_hw),
-            nn.SiLU(inplace=True),
-        )
-        up_blocks: List[nn.Module] = []
-        in_ch = self.start_ch
-        for out_ch in reversed(channel_schedule):
-            up_blocks.append(UpBlock(in_ch, out_ch))
-            in_ch = out_ch
-        self.up_blocks = nn.Sequential(*up_blocks)
-        head_hidden = max(in_ch // 2, 1)
-        self.head = nn.Sequential(
-            nn.Conv2d(in_ch, head_hidden, kernel_size=3, padding=1),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(head_hidden, image_channels, kernel_size=1),
-        )
-        self.channel_schedule = channel_schedule
-        self.latent_hw = latent_hw
-
-    def forward(self, latent: torch.Tensor) -> torch.Tensor:
-        original_shape = latent.shape[:-1]
-        latent = latent.reshape(-1, latent.shape[-1])
-        projected = self.project(latent)
-        decoded = projected.view(-1, self.start_ch, self.start_hw, self.start_hw)
-        decoded = self.up_blocks(decoded)
-        frame = self.head(decoded)
-        frame = frame.view(*original_shape, self.image_channels, self.image_size, self.image_size)
-        return frame
-
-    def shape_info(self) -> Dict[str, Any]:
-        info: Dict[str, Any] = {
-            "module": "Decoder",
-            "projection": (self.start_hw, self.start_hw, self.start_ch),
-            "upsample": [],
-            "final_target": (self.image_size, self.image_size, self.image_channels),
-        }
-        hw = self.start_hw
-        ch = self.start_ch
-        for idx, out_ch in enumerate(reversed(self.channel_schedule), start=1):
-            prev_hw = hw
-            hw = max(1, hw * 2)
-            stage = {
-                "stage": idx,
-                "in": (prev_hw, prev_hw, ch),
-                "out": (hw, hw, out_ch),
-            }
-            info["upsample"].append(stage)
-            ch = out_ch
-        info["pre_resize"] = (hw, hw, self.image_channels)
-        info["needs_resize"] = hw != self.image_size
-        return info
 
 
 RECON_LOSS = HardnessWeightedL1Loss()
@@ -487,12 +331,15 @@ class JEPAWorldModel(nn.Module):
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
         embeddings: List[torch.Tensor] = []
+        detail_skips: List[torch.Tensor] = []
         for step in range(t):
             current = images[:, step]
-            feats = self.encoder(current)
-            embeddings.append(feats)
+            pooled, detail = self.encoder(current)
+            embeddings.append(pooled)
+            detail_skips.append(detail)
         return {
             "embeddings": torch.stack(embeddings, dim=1),
+            "detail_skip": torch.stack(detail_skips, dim=1),
         }
 
 
@@ -633,7 +480,7 @@ def training_step(
     need_recon = weights.recon > 0 or track_hard_examples
     recon: Optional[torch.Tensor] = None
     if need_recon:
-        recon = decoder(outputs["embeddings"])
+        recon = decoder(outputs["embeddings"], outputs.get("detail_skip"))
 
     # Core JEPA + action prediction losses.
     loss_jepa_raw, action_logits = jepa_loss(model, outputs, actions)
@@ -1276,7 +1123,7 @@ def _render_visualization_batch(
         raise ValueError("Visualization batch must include at least two frames.")
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
-    decoded_frames = decoder(vis_embeddings)
+    decoded_frames = decoder(vis_embeddings, vis_outputs.get("detail_skip"))
     batch_size = vis_frames.shape[0]
     min_start = 0
     target_window = max(2, rollout_steps + 1)
@@ -1316,7 +1163,7 @@ def _render_visualization_batch(
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
             delta_embed, _ = model.predictor(current_embed, action)
             next_embed = current_embed + delta_embed
-            decoded_next = decoder(next_embed)[0]
+            decoded_next = decoder(next_embed, None)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
                 gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
