@@ -282,6 +282,7 @@ class TrainConfig:
     lr: float = 1e-4
     weight_decay: float = 0.03
     device: Optional[str] = "mps"
+    decoder_skip_dropout: float = 0.5
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
@@ -479,7 +480,11 @@ def training_step(
     need_recon = weights.recon > 0 or track_hard_examples
     recon: Optional[torch.Tensor] = None
     if need_recon:
-        recon = decoder(outputs["embeddings"], outputs.get("detail_skip"))
+        detail_skip = outputs.get("detail_skip")
+        if detail_skip is not None and cfg.decoder_skip_dropout > 0.0:
+            if random.random() < cfg.decoder_skip_dropout:
+                detail_skip = None
+        recon = decoder(outputs["embeddings"], detail_skip)
 
     # Core JEPA + action prediction losses.
     loss_jepa_raw, action_logits = jepa_loss(model, outputs, actions)
@@ -1163,6 +1168,7 @@ def _render_visualization_batch(
     selection: Optional[VisualizationSelection] = None,
     show_gradients: bool = False,
     log_deltas: bool = False,
+    decoder_skip_dropout: float = 0.0,
 ) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
@@ -1173,7 +1179,11 @@ def _render_visualization_batch(
         raise ValueError("Visualization batch must include at least two frames.")
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
-    decoded_frames = decoder(vis_embeddings, vis_outputs.get("detail_skip"))
+    detail_skip = vis_outputs.get("detail_skip")
+    if detail_skip is not None and decoder_skip_dropout > 0.0:
+        if random.random() < decoder_skip_dropout:
+            detail_skip = None
+    decoded_frames = decoder(vis_embeddings, detail_skip)
     batch_size = vis_frames.shape[0]
     min_start = 0
     target_window = max(2, rollout_steps + 1)
@@ -1260,6 +1270,8 @@ def _render_visualization_batch(
 def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, demo: bool = True) -> None:
     # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
+    if not 0.0 <= cfg.decoder_skip_dropout <= 1.0:
+        raise ValueError(f"decoder_skip_dropout must be in [0, 1], got {cfg.decoder_skip_dropout}")
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
@@ -1471,6 +1483,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     selection=fixed_selection,
                     show_gradients=cfg.vis.gradient_norms,
                     log_deltas=cfg.vis.log_deltas,
+                    decoder_skip_dropout=cfg.decoder_skip_dropout,
                 )
                 save_rollout_sequence_batch(
                     fixed_vis_dir,
@@ -1491,6 +1504,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     selection=None,
                     show_gradients=cfg.vis.gradient_norms,
                     log_deltas=cfg.vis.log_deltas,
+                    decoder_skip_dropout=cfg.decoder_skip_dropout,
                 )
                 save_rollout_sequence_batch(
                     rolling_vis_dir,

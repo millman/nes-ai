@@ -147,6 +147,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
 def _build_overlay_data(experiments: List[Experiment]):
     curve_map: Dict[str, LossCurveData] = {}
+    trace_ids: Dict[str, str] = {}
     for experiment in experiments:
         if experiment.loss_csv is None:
             continue
@@ -162,7 +163,8 @@ def _build_overlay_data(experiments: List[Experiment]):
             continue
         label = experiment.title if experiment.title and experiment.title != "Untitled" else experiment.name
         curve_map[label] = LossCurveData(steps=curves.steps, series=filtered)
-    return build_overlay(curve_map)
+        trace_ids[label] = experiment.id
+    return build_overlay(curve_map, trace_ids=trace_ids)
 
 
 def _build_comparison_rows(experiments: List[Experiment]):
@@ -180,6 +182,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "name": exp.name,
                 "git_commit": exp.git_commit,
                 "title": exp.title,
+                "rollout_steps": exp.rollout_steps,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
                 "loss_image": url_for("serve_asset", relative_path=f"{exp.id}/metrics/loss_curves.png")
@@ -204,7 +207,8 @@ def _build_single_experiment_figure(experiment: Experiment):
     if not filtered:
         return None
     loss_curves = LossCurveData(steps=curves.steps, series=filtered)
-    return build_overlay({experiment.title or experiment.name: loss_curves}, include_experiment_in_trace=False)
+    label = experiment.title or experiment.name
+    return build_overlay({label: loss_curves}, include_experiment_in_trace=False, trace_ids={label: experiment.id})
 
 
 def _resolve_asset_path(root: Path, relative_path: str) -> Path:

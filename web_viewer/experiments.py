@@ -25,6 +25,7 @@ class Experiment:
     title: str
     loss_image: Optional[Path]
     loss_csv: Optional[Path]
+    rollout_steps: List[int]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -63,6 +64,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     git_commit = _extract_git_commit(git_metadata_text)
     notes_text = _read_or_create_notes(notes_path)
     title = _read_title(metadata_custom_path)
+    rollout_steps = _collect_rollout_steps(path)
     return Experiment(
         id=path.name,
         name=path.name,
@@ -74,6 +76,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         title=title,
         loss_image=loss_png if loss_png.exists() else None,
         loss_csv=loss_csv if loss_csv and loss_csv.exists() else None,
+        rollout_steps=rollout_steps,
     )
 
 
@@ -164,6 +167,20 @@ def _resolve_loss_csv(metrics_dir: Path) -> Optional[Path]:
     if legacy.exists():
         return legacy
     return None
+
+
+def _collect_rollout_steps(root: Path) -> List[int]:
+    steps: set[int] = set()
+    for png in root.glob("vis_fixed_*/rollout_*.png"):
+        stem = png.stem
+        if not stem.startswith("rollout_"):
+            continue
+        suffix = stem[len("rollout_") :]
+        try:
+            steps.add(int(suffix))
+        except ValueError:
+            continue
+    return sorted(steps)
 
 
 def _is_all_zero(values: Iterable[float]) -> bool:

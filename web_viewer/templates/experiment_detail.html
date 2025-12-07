@@ -10,20 +10,124 @@
 {% set heading_title = experiment.title if experiment.title != "Untitled" else "Untitled" %}
 <h2 class="mb-4">{{ heading_title }} <small class="text-muted">({{ experiment.name }})</small></h2>
 
-<div class="card mb-4">
+<div class="card mb-3">
     <div class="card-body">
         <div id="detail-plot" class="plot-area">
             {% if figure %}
             <script>
                 document.addEventListener("DOMContentLoaded", () => {
                     const figure = {{ figure|tojson }};
-                    Plotly.react("detail-plot", figure.data, figure.layout, figure.config || {});
+                    const rolloutSteps = {{ experiment.rollout_steps|tojson }};
+                    const plotEl = document.getElementById("detail-plot");
+                    Plotly.react(plotEl, figure.data, figure.layout, figure.config || {}).then(() => {
+                        attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps);
+                    });
                 });
+                function attachRolloutPreview(plotEl, expId, previewId, steps) {
+                    const preview = document.getElementById(previewId);
+                    if (!plotEl || !preview || typeof Plotly === "undefined") {
+                        return;
+                    }
+                    const ensurePreviewStructure = () => {
+                        if (preview.dataset.initialized === "1") {
+                            return;
+                        }
+                        preview.innerHTML = `
+                            <div class="small text-muted mb-1 rollout-path">Hover a point to preview rollout.</div>
+                            <img class="img-fluid rounded border rollout-img d-none" alt="Rollout preview">
+                            <div class="text-muted fst-italic rollout-missing d-none">No rollout image available.</div>
+                        `;
+                        preview.dataset.initialized = "1";
+                    };
+                    ensurePreviewStructure();
+                    const pathEl = () => preview.querySelector(".rollout-path");
+                    const imgEl = () => preview.querySelector(".rollout-img");
+                    const missingEl = () => preview.querySelector(".rollout-missing");
+                    const nearestStep = (target, list) => {
+                        if (!Array.isArray(list) || list.length === 0) {
+                            return null;
+                        }
+                        let best = null;
+                        for (let i = 0; i < list.length; i++) {
+                            const step = list[i];
+                            if (step > target) {
+                                continue;
+                            }
+                            if (best === null || step > best) {
+                                best = step;
+                            }
+                        }
+                        return best;
+                    };
+                    const render = (step) => {
+                        const target = Math.max(0, Math.round(step));
+                        const matched = nearestStep(target, steps);
+                        if (matched === null) {
+                            const miss = missingEl();
+                            const img = imgEl();
+                            const path = pathEl();
+                            if (path) {
+                                path.textContent = "No rollout images available.";
+                            }
+                            if (img) {
+                                img.classList.add("d-none");
+                            }
+                            if (miss) {
+                                miss.textContent = "No rollout images available.";
+                                miss.classList.remove("d-none");
+                            }
+                            return;
+                        }
+                        const filename = `rollout_${matched.toString().padStart(7, "0")}.png`;
+                        // Rollouts are saved under vis_fixed_<idx>/, use the first sample (0) for preview.
+                        const src = `/assets/${expId}/vis_fixed_0/${filename}`;
+                        const path = pathEl();
+                        const img = imgEl();
+                        const miss = missingEl();
+                        if (path) {
+                            path.textContent = `vis_fixed_0/${filename} (hovered ${target}, showing ${matched})`;
+                        }
+                        if (img) {
+                            img.src = src;
+                            img.alt = `Rollout ${matched}`;
+                            img.dataset.step = String(matched);
+                            img.classList.remove("d-none");
+                            img.onerror = () => {
+                                img.classList.add("d-none");
+                                if (miss) {
+                                    miss.textContent = `No rollout image for step ${matched}`;
+                                    miss.classList.remove("d-none");
+                                }
+                            };
+                            img.onload = () => {
+                                if (miss) {
+                                    miss.classList.add("d-none");
+                                }
+                            };
+                        }
+                        if (miss) {
+                            miss.classList.add("d-none");
+                        }
+                    };
+                    plotEl.on("plotly_hover", (event) => {
+                        const point = event?.points?.[0];
+                        if (!point || typeof point.x === "undefined") {
+                            return;
+                        }
+                        render(point.x);
+                    });
+                }
             </script>
             {% else %}
             <p class="text-muted fst-italic">No metrics available for this experiment.</p>
             {% endif %}
         </div>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div id="detail-rollout-preview" class="mt-0"></div>
     </div>
 </div>
 

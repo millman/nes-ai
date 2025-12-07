@@ -7,11 +7,17 @@ import plotly.graph_objects as go
 from .experiments import LossCurveData
 
 
-def build_overlay(curves: Dict[str, LossCurveData], include_experiment_in_trace: bool = True) -> Optional[Dict]:
+def build_overlay(
+    curves: Dict[str, LossCurveData],
+    include_experiment_in_trace: bool = True,
+    trace_ids: Optional[Dict[str, str]] = None,
+) -> Optional[Dict]:
     if not curves:
         return None
     fig = go.Figure()
     for exp_name, curve in curves.items():
+        exp_id = trace_ids.get(exp_name) if trace_ids else None
+        customdata = [exp_id] * len(curve.steps) if exp_id is not None else None
         for metric_name, values in curve.series.items():
             fig.add_trace(
                 go.Scatter(
@@ -19,6 +25,8 @@ def build_overlay(curves: Dict[str, LossCurveData], include_experiment_in_trace:
                     y=values,
                     mode="lines",
                     name=f"{exp_name}: {metric_name}" if include_experiment_in_trace else metric_name,
+                    customdata=customdata,
+                    hovertemplate="%{y}<extra></extra>",
                 )
             )
     fig.update_layout(
