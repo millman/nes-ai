@@ -9,20 +9,20 @@
 {% block body %}
 {% if selected_ids|length >= 2 %}
 <div class="mb-4">
-    <div class="card mb-3">
-        <div class="card-body">
-            <h5 class="card-title">Comparing</h5>
-            <ul class="list-unstyled mb-2">
-                {% for exp_id in selected_ids %}
-                {% set exp = selected_map.get(exp_id) %}
-                {% if exp %}
-                {% set title_text = exp.title if exp.title != "Untitled" else exp.name %}
-                <li>{{ title_text }}</li>
-                {% endif %}
-                {% endfor %}
-            </ul>
-            <p class="text-muted small mb-0">Adjust the comparison by updating the URL: <code>?ids=expA,expB</code></p>
+    <div class="row g-3">
+        {% for exp_id in selected_ids %}
+        {% set exp = selected_map.get(exp_id) %}
+        {% if exp %}
+        {% set title_text = exp.title if exp.title != "Untitled" else exp.name %}
+        <div class="col">
+            <div class="card">
+                <div class="card-body">
+                    <div class="fw-semibold">{{ title_text }}</div>
+                </div>
+            </div>
         </div>
+        {% endif %}
+        {% endfor %}
     </div>
 </div>
 

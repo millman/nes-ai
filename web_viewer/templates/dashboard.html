@@ -26,6 +26,7 @@
                 <th>Select</th>
                 <th>Title</th>
                 <th>Folder</th>
+                <th>Steps</th>
                 <th>Actions</th>
             </tr>
             </thead>
@@ -52,6 +53,13 @@
                     </form>
                 </td>
                 <td><span class="font-monospace text-reset">{{ exp.name }}</span></td>
+                <td>
+                    {% if exp.max_step is not none %}
+                    {{ "{:,}".format(exp.max_step) }}
+                    {% else %}
+                    <span class="text-muted">—</span>
+                    {% endif %}
+                </td>
                 <td>
                     <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}" class="btn btn-outline-secondary btn-sm">Detail view</a>
                 </td>

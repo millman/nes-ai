@@ -26,6 +26,7 @@ class Experiment:
     loss_image: Optional[Path]
     loss_csv: Optional[Path]
     rollout_steps: List[int]
+    max_step: Optional[int]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -65,6 +66,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     notes_text = _read_or_create_notes(notes_path)
     title = _read_title(metadata_custom_path)
     rollout_steps = _collect_rollout_steps(path)
+    max_step = _get_max_step(loss_csv) if loss_csv and loss_csv.exists() else None
     return Experiment(
         id=path.name,
         name=path.name,
@@ -77,6 +79,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         loss_image=loss_png if loss_png.exists() else None,
         loss_csv=loss_csv if loss_csv and loss_csv.exists() else None,
         rollout_steps=rollout_steps,
+        max_step=max_step,
     )
 
 
@@ -181,6 +184,28 @@ def _collect_rollout_steps(root: Path) -> List[int]:
         except ValueError:
             continue
     return sorted(steps)
+
+
+def _get_max_step(csv_path: Path) -> Optional[int]:
+    """Get the maximum step value from the loss CSV file."""
+    if not csv_path.exists():
+        return None
+    try:
+        with csv_path.open("r", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "step" not in reader.fieldnames:
+                return None
+            max_step = None
+            for row in reader:
+                try:
+                    step = int(float(row.get("step", 0)))
+                    if max_step is None or step > max_step:
+                        max_step = step
+                except (ValueError, TypeError):
+                    continue
+            return max_step
+    except (OSError, csv.Error):
+        return None
 
 
 def _is_all_zero(values: Iterable[float]) -> bool:

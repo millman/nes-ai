@@ -62,44 +62,92 @@ function renderComparison(payload) {
 }
 
 function buildExperimentGrid(experiments) {
+  const container = document.createElement("div");
+  container.className = "d-flex flex-column gap-4";
+
+  // Row 1: Preview section
+  const previewRow = buildSectionRow(
+    "Rollout Preview",
+    experiments,
+    (exp) => buildPreviewCell(exp)
+  );
+  container.appendChild(previewRow);
+
+  // Row 2: Title/path/git section
+  const infoRow = buildSectionRow(
+    "Experiment Info",
+    experiments,
+    (exp, index) => buildInfoCell(exp, index)
+  );
+  container.appendChild(infoRow);
+
+  // Row 3: Loss curves section
+  const lossRow = buildSectionRow(
+    "Loss Curves",
+    experiments,
+    (exp) => buildLossImageCell(exp)
+  );
+  container.appendChild(lossRow);
+
+  // Row 4: Metadata section
+  const metaRow = buildSectionRow(
+    "Metadata",
+    experiments,
+    (exp, index) => buildMetadataCell(exp, index)
+  );
+  container.appendChild(metaRow);
+
+  return container;
+}
+
+function buildSectionRow(title, experiments, cellBuilder) {
   const row = document.createElement("div");
   row.className = "row g-3";
+
   experiments.forEach((exp, index) => {
     const col = document.createElement("div");
     col.className = "col";
-    col.appendChild(buildExperimentColumn(exp, index));
+    const cell = cellBuilder(exp, index);
+    col.appendChild(cell);
     row.appendChild(col);
   });
+
   return row;
 }
 
-function buildExperimentColumn(exp, index) {
-  const card = document.createElement("div");
-  card.className = "card h-100";
-  // Preview section
-  const previewBody = document.createElement("div");
-  previewBody.className = "card-body p-2 rollout-preview";
-  previewBody.dataset.expId = exp.id;
+function buildPreviewCell(exp) {
+  const container = document.createElement("div");
+  container.className = "rollout-preview";
+  container.dataset.expId = exp.id;
+
   const path = document.createElement("div");
   path.className = "small text-muted mb-1 rollout-path";
   path.textContent = "Hover a point to preview rollout.";
+
   const img = document.createElement("img");
   img.className = "img-fluid rounded border rollout-img d-none";
   img.alt = "Rollout preview";
+
   const missing = document.createElement("div");
   missing.className = "text-muted fst-italic rollout-missing d-none";
   missing.textContent = "No rollout image available.";
-  previewBody.appendChild(path);
-  previewBody.appendChild(img);
-  previewBody.appendChild(missing);
-  // Title/path/git section
-  const infoBody = document.createElement("div");
-  infoBody.className = "card-body";
+
+  container.appendChild(path);
+  container.appendChild(img);
+  container.appendChild(missing);
+  return container;
+}
+
+function buildInfoCell(exp, index) {
+  const container = document.createElement("div");
+
   const form = document.createElement("form");
   form.className = "title-form mb-2";
   form.dataset.expId = exp.id;
+
   const group = document.createElement("div");
   group.className = "input-group input-group-sm title-input-group";
+
   const input = document.createElement("input");
   input.type = "text";
   input.className = "form-control form-control-sm exp-title-input";
@@ -108,54 +156,51 @@ function buildExperimentColumn(exp, index) {
   if (titleValue) {
     input.value = titleValue;
   }
+
   const status = document.createElement("span");
   status.className = "title-status small text-muted";
   status.setAttribute("aria-live", "polite");
+
   group.appendChild(input);
   form.appendChild(group);
   form.appendChild(status);
+
   const name = document.createElement("div");
   name.className = "fw-semibold";
   name.textContent = exp.name;
+
   const commit = document.createElement("div");
   commit.className = "font-monospace text-muted small mt-1";
   commit.textContent = exp.git_commit || "Unknown commit";
-  infoBody.appendChild(form);
-  infoBody.appendChild(name);
-  infoBody.appendChild(commit);
-  // Loss image section
-  const imageBody = document.createElement("div");
-  imageBody.className = "card-body";
+
+  container.appendChild(form);
+  container.appendChild(name);
+  container.appendChild(commit);
+  return container;
+}
+
+function buildLossImageCell(exp) {
+  const container = document.createElement("div");
+
   if (exp.loss_image) {
-    const lossImg = document.createElement("img");
-    lossImg.loading = "lazy";
-    lossImg.src = exp.loss_image;
-    lossImg.alt = `Loss curves for ${exp.name}`;
-    lossImg.className = "img-fluid rounded border";
-    imageBody.appendChild(lossImg);
+    const link = document.createElement("a");
+    link.href = `/experiments/${exp.id}`;
+    link.className = "d-block";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.src = exp.loss_image;
+    img.alt = `Loss curves for ${exp.name}`;
+    img.className = "img-fluid rounded border";
+    link.appendChild(img);
+    container.appendChild(link);
   } else {
     const placeholder = document.createElement("div");
     placeholder.className = "text-muted fst-italic";
     placeholder.textContent = "metrics/loss_curves.png missing";
-    imageBody.appendChild(placeholder);
+    container.appendChild(placeholder);
   }
-  // Metadata section
-  const metaBody = document.createElement("div");
-  metaBody.className = "card-body";
-  const pre = document.createElement("pre");
-  pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
-  pre.style.maxHeight = "280px";
-  if (index === 0) {
-    pre.textContent = exp.metadata;
-  } else {
-    pre.textContent = exp.metadata_diff || "(no diff)";
-  }
-  metaBody.appendChild(pre);
-  card.appendChild(previewBody);
-  card.appendChild(infoBody);
-  card.appendChild(imageBody);
-  card.appendChild(metaBody);
-  return card;
+
+  return container;
 }
 
 function collectPreviewMap(root) {
@@ -290,33 +335,8 @@ const PLOTLY_HIDE_ICON = {
   path: "M64 256 L448 256",
 };
 
-function buildImageCell(exp) {
-  const card = document.createElement("div");
-  card.className = "card h-100";
-  const cardBody = document.createElement("div");
-  cardBody.className = "card-body";
-  if (exp.loss_image) {
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.src = exp.loss_image;
-    img.alt = `Loss curves for ${exp.name}`;
-    img.className = "img-fluid rounded border";
-    cardBody.appendChild(img);
-  } else {
-    const placeholder = document.createElement("div");
-    placeholder.className = "text-muted fst-italic";
-    placeholder.textContent = "metrics/loss_curves.png missing";
-    cardBody.appendChild(placeholder);
-  }
-  card.appendChild(cardBody);
-  return card;
-}
-
 function buildMetadataCell(exp, index) {
-  const card = document.createElement("div");
-  card.className = "card h-100";
-  const cardBody = document.createElement("div");
-  cardBody.className = "card-body";
+  const container = document.createElement("div");
   const pre = document.createElement("pre");
   pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
   pre.style.maxHeight = "280px";
@@ -325,7 +345,6 @@ function buildMetadataCell(exp, index) {
   } else {
     pre.textContent = exp.metadata_diff || "(no diff)";
   }
-  cardBody.appendChild(pre);
-  card.appendChild(cardBody);
-  return card;
+  container.appendChild(pre);
+  return container;
 }
