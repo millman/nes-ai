@@ -289,7 +289,7 @@ class TrainConfig:
     lr: float = 1e-4
     weight_decay: float = 0.03
     device: Optional[str] = "mps"
-    decoder_skip_dropout: float = 0.5
+    decoder_skip_dropout: float = 0.0
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
@@ -1032,6 +1032,8 @@ def format_shape_summary(
         lines.append(
             f"  • Stage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
+    if "detail_skip" in encoder_info:
+        lines.append(f"  └─ detail_skip: {_format_hwc(*encoder_info['detail_skip'])}")
     # Show pooling and optional projection
     conv_out_dim = encoder_info.get("conv_out_dim", encoder_info["latent_dim"])
     lines.append(f"  AdaptiveAvgPool → 1×1×{conv_out_dim}")
@@ -1052,6 +1054,8 @@ def format_shape_summary(
         lines.append(
             f"  • UpStage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
+    if "detail_skip" in decoder_info:
+        lines.append(f"  ← detail_skip added: {_format_hwc(*decoder_info['detail_skip'])}")
     pre_resize = decoder_info["pre_resize"]
     target = decoder_info["final_target"]
     if decoder_info["needs_resize"]:
@@ -1188,10 +1192,10 @@ def _render_visualization_batch(
     rollout_steps: int,
     max_columns: Optional[int],
     device: torch.device,
-    selection: Optional[VisualizationSelection] = None,
-    show_gradients: bool = False,
-    log_deltas: bool = False,
-    decoder_skip_dropout: float = 0.0,
+    selection: Optional[VisualizationSelection],
+    show_gradients: bool,
+    log_deltas: bool,
+    decoder_skip_dropout: float,
 ) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
@@ -1240,13 +1244,17 @@ def _render_visualization_batch(
         rollout_frames: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
         gradient_maps: List[Optional[np.ndarray]] = [None for _ in range(max_window)]
         current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
+        # Use the starting frame's detail_skip for rollout decoding (shape: 1, C, H, W)
+        rollout_detail_skip: Optional[torch.Tensor] = None
+        if detail_skip is not None:
+            rollout_detail_skip = detail_skip[idx, start_idx].unsqueeze(0)
         prev_pred_frame = decoded_frames[idx, start_idx].detach()
         current_frame = prev_pred_frame
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
             delta_embed, _ = model.predictor(current_embed, action)
             next_embed = current_embed + delta_embed
-            decoded_next = decoder(next_embed, None)[0]
+            decoded_next = decoder(next_embed, rollout_detail_skip)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
                 gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])

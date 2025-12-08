@@ -38,7 +38,7 @@
             <tbody>
             {% for exp in experiments %}
             {% set title_text = exp.title if exp.title != "Untitled" else "" %}
-            <tr>
+            <tr class="align-middle">
                 <td>
                     <input class="form-check-input" type="checkbox" name="ids" value="{{ exp.id }}">
                 </td>
@@ -57,16 +57,16 @@
                         <span class="title-status small text-muted" aria-live="polite"></span>
                     </form>
                 </td>
-                <td><span class="font-monospace text-reset">{{ exp.name }}</span></td>
-                <td>{{ exp.last_modified | format_last_modified }}</td>
-                <td>
+                <td class="small">{{ exp.name }}</td>
+                <td class="small">{{ exp.last_modified | format_last_modified }}</td>
+                <td class="small">
                     {% if exp.max_step is not none %}
-                    {{ "{:,}".format(exp.max_step) }}
+                    <span class="d-inline-block text-end font-monospace" style="min-width: 6ch;">{{ "{:,}".format(exp.max_step) }}</span>
                     {% else %}
                     <span class="text-muted">—</span>
                     {% endif %}
                 </td>
-                <td>
+                <td class="small">
                     <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}" class="btn btn-outline-secondary btn-sm">Detail view</a>
                 </td>
             </tr>
