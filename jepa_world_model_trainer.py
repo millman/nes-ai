@@ -172,32 +172,36 @@ class ModelConfig:
     """Dimensional flow (bottlenecks marked with *):
 
         image (image_size^2·in_channels)
-            └─ Encoder(channel_schedule → embedding_dim*)
+            └─ Encoder(channel_schedule → pool → project → latent_dim*)
             ▼
-        embedding_dim*  ────────────────┐
-                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → embedding_dim
+        latent_dim*  ────────────────┐
+                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → latent_dim
         action_dim ──────┘
             │
             └→ VisualizationDecoder(latent_dim* → image_size^2·in_channels)
 
     • image_size controls the spatial resolution feeding the encoder.
-    • embedding_dim (≈ channel_schedule[-1]) is the latent bottleneck the predictor must match.
+    • channel_schedule defines the conv layer widths (derived from embedding_dim for the conv backbone).
+    • latent_dim is the encoder's final output dimension after pooling and optional projection.
+      If latent_dim > channel_schedule[-1], a linear projection expands the representation.
+      This allows a richer latent space without increasing conv backbone parameters.
+    • embedding_dim determines channel_schedule[-1], the conv backbone's final channel count.
     • action_dim defines the controller space that modulates the predictor through FiLM layers.
-    • hidden_dim is the predictor’s internal width.
-    • latent_dim governs the visualization decoder’s compression when turning embeddings back into images.
-    • latent_hw is the decoder’s initial spatial side-length before upsampling back to image_size (must equal image_size / 2**num_downsample_layers; e.g., multiples of 16 when num_downsample_layers=4).
+    • hidden_dim is the predictor's internal width.
+    • latent_hw is the decoder's initial spatial side-length before upsampling back to image_size
+      (must equal image_size / 2**num_downsample_layers).
     • image_size must be divisible by 2**num_downsample_layers so encoder/decoder resolutions stay aligned.
     """
 
     in_channels: int = 3
     image_size: int = 128
-    latent_dim: int = 256
+    latent_dim: int = 1024
     hidden_dim: int = 512
-    embedding_dim: int = 256
+    embedding_dim: int = 1024
     num_downsample_layers: int = 4
     latent_hw: Optional[int] = None
     action_dim: int = 8
-    predictor_film_layers: int = 2
+    predictor_film_layers: int = 4
     channel_schedule: Tuple[int, ...] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -321,9 +325,15 @@ class JEPAWorldModel(nn.Module):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.encoder = Encoder(cfg.in_channels, cfg.channel_schedule, cfg.image_size)
-        enc_dim = cfg.channel_schedule[-1]
-        self.embedding_dim = enc_dim
+        self.encoder = Encoder(
+            cfg.in_channels,
+            cfg.channel_schedule,
+            cfg.image_size,
+            latent_dim=cfg.latent_dim,
+        )
+        # Use the encoder's actual latent_dim (which may differ from channel_schedule[-1]
+        # if a projection layer is used)
+        self.embedding_dim = self.encoder.latent_dim
         self.predictor = PredictorNetwork(
             self.embedding_dim,
             cfg.hidden_dim,
@@ -1018,7 +1028,13 @@ def format_shape_summary(
         lines.append(
             f"  • Stage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
-    lines.append(f"AdaptiveAvgPool → Latent vector 1×1×{encoder_info['latent_dim']}")
+    # Show pooling and optional projection
+    conv_out_dim = encoder_info.get("conv_out_dim", encoder_info["latent_dim"])
+    lines.append(f"  AdaptiveAvgPool → 1×1×{conv_out_dim}")
+    if encoder_info.get("has_projection", False):
+        lines.append(f"  Projection → latent_dim={encoder_info['latent_dim']}")
+    else:
+        lines.append(f"  (no projection, latent_dim={encoder_info['latent_dim']})")
     lines.append("")
     lines.append("Predictor:")
     lines.append(

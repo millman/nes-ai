@@ -1,5 +1,5 @@
 """Baseline convolutional encoder/decoder preserved from the original trainer."""
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -121,15 +121,42 @@ class UpBlock(nn.Module):
 
 
 class Encoder(nn.Module):
+    """Convolutional encoder that maps images to fixed-size latent vectors.
+
+    Architecture overview:
+        Input image (input_hw × input_hw × in_channels)
+            ↓
+        Conv blocks following channel_schedule (each halves spatial resolution)
+            ↓
+        Final feature map: (input_hw / 2^num_blocks) × same × channel_schedule[-1]
+            ↓
+        AdaptiveAvgPool2d(1) → 1×1×channel_schedule[-1]
+            ↓
+        Optional projection: Linear(channel_schedule[-1] → latent_dim)
+            ↓
+        Output: latent vector of size latent_dim
+
+    The latent_dim parameter allows the output embedding dimension to differ from
+    the final channel count in the schedule. This is useful when you want a larger
+    latent space without increasing the conv channel widths (which would
+    dramatically increase parameters). For example:
+        - channel_schedule ends at 256 channels (8×8×256 before pooling)
+        - latent_dim=1024 adds a 256→1024 projection (~262K params)
+        - This gives a richer latent space without changing the conv backbone
+
+    If latent_dim is None or equals channel_schedule[-1], no projection is applied.
+    """
+
     def __init__(
         self,
         in_channels: int,
         schedule: Tuple[int, ...],
         input_hw: int,
         *,
-        first_block_no_downsample: bool = True,
-        use_blur: bool = True,
-        use_motion_stem: bool = True,
+        latent_dim: Optional[int] = None,
+        first_block_no_downsample: bool = False,
+        use_blur: bool = False,
+        use_motion_stem: bool = False,
     ):
         super().__init__()
         if not schedule:
@@ -153,6 +180,20 @@ class Encoder(nn.Module):
 
         self.blocks = nn.ModuleList(blocks)
         self.pool = nn.AdaptiveAvgPool2d(1)
+
+        # Determine output latent dimension
+        conv_out_dim = schedule[-1]
+        self.latent_dim = latent_dim if latent_dim is not None else conv_out_dim
+
+        # Add projection layer if latent_dim differs from conv output
+        if self.latent_dim != conv_out_dim:
+            self.latent_proj: Optional[nn.Module] = nn.Sequential(
+                nn.Linear(conv_out_dim, self.latent_dim),
+                nn.SiLU(inplace=True),
+            )
+        else:
+            self.latent_proj = None
+
         self.in_channels = in_channels
         self.channel_schedule = schedule
         self.input_hw = input_hw
@@ -167,6 +208,11 @@ class Encoder(nn.Module):
             if idx == 0:
                 detail_skip = feats
         pooled = self.pool(feats).flatten(1)
+
+        # Apply projection to latent_dim if configured
+        if self.latent_proj is not None:
+            pooled = self.latent_proj(pooled)
+
         if detail_skip is None:
             raise RuntimeError("detail_skip capture failed in Encoder forward.")
         return pooled, detail_skip
@@ -203,11 +249,38 @@ class Encoder(nn.Module):
             }
             info["stages"].append(stage)
             h, w, c = next_h, next_w, out_ch
-        info["latent_dim"] = self.channel_schedule[-1] if self.channel_schedule else c
+        # conv_out_dim is the channel count after the last conv block (before projection)
+        conv_out_dim = self.channel_schedule[-1] if self.channel_schedule else c
+        info["conv_out_dim"] = conv_out_dim
+        # latent_dim is the final output dimension (after optional projection)
+        info["latent_dim"] = self.latent_dim
+        info["has_projection"] = self.latent_proj is not None
         return info
 
 
 class VisualizationDecoder(nn.Module):
+    """Decoder that reconstructs images from latent vectors.
+
+    Architecture overview:
+        Input: latent vector of size latent_dim
+            ↓
+        Linear projection: latent_dim → (start_ch × start_hw × start_hw)
+            ↓
+        Reshape to spatial: start_hw × start_hw × start_ch
+            ↓
+        UpBlocks (each doubles spatial resolution, mirrors encoder's channel_schedule)
+            ↓
+        Output: image_size × image_size × image_channels
+
+    The decoder's latent_dim should match the encoder's output latent_dim.
+    Note that latent_dim may differ from channel_schedule[-1] if the encoder
+    uses a projection layer. The decoder handles this by projecting from
+    latent_dim down to the conv feature map size before upsampling.
+
+    The channel_schedule should match the encoder's schedule so that the
+    up-convolutions mirror the down-convolutions.
+    """
+
     def __init__(
         self,
         latent_dim: int,
