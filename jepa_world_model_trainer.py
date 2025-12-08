@@ -24,7 +24,6 @@ from time import perf_counter
 from recon.data import list_trajectories, load_frame_as_tensor
 from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
-from jepa_world_model.convnextv2 import ConvNeXtV2Decoder, ConvNeXtV2Encoder
 from jepa_world_model.loss import HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
 from jepa_world_model.metadata import write_run_metadata
 from jepa_world_model.vis import (
@@ -42,8 +41,8 @@ from jepa_world_model.vis_hard_samples import save_hard_example_grid
 # Model components
 # ------------------------------------------------------------
 
-Encoder = ConvNeXtV2Encoder
-VisualizationDecoder = ConvNeXtV2Decoder
+Encoder = ConvEncoder
+VisualizationDecoder = ConvVisualizationDecoder
 LegacyEncoder = ConvEncoder
 LegacyVisualizationDecoder = ConvVisualizationDecoder
 
