@@ -724,6 +724,7 @@ def log_metrics(
 
 LOSS_COLUMNS = [
     "step",
+    "elapsed_seconds",
     "loss_world",
     "loss_jepa",
     "loss_sigreg",
@@ -740,6 +741,7 @@ LOSS_COLUMNS = [
 @dataclass
 class LossHistory:
     steps: List[float] = field(default_factory=list)
+    elapsed_seconds: List[float] = field(default_factory=list)
     world: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
@@ -751,8 +753,9 @@ class LossHistory:
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
 
-    def append(self, step: float, metrics: Dict[str, float]) -> None:
+    def append(self, step: float, elapsed: float, metrics: Dict[str, float]) -> None:
         self.steps.append(step)
+        self.elapsed_seconds.append(elapsed)
         self.world.append(metrics["loss_world"])
         self.jepa.append(metrics["loss_jepa"])
         self.sigreg.append(metrics["loss_sigreg"])
@@ -777,6 +780,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
         writer.writerow(LOSS_COLUMNS)
         for row in zip(
             history.steps,
+            history.elapsed_seconds,
             history.world,
             history.jepa,
             history.sigreg,
@@ -1450,7 +1454,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 elapsed_seconds=elapsed_seconds,
             )
 
-            loss_history.append(global_step, metrics)
+            loss_history.append(global_step, elapsed_seconds, metrics)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
 
             plot_loss_curves(loss_history, metrics_dir)

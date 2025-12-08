@@ -463,9 +463,13 @@ function buildMetadataCell(exp, index) {
 
 function buildGitMetadataCell(exp) {
   const container = document.createElement("div");
+  container.style.overflow = "hidden";
   const pre = document.createElement("pre");
-  pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
+  pre.className = "bg-dark text-light p-2 rounded mb-0 small";
   pre.style.maxHeight = "280px";
+  pre.style.overflowX = "auto";
+  pre.style.overflowY = "auto";
+  pre.style.whiteSpace = "pre";
   pre.textContent = exp.git_metadata || "(no git metadata)";
   container.appendChild(pre);
   return container;
