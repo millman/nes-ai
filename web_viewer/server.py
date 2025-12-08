@@ -185,6 +185,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "rollout_steps": exp.rollout_steps,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
+                "git_metadata": exp.git_metadata_text,
                 "loss_image": url_for("serve_asset", relative_path=f"{exp.id}/metrics/loss_curves.png")
                 if exp.loss_image
                 else None,

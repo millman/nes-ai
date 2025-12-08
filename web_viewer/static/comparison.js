@@ -1,6 +1,28 @@
 let hasRenderedPlot = false;
+let currentImageFolder = "vis_fixed_0";
+
+const IMAGE_FOLDER_OPTIONS = [
+  { value: "vis_fixed_0", label: "vis_fixed_0", prefix: "rollout_" },
+  { value: "vis_fixed_1", label: "vis_fixed_1", prefix: "rollout_" },
+  { value: "vis_rolling_0", label: "vis_rolling_0", prefix: "rollout_" },
+  { value: "vis_rolling_1", label: "vis_rolling_1", prefix: "rollout_" },
+  { value: "embeddings", label: "embeddings", prefix: "embeddings_" },
+  { value: "samples_hard", label: "samples_hard", prefix: "hard_" },
+];
+
+function getImagePrefixForFolder(folder) {
+  const option = IMAGE_FOLDER_OPTIONS.find((opt) => opt.value === folder);
+  return option ? option.prefix : "rollout_";
+}
 
 document.addEventListener("DOMContentLoaded", () => {
+  // Restore folder selection from URL
+  const urlParams = new URLSearchParams(window.location.search);
+  const folderParam = urlParams.get("folder");
+  if (folderParam && IMAGE_FOLDER_OPTIONS.some((opt) => opt.value === folderParam)) {
+    currentImageFolder = folderParam;
+  }
+
   const ids = getIdsFromDataset();
   if (ids.length >= 2) {
     runComparison(ids);
@@ -50,8 +72,52 @@ function renderComparison(payload) {
   const previewMap = collectPreviewMap(grid);
   const figure = payload.figure;
   if (figure) {
+    // Parse view state from URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const xMin = urlParams.get("xmin");
+    const xMax = urlParams.get("xmax");
+    const yMin = urlParams.get("ymin");
+    const yMax = urlParams.get("ymax");
+
+    // Apply saved view state to figure layout
+    if (xMin !== null && xMax !== null) {
+      figure.layout.xaxis = figure.layout.xaxis || {};
+      figure.layout.xaxis.range = [parseFloat(xMin), parseFloat(xMax)];
+      figure.layout.xaxis.autorange = false;
+    }
+    if (yMin !== null && yMax !== null) {
+      figure.layout.yaxis = figure.layout.yaxis || {};
+      figure.layout.yaxis.range = [parseFloat(yMin), parseFloat(yMax)];
+      figure.layout.yaxis.autorange = false;
+    }
+
     const config = buildPlotConfig(figure.config);
-    Plotly.react(plot, figure.data, figure.layout, config);
+    Plotly.react(plot, figure.data, figure.layout, config).then(() => {
+      // Save view state to URL on zoom/pan
+      plot.on("plotly_relayout", (eventData) => {
+        if (!eventData) return;
+        const url = new URL(window.location.href);
+
+        if (eventData["xaxis.autorange"] || eventData["yaxis.autorange"]) {
+          // Reset to autorange - remove params
+          url.searchParams.delete("xmin");
+          url.searchParams.delete("xmax");
+          url.searchParams.delete("ymin");
+          url.searchParams.delete("ymax");
+        } else {
+          if (eventData["xaxis.range[0]"] !== undefined) {
+            url.searchParams.set("xmin", eventData["xaxis.range[0]"]);
+            url.searchParams.set("xmax", eventData["xaxis.range[1]"]);
+          }
+          if (eventData["yaxis.range[0]"] !== undefined) {
+            url.searchParams.set("ymin", eventData["yaxis.range[0]"]);
+            url.searchParams.set("ymax", eventData["yaxis.range[1]"]);
+          }
+        }
+
+        window.history.replaceState({}, "", url.toString());
+      });
+    });
     attachComparisonHover(plot, availableStepsByExp, previewMap);
     hasRenderedPlot = true;
   } else {
@@ -64,6 +130,42 @@ function renderComparison(payload) {
 function buildExperimentGrid(experiments) {
   const container = document.createElement("div");
   container.className = "d-flex flex-column gap-4";
+
+  // Folder selector row
+  const selectorRow = document.createElement("div");
+  selectorRow.className = "d-flex align-items-center gap-2 mb-2";
+
+  const selectorLabel = document.createElement("label");
+  selectorLabel.className = "form-label mb-0 small text-muted";
+  selectorLabel.textContent = "Image folder:";
+  selectorLabel.htmlFor = "image-folder-select";
+
+  const selector = document.createElement("select");
+  selector.id = "image-folder-select";
+  selector.className = "form-select form-select-sm";
+  selector.style.width = "auto";
+
+  IMAGE_FOLDER_OPTIONS.forEach((opt) => {
+    const option = document.createElement("option");
+    option.value = opt.value;
+    option.textContent = opt.label;
+    if (opt.value === currentImageFolder) {
+      option.selected = true;
+    }
+    selector.appendChild(option);
+  });
+
+  selector.addEventListener("change", (e) => {
+    currentImageFolder = e.target.value;
+    // Update URL with folder selection
+    const url = new URL(window.location.href);
+    url.searchParams.set("folder", currentImageFolder);
+    window.history.replaceState({}, "", url.toString());
+  });
+
+  selectorRow.appendChild(selectorLabel);
+  selectorRow.appendChild(selector);
+  container.appendChild(selectorRow);
 
   // Row 1: Preview section
   const previewRow = buildSectionRow(
@@ -96,6 +198,14 @@ function buildExperimentGrid(experiments) {
     (exp, index) => buildMetadataCell(exp, index)
   );
   container.appendChild(metaRow);
+
+  // Row 5: Git metadata section
+  const gitMetaRow = buildSectionRow(
+    "Git Metadata",
+    experiments,
+    (exp) => buildGitMetadataCell(exp)
+  );
+  container.appendChild(gitMetaRow);
 
   return container;
 }
@@ -242,26 +352,28 @@ function attachComparisonHover(plotEl, stepsMap, previews) {
   };
   const renderAll = (step) => {
     const target = Math.max(0, Math.round(step));
+    const folder = currentImageFolder;
+    const prefix = getImagePrefixForFolder(folder);
     Object.entries(previews).forEach(([expId, preview]) => {
       const available = stepsMap?.[expId] || [];
       const matched = nearestStep(target, available);
       if (matched === null) {
-        preview.path.textContent = "No rollout images available.";
+        preview.path.textContent = "No images available.";
         preview.img.classList.add("d-none");
-        preview.missing.textContent = "No rollout images available.";
+        preview.missing.textContent = "No images available.";
         preview.missing.classList.remove("d-none");
         return;
       }
-      const filename = `rollout_${matched.toString().padStart(7, "0")}.png`;
-      const src = `/assets/${expId}/vis_fixed_0/${filename}`;
-      preview.path.textContent = `${expId}/vis_fixed_0/${filename} (hovered ${target}, showing ${matched})`;
+      const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
+      const src = `/assets/${expId}/${folder}/${filename}`;
+      preview.path.textContent = `${expId}/${folder}/${filename} (hovered ${target}, showing ${matched})`;
       preview.img.src = src;
-      preview.img.alt = `Rollout ${matched}`;
+      preview.img.alt = `${folder} ${matched}`;
       preview.img.dataset.step = String(matched);
       preview.img.classList.remove("d-none");
       preview.img.onerror = () => {
         preview.img.classList.add("d-none");
-        preview.missing.textContent = `No rollout image for step ${matched}`;
+        preview.missing.textContent = `No image for step ${matched}`;
         preview.missing.classList.remove("d-none");
       };
       preview.img.onload = () => {
@@ -345,6 +457,16 @@ function buildMetadataCell(exp, index) {
   } else {
     pre.textContent = exp.metadata_diff || "(no diff)";
   }
+  container.appendChild(pre);
+  return container;
+}
+
+function buildGitMetadataCell(exp) {
+  const container = document.createElement("div");
+  const pre = document.createElement("pre");
+  pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
+  pre.style.maxHeight = "280px";
+  pre.textContent = exp.git_metadata || "(no git metadata)";
   container.appendChild(pre);
   return container;
 }

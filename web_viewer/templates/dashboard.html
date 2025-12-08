@@ -16,6 +16,10 @@
 </div>
 
 {% if experiments %}
+<div id="selected-preview" class="mb-4" style="display: none; max-height: 300px; overflow-y: auto;">
+    <div class="row g-3" id="preview-container"></div>
+</div>
+
 <div class="mb-3 text-end">
         <button type="button" id="dashboard-compare" class="btn btn-primary">Compare selected</button>
     </div>
@@ -72,15 +76,134 @@
 {{ super() }}
 <script>
 document.addEventListener("DOMContentLoaded", () => {
+  const STORAGE_KEY = "dashboard_selected_experiments";
+  const experiments = [
+    {% for exp in experiments %}
+    {
+      id: "{{ exp.id }}",
+      name: "{{ exp.name }}",
+      title: "{{ exp.title }}",
+      loss_image: {{ "true" if exp.loss_image else "false" }}
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ];
+
+  function updateUrl(selectedIds) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("ids");
+    selectedIds.forEach((id) => url.searchParams.append("ids", id));
+    window.history.replaceState({}, "", url.toString());
+  }
+
+  function updatePreview() {
+    const selectedIds = Array.from(document.querySelectorAll("input[name='ids']:checked"))
+      .map((input) => input.value);
+
+    const previewSection = document.getElementById("selected-preview");
+    const previewContainer = document.getElementById("preview-container");
+
+    if (selectedIds.length === 0) {
+      previewSection.style.display = "none";
+      return;
+    }
+
+    previewSection.style.display = "block";
+    previewContainer.innerHTML = "";
+
+    selectedIds.forEach((id) => {
+      const exp = experiments.find((e) => e.id === id);
+      if (!exp) return;
+
+      const col = document.createElement("div");
+      col.className = "col";
+
+      const card = document.createElement("div");
+      card.className = "card";
+
+      const cardBody = document.createElement("div");
+      cardBody.className = "card-body";
+
+      const title = document.createElement("div");
+      title.className = "fw-semibold mb-2";
+      const titleText = exp.title && exp.title !== "Untitled" ? exp.title : exp.name;
+      title.textContent = titleText;
+
+      const lossImageContainer = document.createElement("div");
+      if (exp.loss_image) {
+        const link = document.createElement("a");
+        link.href = "{{ url_for('experiment_detail', exp_id='__EXP_ID__') }}".replace("__EXP_ID__", exp.id);
+        const img = document.createElement("img");
+        img.src = "{{ url_for('serve_asset', relative_path='__REL_PATH__') }}".replace("__REL_PATH__", `${exp.id}/metrics/loss_curves.png`);
+        img.alt = `Loss curves for ${exp.name}`;
+        img.className = "img-fluid rounded border";
+        img.style.maxHeight = "200px";
+        img.style.objectFit = "contain";
+        img.loading = "lazy";
+        link.appendChild(img);
+        lossImageContainer.appendChild(link);
+      } else {
+        const placeholder = document.createElement("div");
+        placeholder.className = "text-muted fst-italic";
+        placeholder.textContent = "No loss curves available";
+        lossImageContainer.appendChild(placeholder);
+      }
+
+      cardBody.appendChild(title);
+      cardBody.appendChild(lossImageContainer);
+      card.appendChild(cardBody);
+      col.appendChild(card);
+      previewContainer.appendChild(col);
+    });
+  }
+
+  // Restore selections from URL first, then localStorage as fallback
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlIds = urlParams.getAll("ids");
+  let idsToRestore = [];
+
+  if (urlIds.length > 0) {
+    idsToRestore = urlIds;
+  } else {
+    const savedSelections = localStorage.getItem(STORAGE_KEY);
+    if (savedSelections) {
+      try {
+        idsToRestore = JSON.parse(savedSelections);
+      } catch (e) {
+        console.error("Failed to restore selections:", e);
+      }
+    }
+  }
+
+  idsToRestore.forEach((id) => {
+    const checkbox = document.querySelector(`input[name='ids'][value='${id}']`);
+    if (checkbox) {
+      checkbox.checked = true;
+    }
+  });
+
+  // Initial preview update and URL sync
+  updatePreview();
+  const initialIds = Array.from(document.querySelectorAll("input[name='ids']:checked"))
+    .map((input) => input.value);
+  updateUrl(initialIds);
+
+  // Save selections and update preview whenever checkboxes change
+  document.querySelectorAll("input[name='ids']").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const selectedIds = Array.from(document.querySelectorAll("input[name='ids']:checked"))
+        .map((input) => input.value);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(selectedIds));
+      updateUrl(selectedIds);
+      updatePreview();
+    });
+  });
+
+  // Compare button handler
   const button = document.getElementById("dashboard-compare");
   if (!button) return;
   button.addEventListener("click", () => {
     const ids = Array.from(document.querySelectorAll("input[name='ids']:checked"))
       .map((input) => input.value);
-    if (ids.length < 2) {
-      alert("Select at least two experiments to compare.");
-      return;
-    }
     const params = new URLSearchParams();
     ids.forEach((id) => params.append("ids", id));
     window.location = "{{ url_for('comparison') }}" + "?" + params.toString();

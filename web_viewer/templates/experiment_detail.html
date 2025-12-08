@@ -10,24 +10,97 @@
 {% set heading_title = experiment.title if experiment.title != "Untitled" else "Untitled" %}
 <h2 class="mb-4">{{ heading_title }} <small class="text-muted">({{ experiment.name }})</small></h2>
 
-<div class="card mb-3">
-    <div class="card-body">
-        <div id="detail-plot" class="plot-area">
-            {% if figure %}
-            <script>
+<div id="detail-plot" class="plot-area mb-3">
+    {% if figure %}
+    <script>
                 document.addEventListener("DOMContentLoaded", () => {
                     const figure = {{ figure|tojson }};
                     const rolloutSteps = {{ experiment.rollout_steps|tojson }};
                     const plotEl = document.getElementById("detail-plot");
+
+                    // Parse view state from URL
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const xMin = urlParams.get("xmin");
+                    const xMax = urlParams.get("xmax");
+                    const yMin = urlParams.get("ymin");
+                    const yMax = urlParams.get("ymax");
+
+                    // Apply saved view state to figure layout
+                    if (xMin !== null && xMax !== null) {
+                        figure.layout.xaxis = figure.layout.xaxis || {};
+                        figure.layout.xaxis.range = [parseFloat(xMin), parseFloat(xMax)];
+                        figure.layout.xaxis.autorange = false;
+                    }
+                    if (yMin !== null && yMax !== null) {
+                        figure.layout.yaxis = figure.layout.yaxis || {};
+                        figure.layout.yaxis.range = [parseFloat(yMin), parseFloat(yMax)];
+                        figure.layout.yaxis.autorange = false;
+                    }
+
                     Plotly.react(plotEl, figure.data, figure.layout, figure.config || {}).then(() => {
                         attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps);
+
+                        // Save view state to URL on zoom/pan
+                        plotEl.on("plotly_relayout", (eventData) => {
+                            if (!eventData) return;
+                            const url = new URL(window.location.href);
+
+                            if (eventData["xaxis.autorange"] || eventData["yaxis.autorange"]) {
+                                // Reset to autorange - remove params
+                                url.searchParams.delete("xmin");
+                                url.searchParams.delete("xmax");
+                                url.searchParams.delete("ymin");
+                                url.searchParams.delete("ymax");
+                            } else {
+                                if (eventData["xaxis.range[0]"] !== undefined) {
+                                    url.searchParams.set("xmin", eventData["xaxis.range[0]"]);
+                                    url.searchParams.set("xmax", eventData["xaxis.range[1]"]);
+                                }
+                                if (eventData["yaxis.range[0]"] !== undefined) {
+                                    url.searchParams.set("ymin", eventData["yaxis.range[0]"]);
+                                    url.searchParams.set("ymax", eventData["yaxis.range[1]"]);
+                                }
+                            }
+
+                            window.history.replaceState({}, "", url.toString());
+                        });
                     });
                 });
                 function attachRolloutPreview(plotEl, expId, previewId, steps) {
                     const preview = document.getElementById(previewId);
+                    const folderSelect = document.getElementById("detail-folder-select");
                     if (!plotEl || !preview || typeof Plotly === "undefined") {
                         return;
                     }
+
+                    const IMAGE_FOLDER_OPTIONS = {
+                        "vis_fixed_0": "rollout_",
+                        "vis_fixed_1": "rollout_",
+                        "vis_rolling_0": "rollout_",
+                        "vis_rolling_1": "rollout_",
+                        "embeddings": "embeddings_",
+                        "samples_hard": "hard_",
+                    };
+
+                    // Restore folder from URL
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const folderParam = urlParams.get("folder");
+                    if (folderParam && IMAGE_FOLDER_OPTIONS[folderParam] && folderSelect) {
+                        folderSelect.value = folderParam;
+                    }
+
+                    // Save folder to URL on change
+                    if (folderSelect) {
+                        folderSelect.addEventListener("change", () => {
+                            const url = new URL(window.location.href);
+                            url.searchParams.set("folder", folderSelect.value);
+                            window.history.replaceState({}, "", url.toString());
+                        });
+                    }
+
+                    const getFolder = () => folderSelect ? folderSelect.value : "vis_fixed_0";
+                    const getPrefix = () => IMAGE_FOLDER_OPTIONS[getFolder()] || "rollout_";
+
                     const ensurePreviewStructure = () => {
                         if (preview.dataset.initialized === "1") {
                             return;
@@ -67,35 +140,36 @@
                             const img = imgEl();
                             const path = pathEl();
                             if (path) {
-                                path.textContent = "No rollout images available.";
+                                path.textContent = "No images available.";
                             }
                             if (img) {
                                 img.classList.add("d-none");
                             }
                             if (miss) {
-                                miss.textContent = "No rollout images available.";
+                                miss.textContent = "No images available.";
                                 miss.classList.remove("d-none");
                             }
                             return;
                         }
-                        const filename = `rollout_${matched.toString().padStart(7, "0")}.png`;
-                        // Rollouts are saved under vis_fixed_<idx>/, use the first sample (0) for preview.
-                        const src = `/assets/${expId}/vis_fixed_0/${filename}`;
+                        const folder = getFolder();
+                        const prefix = getPrefix();
+                        const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
+                        const src = `/assets/${expId}/${folder}/${filename}`;
                         const path = pathEl();
                         const img = imgEl();
                         const miss = missingEl();
                         if (path) {
-                            path.textContent = `vis_fixed_0/${filename} (hovered ${target}, showing ${matched})`;
+                            path.textContent = `${folder}/${filename} (hovered ${target}, showing ${matched})`;
                         }
                         if (img) {
                             img.src = src;
-                            img.alt = `Rollout ${matched}`;
+                            img.alt = `${folder} ${matched}`;
                             img.dataset.step = String(matched);
                             img.classList.remove("d-none");
                             img.onerror = () => {
                                 img.classList.add("d-none");
                                 if (miss) {
-                                    miss.textContent = `No rollout image for step ${matched}`;
+                                    miss.textContent = `No image for step ${matched}`;
                                     miss.classList.remove("d-none");
                                 }
                             };
@@ -117,18 +191,25 @@
                         render(point.x);
                     });
                 }
-            </script>
-            {% else %}
-            <p class="text-muted fst-italic">No metrics available for this experiment.</p>
-            {% endif %}
-        </div>
-    </div>
+    </script>
+    {% else %}
+    <p class="text-muted fst-italic">No metrics available for this experiment.</p>
+    {% endif %}
 </div>
 
-<div class="card mb-4">
-    <div class="card-body">
-        <div id="detail-rollout-preview" class="mt-0"></div>
+<div class="mb-4">
+    <div class="d-flex align-items-center gap-2 mb-3">
+        <label class="form-label mb-0 small text-muted" for="detail-folder-select">Image folder:</label>
+        <select id="detail-folder-select" class="form-select form-select-sm" style="width: auto;">
+            <option value="vis_fixed_0">vis_fixed_0</option>
+            <option value="vis_fixed_1">vis_fixed_1</option>
+            <option value="vis_rolling_0">vis_rolling_0</option>
+            <option value="vis_rolling_1">vis_rolling_1</option>
+            <option value="embeddings">embeddings</option>
+            <option value="samples_hard">samples_hard</option>
+        </select>
     </div>
+    <div id="detail-rollout-preview" class="mt-0"></div>
 </div>
 
 <div class="table-responsive">
