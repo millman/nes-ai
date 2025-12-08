@@ -76,7 +76,7 @@ class ConvNeXtV2Block(nn.Module):
         dim: int,
         mlp_ratio: int = 4,
         drop_path: float = 0.0,
-        layer_scale_init_value: float = 1e-6,
+        layer_scale_init_value: float = 1e-2,
         dilation: int = 1,
         use_grn: bool = True,
     ) -> None:
@@ -114,28 +114,16 @@ class ConvNeXtV2Block(nn.Module):
 
 
 class PatchStem(nn.Module):
-    """Two-step DW+PW stem tuned for small motions."""
+    """Simplified stem to mirror the legacy stride-2 entry."""
 
-    def __init__(self, in_ch: int, out_ch: int, use_blur: bool = True) -> None:
+    def __init__(self, in_ch: int, out_ch: int, use_blur: bool = False) -> None:
         super().__init__()
-        self.pre_blur = Blur(in_ch) if use_blur else nn.Identity()
-        self.dw1 = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch)
-        self.pw1 = nn.Conv2d(in_ch, out_ch, kernel_size=1)
-        self.dw2_blur = Blur(out_ch) if use_blur else nn.Identity()
-        self.dw2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1, groups=out_ch)
-        self.pw2 = nn.Conv2d(out_ch, out_ch, kernel_size=1)
+        _ = use_blur  # kept for signature compatibility
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
         self.act = nn.SiLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.pre_blur(x)
-        x = self.dw1(x)
-        x = self.pw1(x)
-        x = self.act(x)
-        x = self.dw2_blur(x)
-        x = self.dw2(x)
-        x = self.pw2(x)
-        x = self.act(x)
-        return x
+        return self.act(self.conv(x))
 
 
 class ConvNeXtV2DownStage(nn.Module):
@@ -146,7 +134,7 @@ class ConvNeXtV2DownStage(nn.Module):
         depth: int,
         drop_paths: Sequence[float],
         dilated: bool = False,
-        use_blur: bool = True,
+        use_blur: bool = False,
     ) -> None:
         super().__init__()
         dilation = 2 if dilated else 1
@@ -179,7 +167,7 @@ class ConvNeXtV2UpStage(nn.Module):
         out_ch: int,
         depth: int,
         drop_paths: Sequence[float],
-        use_blur: bool = True,
+        use_blur: bool = False,
         skip_ch: int | None = None,
     ) -> None:
         super().__init__()
@@ -233,7 +221,7 @@ class ConvNeXtV2Encoder(nn.Module):
                     channel_schedule[i + 1],
                     depth=depth,
                     drop_paths=stage_drop,
-                    dilated=i == 0,
+                    dilated=False,
                 )
             )
             offset += depth
@@ -260,9 +248,7 @@ class ConvNeXtV2Encoder(nn.Module):
 
     @staticmethod
     def _drop_path_schedule(num_blocks: int, max_rate: float) -> List[float]:
-        if num_blocks <= 1:
-            return [0.0] * num_blocks
-        return [max_rate * i / (num_blocks - 1) for i in range(num_blocks)]
+        return [0.0] * num_blocks
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.stem(x)
