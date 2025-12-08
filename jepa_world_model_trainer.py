@@ -195,13 +195,13 @@ class ModelConfig:
 
     in_channels: int = 3
     image_size: int = 128
-    latent_dim: int = 1024
+    latent_dim: int = 256
     hidden_dim: int = 512
-    embedding_dim: int = 1024
+    embedding_dim: int = 256
     num_downsample_layers: int = 4
     latent_hw: Optional[int] = None
     action_dim: int = 8
-    predictor_film_layers: int = 4
+    predictor_film_layers: int = 2
     channel_schedule: Tuple[int, ...] = field(init=False)
 
     def __post_init__(self) -> None:
