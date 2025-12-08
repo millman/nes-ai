@@ -332,7 +332,7 @@ class VisualizationDecoder(nn.Module):
             nn.GroupNorm(max(1, channel_schedule[0] // 8), channel_schedule[0]),
             nn.Conv2d(channel_schedule[0], decoded_channels_at_skip, kernel_size=1),
         )
-        self.skip_gate = nn.Parameter(torch.zeros(1))
+        self.skip_gate = nn.Parameter(torch.tensor(1.0))
 
         head_hidden = max(in_ch // 2, 1)
         self.head = nn.Sequential(
