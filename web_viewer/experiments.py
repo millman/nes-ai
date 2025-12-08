@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -27,6 +28,7 @@ class Experiment:
     loss_csv: Optional[Path]
     rollout_steps: List[int]
     max_step: Optional[int]
+    last_modified: Optional[datetime]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -67,6 +69,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     title = _read_title(metadata_custom_path)
     rollout_steps = _collect_rollout_steps(path)
     max_step = _get_max_step(loss_csv) if loss_csv and loss_csv.exists() else None
+    last_modified = _get_last_modified(path)
     return Experiment(
         id=path.name,
         name=path.name,
@@ -80,6 +83,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         loss_csv=loss_csv if loss_csv and loss_csv.exists() else None,
         rollout_steps=rollout_steps,
         max_step=max_step,
+        last_modified=last_modified,
     )
 
 
@@ -206,6 +210,27 @@ def _get_max_step(csv_path: Path) -> Optional[int]:
             return max_step
     except (OSError, csv.Error):
         return None
+
+
+def _get_last_modified(path: Path) -> Optional[datetime]:
+    """Get the most recent modification time of any file in the directory tree."""
+    if not path.is_dir():
+        return None
+    latest_mtime: Optional[float] = None
+    try:
+        for item in path.rglob("*"):
+            if item.is_file():
+                try:
+                    mtime = item.stat().st_mtime
+                    if latest_mtime is None or mtime > latest_mtime:
+                        latest_mtime = mtime
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    if latest_mtime is None:
+        return None
+    return datetime.fromtimestamp(latest_mtime)
 
 
 def _is_all_zero(values: Iterable[float]) -> bool:

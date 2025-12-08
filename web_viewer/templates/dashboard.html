@@ -30,6 +30,7 @@
                 <th>Select</th>
                 <th>Title</th>
                 <th>Folder</th>
+                <th>Last Modified</th>
                 <th>Steps</th>
                 <th>Actions</th>
             </tr>
@@ -57,6 +58,7 @@
                     </form>
                 </td>
                 <td><span class="font-monospace text-reset">{{ exp.name }}</span></td>
+                <td>{{ exp.last_modified | format_last_modified }}</td>
                 <td>
                     {% if exp.max_step is not none %}
                     {{ "{:,}".format(exp.max_step) }}

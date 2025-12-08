@@ -190,7 +190,7 @@ class ModelConfig:
     """
 
     in_channels: int = 3
-    image_size: int = 224
+    image_size: int = 128
     latent_dim: int = 256
     hidden_dim: int = 512
     embedding_dim: int = 256

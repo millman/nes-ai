@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -30,6 +31,27 @@ from .plots import build_overlay
 PACKAGE_ROOT = Path(__file__).resolve().parent
 
 
+def _format_last_modified(dt: Optional[datetime]) -> str:
+    """Format datetime as relative time for same-day, or date string otherwise."""
+    if dt is None:
+        return "—"
+    now = datetime.now()
+    if dt.date() == now.date():
+        # Same day - show relative time
+        delta = now - dt
+        total_seconds = int(delta.total_seconds())
+        if total_seconds < 60:
+            return "just now"
+        minutes = total_seconds // 60
+        if minutes < 60:
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        hours = minutes // 60
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    else:
+        # Different day - show date
+        return dt.strftime("%Y-%m-%d %H:%M")
+
+
 def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     cfg = config or ViewerConfig()
     app = Flask(
@@ -39,6 +61,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         static_url_path="/static/web_viewer",
     )
     app.config["VIEWER_CONFIG"] = cfg
+
+    # Register custom Jinja filters
+    app.jinja_env.filters["format_last_modified"] = _format_last_modified
 
     def _load_all() -> List[Experiment]:
         return list_experiments(cfg.output_dir)
@@ -81,6 +106,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if len(selected_ids) < 2 and len(experiments) >= 2:
             selected_ids = [exp.id for exp in experiments[:2]]
         selected_map = {exp.id: exp for exp in experiments if exp.id in selected_ids}
+        # Sort selected_ids by last_modified date (most recent first)
+        selected_ids = sorted(
+            selected_ids,
+            key=lambda eid: selected_map[eid].last_modified or datetime.min,
+            reverse=True,
+        )
         return render_template(
             "comparison.html",
             experiments=experiments,
@@ -126,6 +157,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if not isinstance(exp_ids, list) or len(exp_ids) < 2:
             abort(400, "Provide at least two experiment ids.")
         experiments = [_get_experiment_or_404(exp_id) for exp_id in exp_ids]
+        # Sort by last_modified date (most recent first)
+        experiments = sorted(
+            experiments,
+            key=lambda exp: exp.last_modified or datetime.min,
+            reverse=True,
+        )
         overlay_data = _build_overlay_data(experiments)
         comparison_rows = _build_comparison_rows(experiments)
         return jsonify(
