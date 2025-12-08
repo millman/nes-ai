@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Annotated, Any, Dict, Iterable, List, Optional, Tuple
 
 import math
 import random
@@ -15,6 +15,7 @@ from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import tomli_w
 import tyro
 from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
@@ -189,7 +190,7 @@ class ModelConfig:
     """
 
     in_channels: int = 3
-    image_size: int = 128
+    image_size: int = 224
     latent_dim: int = 256
     hidden_dim: int = 512
     embedding_dim: int = 256
@@ -271,6 +272,9 @@ class TrainConfig:
     vis_every_steps: int = 50
     steps: int = 100_000
     show_timing_breakdown: bool = True
+
+    # Experiment metadata
+    title: Annotated[Optional[str], tyro.conf.arg(name="title", aliases=["-m"])] = None
 
     # Dataset & batching
     max_trajectories: Optional[int] = None
@@ -1297,6 +1301,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     loss_history = LossHistory()
 
     write_run_metadata(run_dir, cfg, model_cfg)
+
+    # Write experiment title to experiment_metadata.txt only if provided
+    if cfg.title is not None:
+        experiment_metadata_path = run_dir / "experiment_metadata.txt"
+        experiment_metadata_path.write_text(tomli_w.dumps({"title": cfg.title}))
 
     # --- Dataset initialization ---
     dataset = TrajectorySequenceDataset(
