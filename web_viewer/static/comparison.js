@@ -235,7 +235,7 @@ function buildPreviewCell(exp) {
   path.textContent = "Hover a point to preview rollout.";
 
   const img = document.createElement("img");
-  img.className = "img-fluid rounded border rollout-img d-none";
+  img.className = "rounded border rollout-img d-none";
   img.alt = "Rollout preview";
 
   const missing = document.createElement("div");

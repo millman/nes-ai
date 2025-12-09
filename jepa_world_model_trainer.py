@@ -289,7 +289,6 @@ class TrainConfig:
     lr: float = 1e-4
     weight_decay: float = 0.03
     device: Optional[str] = "mps"
-    decoder_skip_dropout: float = 0.0
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
@@ -344,15 +343,12 @@ class JEPAWorldModel(nn.Module):
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
         embeddings: List[torch.Tensor] = []
-        detail_skips: List[torch.Tensor] = []
         for step in range(t):
             current = images[:, step]
-            pooled, detail = self.encoder(current)
+            pooled = self.encoder(current)
             embeddings.append(pooled)
-            detail_skips.append(detail)
         return {
             "embeddings": torch.stack(embeddings, dim=1),
-            "detail_skip": torch.stack(detail_skips, dim=1),
         }
 
 
@@ -490,14 +486,11 @@ def training_step(
     outputs = model.encode_sequence(images)
 
     # Optional reconstruction for loss + difficulty tracking.
+    # Note: decoder no longer uses detail_skip - all spatial info is in the latent
     need_recon = weights.recon > 0 or track_hard_examples
     recon: Optional[torch.Tensor] = None
     if need_recon:
-        detail_skip = outputs.get("detail_skip")
-        if detail_skip is not None and cfg.decoder_skip_dropout > 0.0:
-            if random.random() < cfg.decoder_skip_dropout:
-                detail_skip = None
-        recon = decoder(outputs["embeddings"], detail_skip)
+        recon = decoder(outputs["embeddings"])
 
     # Core JEPA + action prediction losses.
     loss_jepa_raw, action_logits = jepa_loss(model, outputs, actions)
@@ -1032,8 +1025,6 @@ def format_shape_summary(
         lines.append(
             f"  • Stage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
-    if "detail_skip" in encoder_info:
-        lines.append(f"  └─ detail_skip: {_format_hwc(*encoder_info['detail_skip'])}")
     # Show pooling and optional projection
     conv_out_dim = encoder_info.get("conv_out_dim", encoder_info["latent_dim"])
     lines.append(f"  AdaptiveAvgPool → 1×1×{conv_out_dim}")
@@ -1049,13 +1040,13 @@ def format_shape_summary(
     )
     lines.append("")
     lines.append("Decoder:")
+    lines.append(f"  latent_dim={decoder_info.get('latent_dim', 'N/A')}")
     lines.append(f"  Projection reshape → {_format_hwc(*decoder_info['projection'])}")
     for stage in decoder_info["upsample"]:
         lines.append(
             f"  • UpStage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
-    if "detail_skip" in decoder_info:
-        lines.append(f"  ← detail_skip added: {_format_hwc(*decoder_info['detail_skip'])}")
+    # No more detail_skip in decoder
     pre_resize = decoder_info["pre_resize"]
     target = decoder_info["final_target"]
     if decoder_info["needs_resize"]:
@@ -1195,7 +1186,6 @@ def _render_visualization_batch(
     selection: Optional[VisualizationSelection],
     show_gradients: bool,
     log_deltas: bool,
-    decoder_skip_dropout: float,
 ) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
@@ -1206,11 +1196,8 @@ def _render_visualization_batch(
         raise ValueError("Visualization batch must include at least two frames.")
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
-    detail_skip = vis_outputs.get("detail_skip")
-    if detail_skip is not None and decoder_skip_dropout > 0.0:
-        if random.random() < decoder_skip_dropout:
-            detail_skip = None
-    decoded_frames = decoder(vis_embeddings, detail_skip)
+    # Decoder no longer uses detail_skip - all spatial info is in the latent
+    decoded_frames = decoder(vis_embeddings)
     batch_size = vis_frames.shape[0]
     min_start = 0
     target_window = max(2, rollout_steps + 1)
@@ -1244,17 +1231,13 @@ def _render_visualization_batch(
         rollout_frames: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
         gradient_maps: List[Optional[np.ndarray]] = [None for _ in range(max_window)]
         current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
-        # Use the starting frame's detail_skip for rollout decoding (shape: 1, C, H, W)
-        rollout_detail_skip: Optional[torch.Tensor] = None
-        if detail_skip is not None:
-            rollout_detail_skip = detail_skip[idx, start_idx].unsqueeze(0)
         prev_pred_frame = decoded_frames[idx, start_idx].detach()
         current_frame = prev_pred_frame
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
             delta_embed, _ = model.predictor(current_embed, action)
             next_embed = current_embed + delta_embed
-            decoded_next = decoder(next_embed, rollout_detail_skip)[0]
+            decoded_next = decoder(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
                 gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
@@ -1301,8 +1284,6 @@ def _render_visualization_batch(
 def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, demo: bool = True) -> None:
     # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
-    if not 0.0 <= cfg.decoder_skip_dropout <= 1.0:
-        raise ValueError(f"decoder_skip_dropout must be in [0, 1], got {cfg.decoder_skip_dropout}")
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
@@ -1519,7 +1500,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     selection=fixed_selection,
                     show_gradients=cfg.vis.gradient_norms,
                     log_deltas=cfg.vis.log_deltas,
-                    decoder_skip_dropout=cfg.decoder_skip_dropout,
                 )
                 save_rollout_sequence_batch(
                     fixed_vis_dir,
@@ -1540,7 +1520,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     selection=None,
                     show_gradients=cfg.vis.gradient_norms,
                     log_deltas=cfg.vis.log_deltas,
-                    decoder_skip_dropout=cfg.decoder_skip_dropout,
                 )
                 save_rollout_sequence_batch(
                     rolling_vis_dir,

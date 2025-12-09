@@ -128,3 +128,17 @@
     height: 100%;
     resize: none;
 }
+
+/* Comparison grid - images scale with font size */
+#comparison-grid img {
+    width: 40em;
+    height: auto;
+}
+
+#comparison-grid .rollout-preview img {
+    width: 60em;
+}
+
+#comparison-grid .row {
+    overflow-x: auto;
+}
