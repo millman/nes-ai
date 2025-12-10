@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 import subprocess
 import tomli_w
@@ -35,7 +35,12 @@ def _serialize_for_json(value: Any):
     return value
 
 
-def write_run_metadata(run_dir: Path, cfg: Any, model_cfg: Any) -> None:
+def write_run_metadata(
+    run_dir: Path,
+    cfg: Any,
+    model_cfg: Any,
+    exclude_fields: Optional[Set[str]] = None,
+) -> None:
     commit_sha = _run_git_command(["git", "rev-parse", "HEAD"])
     diff_output = _run_git_command(["git", "diff", "--patch"])
     if not diff_output.strip():
@@ -52,6 +57,9 @@ def write_run_metadata(run_dir: Path, cfg: Any, model_cfg: Any) -> None:
     )
     (run_dir / "metadata_git.txt").write_text(git_metadata)
     train_config = _serialize_for_json(asdict(cfg))
+    if exclude_fields:
+        for field_name in exclude_fields:
+            train_config.pop(field_name, None)
     model_config = _serialize_for_json(asdict(model_cfg))
     toml_payload: Dict[str, Any] = {
         "train_config": train_config,

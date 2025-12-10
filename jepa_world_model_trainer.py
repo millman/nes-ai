@@ -288,9 +288,6 @@ class TrainConfig:
     steps: int = 100_000
     show_timing_breakdown: bool = True
 
-    # Experiment metadata
-    title: Annotated[Optional[str], tyro.conf.arg(name="title", aliases=["-m"])] = None
-
     # Dataset & batching
     max_trajectories: Optional[int] = None
     seq_len: int = 8
@@ -313,6 +310,9 @@ class TrainConfig:
     vis: VisConfig = field(default_factory=VisConfig)
     hard_example: HardExampleConfig = field(default_factory=HardExampleConfig)
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
+
+    # CLI-only field (not part of training config, used for experiment metadata)
+    title: Annotated[Optional[str], tyro.conf.arg(aliases=["-m"])] = None
 
 
 @dataclass
@@ -1430,7 +1430,7 @@ def _render_visualization_batch(
 # ------------------------------------------------------------
 
 
-def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, demo: bool = True) -> None:
+def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, title: Optional[str] = None, demo: bool = True) -> None:
     # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
 
@@ -1458,12 +1458,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
     loss_history = LossHistory()
 
-    write_run_metadata(run_dir, cfg, model_cfg)
+    write_run_metadata(run_dir, cfg, model_cfg, exclude_fields={"title"})
 
     # Write experiment title to experiment_metadata.txt only if provided
-    if cfg.title is not None:
+    if title is not None:
         experiment_metadata_path = run_dir / "experiment_metadata.txt"
-        experiment_metadata_path.write_text(tomli_w.dumps({"title": cfg.title}))
+        experiment_metadata_path.write_text(tomli_w.dumps({"title": title}))
 
     # --- Dataset initialization ---
     dataset = TrajectorySequenceDataset(
@@ -1729,7 +1729,7 @@ def main() -> None:
         config=(tyro.conf.HelptextFromCommentsOff,),
     )
     model_cfg = ModelConfig()
-    run_training(cfg, model_cfg, cfg.loss_weights, demo=False)
+    run_training(cfg, model_cfg, cfg.loss_weights, title=cfg.title, demo=False)
 
 
 if __name__ == "__main__":
