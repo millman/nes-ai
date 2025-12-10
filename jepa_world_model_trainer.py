@@ -250,6 +250,7 @@ class LossWeights:
     sigreg: float = 1.0
     recon: float = 1.0
     action_recon: float = 0.0
+    delta: float = 1.0
     rollout: float = 0.0
     consistency: float = 0.0
     ema_consistency: float = 0.0
@@ -311,8 +312,6 @@ class TrainConfig:
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
-    use_delta_loss: bool = True
-    delta_loss_weight: float = 1.0
 
     # Specific losses
     ema: LossEMAConfig = field(default_factory=LossEMAConfig)
@@ -394,6 +393,20 @@ def jepa_loss(
     preds, delta_pred, action_logits = model.predictor(prev_embed, prev_actions)
     target = embeddings[:, 1:].detach()
     return JEPA_LOSS(preds, target), action_logits, delta_pred
+
+
+def delta_prediction_loss(
+    delta_pred: torch.Tensor, embeddings: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Auxiliary loss comparing predicted and target latent deltas."""
+    if embeddings.shape[1] < 2:
+        zero = embeddings.new_tensor(0.0)
+        return zero, zero, zero
+    delta_target = (embeddings[:, 1:] - embeddings[:, :-1]).detach()
+    loss = F.mse_loss(delta_pred, delta_target)
+    pred_norm = delta_pred.detach().norm(dim=-1).mean()
+    target_norm = delta_target.norm(dim=-1).mean()
+    return loss, pred_norm, target_norm
 
 
 def rollout_loss(
@@ -516,18 +529,8 @@ def training_step(
     # Core JEPA + action prediction losses.
     loss_jepa_raw, action_logits, delta_pred = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
-    has_temporal = outputs["embeddings"].shape[1] > 1
-    if has_temporal:
-        delta_target = (outputs["embeddings"][:, 1:] - outputs["embeddings"][:, :-1]).detach()
-        delta_pred_norm = delta_pred.detach().norm(dim=-1).mean()
-        delta_target_norm = delta_target.norm(dim=-1).mean()
-    else:
-        delta_target = images.new_zeros(delta_pred.shape)
-        delta_pred_norm = images.new_tensor(0.0)
-        delta_target_norm = images.new_tensor(0.0)
-    loss_delta = (
-        F.mse_loss(delta_pred, delta_target) if cfg.use_delta_loss and has_temporal else images.new_tensor(0.0)
-    )
+    loss_delta_raw, delta_pred_norm, delta_target_norm = delta_prediction_loss(delta_pred, outputs["embeddings"])
+    loss_delta = loss_delta_raw if weights.delta > 0 else images.new_tensor(0.0)
     prev_actions = actions[:, :-1]
     if weights.action_recon > 0 and prev_actions.numel() > 0:
         loss_action = ACTION_RECON_LOSS(action_logits, prev_actions)
@@ -565,13 +568,13 @@ def training_step(
     # Accumulate and backpropagate the weighted loss.
     world_loss = (
         weights.jepa * loss_jepa
+        + weights.delta * loss_delta
         + weights.sigreg * loss_sigreg
         + weights.rollout * loss_rollout
         + weights.consistency * loss_consistency
         + weights.ema_consistency * loss_ema_consistency
         + weights.action_recon * loss_action
         + weights.recon * loss_recon
-        + (cfg.delta_loss_weight * loss_delta if cfg.use_delta_loss else 0.0)
     )
     optimizer.zero_grad()
     world_loss.backward()
@@ -725,6 +728,8 @@ def log_metrics(
     filtered = dict(metrics)
     if weights.jepa <= 0:
         filtered.pop("loss_jepa", None)
+    if weights.delta <= 0:
+        filtered.pop("loss_delta", None)
     if weights.sigreg <= 0:
         filtered.pop("loss_sigreg", None)
     if weights.rollout <= 0:
