@@ -1003,10 +1003,9 @@ def _format_param_count(count: int) -> str:
             if value >= 100:
                 formatted = f"{value:.0f}"
             elif value >= 10:
-                formatted = f"{value:.1f}"
+                formatted = f"{value:.1f}".rstrip("0").rstrip(".")
             else:
-                formatted = f"{value:.2f}"
-            formatted = formatted.rstrip("0").rstrip(".")
+                formatted = f"{value:.2f}".rstrip("0").rstrip(".")
             return f"{formatted}{suffix}"
     return str(count)
 
@@ -1148,10 +1147,9 @@ def _format_flops(flops: int) -> str:
     if value >= 100:
         formatted = f"{value:.0f}"
     elif value >= 10:
-        formatted = f"{value:.1f}"
+        formatted = f"{value:.1f}".rstrip("0").rstrip(".")
     else:
-        formatted = f"{value:.2f}"
-    formatted = formatted.rstrip("0").rstrip(".")
+        formatted = f"{value:.2f}".rstrip("0").rstrip(".")
     return f"{formatted} {suffix}"
 
 
