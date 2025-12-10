@@ -37,6 +37,7 @@ class Experiment:
 @dataclass
 class LossCurveData:
     steps: List[float]
+    cumulative_flops: List[float]
     series: Dict[str, List[float]]
 
 
@@ -94,19 +95,28 @@ def load_loss_curves(csv_path: Path) -> Optional[LossCurveData]:
         reader = csv.DictReader(handle)
         if not reader.fieldnames or "step" not in reader.fieldnames:
             return None
-        other_fields = [f for f in reader.fieldnames if f != "step"]
+        # Exclude step and cumulative_flops from series
+        excluded_fields = {"step", "cumulative_flops"}
+        other_fields = [f for f in reader.fieldnames if f not in excluded_fields]
+        has_cumulative_flops = "cumulative_flops" in reader.fieldnames
         rows = list(reader)
     if not rows:
         return None
     steps: List[float] = []
+    cumulative_flops: List[float] = []
     series: Dict[str, List[float]] = {field: [] for field in other_fields}
     for row in rows:
         steps.append(float(row.get("step", 0.0)))
+        if has_cumulative_flops:
+            cumulative_flops.append(float(row.get("cumulative_flops", "0") or 0.0))
         for field in other_fields:
             try:
                 series[field].append(float(row.get(field, "0") or 0.0))
             except ValueError:
                 series[field].append(0.0)
+    # If no cumulative_flops column, generate placeholder (step-based)
+    if not cumulative_flops:
+        cumulative_flops = [s for s in steps]
     filtered_series = {
         field: values
         for field, values in series.items()
@@ -114,7 +124,7 @@ def load_loss_curves(csv_path: Path) -> Optional[LossCurveData]:
     }
     if not filtered_series:
         return None
-    return LossCurveData(steps=steps, series=filtered_series)
+    return LossCurveData(steps=steps, cumulative_flops=cumulative_flops, series=filtered_series)
 
 
 def write_notes(path: Path, text: str) -> None:

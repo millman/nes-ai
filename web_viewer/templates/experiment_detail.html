@@ -37,8 +37,57 @@
                         figure.layout.yaxis.autorange = false;
                     }
 
+                    // Store original x-axis data for toggling
+                    const originalSteps = figure.data.map(trace => trace.x ? [...trace.x] : []);
+                    const cumulativeFlops = figure.data.map(trace => {
+                        // Extract cumulative_flops from meta (stored by plots.py)
+                        if (trace.meta && trace.meta.cumulative_flops) {
+                            return trace.meta.cumulative_flops;
+                        }
+                        // Fallback: use customdata if available (cumulative_flops is at index 1)
+                        if (trace.customdata && Array.isArray(trace.customdata)) {
+                            return trace.customdata.map(cd => Array.isArray(cd) ? cd[1] : null);
+                        }
+                        return trace.x ? [...trace.x] : [];  // Fallback to steps
+                    });
+
                     Plotly.react(plotEl, figure.data, figure.layout, figure.config || {}).then(() => {
                         attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps);
+
+                        // X-axis toggle handler
+                        const xAxisSelect = document.getElementById("detail-xaxis-select");
+                        if (xAxisSelect) {
+                            // Restore x-axis mode from URL
+                            const xAxisParam = urlParams.get("xaxis");
+                            if (xAxisParam === "flops") {
+                                xAxisSelect.value = "flops";
+                                // Apply flops x-axis
+                                const updates = {};
+                                for (let i = 0; i < figure.data.length; i++) {
+                                    updates[i] = { x: [cumulativeFlops[i]] };
+                                }
+                                Plotly.restyle(plotEl, { x: cumulativeFlops });
+                                Plotly.relayout(plotEl, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
+                            }
+
+                            xAxisSelect.addEventListener("change", () => {
+                                const mode = xAxisSelect.value;
+                                const url = new URL(window.location.href);
+                                url.searchParams.set("xaxis", mode);
+                                // Clear zoom state when switching axes
+                                url.searchParams.delete("xmin");
+                                url.searchParams.delete("xmax");
+                                window.history.replaceState({}, "", url.toString());
+
+                                if (mode === "flops") {
+                                    Plotly.restyle(plotEl, { x: cumulativeFlops });
+                                    Plotly.relayout(plotEl, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
+                                } else {
+                                    Plotly.restyle(plotEl, { x: originalSteps });
+                                    Plotly.relayout(plotEl, { "xaxis.title": "Step", "xaxis.autorange": true });
+                                }
+                            });
+                        }
 
                         // Save view state to URL on zoom/pan
                         plotEl.on("plotly_relayout", (eventData) => {
@@ -198,8 +247,13 @@
 </div>
 
 <div class="mb-4">
-    <div class="d-flex align-items-center gap-2 mb-3">
-        <label class="form-label mb-0 small text-muted" for="detail-folder-select">Image folder:</label>
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <label class="form-label mb-0 small text-muted" for="detail-xaxis-select">X-axis:</label>
+        <select id="detail-xaxis-select" class="form-select form-select-sm" style="width: auto;">
+            <option value="steps">Steps</option>
+            <option value="flops">Cumulative FLOPs</option>
+        </select>
+        <label class="form-label mb-0 small text-muted ms-3" for="detail-folder-select">Image folder:</label>
         <select id="detail-folder-select" class="form-select form-select-sm" style="width: auto;">
             <option value="vis_fixed_0">vis_fixed_0</option>
             <option value="vis_fixed_1">vis_fixed_1</option>

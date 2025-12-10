@@ -28,6 +28,13 @@
 
 <div class="card mb-4" data-selected-ids="{{ selected_ids|join(',') }}">
     <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <label class="form-label mb-0 small text-muted" for="comparison-xaxis-select">X-axis:</label>
+            <select id="comparison-xaxis-select" class="form-select form-select-sm" style="width: auto;">
+                <option value="steps">Steps</option>
+                <option value="flops">Cumulative FLOPs</option>
+            </select>
+        </div>
         <div id="comparison-plot" class="plot-area">
             <p class="text-muted fst-italic">Select experiments to view overlapping loss curves.</p>
         </div>

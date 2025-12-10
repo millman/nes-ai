@@ -1,5 +1,10 @@
 let hasRenderedPlot = false;
 let currentImageFolder = "vis_fixed_0";
+let currentXAxisMode = "steps";
+
+// Store original data for x-axis toggling
+let originalSteps = [];
+let cumulativeFlops = [];
 
 const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_fixed_0", label: "vis_fixed_0", prefix: "rollout_" },
@@ -21,6 +26,16 @@ document.addEventListener("DOMContentLoaded", () => {
   const folderParam = urlParams.get("folder");
   if (folderParam && IMAGE_FOLDER_OPTIONS.some((opt) => opt.value === folderParam)) {
     currentImageFolder = folderParam;
+  }
+
+  // Restore x-axis mode from URL
+  const xAxisParam = urlParams.get("xaxis");
+  if (xAxisParam === "flops") {
+    currentXAxisMode = "flops";
+    const xAxisSelect = document.getElementById("comparison-xaxis-select");
+    if (xAxisSelect) {
+      xAxisSelect.value = "flops";
+    }
   }
 
   const ids = getIdsFromDataset();
@@ -72,6 +87,20 @@ function renderComparison(payload) {
   const previewMap = collectPreviewMap(grid);
   const figure = payload.figure;
   if (figure) {
+    // Store original x-axis data for toggling
+    originalSteps = figure.data.map(trace => trace.x ? [...trace.x] : []);
+    cumulativeFlops = figure.data.map(trace => {
+      // Extract cumulative_flops from meta (stored by plots.py)
+      if (trace.meta && trace.meta.cumulative_flops) {
+        return trace.meta.cumulative_flops;
+      }
+      // Fallback: use customdata if available (cumulative_flops is at index 1)
+      if (trace.customdata && Array.isArray(trace.customdata)) {
+        return trace.customdata.map(cd => Array.isArray(cd) ? cd[1] : null);
+      }
+      return trace.x ? [...trace.x] : [];  // Fallback to steps
+    });
+
     // Parse view state from URL
     const urlParams = new URLSearchParams(window.location.search);
     const xMin = urlParams.get("xmin");
@@ -93,6 +122,35 @@ function renderComparison(payload) {
 
     const config = buildPlotConfig(figure.config);
     Plotly.react(plot, figure.data, figure.layout, config).then(() => {
+      // Apply x-axis mode if set to flops
+      if (currentXAxisMode === "flops") {
+        Plotly.restyle(plot, { x: cumulativeFlops });
+        Plotly.relayout(plot, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
+      }
+
+      // X-axis toggle handler
+      const xAxisSelect = document.getElementById("comparison-xaxis-select");
+      if (xAxisSelect) {
+        xAxisSelect.addEventListener("change", () => {
+          const mode = xAxisSelect.value;
+          currentXAxisMode = mode;
+          const url = new URL(window.location.href);
+          url.searchParams.set("xaxis", mode);
+          // Clear zoom state when switching axes
+          url.searchParams.delete("xmin");
+          url.searchParams.delete("xmax");
+          window.history.replaceState({}, "", url.toString());
+
+          if (mode === "flops") {
+            Plotly.restyle(plot, { x: cumulativeFlops });
+            Plotly.relayout(plot, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
+          } else {
+            Plotly.restyle(plot, { x: originalSteps });
+            Plotly.relayout(plot, { "xaxis.title": "Step", "xaxis.autorange": true });
+          }
+        });
+      }
+
       // Save view state to URL on zoom/pan
       plot.on("plotly_relayout", (eventData) => {
         if (!eventData) return;
