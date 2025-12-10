@@ -312,6 +312,12 @@
                 </form>
                 <div class="fw-semibold">{{ experiment.name }}</div>
                 <div class="font-monospace text-muted small mt-1">{{ experiment.git_commit }}</div>
+                <div class="text-muted small mt-1">
+                    Parameters: <span class="font-monospace format-params" data-value="{{ experiment.total_params if experiment.total_params is not none else '' }}">—</span>
+                </div>
+                <div class="text-muted small">
+                    FLOPs/step: <span class="font-monospace format-flops" data-value="{{ experiment.flops_per_step if experiment.flops_per_step is not none else '' }}">—</span>
+                </div>
             </td>
             <td data-col-id="metadata">
                 <div class="metadata-wrapper card card-body p-2" data-exp-id="{{ experiment.id }}">

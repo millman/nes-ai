@@ -30,6 +30,8 @@
                 <th>Select</th>
                 <th>Title</th>
                 <th>Folder</th>
+                <th>Parameters</th>
+                <th>FLOPs/step</th>
                 <th>Last Modified</th>
                 <th>Steps</th>
                 <th>Actions</th>
@@ -58,6 +60,8 @@
                     </form>
                 </td>
                 <td class="small">{{ exp.name }}</td>
+                <td class="small font-monospace format-params" data-value="{{ exp.total_params if exp.total_params is not none else '' }}">—</td>
+                <td class="small font-monospace format-flops" data-value="{{ exp.flops_per_step if exp.flops_per_step is not none else '' }}">—</td>
                 <td class="small">{{ exp.last_modified | format_last_modified }}</td>
                 <td class="small">
                     {% if exp.max_step is not none %}

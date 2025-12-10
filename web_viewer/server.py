@@ -223,6 +223,8 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
                 "git_metadata": exp.git_metadata_text,
+                "total_params": exp.total_params,
+                "flops_per_step": exp.flops_per_step,
                 "loss_image": url_for("serve_asset", relative_path=f"{exp.id}/metrics/loss_curves.png")
                 if exp.loss_image
                 else None,

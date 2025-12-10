@@ -3,7 +3,93 @@ document.addEventListener("DOMContentLoaded", () => {
   forms.forEach((form) => wireNotesForm(form));
   wireTitleForms(document);
   wireMetadataToggles(document);
+  formatAllNumbers(document);
 });
+
+/**
+ * Format all elements with .format-params and .format-flops classes.
+ * @param {Element} root - The root element to search within.
+ */
+function formatAllNumbers(root) {
+  root.querySelectorAll(".format-params").forEach((el) => {
+    const value = el.dataset.value;
+    el.textContent = formatParamCount(value ? parseInt(value, 10) : null);
+  });
+  root.querySelectorAll(".format-flops").forEach((el) => {
+    const value = el.dataset.value;
+    el.textContent = formatFlops(value ? parseInt(value, 10) : null);
+  });
+}
+
+/**
+ * Format a parameter count in human-readable form (e.g., "4.26M").
+ * @param {number|null} count - The raw parameter count.
+ * @returns {string} - Formatted string or "—" if null/undefined.
+ */
+function formatParamCount(count) {
+  if (count === null || count === undefined) {
+    return "—";
+  }
+  if (count < 1000) {
+    return String(count);
+  }
+  const units = [
+    { divisor: 1_000_000_000, suffix: "B" },
+    { divisor: 1_000_000, suffix: "M" },
+    { divisor: 1_000, suffix: "k" },
+  ];
+  for (const { divisor, suffix } of units) {
+    if (count >= divisor) {
+      const value = count / divisor;
+      let formatted;
+      if (value >= 100) {
+        formatted = value.toFixed(0);
+      } else if (value >= 10) {
+        formatted = value.toFixed(1);
+      } else {
+        formatted = value.toFixed(2);
+      }
+      // Remove trailing zeros and decimal point
+      formatted = formatted.replace(/\.?0+$/, "");
+      return formatted + suffix;
+    }
+  }
+  return String(count);
+}
+
+/**
+ * Format a FLOPs count in human-readable form (e.g., "229 GFLOPs").
+ * @param {number|null} flops - The raw FLOPs count.
+ * @returns {string} - Formatted string or "—" if null/undefined.
+ */
+function formatFlops(flops) {
+  if (flops === null || flops === undefined) {
+    return "—";
+  }
+  const units = [
+    { divisor: 1_000_000_000_000, suffix: "TFLOPs" },
+    { divisor: 1_000_000_000, suffix: "GFLOPs" },
+    { divisor: 1_000_000, suffix: "MFLOPs" },
+    { divisor: 1_000, suffix: "KFLOPs" },
+  ];
+  for (const { divisor, suffix } of units) {
+    if (flops >= divisor) {
+      const value = flops / divisor;
+      let formatted;
+      if (value >= 100) {
+        formatted = value.toFixed(0);
+      } else if (value >= 10) {
+        formatted = value.toFixed(1);
+      } else {
+        formatted = value.toFixed(2);
+      }
+      // Remove trailing zeros and decimal point
+      formatted = formatted.replace(/\.?0+$/, "");
+      return formatted + " " + suffix;
+    }
+  }
+  return flops + " FLOPs";
+}
 
 function wireNotesForm(form) {
   const expId = form.dataset.expId;

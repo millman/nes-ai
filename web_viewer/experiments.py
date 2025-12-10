@@ -29,6 +29,8 @@ class Experiment:
     rollout_steps: List[int]
     max_step: Optional[int]
     last_modified: Optional[datetime]
+    total_params: Optional[int]
+    flops_per_step: Optional[int]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -58,6 +60,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         return None
     metadata_path = path / "metadata.txt"
     metadata_git_path = path / "metadata_git.txt"
+    metadata_model_path = path / "metadata_model.txt"
     metrics_dir = path / "metrics"
     loss_png = metrics_dir / "loss_curves.png"
     loss_csv = _resolve_loss_csv(metrics_dir)
@@ -71,6 +74,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     rollout_steps = _collect_rollout_steps(path)
     max_step = _get_max_step(loss_csv) if loss_csv and loss_csv.exists() else None
     last_modified = _get_last_modified(path)
+    total_params, flops_per_step = _read_model_metadata(metadata_model_path)
     return Experiment(
         id=path.name,
         name=path.name,
@@ -85,6 +89,8 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         rollout_steps=rollout_steps,
         max_step=max_step,
         last_modified=last_modified,
+        total_params=total_params,
+        flops_per_step=flops_per_step,
     )
 
 
@@ -172,6 +178,29 @@ def _extract_git_commit(metadata_git_text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _read_model_metadata(path: Path) -> Tuple[Optional[int], Optional[int]]:
+    """Read total_params and flops_per_step from metadata_model.txt."""
+    if not path.exists():
+        return None, None
+    try:
+        data = tomli.loads(path.read_text())
+    except (tomli.TOMLDecodeError, OSError):
+        return None, None
+    total_params = None
+    flops_per_step = None
+    params_section = data.get("parameters")
+    if isinstance(params_section, dict):
+        total = params_section.get("total")
+        if isinstance(total, int):
+            total_params = total
+    flops_section = data.get("flops")
+    if isinstance(flops_section, dict):
+        per_step = flops_section.get("per_step")
+        if isinstance(per_step, int):
+            flops_per_step = per_step
+    return total_params, flops_per_step
 
 
 def _resolve_loss_csv(metrics_dir: Path) -> Optional[Path]:

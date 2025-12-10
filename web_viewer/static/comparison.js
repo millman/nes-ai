@@ -341,9 +341,19 @@ function buildInfoCell(exp, index) {
   commit.className = "font-monospace text-muted small mt-1";
   commit.textContent = exp.git_commit || "Unknown commit";
 
+  const params = document.createElement("div");
+  params.className = "text-muted small mt-1";
+  params.innerHTML = `Parameters: <span class="font-monospace">${formatParamCount(exp.total_params)}</span>`;
+
+  const flops = document.createElement("div");
+  flops.className = "text-muted small";
+  flops.innerHTML = `FLOPs/step: <span class="font-monospace">${formatFlops(exp.flops_per_step)}</span>`;
+
   container.appendChild(form);
   container.appendChild(name);
   container.appendChild(commit);
+  container.appendChild(params);
+  container.appendChild(flops);
   return container;
 }
 
