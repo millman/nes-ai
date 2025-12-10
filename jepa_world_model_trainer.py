@@ -183,18 +183,17 @@ class ModelConfig:
     """Dimensional flow (bottlenecks marked with *):
 
         image (image_size^2·in_channels)
-            └─ Encoder(encoder_schedule → pool → embedding_dim*)
+            └─ Encoder(encoder_schedule → pool → encoder_schedule[-1]*)
             ▼
-        embedding_dim*  ────────────────┐
-                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → embedding_dim
+        encoder_schedule[-1]*  ─────────────┐
+                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → encoder_schedule[-1]
         action_dim ──────┘
             │
             └→ VisualizationDecoder(decoder_schedule → image_size^2·in_channels)
 
     • image_size controls the spatial resolution feeding the encoder.
-    • encoder_schedule defines the encoder conv layer widths (must end with embedding_dim).
+    • encoder_schedule defines the encoder conv layer widths; encoder_schedule[-1] is the embedding dim.
     • decoder_schedule defines the decoder conv layer widths (defaults to encoder_schedule if not set).
-    • embedding_dim is encoder_schedule[-1], the encoder's output after pooling.
     • action_dim defines the controller space that modulates the predictor through FiLM layers.
     • hidden_dim is the predictor's internal width.
     • image_size must be divisible by 2**len(encoder_schedule) for the encoder.
@@ -203,24 +202,19 @@ class ModelConfig:
     in_channels: int = 3
     image_size: int = 128
     hidden_dim: int = 512
-    embedding_dim: int = 256
     encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 32, 32, 64)
     action_dim: int = 8
     predictor_film_layers: int = 2
 
+    @property
+    def embedding_dim(self) -> int:
+        """The embedding dimension is encoder_schedule[-1]."""
+        return self.encoder_schedule[-1]
+
     def __post_init__(self) -> None:
-        # Validate encoder_schedule ends with embedding_dim
         if not self.encoder_schedule:
             raise ValueError("encoder_schedule must be non-empty.")
-
-        if self.encoder_schedule[-1] != self.embedding_dim:
-            num_layers = len(self.encoder_schedule)
-            suggested = _suggest_encoder_schedule(self.embedding_dim, num_layers)
-            raise ValueError(
-                f"encoder_schedule[-1]={self.encoder_schedule[-1]} must equal embedding_dim={self.embedding_dim}.\n"
-                f"Suggested fix: {suggested}"
-            )
 
         # Validate image_size is divisible by encoder stride
         num_layers = len(self.encoder_schedule)
