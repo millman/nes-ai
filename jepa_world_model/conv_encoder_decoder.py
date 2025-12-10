@@ -9,14 +9,52 @@ def _norm_groups(out_ch: int) -> int:
     return max(1, out_ch // 8)
 
 
+class CoordConv2d(nn.Module):
+    """Conv2d that concatenates normalized (x, y) coordinate channels to input.
+
+    Adds two channels containing normalized coordinates in [-1, 1] range,
+    helping the network learn position-dependent features.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+    ) -> None:
+        super().__init__()
+        # +2 for the x, y coordinate channels
+        self.conv = nn.Conv2d(
+            in_channels + 2, out_channels, kernel_size, stride=stride, padding=padding
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        # Create coordinate grids normalized to [-1, 1]
+        y_coords = torch.linspace(-1, 1, h, device=x.device, dtype=x.dtype)
+        x_coords = torch.linspace(-1, 1, w, device=x.device, dtype=x.dtype)
+        yy, xx = torch.meshgrid(y_coords, x_coords, indexing="ij")
+        # Expand to batch size: (1, 1, H, W) -> (B, 1, H, W)
+        xx = xx.unsqueeze(0).unsqueeze(0).expand(b, 1, h, w)
+        yy = yy.unsqueeze(0).unsqueeze(0).expand(b, 1, h, w)
+        # Concatenate coordinates to input
+        x_with_coords = torch.cat([x, xx, yy], dim=1)
+        return self.conv(x_with_coords)
+
+
 class DownBlock(nn.Module):
     """ResNet-style conv block with stride-2 contraction and residual connection."""
 
-    def __init__(self, in_ch: int, out_ch: int) -> None:
+    def __init__(self, in_ch: int, out_ch: int, use_coord_conv: bool = False) -> None:
         super().__init__()
         groups = _norm_groups(out_ch)
         # Main path: downsample + refine
-        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
+        if use_coord_conv:
+            self.conv1 = CoordConv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
+        else:
+            self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
         self.norm1 = nn.GroupNorm(groups, out_ch)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
         self.norm2 = nn.GroupNorm(groups, out_ch)
@@ -71,18 +109,13 @@ class Encoder(nn.Module):
     Architecture overview:
         Input image (input_hw × input_hw × in_channels)
             ↓
-        Conv blocks following channel_schedule (each halves spatial resolution)
+        Conv blocks following schedule (each halves spatial resolution)
             ↓
-        Final feature map: (input_hw / 2^num_blocks) × same × channel_schedule[-1]
+        Final feature map: (input_hw / 2^num_blocks) × same × schedule[-1]
             ↓
-        AdaptiveAvgPool2d(1) → 1×1×channel_schedule[-1]
+        AdaptiveAvgPool2d(1) → 1×1×schedule[-1]
             ↓
-        Optional projection: Linear(channel_schedule[-1] → latent_dim)
-            ↓
-        Output: latent vector of size latent_dim
-
-    The latent_dim parameter allows the output embedding dimension to differ from
-    the final channel count in the schedule.
+        Output: latent vector of size schedule[-1]
     """
 
     def __init__(
@@ -90,38 +123,26 @@ class Encoder(nn.Module):
         in_channels: int,
         schedule: Tuple[int, ...],
         input_hw: int,
-        *,
-        latent_dim: Optional[int] = None,
     ):
         super().__init__()
         if not schedule:
-            raise ValueError("Channel schedule must be non-empty")
+            raise ValueError("Schedule must be non-empty")
 
         blocks: List[nn.Module] = []
         ch_prev = in_channels
 
-        for ch in schedule:
-            blocks.append(DownBlock(ch_prev, ch))
+        for idx, ch in enumerate(schedule):
+            # Use CoordConv2d for the first layer to help encode spatial position
+            use_coord_conv = (idx == 0)
+            blocks.append(DownBlock(ch_prev, ch, use_coord_conv=use_coord_conv))
             ch_prev = ch
 
         self.blocks = nn.ModuleList(blocks)
         self.pool = nn.AdaptiveAvgPool2d(1)
-
-        # Output latent dimension
-        conv_out_dim = schedule[-1]
-        self.latent_dim = latent_dim if latent_dim is not None else conv_out_dim
-
-        # Add projection layer if latent_dim differs from conv output
-        if self.latent_dim != conv_out_dim:
-            self.latent_proj: Optional[nn.Module] = nn.Sequential(
-                nn.Linear(conv_out_dim, self.latent_dim),
-                nn.SiLU(inplace=True),
-            )
-        else:
-            self.latent_proj = None
+        self.latent_dim = schedule[-1]
 
         self.in_channels = in_channels
-        self.channel_schedule = schedule
+        self.schedule = schedule
         self.input_hw = input_hw
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -129,12 +150,7 @@ class Encoder(nn.Module):
         for block in self.blocks:
             feats = block(feats)
 
-        # Pool and optionally project
-        pooled = self.pool(feats).flatten(1)
-        if self.latent_proj is not None:
-            pooled = self.latent_proj(pooled)
-
-        return pooled
+        return self.pool(feats).flatten(1)
 
     def shape_info(self) -> Dict[str, Any]:
         info: Dict[str, Any] = {
@@ -146,7 +162,7 @@ class Encoder(nn.Module):
         h = self.input_hw
         w = self.input_hw
         c = self.in_channels
-        for idx, out_ch in enumerate(self.channel_schedule, start=1):
+        for idx, out_ch in enumerate(self.schedule, start=1):
             next_h = (h + 1) // 2
             next_w = (w + 1) // 2
             stage = {
@@ -156,12 +172,7 @@ class Encoder(nn.Module):
             }
             info["stages"].append(stage)
             h, w, c = next_h, next_w, out_ch
-        # conv_out_dim is the channel count after the last conv block (before projection)
-        conv_out_dim = self.channel_schedule[-1] if self.channel_schedule else c
-        info["conv_out_dim"] = conv_out_dim
-        # latent_dim is the final output dimension (after optional projection)
         info["latent_dim"] = self.latent_dim
-        info["has_projection"] = self.latent_proj is not None
         return info
 
 
@@ -175,7 +186,7 @@ class VisualizationDecoder(nn.Module):
             ↓
         Reshape to spatial: start_hw × start_hw × start_ch
             ↓
-        UpBlocks (each doubles spatial resolution, mirrors encoder's channel_schedule)
+        UpBlocks (each doubles spatial resolution)
             ↓
         Output: image_size × image_size × image_channels
 
@@ -184,8 +195,9 @@ class VisualizationDecoder(nn.Module):
     in the latent. This forces the encoder to capture fine details in the latent
     representation rather than relying on shortcuts.
 
-    The channel_schedule should match the encoder's schedule so that the
-    up-convolutions mirror the down-convolutions.
+    The schedule can differ from the encoder's schedule. The decoder
+    starts at start_ch (schedule[-1]) and upsamples through the
+    reversed schedule.
     """
 
     def __init__(
@@ -193,30 +205,23 @@ class VisualizationDecoder(nn.Module):
         latent_dim: int,
         image_channels: int,
         image_size: int,
-        channel_schedule: Tuple[int, ...],
-        latent_hw: int,
+        schedule: Tuple[int, ...],
     ) -> None:
         super().__init__()
-        if not channel_schedule:
-            raise ValueError("channel_schedule must be non-empty for decoder construction.")
-        scale = 2 ** len(channel_schedule)
+        if not schedule:
+            raise ValueError("Schedule must be non-empty for decoder construction.")
+        num_layers = len(schedule)
+        scale = 2 ** num_layers
         if image_size % scale != 0:
             raise ValueError(
-                f"image_size={image_size} must be divisible by 2**len(channel_schedule)={scale} "
-                "so the decoder can mirror the encoder."
+                f"image_size={image_size} must be divisible by 2**len(schedule)={scale}."
             )
-        expected_hw = image_size // scale
-        if latent_hw != expected_hw:
-            raise ValueError(
-                f"latent_hw must equal image_size // 2**len(channel_schedule) ({expected_hw}), "
-                f"got {latent_hw}. Adjust ModelConfig.latent_hw or image_size."
-            )
-        self.start_hw = expected_hw
-        self.start_ch = channel_schedule[-1]
+        start_hw = image_size // scale
+        self.start_hw = start_hw
+        self.start_ch = schedule[-1]
         self.image_channels = image_channels
         self.image_size = image_size
-        self.channel_schedule = channel_schedule
-        self.latent_hw = latent_hw
+        self.schedule = schedule
         self.latent_dim = latent_dim
 
         self.project = nn.Sequential(
@@ -225,7 +230,7 @@ class VisualizationDecoder(nn.Module):
         )
         up_blocks: List[nn.Module] = []
         in_ch = self.start_ch
-        for out_ch in reversed(channel_schedule):
+        for out_ch in reversed(schedule):
             up_blocks.append(UpBlock(in_ch, out_ch))
             in_ch = out_ch
         self.up_blocks = nn.ModuleList(up_blocks)
@@ -261,7 +266,7 @@ class VisualizationDecoder(nn.Module):
         }
         hw = self.start_hw
         ch = self.start_ch
-        for idx, out_ch in enumerate(reversed(self.channel_schedule), start=1):
+        for idx, out_ch in enumerate(reversed(self.schedule), start=1):
             prev_hw = hw
             hw = max(1, hw * 2)
             stage = {

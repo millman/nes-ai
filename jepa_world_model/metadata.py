@@ -56,7 +56,6 @@ def write_run_metadata(run_dir: Path, cfg: Any, model_cfg: Any) -> None:
     toml_payload: Dict[str, Any] = {
         "train_config": train_config,
         "model_config": model_config,
-        "data_root": str(cfg.data_root),
     }
     metadata_text = tomli_w.dumps(toml_payload)
     metadata_text = metadata_text.replace(f'"{_TOML_NULL_SENTINEL}"', "null")

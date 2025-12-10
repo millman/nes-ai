@@ -25,7 +25,7 @@ from time import perf_counter
 from recon.data import list_trajectories, load_frame_as_tensor
 from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
-from jepa_world_model.loss import HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
+from jepa_world_model.loss import FocalL1Loss, HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
 from jepa_world_model.metadata import write_run_metadata
 from jepa_world_model.vis import (
     describe_action_tensor,
@@ -151,7 +151,8 @@ EMA_CONSISTENCY_LOSS = nn.MSELoss()
 # ------------------------------------------------------------
 
 
-def _derive_channel_schedule(embedding_dim: int, num_layers: int) -> Tuple[int, ...]:
+def _derive_encoder_schedule(embedding_dim: int, num_layers: int) -> Tuple[int, ...]:
+    """Derive a channel schedule that doubles each layer and ends at embedding_dim."""
     if num_layers < 1:
         raise ValueError("num_downsample_layers must be positive.")
     factor = 2 ** (num_layers - 1)
@@ -167,59 +168,75 @@ def _derive_channel_schedule(embedding_dim: int, num_layers: int) -> Tuple[int, 
     return tuple(schedule)
 
 
+def _suggest_encoder_schedule(embedding_dim: int, num_layers: int) -> str:
+    """Generate a suggested encoder_schedule for error messages."""
+    try:
+        suggested = _derive_encoder_schedule(embedding_dim, num_layers)
+        return f"encoder_schedule={suggested}"
+    except ValueError:
+        # If we can't derive, suggest a simple pattern
+        return f"encoder_schedule with {num_layers} layers ending in {embedding_dim}"
+
+
 @dataclass
 class ModelConfig:
     """Dimensional flow (bottlenecks marked with *):
 
         image (image_size^2·in_channels)
-            └─ Encoder(channel_schedule → pool → project → latent_dim*)
+            └─ Encoder(encoder_schedule → pool → embedding_dim*)
             ▼
-        latent_dim*  ────────────────┐
-                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → latent_dim
+        embedding_dim*  ────────────────┐
+                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → embedding_dim
         action_dim ──────┘
             │
-            └→ VisualizationDecoder(latent_dim* → image_size^2·in_channels)
+            └→ VisualizationDecoder(decoder_schedule → image_size^2·in_channels)
 
     • image_size controls the spatial resolution feeding the encoder.
-    • channel_schedule defines the conv layer widths (derived from embedding_dim for the conv backbone).
-    • latent_dim is the encoder's final output dimension after pooling and optional projection.
-      If latent_dim > channel_schedule[-1], a linear projection expands the representation.
-      This allows a richer latent space without increasing conv backbone parameters.
-    • embedding_dim determines channel_schedule[-1], the conv backbone's final channel count.
+    • encoder_schedule defines the encoder conv layer widths (must end with embedding_dim).
+    • decoder_schedule defines the decoder conv layer widths (defaults to encoder_schedule if not set).
+    • embedding_dim is encoder_schedule[-1], the encoder's output after pooling.
     • action_dim defines the controller space that modulates the predictor through FiLM layers.
     • hidden_dim is the predictor's internal width.
-    • latent_hw is the decoder's initial spatial side-length before upsampling back to image_size
-      (must equal image_size / 2**num_downsample_layers).
-    • image_size must be divisible by 2**num_downsample_layers so encoder/decoder resolutions stay aligned.
+    • image_size must be divisible by 2**len(encoder_schedule) for the encoder.
     """
 
     in_channels: int = 3
     image_size: int = 128
-    latent_dim: int = 256
     hidden_dim: int = 512
     embedding_dim: int = 256
-    num_downsample_layers: int = 4
-    latent_hw: Optional[int] = None
+    encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
+    decoder_schedule: Optional[Tuple[int, ...]] = (32, 32, 32, 64)
     action_dim: int = 8
     predictor_film_layers: int = 2
-    channel_schedule: Tuple[int, ...] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.channel_schedule = _derive_channel_schedule(self.embedding_dim, self.num_downsample_layers)
-        stride = 2 ** self.num_downsample_layers
+        # Validate encoder_schedule ends with embedding_dim
+        if not self.encoder_schedule:
+            raise ValueError("encoder_schedule must be non-empty.")
+
+        if self.encoder_schedule[-1] != self.embedding_dim:
+            num_layers = len(self.encoder_schedule)
+            suggested = _suggest_encoder_schedule(self.embedding_dim, num_layers)
+            raise ValueError(
+                f"encoder_schedule[-1]={self.encoder_schedule[-1]} must equal embedding_dim={self.embedding_dim}.\n"
+                f"Suggested fix: {suggested}"
+            )
+
+        # Validate image_size is divisible by encoder stride
+        num_layers = len(self.encoder_schedule)
+        stride = 2 ** num_layers
         if self.image_size % stride != 0:
             raise ValueError(
-                f"image_size={self.image_size} must be divisible by 2**num_downsample_layers={stride} "
-                "to mirror encoder/decoder resolutions."
+                f"image_size={self.image_size} must be divisible by 2**len(encoder_schedule)={stride}."
             )
-        expected_hw = self.image_size // stride
-        if self.latent_hw is None:
-            self.latent_hw = expected_hw
-        elif self.latent_hw != expected_hw:
-            raise ValueError(
-                f"latent_hw must equal image_size // 2**num_downsample_layers ({expected_hw}), "
-                f"got {self.latent_hw}. Adjust ModelConfig."
-            )
+
+        # Validate decoder_schedule if provided
+        if self.decoder_schedule is not None:
+            decoder_stride = 2 ** len(self.decoder_schedule)
+            if self.image_size % decoder_stride != 0:
+                raise ValueError(
+                    f"image_size={self.image_size} must be divisible by 2**len(decoder_schedule)={decoder_stride}."
+                )
 
 
 @dataclass
@@ -326,12 +343,10 @@ class JEPAWorldModel(nn.Module):
         self.cfg = cfg
         self.encoder = Encoder(
             cfg.in_channels,
-            cfg.channel_schedule,
+            cfg.encoder_schedule,
             cfg.image_size,
-            latent_dim=cfg.latent_dim,
         )
-        # Use the encoder's actual latent_dim (which may differ from channel_schedule[-1]
-        # if a projection layer is used)
+        # latent_dim is encoder_schedule[-1]
         self.embedding_dim = self.encoder.latent_dim
         self.predictor = PredictorNetwork(
             self.embedding_dim,
@@ -1018,20 +1033,15 @@ def format_shape_summary(
     lines.append(f"Raw frame {_format_hwc(*raw_shape)}")
     lines.append(f"  └─ Data loader resize → {_format_hwc(*encoder_info['input'])}")
     lines.append("")
-    auto_schedule = _derive_channel_schedule(cfg.embedding_dim, cfg.num_downsample_layers)
-    lines.append(f"Channel schedule: {auto_schedule}")
+    lines.append(f"Encoder schedule: {cfg.encoder_schedule}")
     lines.append("Encoder:")
     for stage in encoder_info["stages"]:
         lines.append(
             f"  • Stage {stage['stage']}: {_format_hwc(*stage['in'])} → {_format_hwc(*stage['out'])}"
         )
-    # Show pooling and optional projection
-    conv_out_dim = encoder_info.get("conv_out_dim", encoder_info["latent_dim"])
-    lines.append(f"  AdaptiveAvgPool → 1×1×{conv_out_dim}")
-    if encoder_info.get("has_projection", False):
-        lines.append(f"  Projection → latent_dim={encoder_info['latent_dim']}")
-    else:
-        lines.append(f"  (no projection, latent_dim={encoder_info['latent_dim']})")
+    # Show pooling
+    latent_dim = encoder_info["latent_dim"]
+    lines.append(f"  AdaptiveAvgPool → 1×1×{latent_dim} (latent)")
     lines.append("")
     lines.append("Predictor:")
     lines.append(
@@ -1342,12 +1352,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if cfg.loss_weights.ema_consistency > 0 and cfg.ema.momentum >= 0.0:
         ema_model = build_ema_model(model)
 
+    decoder_schedule = model_cfg.decoder_schedule if model_cfg.decoder_schedule is not None else model_cfg.encoder_schedule
     decoder = VisualizationDecoder(
         model.embedding_dim,
         model_cfg.in_channels,
         model_cfg.image_size,
-        model_cfg.channel_schedule,
-        model_cfg.latent_hw,
+        decoder_schedule,
     ).to(device)
 
     raw_shape = _infer_raw_frame_shape(dataset)
