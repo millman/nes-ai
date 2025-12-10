@@ -13,6 +13,7 @@
             <th data-col-id="notes">Notes</th>
             <th data-col-id="name">Experiment</th>
             <th data-col-id="metadata">metadata.txt</th>
+            <th data-col-id="metadata_git">metadata_git.txt</th>
             <th data-col-id="image">metrics/loss_curves.png</th>
         </tr>
         </thead>
@@ -51,6 +52,12 @@
                     <pre class="metadata-block">{{ exp.metadata_text }}</pre>
                 </div>
                 <button type="button" class="btn btn-sm btn-outline-secondary mt-2 metadata-toggle" data-target="{{ exp.id }}">Expand</button>
+            </td>
+            <td data-col-id="metadata_git">
+                <div class="metadata-wrapper card card-body p-2" data-exp-id="{{ exp.id }}-git">
+                    <pre class="metadata-block">{{ exp.git_metadata_text }}</pre>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary mt-2 metadata-toggle" data-target="{{ exp.id }}-git">Expand</button>
             </td>
             <td class="image-cell" data-col-id="image">
                 {% if exp.loss_image %}
