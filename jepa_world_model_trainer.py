@@ -65,7 +65,7 @@ class PredictorNetwork(nn.Module):
         self.action_dim = action_dim
         self.film_layers = film_layers
         self.delta_scale = 1.0
-        self.use_delta_squash = True
+        self.use_delta_squash = False
 
     def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if embeddings.shape[:-1] != actions.shape[:-1]:
@@ -211,10 +211,10 @@ class ModelConfig:
     """
 
     in_channels: int = 3
-    image_size: int = 128
+    image_size: int = 64
     hidden_dim: int = 512
     encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
-    decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 128, 256)
+    decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
     action_dim: int = 8
     predictor_film_layers: int = 2
 
@@ -250,7 +250,7 @@ class LossWeights:
     sigreg: float = 1.0
     recon: float = 1.0
     action_recon: float = 0.0
-    delta: float = 1.0
+    delta: float = 0.0
     rollout: float = 0.0
     consistency: float = 0.0
     ema_consistency: float = 0.0
