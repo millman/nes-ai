@@ -2,6 +2,7 @@
 
 {% block extra_head %}
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>
 {% endblock %}
 
@@ -9,6 +10,14 @@
 <a href="{{ url_for('experiments_index') }}" class="btn btn-outline-secondary btn-sm mb-3">&larr; Back to all experiments</a>
 {% set heading_title = experiment.title if experiment.title != "Untitled" else "Untitled" %}
 <h2 class="mb-4">{{ heading_title }} <small class="text-muted">({{ experiment.name }})</small></h2>
+
+<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+    <label class="form-label mb-0 small text-muted" for="detail-xaxis-select">X-axis:</label>
+    <select id="detail-xaxis-select" class="form-select form-select-sm" style="width: auto;">
+        <option value="steps">Steps</option>
+        <option value="flops">Cumulative FLOPs</option>
+    </select>
+</div>
 
 <div id="detail-plot" class="plot-area mb-3">
     {% if figure %}
@@ -51,7 +60,7 @@
                         return trace.x ? [...trace.x] : [];  // Fallback to steps
                     });
 
-                    Plotly.react(plotEl, figure.data, figure.layout, figure.config || {}).then(() => {
+                    Plotly.react(plotEl, figure.data, figure.layout, buildPlotlyConfig(figure.config || {})).then(() => {
                         attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps);
 
                         // X-axis toggle handler
@@ -248,12 +257,7 @@
 
 <div class="mb-4">
     <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
-        <label class="form-label mb-0 small text-muted" for="detail-xaxis-select">X-axis:</label>
-        <select id="detail-xaxis-select" class="form-select form-select-sm" style="width: auto;">
-            <option value="steps">Steps</option>
-            <option value="flops">Cumulative FLOPs</option>
-        </select>
-        <label class="form-label mb-0 small text-muted ms-3" for="detail-folder-select">Image folder:</label>
+        <label class="form-label mb-0 small text-muted" for="detail-folder-select">Image folder:</label>
         <select id="detail-folder-select" class="form-select form-select-sm" style="width: auto;">
             <option value="vis_fixed_0">vis_fixed_0</option>
             <option value="vis_fixed_1">vis_fixed_1</option>

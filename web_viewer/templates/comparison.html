@@ -2,6 +2,7 @@
 
 {% block extra_head %}
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>
 <script defer src="{{ url_for('static', filename='comparison.js') }}"></script>
 {% endblock %}
