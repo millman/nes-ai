@@ -1,5 +1,5 @@
 """Baseline convolutional encoder/decoder preserved from the original trainer."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -9,51 +9,13 @@ def _norm_groups(out_ch: int) -> int:
     return max(1, out_ch // 8)
 
 
-class CoordConv2d(nn.Module):
-    """Conv2d that concatenates normalized (x, y) coordinate channels to input.
-
-    Adds two channels containing normalized coordinates in [-1, 1] range,
-    helping the network learn position-dependent features.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int = 1,
-        padding: int = 0,
-    ) -> None:
-        super().__init__()
-        # +2 for the x, y coordinate channels
-        self.conv = nn.Conv2d(
-            in_channels + 2, out_channels, kernel_size, stride=stride, padding=padding
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = x.shape
-        # Create coordinate grids normalized to [-1, 1]
-        y_coords = torch.linspace(-1, 1, h, device=x.device, dtype=x.dtype)
-        x_coords = torch.linspace(-1, 1, w, device=x.device, dtype=x.dtype)
-        yy, xx = torch.meshgrid(y_coords, x_coords, indexing="ij")
-        # Expand to batch size: (1, 1, H, W) -> (B, 1, H, W)
-        xx = xx.unsqueeze(0).unsqueeze(0).expand(b, 1, h, w)
-        yy = yy.unsqueeze(0).unsqueeze(0).expand(b, 1, h, w)
-        # Concatenate coordinates to input
-        x_with_coords = torch.cat([x, xx, yy], dim=1)
-        return self.conv(x_with_coords)
-
-
 class DownBlock(nn.Module):
     """Conv block with stride-2 contraction."""
 
-    def __init__(self, in_ch: int, out_ch: int, use_coord_conv: bool = False) -> None:
+    def __init__(self, in_ch: int, out_ch: int) -> None:
         super().__init__()
         groups = _norm_groups(out_ch)
-        if use_coord_conv:
-            self.conv1 = CoordConv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
-        else:
-            self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
         self.norm1 = nn.GroupNorm(groups, out_ch)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
         self.norm2 = nn.GroupNorm(groups, out_ch)
@@ -111,10 +73,8 @@ class Encoder(nn.Module):
         blocks: List[nn.Module] = []
         ch_prev = in_channels
 
-        for idx, ch in enumerate(schedule):
-            # Use CoordConv2d for the first layer to help encode spatial position
-            use_coord_conv = (idx == 0)
-            blocks.append(DownBlock(ch_prev, ch, use_coord_conv=use_coord_conv))
+        for ch in schedule:
+            blocks.append(DownBlock(ch_prev, ch))
             ch_prev = ch
 
         self.blocks = nn.ModuleList(blocks)
