@@ -64,6 +64,8 @@ class PredictorNetwork(nn.Module):
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.film_layers = film_layers
+        self.delta_scale = 1.0
+        self.use_delta_squash = True
 
     def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if embeddings.shape[:-1] != actions.shape[:-1]:
@@ -75,9 +77,17 @@ class PredictorNetwork(nn.Module):
         hidden = self.film(hidden, act_embed)
         hidden = self.activation(self.hidden_proj(hidden))
         hidden = self.film(hidden, act_embed)
-        delta = self.out_proj(hidden)
+        raw_delta = self.out_proj(hidden)
+        if self.use_delta_squash:
+            delta = torch.tanh(raw_delta) * self.delta_scale
+        else:
+            delta = raw_delta * self.delta_scale
         action_logits = self.action_head(hidden)
-        return delta.view(*original_shape, delta.shape[-1]), action_logits.view(*original_shape, action_logits.shape[-1])
+        pred = emb_flat + delta
+        return (
+            pred.view(*original_shape, pred.shape[-1]),
+            action_logits.view(*original_shape, action_logits.shape[-1]),
+        )
 
     def shape_info(self) -> Dict[str, Any]:
         return {
@@ -377,8 +387,7 @@ def jepa_loss(
         return zero, logits
     prev_embed = embeddings[:, :-1]
     prev_actions = actions[:, :-1]
-    deltas, action_logits = model.predictor(prev_embed, prev_actions)
-    preds = prev_embed + deltas
+    preds, action_logits = model.predictor(prev_embed, prev_actions)
     target = embeddings[:, 1:].detach()
     return JEPA_LOSS(preds, target), action_logits
 
@@ -401,8 +410,7 @@ def rollout_loss(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            delta, _ = model.predictor(current, act)
-            pred = current + delta
+            pred, _ = model.predictor(current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
@@ -1382,8 +1390,8 @@ def _render_visualization_batch(
         current_frame = prev_pred_frame
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
-            delta_embed, _ = model.predictor(current_embed, action)
-            next_embed = current_embed + delta_embed
+            prev_embed = current_embed
+            next_embed, _ = model.predictor(current_embed, action)
             decoded_next = decoder(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
@@ -1391,9 +1399,8 @@ def _render_visualization_batch(
             else:
                 gradient_maps[step] = _loss_to_heatmap(gt_slice[step], current_frame)
             rollout_frames[step] = current_frame.detach().cpu()
-            current_embed = next_embed
             if log_deltas and row_offset < 2:
-                latent_norm = delta_embed.norm().item()
+                latent_norm = (next_embed - prev_embed).norm().item()
                 pixel_delta = (current_frame - prev_pred_frame).abs().mean().item()
                 frame_mse = F.mse_loss(current_frame, gt_slice[step]).item()
                 debug_lines.append(
@@ -1404,6 +1411,7 @@ def _render_visualization_batch(
                     )
                 )
             prev_pred_frame = current_frame.detach()
+            current_embed = next_embed
         labels = _extract_frame_labels(frame_paths, int(idx.item()), start_idx, max_window)
         sequences.append(
             VisualizationSequence(
