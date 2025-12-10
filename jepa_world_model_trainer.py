@@ -67,7 +67,7 @@ class PredictorNetwork(nn.Module):
         self.delta_scale = 1.0
         self.use_delta_squash = True
 
-    def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if embeddings.shape[:-1] != actions.shape[:-1]:
             raise ValueError("Embeddings and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -86,6 +86,7 @@ class PredictorNetwork(nn.Module):
         pred = emb_flat + delta
         return (
             pred.view(*original_shape, pred.shape[-1]),
+            delta.view(*original_shape, delta.shape[-1]),
             action_logits.view(*original_shape, action_logits.shape[-1]),
         )
 
@@ -310,6 +311,8 @@ class TrainConfig:
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
+    use_delta_loss: bool = True
+    delta_loss_weight: float = 1.0
 
     # Specific losses
     ema: LossEMAConfig = field(default_factory=LossEMAConfig)
@@ -378,18 +381,19 @@ class JEPAWorldModel(nn.Module):
 
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Standard one-step JEPA loss plus action logits from the predictor."""
     embeddings = outputs["embeddings"]
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
         logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
-        return zero, logits
+        delta = embeddings.new_zeros(embeddings[:, :-1].shape)
+        return zero, logits, delta
     prev_embed = embeddings[:, :-1]
     prev_actions = actions[:, :-1]
-    preds, action_logits = model.predictor(prev_embed, prev_actions)
+    preds, delta_pred, action_logits = model.predictor(prev_embed, prev_actions)
     target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(preds, target), action_logits
+    return JEPA_LOSS(preds, target), action_logits, delta_pred
 
 
 def rollout_loss(
@@ -410,7 +414,7 @@ def rollout_loss(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            pred, _ = model.predictor(current, act)
+            pred, _, _ = model.predictor(current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
@@ -510,8 +514,20 @@ def training_step(
         recon = decoder(outputs["embeddings"])
 
     # Core JEPA + action prediction losses.
-    loss_jepa_raw, action_logits = jepa_loss(model, outputs, actions)
+    loss_jepa_raw, action_logits, delta_pred = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
+    has_temporal = outputs["embeddings"].shape[1] > 1
+    if has_temporal:
+        delta_target = (outputs["embeddings"][:, 1:] - outputs["embeddings"][:, :-1]).detach()
+        delta_pred_norm = delta_pred.detach().norm(dim=-1).mean()
+        delta_target_norm = delta_target.norm(dim=-1).mean()
+    else:
+        delta_target = images.new_zeros(delta_pred.shape)
+        delta_pred_norm = images.new_tensor(0.0)
+        delta_target_norm = images.new_tensor(0.0)
+    loss_delta = (
+        F.mse_loss(delta_pred, delta_target) if cfg.use_delta_loss and has_temporal else images.new_tensor(0.0)
+    )
     prev_actions = actions[:, :-1]
     if weights.action_recon > 0 and prev_actions.numel() > 0:
         loss_action = ACTION_RECON_LOSS(action_logits, prev_actions)
@@ -555,6 +571,7 @@ def training_step(
         + weights.ema_consistency * loss_ema_consistency
         + weights.action_recon * loss_action
         + weights.recon * loss_recon
+        + (cfg.delta_loss_weight * loss_delta if cfg.use_delta_loss else 0.0)
     )
     optimizer.zero_grad()
     world_loss.backward()
@@ -589,6 +606,9 @@ def training_step(
         "loss_ema_consistency": loss_ema_consistency.item(),
         "loss_recon": loss_recon.item(),
         "loss_action": loss_action.item(),
+        "loss_delta": loss_delta.item(),
+        "delta_pred_norm": delta_pred_norm.item(),
+        "delta_target_norm": delta_target_norm.item(),
         "loss_world": world_loss.item(),
         "grad_world": world_grad_norm,
         "grad_decoder": decoder_grad_norm,
@@ -744,6 +764,9 @@ LOSS_COLUMNS = [
     "loss_ema_consistency",
     "loss_recon",
     "loss_action",
+    "loss_delta",
+    "delta_pred_norm",
+    "delta_target_norm",
     "grad_world",
     "grad_decoder",
 ]
@@ -762,6 +785,9 @@ class LossHistory:
     ema_consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
+    delta: List[float] = field(default_factory=list)
+    delta_pred_norm: List[float] = field(default_factory=list)
+    delta_target_norm: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
 
@@ -777,6 +803,9 @@ class LossHistory:
         self.ema_consistency.append(metrics["loss_ema_consistency"])
         self.recon.append(metrics["loss_recon"])
         self.action.append(metrics["loss_action"])
+        self.delta.append(metrics["loss_delta"])
+        self.delta_pred_norm.append(metrics["delta_pred_norm"])
+        self.delta_target_norm.append(metrics["delta_target_norm"])
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
 
@@ -803,6 +832,9 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.ema_consistency,
             history.recon,
             history.action,
+            history.delta,
+            history.delta_pred_norm,
+            history.delta_target_norm,
             history.grad_world,
             history.grad_decoder,
         ):
@@ -1391,7 +1423,7 @@ def _render_visualization_batch(
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
             prev_embed = current_embed
-            next_embed, _ = model.predictor(current_embed, action)
+            next_embed, _, _ = model.predictor(current_embed, action)
             decoded_next = decoder(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
