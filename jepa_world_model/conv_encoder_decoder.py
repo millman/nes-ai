@@ -45,12 +45,11 @@ class CoordConv2d(nn.Module):
 
 
 class DownBlock(nn.Module):
-    """ResNet-style conv block with stride-2 contraction and residual connection."""
+    """Conv block with stride-2 contraction."""
 
     def __init__(self, in_ch: int, out_ch: int, use_coord_conv: bool = False) -> None:
         super().__init__()
         groups = _norm_groups(out_ch)
-        # Main path: downsample + refine
         if use_coord_conv:
             self.conv1 = CoordConv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
         else:
@@ -60,46 +59,27 @@ class DownBlock(nn.Module):
         self.norm2 = nn.GroupNorm(groups, out_ch)
         self.act = nn.SiLU(inplace=True)
 
-        # Shortcut path: match dimensions (channels + spatial)
-        self.shortcut = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=2),
-            nn.GroupNorm(groups, out_ch),
-        )
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Main path
         out = self.act(self.norm1(self.conv1(x)))
-        out = self.norm2(self.conv2(out))
-        # Residual connection
-        out = self.act(out + self.shortcut(x))
+        out = self.act(self.norm2(self.conv2(out)))
         return out
 
 
 class UpBlock(nn.Module):
-    """ResNet-style upsample block with stride-2 expansion and residual connection."""
+    """Upsample block with stride-2 expansion."""
 
     def __init__(self, in_ch: int, out_ch: int) -> None:
         super().__init__()
         groups = _norm_groups(out_ch)
-        # Main path: upsample + refine
         self.upsample = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2)
         self.norm1 = nn.GroupNorm(groups, out_ch)
         self.conv = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
         self.norm2 = nn.GroupNorm(groups, out_ch)
         self.act = nn.SiLU(inplace=True)
 
-        # Shortcut path: match dimensions (channels + spatial)
-        self.shortcut = nn.Sequential(
-            nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2),
-            nn.GroupNorm(groups, out_ch),
-        )
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Main path
         out = self.act(self.norm1(self.upsample(x)))
-        out = self.norm2(self.conv(out))
-        # Residual connection
-        out = self.act(out + self.shortcut(x))
+        out = self.act(self.norm2(self.conv(out)))
         return out
 
 
