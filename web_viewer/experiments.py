@@ -38,6 +38,15 @@ class Experiment:
 
 
 @dataclass
+class ExperimentIndex:
+    """Lightweight index row for pagination."""
+
+    id: str
+    path: Path
+    last_modified: Optional[datetime]
+
+
+@dataclass
 class LossCurveData:
     steps: List[float]
     cumulative_flops: List[float]
@@ -54,6 +63,18 @@ def list_experiments(output_dir: Path) -> List[Experiment]:
             experiments.append(exp)
     experiments.sort(key=lambda e: e.name, reverse=True)
     return experiments
+
+
+def build_experiment_index(output_dir: Path) -> List[ExperimentIndex]:
+    """Build a lightweight listing without reading full metadata."""
+    index: List[ExperimentIndex] = []
+    if not output_dir.exists():
+        return index
+    for subdir in sorted(p for p in output_dir.iterdir() if p.is_dir()):
+        last_modified = _quick_last_modified(subdir)
+        index.append(ExperimentIndex(id=subdir.name, path=subdir, last_modified=last_modified))
+    index.sort(key=lambda e: e.id, reverse=True)
+    return index
 
 
 def load_experiment(path: Path) -> Optional[Experiment]:
@@ -306,6 +327,15 @@ def _get_last_modified(path: Path) -> Optional[datetime]:
     if latest_mtime is None:
         return None
     return datetime.fromtimestamp(latest_mtime)
+
+
+def _quick_last_modified(path: Path) -> Optional[datetime]:
+    """Fast last-modified using directory mtime."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return datetime.fromtimestamp(stat.st_mtime)
 
 
 def _is_all_zero(values: Iterable[float]) -> bool:

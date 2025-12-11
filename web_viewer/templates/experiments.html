@@ -46,13 +46,14 @@
                 </form>
                 <form class="tags-form mt-1" data-exp-id="{{ exp.id }}">
                     {% set tags_value = exp.tags if exp.tags else "" %}
-                    <div class="input-group input-group-sm tags-input-group">
+                    <div class="input-group input-group-sm tags-input-group flex-nowrap w-auto">
                         <span class="input-group-text">Tags:</span>
                         <input
                             type="text"
                             class="form-control form-control-sm exp-tags-input"
                             value="{{ tags_value }}"
                             aria-label="Experiment tags"
+                            style="flex: 0 0 auto; width: auto;"
                             readonly
                         >
                     </div>

@@ -339,7 +339,7 @@ function buildInfoCell(exp, index) {
   tagsForm.dataset.expId = exp.id;
 
   const tagsGroup = document.createElement("div");
-  tagsGroup.className = "input-group input-group-sm tags-input-group";
+  tagsGroup.className = "input-group input-group-sm tags-input-group flex-nowrap w-auto";
 
   const tagsLabel = document.createElement("span");
   tagsLabel.className = "input-group-text";
@@ -352,6 +352,8 @@ function buildInfoCell(exp, index) {
   if (tagsValue) {
     tagsInput.value = tagsValue;
   }
+  tagsInput.style.flex = "0 0 auto";
+  tagsInput.style.width = "auto";
 
   const tagsStatus = document.createElement("span");
   tagsStatus.className = "tags-status small text-muted";

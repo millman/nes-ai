@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
+from math import ceil
 
 from flask import (
     Flask,
@@ -19,7 +20,9 @@ from .config import ViewerConfig
 from .diffing import diff_metadata
 from .experiments import (
     Experiment,
+    ExperimentIndex,
     LossCurveData,
+    build_experiment_index,
     list_experiments,
     load_experiment,
     load_loss_curves,
@@ -30,6 +33,7 @@ from .experiments import (
 from .plots import build_overlay
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+DEFAULT_PAGE_SIZE = 25
 
 
 def _format_last_modified(dt: Optional[datetime]) -> str:
@@ -78,11 +82,45 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
     @app.route("/")
     def dashboard():
-        experiments = _load_all()
+        experiments = []
+        index_rows = build_experiment_index(cfg.output_dir)
+        total_items = len(index_rows)
+        requested_page = request.args.get("page", type=int)
+        requested_page_size = request.args.get("page_size", type=int)
+        use_default = not requested_page and not requested_page_size
+        selected_ids: List[str] = []
+        current_page = 1
+        page_size = DEFAULT_PAGE_SIZE
+
+        if use_default:
+            now = datetime.now()
+            start_of_week = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
+            week_ids = [row.id for row in index_rows if row.last_modified and row.last_modified >= start_of_week]
+            page_size = max(DEFAULT_PAGE_SIZE, len(week_ids)) if total_items else DEFAULT_PAGE_SIZE
+            current_page = 1
+        else:
+            page_size = requested_page_size if requested_page_size and requested_page_size > 0 else DEFAULT_PAGE_SIZE
+            current_page = requested_page if requested_page and requested_page > 0 else 1
+
+        total_pages = max(1, ceil(total_items / page_size)) if total_items else 1
+        if current_page > total_pages:
+            current_page = total_pages
+
+        start_idx = (current_page - 1) * page_size
+        end_idx = start_idx + page_size
+        selected_ids = [row.id for row in index_rows[start_idx:end_idx]]
+
+        for exp_id in selected_ids:
+            exp = load_experiment(cfg.output_dir / exp_id)
+            if exp is not None:
+                experiments.append(exp)
         return render_template(
             "dashboard.html",
             experiments=experiments,
             cfg=cfg,
+            total_pages=total_pages,
+            current_page=current_page,
+            page_size=page_size,
             active_nav="dashboard",
         )
 
