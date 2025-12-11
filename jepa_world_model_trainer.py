@@ -249,8 +249,8 @@ class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
     recon: float = 1.0
-    recon_patch: float = 1.0
-    recon_multi: float = 0.0
+    recon_patch: float = 0.0
+    recon_multi: float = 1.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -545,9 +545,11 @@ def multi_scale_hardness_loss(
         gamma = float(gammas[idx])
         lam = float(lambdas[idx])
         per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
+        per_pixel_detached = per_pixel.detach()
         g1d = gaussian_kernel_1d(k, sigma, device=per_pixel.device, dtype=per_pixel.dtype)
-        blurred = gaussian_blur_separable_2d(per_pixel, g1d)
-        scale_loss = ((blurred + eps) ** (1.0 + gamma)).mean()
+        blurred_weight = gaussian_blur_separable_2d(per_pixel_detached, g1d)
+        weight = (blurred_weight + eps).pow(gamma)
+        scale_loss = (weight * (per_pixel + eps)).mean()
         total = total + lam * scale_loss
     return total
 
