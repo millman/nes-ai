@@ -21,6 +21,17 @@ class VisualizationSequenceLike(Protocol):
 
 
 TEXT_FONT = ImageFont.load_default()
+BASE_FONT_SIZE = 10
+_FONT_CACHE: dict[int, ImageFont.FreeTypeFont] = {}
+
+
+def _get_font(font_size: int) -> ImageFont.FreeTypeFont:
+    cached = _FONT_CACHE.get(font_size)
+    if cached is not None:
+        return cached
+    font = TEXT_FONT
+    _FONT_CACHE[font_size] = font
+    return font
 
 
 def describe_action_tensor(action: torch.Tensor) -> str:
@@ -37,14 +48,18 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
 def _annotate_with_text(image: np.ndarray, text: str) -> np.ndarray:
     if not text:
         return image
+    height = image.shape[0]
+    scale = max(0.25, height / 128.0)
+    font_size = max(6, int(round(BASE_FONT_SIZE * scale)))
+    font = _get_font(font_size)
+    padding = max(1, int(round(2 * scale)))
     pil_image = Image.fromarray(image)
     draw = ImageDraw.Draw(pil_image)
-    padding = 2
     text = text.strip()
-    bbox = draw.textbbox((padding, padding), text, font=TEXT_FONT)
+    bbox = draw.textbbox((padding, padding), text, font=font)
     rect = (bbox[0] - padding, bbox[1] - padding, bbox[2] + padding, bbox[3] + padding)
     draw.rectangle(rect, fill=(0, 0, 0))
-    draw.text((padding, padding), text, fill=(255, 255, 255), font=TEXT_FONT)
+    draw.text((padding, padding), text, fill=(255, 255, 255), font=font)
     return np.array(pil_image)
 
 
