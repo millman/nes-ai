@@ -24,6 +24,7 @@ from .experiments import (
     load_experiment,
     load_loss_curves,
     write_notes,
+    write_tags,
     write_title,
 )
 from .plots import build_overlay
@@ -150,6 +151,15 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         write_title(metadata_path, new_title)
         return jsonify({"status": "ok"})
 
+    @app.post("/experiments/<exp_id>/tags")
+    def update_tags(exp_id: str):
+        experiment = _get_experiment_or_404(exp_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        new_tags = payload.get("tags", "")
+        metadata_path = experiment.path / "experiment_metadata.txt"
+        write_tags(metadata_path, new_tags)
+        return jsonify({"status": "ok"})
+
     @app.post("/comparison/data")
     def comparison_data():
         payload = request.get_json(force=True, silent=True) or {}
@@ -214,6 +224,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "name": exp.name,
                 "git_commit": exp.git_commit,
                 "title": exp.title,
+                "tags": exp.tags,
                 "rollout_steps": exp.rollout_steps,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,

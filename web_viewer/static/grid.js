@@ -2,6 +2,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const forms = document.querySelectorAll(".notes-form");
   forms.forEach((form) => wireNotesForm(form));
   wireTitleForms(document);
+  wireTagsForms(document);
   wireMetadataToggles(document);
   formatAllNumbers(document);
 });
@@ -154,6 +155,11 @@ function wireTitleForms(root) {
   titleForms.forEach((form) => wireTitleForm(form));
 }
 
+function wireTagsForms(root) {
+  const tagForms = root.querySelectorAll(".tags-form");
+  tagForms.forEach((form) => wireTagsForm(form));
+}
+
 function wireTitleForm(form) {
   const expId = form.dataset.expId;
   const input = form.querySelector(".exp-title-input");
@@ -205,6 +211,115 @@ function wireTitleForm(form) {
       .then((response) => {
         if (!response.ok) {
           throw new Error("Failed to save title");
+        }
+        return response.json();
+      })
+      .then(() => {
+        lastValue = input.value;
+        status.textContent = "Saved";
+        exitEdit();
+      })
+      .catch(() => {
+        status.textContent = "Save failed";
+        input.readOnly = false;
+        form.classList.add("editing");
+        editing = true;
+      });
+  };
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    save();
+  });
+  input.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!editing) {
+      enterEdit();
+    }
+  });
+  group?.addEventListener("keydown", (event) => {
+    if (!editing && event.key === "Enter") {
+      event.preventDefault();
+      enterEdit();
+    }
+  });
+  input.addEventListener("input", updateState);
+  input.addEventListener("blur", () => {
+    if (editing) {
+      save();
+    }
+  });
+  input.addEventListener("keydown", (event) => {
+    if (!editing) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        enterEdit();
+      }
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      save();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      input.value = lastValue;
+      exitEdit();
+      status.textContent = "";
+    }
+  });
+  updateState();
+}
+
+function wireTagsForm(form) {
+  const expId = form.dataset.expId;
+  const input = form.querySelector(".exp-tags-input");
+  const status = form.querySelector(".tags-status");
+  const group = form.querySelector(".tags-input-group");
+  if (!input) {
+    return;
+  }
+  input.readOnly = true;
+  let lastValue = input.value;
+  let editing = false;
+  const enterEdit = () => {
+    if (editing) {
+      return;
+    }
+    editing = true;
+    input.readOnly = false;
+    form.classList.add("editing");
+    input.focus();
+    input.select();
+  };
+  const exitEdit = () => {
+    editing = false;
+    input.readOnly = true;
+    form.classList.remove("editing");
+  };
+  const updateState = () => {
+    if (input.value !== lastValue) {
+      status.textContent = "Unsaved";
+    } else {
+      status.textContent = "";
+    }
+  };
+  const save = () => {
+    if (!editing) {
+      return;
+    }
+    if (input.value === lastValue) {
+      exitEdit();
+      status.textContent = "";
+      return;
+    }
+    status.textContent = "Saving…";
+    fetch(`/experiments/${expId}/tags`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: input.value }),
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Failed to save tags");
         }
         return response.json();
       })

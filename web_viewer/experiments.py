@@ -24,6 +24,7 @@ class Experiment:
     git_commit: str
     notes_text: str
     title: str
+    tags: str
     loss_image: Optional[Path]
     loss_csv: Optional[Path]
     rollout_steps: List[int]
@@ -66,11 +67,11 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     loss_csv = _resolve_loss_csv(metrics_dir)
     notes_path = path / "notes.txt"
     metadata_custom_path = path / "experiment_metadata.txt"
+    title, tags = _read_metadata(metadata_custom_path)
     metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
     git_metadata_text = metadata_git_path.read_text() if metadata_git_path.exists() else "metadata_git.txt missing."
     git_commit = _extract_git_commit(git_metadata_text)
     notes_text = _read_or_create_notes(notes_path)
-    title = _read_title(metadata_custom_path)
     rollout_steps = _collect_rollout_steps(path)
     max_step = _get_max_step(loss_csv) if loss_csv and loss_csv.exists() else None
     last_modified = _get_last_modified(path)
@@ -84,6 +85,7 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         git_commit=git_commit or "Unknown commit",
         notes_text=notes_text,
         title=title,
+        tags=tags,
         loss_image=loss_png if loss_png.exists() else None,
         loss_csv=loss_csv if loss_csv and loss_csv.exists() else None,
         rollout_steps=rollout_steps,
@@ -140,10 +142,11 @@ def write_notes(path: Path, text: str) -> None:
 
 
 def write_title(path: Path, title: str) -> None:
-    clean = title.strip()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"title": clean or "Untitled"}
-    path.write_text(tomli_w.dumps(payload))
+    _write_metadata(path, title=title)
+
+
+def write_tags(path: Path, tags: str) -> None:
+    _write_metadata(path, tags=tags)
 
 
 def _read_or_create_notes(path: Path) -> str:
@@ -154,16 +157,49 @@ def _read_or_create_notes(path: Path) -> str:
 
 
 def _read_title(path: Path) -> str:
+    title, _ = _read_metadata(path)
+    return title
+
+
+def _read_metadata(path: Path) -> tuple[str, str]:
+    """Read custom metadata (title, tags) with sane defaults."""
     if not path.exists():
-        return "Untitled"
+        return "Untitled", ""
     try:
         data = tomli.loads(path.read_text())
     except (tomli.TOMLDecodeError, OSError):
-        return "Untitled"
-    title = data.get("title")
-    if isinstance(title, str) and title.strip():
-        return title.strip()
-    return "Untitled"
+        return "Untitled", ""
+    raw_title = data.get("title")
+    raw_tags = data.get("tags")
+    title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else "Untitled"
+    tags = _normalize_tags(raw_tags)
+    return title, tags
+
+
+def _normalize_tags(raw_tags) -> str:
+    """Normalize tags from string or list to a single string."""
+    if isinstance(raw_tags, str):
+        return raw_tags.strip()
+    if isinstance(raw_tags, list):
+        cleaned = []
+        for item in raw_tags:
+            if isinstance(item, str) and item.strip():
+                cleaned.append(item.strip())
+        return ", ".join(cleaned)
+    return ""
+
+
+def _write_metadata(path: Path, title: Optional[str] = None, tags: Optional[str] = None) -> None:
+    """Write combined title/tags metadata, preserving existing values."""
+    current_title, current_tags = _read_metadata(path)
+    next_title = title.strip() if isinstance(title, str) else None
+    next_tags = tags.strip() if isinstance(tags, str) else None
+    payload = {
+        "title": (next_title if next_title is not None and next_title else current_title or "Untitled"),
+        "tags": (next_tags if next_tags is not None else current_tags),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tomli_w.dumps(payload))
 
 
 def _extract_git_commit(metadata_git_text: str) -> str:

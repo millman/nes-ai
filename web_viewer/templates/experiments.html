@@ -44,6 +44,20 @@
                     </div>
                     <span class="title-status small text-muted" aria-live="polite"></span>
                 </form>
+                <form class="tags-form mt-1" data-exp-id="{{ exp.id }}">
+                    {% set tags_value = exp.tags if exp.tags else "" %}
+                    <div class="input-group input-group-sm tags-input-group">
+                        <span class="input-group-text">Tags:</span>
+                        <input
+                            type="text"
+                            class="form-control form-control-sm exp-tags-input"
+                            value="{{ tags_value }}"
+                            aria-label="Experiment tags"
+                            readonly
+                        >
+                    </div>
+                    <span class="tags-status small text-muted" aria-live="polite"></span>
+                </form>
                 <div class="fw-semibold">{{ exp.name }}</div>
                 <div class="font-monospace text-muted small mt-1">{{ exp.git_commit }}</div>
                 <div class="text-muted small mt-1">

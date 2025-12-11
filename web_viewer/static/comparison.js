@@ -183,6 +183,7 @@ function renderComparison(payload) {
     plot.innerHTML = "<p class='text-muted fst-italic'>No overlapping CSV metrics found.</p>";
   }
   wireTitleForms(grid);
+  wireTagsForms(grid);
 }
 
 function buildExperimentGrid(experiments) {
@@ -333,6 +334,34 @@ function buildInfoCell(exp, index) {
   form.appendChild(group);
   form.appendChild(status);
 
+  const tagsForm = document.createElement("form");
+  tagsForm.className = "tags-form mb-2";
+  tagsForm.dataset.expId = exp.id;
+
+  const tagsGroup = document.createElement("div");
+  tagsGroup.className = "input-group input-group-sm tags-input-group";
+
+  const tagsLabel = document.createElement("span");
+  tagsLabel.className = "input-group-text";
+  tagsLabel.textContent = "Tags:";
+
+  const tagsInput = document.createElement("input");
+  tagsInput.type = "text";
+  tagsInput.className = "form-control form-control-sm exp-tags-input";
+  const tagsValue = exp.tags || "";
+  if (tagsValue) {
+    tagsInput.value = tagsValue;
+  }
+
+  const tagsStatus = document.createElement("span");
+  tagsStatus.className = "tags-status small text-muted";
+  tagsStatus.setAttribute("aria-live", "polite");
+
+  tagsGroup.appendChild(tagsLabel);
+  tagsGroup.appendChild(tagsInput);
+  tagsForm.appendChild(tagsGroup);
+  tagsForm.appendChild(tagsStatus);
+
   const name = document.createElement("div");
   name.className = "fw-semibold";
   name.textContent = exp.name;
@@ -350,6 +379,7 @@ function buildInfoCell(exp, index) {
   flops.innerHTML = `FLOPs/step: <span class="font-monospace">${formatFlops(exp.flops_per_step)}</span>`;
 
   container.appendChild(form);
+  container.appendChild(tagsForm);
   container.appendChild(name);
   container.appendChild(commit);
   container.appendChild(params);
