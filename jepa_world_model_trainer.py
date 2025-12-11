@@ -473,7 +473,15 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
 def patch_recon_loss(
     recon: torch.Tensor, target: torch.Tensor, patch_sizes: Sequence[int]
 ) -> torch.Tensor:
-    """Compute reconstruction loss over a grid of overlapping patches for multiple sizes."""
+    """
+    Compute reconstruction loss over a grid of overlapping patches for multiple sizes.
+
+    Rationale: keep supervision in image space without adding feature taps or extra
+    forward passes—cheap to bolt on and works with the existing decoder output.
+    A more traditional multi-scale hardness term could sample patches from intermediate
+    CNN layers (feature pyramids, perceptual losses) with size-aware weights, but that
+    would require exposing/retaining feature maps and increase memory/compute.
+    """
     if not patch_sizes:
         raise ValueError("patch_recon_loss requires at least one patch size.")
     h, w = recon.shape[-2], recon.shape[-1]

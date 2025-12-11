@@ -156,13 +156,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         exp_ids = payload.get("ids") or []
         if not isinstance(exp_ids, list) or len(exp_ids) < 2:
             abort(400, "Provide at least two experiment ids.")
+        # Preserve the requested order (matches the title row and dataset ids on the page).
         experiments = [_get_experiment_or_404(exp_id) for exp_id in exp_ids]
-        # Sort by last_modified date (most recent first)
-        experiments = sorted(
-            experiments,
-            key=lambda exp: exp.last_modified or datetime.min,
-            reverse=True,
-        )
         overlay_data = _build_overlay_data(experiments)
         comparison_rows = _build_comparison_rows(experiments)
         return jsonify(

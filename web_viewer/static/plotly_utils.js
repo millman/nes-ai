@@ -45,6 +45,28 @@ function toggleTracesByPattern(gd, pattern) {
   }
 }
 
+function toggleTracesByMetricName(gd, metricName) {
+  if (!gd || !gd.data || !gd.data.length) {
+    return;
+  }
+  const indices = [];
+  const visibilities = [];
+  gd.data.forEach((trace, idx) => {
+    const name = trace.name || "";
+    // Trace names are typically "experiment: metric"
+    const parts = name.split(":").map((p) => p.trim());
+    const traceMetric = parts.length > 1 ? parts[1] : parts[0];
+    if (traceMetric === metricName) {
+      indices.push(idx);
+      const currentlyVisible = trace.visible === true || trace.visible === undefined;
+      visibilities.push(currentlyVisible ? "legendonly" : true);
+    }
+  });
+  if (indices.length > 0) {
+    Plotly.restyle(gd, { visible: visibilities }, indices);
+  }
+}
+
 function buildPlotlyConfig(baseConfig = {}) {
   const clone = { ...baseConfig };
   const customButtons = [
@@ -61,7 +83,7 @@ function buildPlotlyConfig(baseConfig = {}) {
     {
       name: "Toggle loss_recon",
       icon: PLOTLY_RECON_ICON,
-      click: (gd) => toggleTracesByPattern(gd, "loss_recon"),
+      click: (gd) => toggleTracesByMetricName(gd, "loss_recon"),
     },
   ];
   const existingButtons = Array.isArray(clone.modeBarButtonsToAdd) ? clone.modeBarButtonsToAdd : [];
