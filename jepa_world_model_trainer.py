@@ -278,7 +278,7 @@ class LossMultiScaleReconConfig:
     # kernel_sizes: spatial support per scale (analogous to patch sizes); length defines num scales.
     kernel_sizes: Tuple[int, ...] = (32,)
     # sigmas: Gaussian blur stddev per scale; larger sigma smooths hardness over a wider area.
-    sigmas: Tuple[float, ...] = (8.0,)
+    sigmas: Tuple[float, ...] = (16.0,)
     # gammas: focal hardness exponents per scale; >0 upweights harder regions.
     gammas: Tuple[float, ...] = (1.0,)
     # lambdas: per-scale weights to balance contributions across scales.
@@ -495,10 +495,8 @@ def gaussian_kernel_1d(size: int, sigma: float, device: torch.device, dtype: tor
 def gaussian_blur_separable_2d(x: torch.Tensor, kernel_1d: torch.Tensor) -> torch.Tensor:
     """Apply separable Gaussian blur to a single-channel map."""
     k = kernel_1d.numel()
-    pad_v = (k // 2, 0)
-    pad_h = (0, k // 2)
-    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding=pad_v)
-    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding=pad_h)
+    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding="same")
+    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding="same")
     return horiz
 
 
