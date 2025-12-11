@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Annotated, Any, Dict, Iterable, List, Optional, Tuple
+from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import math
 import random
@@ -249,7 +249,7 @@ class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
     recon: float = 1.0
-    recon_patch: float = 0.0
+    recon_patch: float = 1.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -270,7 +270,7 @@ class LossSigRegConfig:
 
 @dataclass
 class LossReconPatchConfig:
-    patch_size: int = 32
+    patch_sizes: Tuple[int, ...] = (32,)
 
 @dataclass
 class VisConfig:
@@ -471,18 +471,38 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
 
 
 def patch_recon_loss(
-    recon: torch.Tensor, target: torch.Tensor, patch_size: int
+    recon: torch.Tensor, target: torch.Tensor, patch_sizes: Sequence[int]
 ) -> torch.Tensor:
-    """Compute reconstruction loss on a shared random spatial patch."""
-    assert patch_size > 0, "patch_recon_loss requires patch_size > 0"
+    """Compute reconstruction loss over a grid of overlapping patches for multiple sizes."""
+    if not patch_sizes:
+        raise ValueError("patch_recon_loss requires at least one patch size.")
     h, w = recon.shape[-2], recon.shape[-1]
-    if patch_size > h or patch_size > w:
-        raise ValueError(f"patch_size={patch_size} exceeds recon dimensions {(h, w)}.")
-    row_start = torch.randint(0, h - patch_size + 1, (1,), device=recon.device).item()
-    col_start = torch.randint(0, w - patch_size + 1, (1,), device=recon.device).item()
-    recon_patch = recon[..., row_start : row_start + patch_size, col_start : col_start + patch_size]
-    target_patch = target[..., row_start : row_start + patch_size, col_start : col_start + patch_size]
-    return RECON_LOSS(recon_patch, target_patch)
+    total = recon.new_tensor(0.0)
+    count = 0
+
+    def _grid_indices(limit: int, size: int) -> Iterable[int]:
+        step = max(1, size // 2)  # 50% overlap by default
+        positions = list(range(0, limit - size + 1, step))
+        if positions and positions[-1] != limit - size:
+            positions.append(limit - size)
+        elif not positions:
+            positions = [0]
+        return positions
+
+    for patch_size in patch_sizes:
+        if patch_size <= 0:
+            raise ValueError("patch_recon_loss requires all patch sizes to be > 0.")
+        if patch_size > h or patch_size > w:
+            raise ValueError(f"patch_size={patch_size} exceeds recon dimensions {(h, w)}.")
+        row_starts = _grid_indices(h, patch_size)
+        col_starts = _grid_indices(w, patch_size)
+        for rs in row_starts:
+            for cs in col_starts:
+                recon_patch = recon[..., rs : rs + patch_size, cs : cs + patch_size]
+                target_patch = target[..., rs : rs + patch_size, cs : cs + patch_size]
+                total = total + RECON_LOSS(recon_patch, target_patch)
+                count += 1
+    return total / count if count > 0 else recon.new_tensor(0.0)
 
 
 def build_ema_model(model: JEPAWorldModel) -> JEPAWorldModel:
@@ -588,7 +608,7 @@ def training_step(
 
     # Patch-space reconstruction.
     if weights.recon_patch > 0 and recon is not None:
-        loss_recon_patch = patch_recon_loss(recon, images, cfg.patch_recon.patch_size)
+        loss_recon_patch = patch_recon_loss(recon, images, cfg.patch_recon.patch_sizes)
     else:
         loss_recon_patch = images.new_tensor(0.0)
 
