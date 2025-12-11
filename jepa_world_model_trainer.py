@@ -250,6 +250,7 @@ class LossWeights:
     sigreg: float = 1.0
     recon: float = 1.0
     recon_patch: float = 1.0
+    recon_multi: float = 0.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -271,6 +272,17 @@ class LossSigRegConfig:
 @dataclass
 class LossReconPatchConfig:
     patch_sizes: Tuple[int, ...] = (32,)
+
+@dataclass
+class LossMultiScaleReconConfig:
+    # kernel_sizes: spatial support per scale (analogous to patch sizes); length defines num scales.
+    kernel_sizes: Tuple[int, ...] = (32,)
+    # sigmas: Gaussian blur stddev per scale; larger sigma smooths hardness over a wider area.
+    sigmas: Tuple[float, ...] = (8.0,)
+    # gammas: focal hardness exponents per scale; >0 upweights harder regions.
+    gammas: Tuple[float, ...] = (1.0,)
+    # lambdas: per-scale weights to balance contributions across scales.
+    lambdas: Tuple[float, ...] = (1.0,)
 
 @dataclass
 class VisConfig:
@@ -323,6 +335,7 @@ class TrainConfig:
     rollout: LossRolloutConfig = field(default_factory=LossRolloutConfig)
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
+    recon_multi: LossMultiScaleReconConfig = field(default_factory=LossMultiScaleReconConfig)
 
     # Visualization
     vis: VisConfig = field(default_factory=VisConfig)
@@ -470,6 +483,75 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     return SIGREG_LOSS(sorted_proj, sorted_normal)
 
 
+def gaussian_kernel_1d(size: int, sigma: float, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    if size <= 0:
+        raise ValueError("Gaussian kernel size must be positive.")
+    coords = torch.arange(size, device=device, dtype=dtype) - (size - 1) / 2
+    kernel = torch.exp(-0.5 * (coords / max(sigma, 1e-6)) ** 2)
+    kernel = kernel / kernel.sum().clamp_min(1e-6)
+    return kernel
+
+
+def gaussian_blur_separable_2d(x: torch.Tensor, kernel_1d: torch.Tensor) -> torch.Tensor:
+    """Apply separable Gaussian blur to a single-channel map."""
+    k = kernel_1d.numel()
+    pad_v = (k // 2, 0)
+    pad_h = (0, k // 2)
+    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding=pad_v)
+    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding=pad_h)
+    return horiz
+
+
+def _build_feature_pyramid(
+    pred: torch.Tensor, target: torch.Tensor, num_scales: int
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    preds = [pred]
+    targets = [target]
+    for _ in range(1, num_scales):
+        pred = F.avg_pool2d(pred, kernel_size=2, stride=2)
+        target = F.avg_pool2d(target, kernel_size=2, stride=2)
+        preds.append(pred)
+        targets.append(target)
+    return preds, targets
+
+
+def multi_scale_hardness_loss(
+    preds: List[torch.Tensor],
+    targets: List[torch.Tensor],
+    kernel_sizes: Sequence[int],
+    sigmas: Sequence[float],
+    gammas: Sequence[float],
+    lambdas: Sequence[float],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Compute hardness-weighted loss over multiple scales.
+
+    • kernel_sizes: spatial support per scale (similar to patch size).
+    • sigmas: Gaussian blur stddev per scale (controls how far hardness spreads).
+    • gammas: focal exponents; higher gamma emphasizes harder regions.
+    • lambdas: per-scale weights to balance contributions.
+    """
+    if not (len(preds) == len(targets) == len(kernel_sizes) == len(sigmas) == len(gammas) == len(lambdas)):
+        raise ValueError("preds, targets, kernel_sizes, sigmas, gammas, and lambdas must share length.")
+    if not preds:
+        return torch.tensor(0.0, device="cpu")
+    total = preds[0].new_tensor(0.0)
+    for idx, (p, t) in enumerate(zip(preds, targets)):
+        if p.shape != t.shape:
+            raise ValueError(f"Pred/target shape mismatch at scale {idx}: {p.shape} vs {t.shape}")
+        k = int(kernel_sizes[idx])
+        sigma = float(sigmas[idx])
+        gamma = float(gammas[idx])
+        lam = float(lambdas[idx])
+        per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
+        g1d = gaussian_kernel_1d(k, sigma, device=per_pixel.device, dtype=per_pixel.dtype)
+        blurred = gaussian_blur_separable_2d(per_pixel, g1d)
+        scale_loss = ((blurred + eps) ** (1.0 + gamma)).mean()
+        total = total + lam * scale_loss
+    return total
+
+
 def patch_recon_loss(
     recon: torch.Tensor, target: torch.Tensor, patch_sizes: Sequence[int]
 ) -> torch.Tensor:
@@ -511,6 +593,28 @@ def patch_recon_loss(
                 total = total + RECON_LOSS(recon_patch, target_patch)
                 count += 1
     return total / count if count > 0 else recon.new_tensor(0.0)
+
+
+def multi_scale_recon_loss(
+    recon: torch.Tensor,
+    target: torch.Tensor,
+    cfg: LossMultiScaleReconConfig,
+) -> torch.Tensor:
+    """Multi-scale hardness-weighted reconstruction over an image pyramid."""
+    # Flatten batch/time to apply pyramid on spatial dims only.
+    recon_bt = recon.reshape(-1, *recon.shape[2:])
+    target_bt = target.reshape(-1, *target.shape[2:])
+    num_scales = len(cfg.kernel_sizes)
+    preds_scales, targets_scales = _build_feature_pyramid(recon_bt, target_bt, num_scales)
+    loss_raw = multi_scale_hardness_loss(
+        preds_scales,
+        targets_scales,
+        cfg.kernel_sizes,
+        cfg.sigmas,
+        cfg.gammas,
+        cfg.lambdas,
+    )
+    return loss_raw
 
 
 def build_ema_model(model: JEPAWorldModel) -> JEPAWorldModel:
@@ -614,6 +718,12 @@ def training_step(
     else:
         loss_recon = images.new_tensor(0.0)
 
+    # Multi-scale hardness-weighted reconstruction (image-space pyramid fallback).
+    if weights.recon_multi > 0 and recon is not None:
+        loss_recon_multi = multi_scale_recon_loss(recon, images, cfg.recon_multi)
+    else:
+        loss_recon_multi = images.new_tensor(0.0)
+
     # Patch-space reconstruction.
     if weights.recon_patch > 0 and recon is not None:
         loss_recon_patch = patch_recon_loss(recon, images, cfg.patch_recon.patch_sizes)
@@ -630,6 +740,7 @@ def training_step(
         + weights.ema_consistency * loss_ema_consistency
         + weights.action_recon * loss_action
         + weights.recon * loss_recon
+        + weights.recon_multi * loss_recon_multi
         + weights.recon_patch * loss_recon_patch
     )
     optimizer.zero_grad()
@@ -664,6 +775,7 @@ def training_step(
         "loss_consistency": loss_consistency.item(),
         "loss_ema_consistency": loss_ema_consistency.item(),
         "loss_recon": loss_recon.item(),
+        "loss_recon_multi": loss_recon_multi.item(),
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_action": loss_action.item(),
         "loss_delta": loss_delta.item(),
@@ -797,6 +909,8 @@ def log_metrics(
         filtered.pop("loss_ema_consistency", None)
     if weights.recon <= 0:
         filtered.pop("loss_recon", None)
+    if weights.recon_multi <= 0:
+        filtered.pop("loss_recon_multi", None)
     if weights.recon_patch <= 0:
         filtered.pop("loss_recon_patch", None)
     if weights.action_recon <= 0:
@@ -827,6 +941,7 @@ LOSS_COLUMNS = [
     "loss_consistency",
     "loss_ema_consistency",
     "loss_recon",
+    "loss_recon_multi",
     "loss_recon_patch",
     "loss_action",
     "loss_delta",
@@ -849,6 +964,7 @@ class LossHistory:
     consistency: List[float] = field(default_factory=list)
     ema_consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
+    recon_multi: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
     delta: List[float] = field(default_factory=list)
@@ -868,6 +984,7 @@ class LossHistory:
         self.consistency.append(metrics["loss_consistency"])
         self.ema_consistency.append(metrics["loss_ema_consistency"])
         self.recon.append(metrics["loss_recon"])
+        self.recon_multi.append(metrics["loss_recon_multi"])
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.action.append(metrics["loss_action"])
         self.delta.append(metrics["loss_delta"])
@@ -898,6 +1015,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.consistency,
             history.ema_consistency,
             history.recon,
+            history.recon_multi,
             history.recon_patch,
             history.action,
             history.delta,
@@ -944,6 +1062,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         plt.plot(history.steps, history.action, label="action_recon", color=color_map["action"])
     if any(val != 0.0 for val in history.recon_patch):
         plt.plot(history.steps, history.recon_patch, label="recon_patch", color=_color(8))
+    if any(val != 0.0 for val in history.recon_multi):
+        plt.plot(history.steps, history.recon_multi, label="recon_multi", color=_color(9))
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
