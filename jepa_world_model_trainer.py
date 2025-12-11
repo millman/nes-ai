@@ -279,10 +279,12 @@ class LossMultiScaleReconConfig:
     kernel_sizes: Tuple[int, ...] = (32,)
     # sigmas: Gaussian blur stddev per scale; larger sigma smooths hardness over a wider area.
     sigmas: Tuple[float, ...] = (16.0,)
-    # gammas: focal hardness exponents per scale; >0 upweights harder regions.
-    gammas: Tuple[float, ...] = (1.0,)
+    # betas: hardness exponents per scale; >0 upweights harder regions.
+    betas: Tuple[float, ...] = (2.0,)
     # lambdas: per-scale weights to balance contributions across scales.
     lambdas: Tuple[float, ...] = (1.0,)
+    # max_weight: optional clamp for hardness weights to avoid extreme scaling.
+    max_weight: float = 100.0
 
 @dataclass
 class VisConfig:
@@ -518,8 +520,9 @@ def multi_scale_hardness_loss(
     targets: List[torch.Tensor],
     kernel_sizes: Sequence[int],
     sigmas: Sequence[float],
-    gammas: Sequence[float],
+    betas: Sequence[float],
     lambdas: Sequence[float],
+    max_weight: float = 100.0,
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """
@@ -527,11 +530,13 @@ def multi_scale_hardness_loss(
 
     • kernel_sizes: spatial support per scale (similar to patch size).
     • sigmas: Gaussian blur stddev per scale (controls how far hardness spreads).
-    • gammas: focal exponents; higher gamma emphasizes harder regions.
+    • betas: hardness exponents; higher beta emphasizes harder regions.
     • lambdas: per-scale weights to balance contributions.
     """
-    if not (len(preds) == len(targets) == len(kernel_sizes) == len(sigmas) == len(gammas) == len(lambdas)):
-        raise ValueError("preds, targets, kernel_sizes, sigmas, gammas, and lambdas must share length.")
+    if max_weight <= 0:
+        raise ValueError("max_weight must be positive.")
+    if not (len(preds) == len(targets) == len(kernel_sizes) == len(sigmas) == len(betas) == len(lambdas)):
+        raise ValueError("preds, targets, kernel_sizes, sigmas, betas, and lambdas must share length.")
     if not preds:
         return torch.tensor(0.0, device="cpu")
     total = preds[0].new_tensor(0.0)
@@ -540,13 +545,13 @@ def multi_scale_hardness_loss(
             raise ValueError(f"Pred/target shape mismatch at scale {idx}: {p.shape} vs {t.shape}")
         k = int(kernel_sizes[idx])
         sigma = float(sigmas[idx])
-        gamma = float(gammas[idx])
+        beta = float(betas[idx])
         lam = float(lambdas[idx])
         per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
         per_pixel_detached = per_pixel.detach()
         g1d = gaussian_kernel_1d(k, sigma, device=per_pixel.device, dtype=per_pixel.dtype)
         blurred_weight = gaussian_blur_separable_2d(per_pixel_detached, g1d)
-        weight = (blurred_weight + eps).pow(gamma)
+        weight = (blurred_weight + eps).pow(beta).clamp(max=max_weight)
         scale_loss = (weight * (per_pixel + eps)).mean()
         total = total + lam * scale_loss
     return total
@@ -611,8 +616,9 @@ def multi_scale_recon_loss(
         targets_scales,
         cfg.kernel_sizes,
         cfg.sigmas,
-        cfg.gammas,
+        cfg.betas,
         cfg.lambdas,
+        cfg.max_weight,
     )
     return loss_raw
 
