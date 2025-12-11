@@ -249,6 +249,7 @@ class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
     recon: float = 1.0
+    recon_patch: float = 0.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -266,6 +267,10 @@ class LossRolloutConfig:
 @dataclass
 class LossSigRegConfig:
     projections: int = 64
+
+@dataclass
+class LossReconPatchConfig:
+    patch_size: int = 32
 
 @dataclass
 class VisConfig:
@@ -317,6 +322,7 @@ class TrainConfig:
     ema: LossEMAConfig = field(default_factory=LossEMAConfig)
     rollout: LossRolloutConfig = field(default_factory=LossRolloutConfig)
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
+    patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
 
     # Visualization
     vis: VisConfig = field(default_factory=VisConfig)
@@ -464,6 +470,21 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     return SIGREG_LOSS(sorted_proj, sorted_normal)
 
 
+def patch_recon_loss(
+    recon: torch.Tensor, target: torch.Tensor, patch_size: int
+) -> torch.Tensor:
+    """Compute reconstruction loss on a shared random spatial patch."""
+    assert patch_size > 0, "patch_recon_loss requires patch_size > 0"
+    h, w = recon.shape[-2], recon.shape[-1]
+    if patch_size > h or patch_size > w:
+        raise ValueError(f"patch_size={patch_size} exceeds recon dimensions {(h, w)}.")
+    row_start = torch.randint(0, h - patch_size + 1, (1,), device=recon.device).item()
+    col_start = torch.randint(0, w - patch_size + 1, (1,), device=recon.device).item()
+    recon_patch = recon[..., row_start : row_start + patch_size, col_start : col_start + patch_size]
+    target_patch = target[..., row_start : row_start + patch_size, col_start : col_start + patch_size]
+    return RECON_LOSS(recon_patch, target_patch)
+
+
 def build_ema_model(model: JEPAWorldModel) -> JEPAWorldModel:
     device = next(model.parameters()).device
     ema_model = JEPAWorldModel(model.cfg).to(device)
@@ -565,6 +586,12 @@ def training_step(
     else:
         loss_recon = images.new_tensor(0.0)
 
+    # Patch-space reconstruction.
+    if weights.recon_patch > 0 and recon is not None:
+        loss_recon_patch = patch_recon_loss(recon, images, cfg.patch_recon.patch_size)
+    else:
+        loss_recon_patch = images.new_tensor(0.0)
+
     # Accumulate and backpropagate the weighted loss.
     world_loss = (
         weights.jepa * loss_jepa
@@ -575,6 +602,7 @@ def training_step(
         + weights.ema_consistency * loss_ema_consistency
         + weights.action_recon * loss_action
         + weights.recon * loss_recon
+        + weights.recon_patch * loss_recon_patch
     )
     optimizer.zero_grad()
     world_loss.backward()
@@ -608,6 +636,7 @@ def training_step(
         "loss_consistency": loss_consistency.item(),
         "loss_ema_consistency": loss_ema_consistency.item(),
         "loss_recon": loss_recon.item(),
+        "loss_recon_patch": loss_recon_patch.item(),
         "loss_action": loss_action.item(),
         "loss_delta": loss_delta.item(),
         "delta_pred_norm": delta_pred_norm.item(),
@@ -740,6 +769,8 @@ def log_metrics(
         filtered.pop("loss_ema_consistency", None)
     if weights.recon <= 0:
         filtered.pop("loss_recon", None)
+    if weights.recon_patch <= 0:
+        filtered.pop("loss_recon_patch", None)
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
@@ -768,6 +799,7 @@ LOSS_COLUMNS = [
     "loss_consistency",
     "loss_ema_consistency",
     "loss_recon",
+    "loss_recon_patch",
     "loss_action",
     "loss_delta",
     "delta_pred_norm",
@@ -789,6 +821,7 @@ class LossHistory:
     consistency: List[float] = field(default_factory=list)
     ema_consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
+    recon_patch: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
     delta: List[float] = field(default_factory=list)
     delta_pred_norm: List[float] = field(default_factory=list)
@@ -807,6 +840,7 @@ class LossHistory:
         self.consistency.append(metrics["loss_consistency"])
         self.ema_consistency.append(metrics["loss_ema_consistency"])
         self.recon.append(metrics["loss_recon"])
+        self.recon_patch.append(metrics["loss_recon_patch"])
         self.action.append(metrics["loss_action"])
         self.delta.append(metrics["loss_delta"])
         self.delta_pred_norm.append(metrics["delta_pred_norm"])
@@ -836,6 +870,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.consistency,
             history.ema_consistency,
             history.recon,
+            history.recon_patch,
             history.action,
             history.delta,
             history.delta_pred_norm,
@@ -879,6 +914,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         plt.plot(history.steps, history.ema_consistency, label="ema_consistency", color=color_map["ema_consistency"])
     if any(val != 0.0 for val in history.action):
         plt.plot(history.steps, history.action, label="action_recon", color=color_map["action"])
+    if any(val != 0.0 for val in history.recon_patch):
+        plt.plot(history.steps, history.recon_patch, label="recon_patch", color=_color(8))
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
