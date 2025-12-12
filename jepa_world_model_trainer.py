@@ -612,7 +612,7 @@ def multi_scale_hardness_loss_box(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """
-    Compute hardness-weighted loss over multiple scales using a box filter.
+    Compute hardness-weighted loss over multiple scales using a separable-style box filter on per-pixel L1.
     """
     if max_weight <= 0:
         raise ValueError("max_weight must be positive.")
@@ -637,15 +637,14 @@ def multi_scale_hardness_loss_box(
         stride = int(strides[idx])
         if stride <= 0:
             raise ValueError("Box hardness stride must be positive.")
-        per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
-        per_pixel_detached = per_pixel.detach()
-        box = box_kernel_2d(k, device=per_pixel.device, dtype=per_pixel.dtype)
-        pad = k // 2
-        blurred_weight = F.conv2d(per_pixel_detached, box, padding=pad, stride=stride)
-        if blurred_weight.shape[-2:] != per_pixel.shape[-2:]:
-            blurred_weight = F.interpolate(blurred_weight, size=per_pixel.shape[-2:], mode="nearest")
-        weight = (blurred_weight + eps).pow(beta).clamp(max=max_weight)
-        scale_loss = (weight * (per_pixel + eps)).mean()
+        per_pixel_l1 = (p - t).abs().mean(dim=1, keepdim=True)  # Bx1xHxW
+        per_pixel_detached = per_pixel_l1.detach()
+        # Separable-style box smoothing of detached errors; padding keeps centers aligned.
+        norm = F.avg_pool2d(per_pixel_detached, kernel_size=k, stride=stride, padding=k // 2)
+        if norm.shape[-2:] != per_pixel_l1.shape[-2:]:
+            norm = F.interpolate(norm, size=per_pixel_l1.shape[-2:], mode="nearest")
+        rel = (per_pixel_detached / norm.clamp_min(eps)).pow(beta).clamp(max=max_weight)
+        scale_loss = (rel * per_pixel_l1).mean()
         total = total + lam * scale_loss
     return total
 
