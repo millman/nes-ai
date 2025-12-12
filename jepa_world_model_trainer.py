@@ -251,7 +251,7 @@ class LossWeights:
     recon: float = 1.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 1.0
+    recon_multi_box: float = 0.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -335,6 +335,8 @@ class TrainConfig:
     vis_every_steps: int = 50
     steps: int = 100_000
     show_timing_breakdown: bool = True
+    val_fraction: float = 0.1
+    val_split_seed: int = 0
 
     # Dataset & batching
     max_trajectories: Optional[int] = None
@@ -790,26 +792,76 @@ def training_step(
     ema_model: Optional[JEPAWorldModel] = None,
     ema_momentum: float = 0.0,
 ) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo]]:
-    # Unpack batch and move tensors to the training device.
+    metrics, difficulty_info, world_loss, grads = _compute_losses_and_metrics(
+        model,
+        decoder,
+        batch,
+        cfg,
+        weights,
+        ema_model=ema_model,
+        ema_momentum=ema_momentum,
+        track_hard_examples=True,
+        for_training=True,
+        optimizer=optimizer,
+    )
+    return metrics, difficulty_info
+
+
+@torch.no_grad()
+def validation_step(
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
+    cfg: TrainConfig,
+    weights: LossWeights,
+) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo]]:
+    metrics, difficulty_info, _, _ = _compute_losses_and_metrics(
+        model,
+        decoder,
+        batch,
+        cfg,
+        weights,
+        ema_model=None,
+        ema_momentum=0.0,
+        track_hard_examples=True,
+        for_training=False,
+        optimizer=None,
+    )
+    return metrics, difficulty_info
+
+
+def _compute_losses_and_metrics(
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
+    cfg: TrainConfig,
+    weights: LossWeights,
+    ema_model: Optional[JEPAWorldModel],
+    ema_momentum: float,
+    track_hard_examples: bool,
+    for_training: bool,
+    optimizer: Optional[torch.optim.Optimizer],
+) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo], torch.Tensor, Tuple[float, float]]:
     images, actions = batch[0], batch[1]
     batch_paths = batch[2] if len(batch) > 2 else None
     batch_indices = batch[3] if len(batch) > 3 else None
-    track_hard_examples = cfg.hard_example.reservoir > 0
     device = next(model.parameters()).device
     images = images.to(device)
     actions = actions.to(device)
 
-    # Encode frames once up front.
     outputs = model.encode_sequence(images)
 
-    # Optional reconstruction for loss + difficulty tracking.
-    # Note: decoder no longer uses detail_skip - all spatial info is in the latent
-    need_recon = weights.recon > 0 or track_hard_examples
+    need_recon = (
+        weights.recon > 0
+        or track_hard_examples
+        or weights.recon_multi_gauss > 0
+        or weights.recon_multi_box > 0
+        or weights.recon_patch > 0
+    )
     recon: Optional[torch.Tensor] = None
     if need_recon:
         recon = decoder(outputs["embeddings"])
 
-    # Core JEPA + action prediction losses.
     loss_jepa_raw, action_logits, delta_pred = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
     loss_delta_raw, delta_pred_norm, delta_target_norm = delta_prediction_loss(delta_pred, outputs["embeddings"])
@@ -820,7 +872,6 @@ def training_step(
     else:
         loss_action = images.new_tensor(0.0)
 
-    # Auxiliary latent penalties and rollout objectives.
     loss_rollout = (
         rollout_loss(model, outputs["embeddings"], actions, cfg.rollout.horizon)
         if weights.rollout > 0
@@ -842,31 +893,26 @@ def training_step(
             ema_outputs = ema_model.encode_sequence(images)
         loss_ema_consistency = ema_latent_consistency_loss(outputs["embeddings"], ema_outputs["embeddings"])
 
-    # Pixel-space reconstruction.
     if weights.recon > 0 and recon is not None:
         loss_recon = RECON_LOSS(recon, images)
     else:
         loss_recon = images.new_tensor(0.0)
 
-    # Multi-scale hardness-weighted reconstruction (image-space pyramid fallback).
     if weights.recon_multi_gauss > 0 and recon is not None:
         loss_recon_multi_gauss = multi_scale_recon_loss_gauss(recon, images, cfg.recon_multi_gauss)
     else:
         loss_recon_multi_gauss = images.new_tensor(0.0)
 
-    # Multi-scale hardness-weighted reconstruction with box filter.
     if weights.recon_multi_box > 0 and recon is not None:
         loss_recon_multi_box = multi_scale_recon_loss_box(recon, images, cfg.recon_multi_box)
     else:
         loss_recon_multi_box = images.new_tensor(0.0)
 
-    # Patch-space reconstruction.
     if weights.recon_patch > 0 and recon is not None:
         loss_recon_patch = patch_recon_loss(recon, images, cfg.patch_recon.patch_sizes)
     else:
         loss_recon_patch = images.new_tensor(0.0)
 
-    # Accumulate and backpropagate the weighted loss.
     world_loss = (
         weights.jepa * loss_jepa
         + weights.delta * loss_delta
@@ -880,13 +926,17 @@ def training_step(
         + weights.recon_multi_box * loss_recon_multi_box
         + weights.recon_patch * loss_recon_patch
     )
-    optimizer.zero_grad()
-    world_loss.backward()
-    world_grad_norm = grad_norm(model.parameters())
-    decoder_grad_norm = grad_norm(decoder.parameters())
-    optimizer.step()
-    if ema_model is not None:
-        update_ema_model(model, ema_model, ema_momentum)
+
+    world_grad_norm = 0.0
+    decoder_grad_norm = 0.0
+    if for_training and optimizer is not None:
+        optimizer.zero_grad()
+        world_loss.backward()
+        world_grad_norm = grad_norm(model.parameters())
+        decoder_grad_norm = grad_norm(decoder.parameters())
+        optimizer.step()
+        if ema_model is not None:
+            update_ema_model(model, ema_model, ema_momentum)
 
     difficulty_info: Optional[BatchDifficultyInfo] = None
     if (
@@ -920,10 +970,12 @@ def training_step(
         "delta_pred_norm": delta_pred_norm.item(),
         "delta_target_norm": delta_target_norm.item(),
         "loss_world": world_loss.item(),
-        "grad_world": world_grad_norm,
-        "grad_decoder": decoder_grad_norm,
     }
-    return metrics, difficulty_info
+    if for_training:
+        metrics["grad_world"] = world_grad_norm
+        metrics["grad_decoder"] = decoder_grad_norm
+
+    return metrics, difficulty_info, world_loss, (world_grad_norm, decoder_grad_norm)
 
 
 # ------------------------------------------------------------
@@ -951,6 +1003,7 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
         seq_len: int,
         image_hw: Tuple[int, int],
         max_traj: Optional[int] = None,
+        included_trajectories: Optional[Sequence[str]] = None,
     ) -> None:
         self.root = Path(root)
         self.seq_len = seq_len
@@ -958,7 +1011,11 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
         if self.seq_len < 1:
             raise ValueError("seq_len must be positive.")
         trajectories = list_trajectories(self.root)
-        items = list(trajectories.items())
+        if included_trajectories is not None:
+            include_set = set(included_trajectories)
+            items = [(name, frames) for name, frames in trajectories.items() if name in include_set]
+        else:
+            items = list(trajectories.items())
         if max_traj is not None:
             items = items[:max_traj]
         self.samples: List[Tuple[List[Path], np.ndarray, int]] = []
@@ -1013,6 +1070,27 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
         return torch.stack(frames, dim=0), torch.from_numpy(action_slice), path_slice, index
 
 
+def _split_trajectories(
+    root: Path, max_traj: Optional[int], val_fraction: float, seed: int
+) -> Tuple[List[str], List[str]]:
+    traj_names = sorted(list(list_trajectories(root).keys()))
+    if max_traj is not None:
+        traj_names = traj_names[:max_traj]
+    if not traj_names:
+        return [], []
+    rng = random.Random(seed)
+    rng.shuffle(traj_names)
+    if val_fraction <= 0:
+        return traj_names, []
+    if val_fraction >= 1.0:
+        return [], traj_names
+    val_count = max(1, int(len(traj_names) * val_fraction)) if len(traj_names) > 1 else 0
+    val_count = min(val_count, max(0, len(traj_names) - 1))
+    val_names = traj_names[:val_count]
+    train_names = traj_names[val_count:]
+    return train_names, val_names
+
+
 # ------------------------------------------------------------
 # Logging helpers
 # ------------------------------------------------------------
@@ -1053,6 +1131,11 @@ def log_metrics(
         filtered.pop("loss_recon_multi_box", None)
     if weights.recon_patch <= 0:
         filtered.pop("loss_recon_patch", None)
+    # Always show val loss if present
+    if "loss_val_world" in metrics:
+        filtered["loss_val_world"] = metrics["loss_val_world"]
+    if "loss_val_recon" in metrics:
+        filtered["loss_val_recon"] = metrics["loss_val_recon"]
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
@@ -1075,6 +1158,8 @@ LOSS_COLUMNS = [
     "elapsed_seconds",
     "cumulative_flops",
     "loss_world",
+    "loss_val_world",
+    "loss_val_recon",
     "loss_jepa",
     "loss_sigreg",
     "loss_rollout",
@@ -1099,6 +1184,8 @@ class LossHistory:
     elapsed_seconds: List[float] = field(default_factory=list)
     cumulative_flops: List[float] = field(default_factory=list)
     world: List[float] = field(default_factory=list)
+    val_world: List[float] = field(default_factory=list)
+    val_recon: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
     rollout: List[float] = field(default_factory=list)
@@ -1120,6 +1207,8 @@ class LossHistory:
         self.elapsed_seconds.append(elapsed)
         self.cumulative_flops.append(cumulative_flops)
         self.world.append(metrics["loss_world"])
+        self.val_world.append(metrics.get("loss_val_world", 0.0))
+        self.val_recon.append(metrics.get("loss_val_recon", 0.0))
         self.jepa.append(metrics["loss_jepa"])
         self.sigreg.append(metrics["loss_sigreg"])
         self.rollout.append(metrics["loss_rollout"])
@@ -1152,6 +1241,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.elapsed_seconds,
             history.cumulative_flops,
             history.world,
+            history.val_world,
+            history.val_recon,
             history.jepa,
             history.sigreg,
             history.rollout,
@@ -1193,6 +1284,10 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         "ema_consistency": _color(7),
     }
     plt.plot(history.steps, history.world, label="world", color=color_map["world"])
+    if any(val != 0.0 for val in history.val_world):
+        plt.plot(history.steps, history.val_world, label="val_world", color=_color(11))
+    if any(val != 0.0 for val in history.val_recon):
+        plt.plot(history.steps, history.val_recon, label="val_recon", color=_color(12))
     plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
     plt.plot(history.steps, history.sigreg, label="sigreg", color=color_map["sigreg"])
     plt.plot(history.steps, history.recon, label="recon", color=color_map["recon"])
@@ -1815,6 +1910,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
     samples_hard_dir = run_dir / "samples_hard"
+    samples_hard_val_dir = run_dir / "samples_hard_val"
     inputs_vis_dir = run_dir / "vis_inputs"
     pair_vis_dir = run_dir / "vis_pairs"
 
@@ -1823,6 +1919,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     metrics_dir.mkdir(parents=True, exist_ok=True)
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
+    samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
 
     debug_vis = cfg.debug_visualization
     if debug_vis.input_vis_every_steps > 0:
@@ -1840,23 +1937,42 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         experiment_metadata_path.write_text(tomli_w.dumps({"title": title}))
 
     # --- Dataset initialization ---
+    train_trajs, val_trajs = _split_trajectories(cfg.data_root, cfg.max_trajectories, cfg.val_fraction, cfg.val_split_seed)
     dataset = TrajectorySequenceDataset(
         root=cfg.data_root,
         seq_len=cfg.seq_len,
         image_hw=(model_cfg.image_size, model_cfg.image_size),
-        max_traj=cfg.max_trajectories,
+        max_traj=None,
+        included_trajectories=train_trajs,
     )
+    val_dataset: Optional[TrajectorySequenceDataset] = None
+    if val_trajs:
+        val_dataset = TrajectorySequenceDataset(
+            root=cfg.data_root,
+            seq_len=cfg.seq_len,
+            image_hw=(model_cfg.image_size, model_cfg.image_size),
+            max_traj=None,
+            included_trajectories=val_trajs,
+        )
 
     dataset_action_dim = getattr(dataset, "action_dim", model_cfg.action_dim)
+    if val_dataset is not None:
+        val_action_dim = getattr(val_dataset, "action_dim", dataset_action_dim)
+        if val_action_dim != dataset_action_dim:
+            raise AssertionError(f"Validation action_dim {val_action_dim} does not match train action_dim {dataset_action_dim}")
     assert dataset_action_dim == 8, f"Expected action_dim 8, got {dataset_action_dim}"
     if model_cfg.action_dim != dataset_action_dim:
         model_cfg = replace(model_cfg, action_dim=dataset_action_dim)
 
     hard_reservoir = HardSampleReservoir(cfg.hard_example.reservoir) if cfg.hard_example.reservoir > 0 else None
+    hard_reservoir_val = HardSampleReservoir(cfg.hard_example.reservoir) if cfg.hard_example.reservoir > 0 else None
 
     if len(dataset) == 0:
         raise AssertionError(f"No training samples available in dataset at {cfg.data_root}")
     dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
+    val_dataloader = (
+        DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch) if val_dataset else None
+    )
 
     # --- Model initialization ---
     model = JEPAWorldModel(model_cfg).to(device)
@@ -1940,6 +2056,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
     # --- Main optimization loop ---
     data_iter = iter(dataloader)
+    val_iter = iter(val_dataloader) if val_dataloader is not None else None
     for global_step in range(cfg.steps):
         # Get next batch of inputs.
         try:
@@ -1970,28 +2087,49 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         # Log outputs.
         if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
             log_start = perf_counter()
+            val_metrics: Optional[Dict[str, float]] = None
+            val_difficulty: Optional[BatchDifficultyInfo] = None
+            if val_iter is not None:
+                try:
+                    val_batch = next(val_iter)
+                except StopIteration:
+                    val_iter = iter(val_dataloader)
+                    val_batch = next(val_iter)
+                val_metrics, val_difficulty = validation_step(model, decoder, val_batch, cfg, weights)
+                if hard_reservoir_val is not None and val_difficulty is not None:
+                    hard_reservoir_val.update(
+                        val_difficulty.indices,
+                        val_difficulty.paths,
+                        val_difficulty.scores,
+                        val_difficulty.frame_indices,
+                    )
             elapsed_seconds = max(log_start - run_start_time, 0.0)
             samples_per_sec: Optional[float]
             if elapsed_seconds > 0:
                 samples_per_sec = total_samples_processed / elapsed_seconds
             else:
                 samples_per_sec = None
+            metrics_for_log = dict(metrics)
+            if val_metrics is not None:
+                metrics_for_log["loss_val_world"] = val_metrics["loss_world"]
+                metrics_for_log["loss_val_recon"] = val_metrics["loss_recon"]
             log_metrics(
                 global_step,
-                metrics,
+                metrics_for_log,
                 weights,
                 samples_per_sec=samples_per_sec,
                 elapsed_seconds=elapsed_seconds,
             )
 
             cumulative_flops = (global_step + 1) * flops_per_step
-            loss_history.append(global_step, elapsed_seconds, cumulative_flops, metrics)
+            loss_history.append(global_step, elapsed_seconds, cumulative_flops, metrics_for_log)
             write_loss_csv(loss_history, metrics_dir / "loss.csv")
 
             plot_loss_curves(loss_history, metrics_dir)
             timing_totals["log"] += perf_counter() - log_start
             if cfg.show_timing_breakdown:
                 _print_timing_summary(global_step, timing_totals)
+            model.train()
 
         # --- Visualization of raw inputs/pairs ---
         batch_paths = batch[2] if len(batch) > 2 else None
@@ -2082,6 +2220,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     save_hard_example_grid(
                         samples_hard_dir / f"hard_{global_step:07d}.png",
                         hard_samples,
+                        cfg.hard_example.vis_columns,
+                        cfg.hard_example.vis_rows,
+                        dataset.image_hw,
+                    )
+                if hard_reservoir_val is not None:
+                    hard_samples_val = hard_reservoir_val.topk(cfg.hard_example.vis_rows * cfg.hard_example.vis_columns)
+                    save_hard_example_grid(
+                        samples_hard_val_dir / f"hard_{global_step:07d}.png",
+                        hard_samples_val,
                         cfg.hard_example.vis_columns,
                         cfg.hard_example.vis_rows,
                         dataset.image_hw,
