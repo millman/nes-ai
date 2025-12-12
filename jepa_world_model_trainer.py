@@ -248,10 +248,10 @@ class ModelConfig:
 class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
-    recon: float = 1.0
+    recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 0.0
+    recon_multi_box: float = 1.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -276,7 +276,7 @@ class LossReconPatchConfig:
 
 @dataclass
 class LossMultiScaleGaussReconConfig:
-    # kernel_sizes: spatial support per scale (analogous to patch sizes); length defines num scales.
+    # kernel_sizes: spatial support per scale (analogous to patch sizes); length = number of pyramid scales (each level is 2× downsampled).
     kernel_sizes: Tuple[int, ...] = (32,)
     # sigmas: Gaussian blur stddev per scale; larger sigma smooths hardness over a wider area.
     sigmas: Tuple[float, ...] = (16.0,)
@@ -292,16 +292,16 @@ class LossMultiScaleGaussReconConfig:
 
 @dataclass
 class LossMultiScaleBoxReconConfig:
-    # kernel_sizes: spatial support per scale (analogous to patch sizes); length defines num scales.
-    kernel_sizes: Tuple[int, ...] = (32,)
+    # kernel_sizes: spatial support per scale (analogous to patch sizes); length = number of pyramid scales (each level is 2× downsampled).
+    kernel_sizes: Tuple[int, ...] = (8, 16, 16,)
     # betas: hardness exponents per scale; >0 upweights harder regions.
-    betas: Tuple[float, ...] = (2.0,)
+    betas: Tuple[float, ...] = (2.0, 2.0, 2.0,)
     # lambdas: per-scale weights to balance contributions across scales.
-    lambdas: Tuple[float, ...] = (1.0,)
+    lambdas: Tuple[float, ...] = (0.333, 0.333, 0.333,)
     # max_weight: optional clamp for hardness weights to avoid extreme scaling.
     max_weight: float = 100.0
     # strides: optional stride for the blur (reduces compute, may downsample before reprojecting).
-    strides: Tuple[int, ...] = (16,)
+    strides: Tuple[int, ...] = (4, 8, 8,)
 
 @dataclass
 class VisConfig:
@@ -640,13 +640,14 @@ def multi_scale_hardness_loss_box(
         if stride <= 0:
             raise ValueError("Box hardness stride must be positive.")
         _, _, h, w = p.shape
-        if k > h or k > w:
-            raise ValueError(f"kernel_size={k} exceeds feature map size {(h, w)} at scale {idx}.")
+        k_eff = min(k, h, w)
+        # Clamp kernel/stride to valid spatial support so deeper pyramid levels still contribute.
+        stride_eff = max(1, min(stride, k_eff))
         per_pixel_l1 = (p - t).abs().mean(dim=1, keepdim=True)  # Bx1xHxW
         per_pixel_detached = per_pixel_l1.detach()
         # Valid pooling (no padding) to avoid border bleed; stride can mimic patch overlap (e.g., k//2).
-        norm = F.avg_pool2d(per_pixel_detached, kernel_size=k, stride=stride, padding=0)
-        coverage = F.avg_pool2d(torch.ones_like(per_pixel_detached), kernel_size=k, stride=stride, padding=0)
+        norm = F.avg_pool2d(per_pixel_detached, kernel_size=k_eff, stride=stride_eff, padding=0)
+        coverage = F.avg_pool2d(torch.ones_like(per_pixel_detached), kernel_size=k_eff, stride=stride_eff, padding=0)
         # Upsample pooled maps back to full resolution for per-pixel weighting.
         if norm.shape[-2:] != per_pixel_l1.shape[-2:]:
             norm = F.interpolate(norm, size=per_pixel_l1.shape[-2:], mode="bilinear", align_corners=False)
