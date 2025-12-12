@@ -15,7 +15,7 @@
         {% set exp = selected_map.get(exp_id) %}
         {% if exp %}
         {% set title_text = exp.title if exp.title != "Untitled" else exp.name %}
-        <div class="col">
+        <div class="col" data-exp-title="{{ exp.id }}">
             <div class="card">
                 <div class="card-body">
                     <div class="fw-semibold">{{ title_text }}</div>

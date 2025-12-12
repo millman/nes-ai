@@ -175,6 +175,8 @@ function renderComparison(payload) {
 
         window.history.replaceState({}, "", url.toString());
       });
+
+      wireExperimentVisibilitySync(plot);
     });
     attachComparisonHover(plot, availableStepsByExp, previewMap);
     hasRenderedPlot = true;
@@ -276,6 +278,7 @@ function buildSectionRow(title, experiments, cellBuilder) {
   experiments.forEach((exp, index) => {
     const col = document.createElement("div");
     col.className = "col";
+    col.dataset.expColumn = exp.id;
     const cell = cellBuilder(exp, index);
     col.appendChild(cell);
     row.appendChild(col);
@@ -288,6 +291,13 @@ function buildPreviewCell(exp) {
   const container = document.createElement("div");
   container.className = "rollout-preview";
   container.dataset.expId = exp.id;
+   // Use title field when available; fall back to name.
+  const displayTitle = exp.title && exp.title !== "Untitled" ? exp.title : exp.name;
+  container.dataset.expTitle = displayTitle;
+
+  const title = document.createElement("div");
+  title.className = "rollout-title small mb-1";
+  title.textContent = displayTitle || "Rollout preview";
 
   const path = document.createElement("div");
   path.className = "small text-muted mb-1 rollout-path";
@@ -301,6 +311,7 @@ function buildPreviewCell(exp) {
   missing.className = "text-muted fst-italic rollout-missing d-none";
   missing.textContent = "No rollout image available.";
 
+  container.appendChild(title);
   container.appendChild(path);
   container.appendChild(img);
   container.appendChild(missing);
@@ -420,11 +431,13 @@ function collectPreviewMap(root) {
     if (!expId) {
       return;
     }
+    const displayTitle = preview.dataset.expTitle || expId;
+    const title = preview.querySelector(".rollout-title");
     const path = preview.querySelector(".rollout-path");
     const img = preview.querySelector(".rollout-img");
     const missing = preview.querySelector(".rollout-missing");
-    if (path && img && missing) {
-      map[expId] = { path, img, missing };
+    if (title && path && img && missing) {
+      map[expId] = { title, path, img, missing, displayTitle };
     }
   });
   return map;
@@ -455,9 +468,11 @@ function attachComparisonHover(plotEl, stepsMap, previews) {
     const folder = currentImageFolder;
     const prefix = getImagePrefixForFolder(folder);
     Object.entries(previews).forEach(([expId, preview]) => {
+      const displayTitle = preview.displayTitle || expId;
       const available = stepsMap?.[expId] || [];
       const matched = nearestStep(target, available);
       if (matched === null) {
+        preview.title.textContent = displayTitle;
         preview.path.textContent = "No images available.";
         preview.img.classList.add("d-none");
         preview.missing.textContent = "No images available.";
@@ -466,7 +481,9 @@ function attachComparisonHover(plotEl, stepsMap, previews) {
       }
       const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
       const src = `/assets/${expId}/${folder}/${filename}`;
-      preview.path.textContent = `${expId}/${folder}/${filename} (hovered ${target}, showing ${matched})`;
+      const pathText = `${expId}/${folder}/${filename} (hovered ${target}, showing ${matched})`;
+      preview.title.textContent = displayTitle;
+      preview.path.textContent = pathText;
       preview.img.src = src;
       preview.img.alt = `${folder} ${matched}`;
       preview.img.dataset.step = String(matched);
@@ -533,4 +550,65 @@ function buildGitMetadataCell(exp) {
   pre.textContent = exp.git_metadata || "(no git metadata)";
   container.appendChild(pre);
   return container;
+}
+
+function wireExperimentVisibilitySync(plotEl) {
+  if (!plotEl) {
+    return;
+  }
+  const syncVisibility = () => {
+    const visibleIds = collectVisibleExperimentIds(plotEl);
+    applyExperimentVisibility(visibleIds);
+  };
+  syncVisibility();
+  plotEl.on("plotly_restyle", () => {
+    window.requestAnimationFrame(syncVisibility);
+  });
+}
+
+function collectVisibleExperimentIds(plotEl) {
+  const visible = new Set();
+  if (!plotEl || !Array.isArray(plotEl.data) || plotEl.data.length === 0) {
+    document.querySelectorAll("[data-exp-column]").forEach((col) => {
+      if (col.dataset.expColumn) {
+        visible.add(col.dataset.expColumn);
+      }
+    });
+    return visible;
+  }
+  plotEl.data.forEach((trace) => {
+    const expId = extractExperimentId(trace);
+    if (!expId) {
+      return;
+    }
+    const visibility = trace.visible;
+    const isVisible = visibility === undefined || visibility === true;
+    if (visibility !== "legendonly" && visibility !== false && isVisible) {
+      visible.add(expId);
+    }
+  });
+  return visible;
+}
+
+function extractExperimentId(trace) {
+  if (!trace || !trace.customdata) {
+    return null;
+  }
+  const custom = trace.customdata;
+  if (!Array.isArray(custom) || custom.length === 0) {
+    return null;
+  }
+  const first = custom[0];
+  if (Array.isArray(first) && first.length > 0 && first[0]) {
+    return first[0];
+  }
+  return null;
+}
+
+function applyExperimentVisibility(visibleIds) {
+  document.querySelectorAll("[data-exp-column]").forEach((col) => {
+    const expId = col.dataset.expColumn;
+    const shouldShow = visibleIds.has(expId);
+    col.classList.toggle("d-none", !shouldShow);
+  });
 }
