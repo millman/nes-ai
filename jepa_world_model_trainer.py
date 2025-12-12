@@ -335,6 +335,7 @@ class TrainConfig:
     vis_every_steps: int = 50
     steps: int = 100_000
     show_timing_breakdown: bool = True
+    seed: Optional[int] = 0
 
     # A validation split only materializes when multiple trajectories exist; with a single traj, keep val_fraction at 0.
     val_fraction: float = 0
@@ -1094,6 +1095,17 @@ def _split_trajectories(
     return train_names, val_names
 
 
+def _seed_everything(seed: Optional[int]) -> Tuple[int, random.Random]:
+    """Seed Python, NumPy, and torch RNGs and return a dedicated Python RNG."""
+    seed_value = 0 if seed is None else int(seed)
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed_value)
+    return seed_value, random.Random(seed_value)
+
+
 # ------------------------------------------------------------
 # Logging helpers
 # ------------------------------------------------------------
@@ -1346,10 +1358,13 @@ class HardSampleRecord:
 
 
 class HardSampleReservoir:
-    def __init__(self, capacity: int, sample_decay: float = 0.9) -> None:
+    def __init__(self, capacity: int, sample_decay: float = 0.9, rng: random.Random = None) -> None:
         self.capacity = max(0, capacity)
         self.sample_decay = sample_decay
         self._samples: Dict[int, HardSampleRecord] = {}
+        if rng is None:
+            raise ValueError("HardSampleReservoir requires an explicit RNG; got None.")
+        self.rng = rng
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -1394,7 +1409,7 @@ class HardSampleReservoir:
         population = list(self._samples.values())
         count = min(count, len(population))
         weights = [max(record.score, 1e-6) for record in population]
-        chosen = random.choices(population=population, weights=weights, k=count)
+        chosen = self.rng.choices(population=population, weights=weights, k=count)
         return chosen
 
     def mark_sampled(self, dataset_index: int) -> None:
@@ -1783,14 +1798,18 @@ def _build_fixed_vis_batch(
 def _build_embedding_batch(
     dataset: TrajectorySequenceDataset,
     sample_count: int,
+    generator: torch.Generator = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if sample_count <= 0:
         raise ValueError("sample_count must be positive for embedding projection batches.")
+    if generator is None:
+        raise ValueError("Embedding batch construction requires an explicit torch.Generator.")
     embed_loader = DataLoader(
         dataset,
         batch_size=min(sample_count, len(dataset)),
         shuffle=True,
         collate_fn=collate_batch,
+        generator=generator,
     )
     embed_batch = next(iter(embed_loader))
     return (embed_batch[0].clone(), embed_batch[1].clone())
@@ -1905,6 +1924,15 @@ def _render_visualization_batch(
 def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, title: Optional[str] = None, demo: bool = True) -> None:
     # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
+    seed_value, python_rng = _seed_everything(cfg.seed)
+    dataloader_generator = torch.Generator()
+    dataloader_generator.manual_seed(seed_value)
+    val_dataloader_generator = torch.Generator()
+    val_dataloader_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+    embedding_generator = torch.Generator()
+    embedding_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+    hard_reservoir_rng = random.Random(python_rng.randint(0, 2**32 - 1))
+    hard_reservoir_val_rng = random.Random(python_rng.randint(0, 2**32 - 1))
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
@@ -1971,14 +1999,32 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if model_cfg.action_dim != dataset_action_dim:
         model_cfg = replace(model_cfg, action_dim=dataset_action_dim)
 
-    hard_reservoir = HardSampleReservoir(cfg.hard_example.reservoir) if cfg.hard_example.reservoir > 0 else None
-    hard_reservoir_val = HardSampleReservoir(cfg.hard_example.reservoir) if cfg.hard_example.reservoir > 0 else None
+    hard_reservoir = (
+        HardSampleReservoir(cfg.hard_example.reservoir, rng=hard_reservoir_rng) if cfg.hard_example.reservoir > 0 else None
+    )
+    hard_reservoir_val = (
+        HardSampleReservoir(cfg.hard_example.reservoir, rng=hard_reservoir_val_rng) if cfg.hard_example.reservoir > 0 else None
+    )
 
     if len(dataset) == 0:
         raise AssertionError(f"No training samples available in dataset at {cfg.data_root}")
-    dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        collate_fn=collate_batch,
+        generator=dataloader_generator,
+    )
     val_dataloader = (
-        DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_batch) if val_dataset else None
+        DataLoader(
+            val_dataset,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            collate_fn=collate_batch,
+            generator=val_dataloader_generator,
+        )
+        if val_dataset
+        else None
     )
 
     # --- Model initialization ---
@@ -2038,7 +2084,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]] = fixed_batch_cpu
     embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]]
     if cfg.vis.embedding_projection_samples > 0:
-        embedding_batch_cpu = _build_embedding_batch(dataset, cfg.vis.embedding_projection_samples)
+        embedding_batch_cpu = _build_embedding_batch(
+            dataset,
+            cfg.vis.embedding_projection_samples,
+            generator=embedding_generator,
+        )
     else:
         embedding_batch_cpu = None
 
