@@ -1921,7 +1921,7 @@ def _render_visualization_batch(
 # ------------------------------------------------------------
 
 
-def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, title: Optional[str] = None, demo: bool = True) -> None:
+def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, title: Optional[str] = None) -> None:
     # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
     seed_value, python_rng = _seed_everything(cfg.seed)
@@ -2307,7 +2307,7 @@ def main() -> None:
         config=(tyro.conf.HelptextFromCommentsOff,),
     )
     model_cfg = ModelConfig()
-    run_training(cfg, model_cfg, cfg.loss_weights, title=cfg.title, demo=False)
+    run_training(cfg, model_cfg, cfg.loss_weights, title=cfg.title)
 
 
 if __name__ == "__main__":
