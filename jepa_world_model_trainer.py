@@ -335,7 +335,9 @@ class TrainConfig:
     vis_every_steps: int = 50
     steps: int = 100_000
     show_timing_breakdown: bool = True
-    val_fraction: float = 0.1
+
+    # A validation split only materializes when multiple trajectories exist; with a single traj, keep val_fraction at 0.
+    val_fraction: float = 0
     val_split_seed: int = 0
 
     # Dataset & batching
@@ -1954,6 +1956,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             image_hw=(model_cfg.image_size, model_cfg.image_size),
             max_traj=None,
             included_trajectories=val_trajs,
+        )
+    if cfg.val_fraction > 0 and (val_dataset is None or len(val_dataset) == 0):
+        raise AssertionError(
+            "val_fraction > 0 but no validation samples are available; check dataset size, val_fraction, and max_traj."
         )
 
     dataset_action_dim = getattr(dataset, "action_dim", model_cfg.action_dim)
