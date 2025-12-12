@@ -249,9 +249,9 @@ class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
     recon: float = 1.0
-    recon_patch: float = 1.0
+    recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 0.0
+    recon_multi_box: float = 1.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -517,8 +517,9 @@ def gaussian_blur_separable_2d(x: torch.Tensor, kernel_1d: torch.Tensor, stride:
     if stride <= 0:
         raise ValueError("Gaussian blur stride must be positive.")
     k = kernel_1d.numel()
-    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding="same", stride=stride)
-    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding="same", stride=stride)
+    pad = k // 2
+    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding=pad, stride=stride)
+    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding=pad, stride=stride)
     return horiz
 
 
@@ -639,7 +640,8 @@ def multi_scale_hardness_loss_box(
         per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
         per_pixel_detached = per_pixel.detach()
         box = box_kernel_2d(k, device=per_pixel.device, dtype=per_pixel.dtype)
-        blurred_weight = F.conv2d(per_pixel_detached, box, padding="same", stride=stride)
+        pad = k // 2
+        blurred_weight = F.conv2d(per_pixel_detached, box, padding=pad, stride=stride)
         if blurred_weight.shape[-2:] != per_pixel.shape[-2:]:
             blurred_weight = F.interpolate(blurred_weight, size=per_pixel.shape[-2:], mode="nearest")
         weight = (blurred_weight + eps).pow(beta).clamp(max=max_weight)
