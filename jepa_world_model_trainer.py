@@ -249,8 +249,9 @@ class LossWeights:
     jepa: float = 1.0
     sigreg: float = 1.0
     recon: float = 1.0
-    recon_patch: float = 0.0
-    recon_multi: float = 1.0
+    recon_patch: float = 1.0
+    recon_multi_gauss: float = 0.0
+    recon_multi_box: float = 0.0
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -274,7 +275,7 @@ class LossReconPatchConfig:
     patch_sizes: Tuple[int, ...] = (32,)
 
 @dataclass
-class LossMultiScaleReconConfig:
+class LossMultiScaleGaussReconConfig:
     # kernel_sizes: spatial support per scale (analogous to patch sizes); length defines num scales.
     kernel_sizes: Tuple[int, ...] = (32,)
     # sigmas: Gaussian blur stddev per scale; larger sigma smooths hardness over a wider area.
@@ -285,6 +286,22 @@ class LossMultiScaleReconConfig:
     lambdas: Tuple[float, ...] = (1.0,)
     # max_weight: optional clamp for hardness weights to avoid extreme scaling.
     max_weight: float = 100.0
+    # strides: optional stride for the blur (reduces compute, may downsample before reprojecting).
+    strides: Tuple[int, ...] = (1,)
+
+
+@dataclass
+class LossMultiScaleBoxReconConfig:
+    # kernel_sizes: spatial support per scale (analogous to patch sizes); length defines num scales.
+    kernel_sizes: Tuple[int, ...] = (32,)
+    # betas: hardness exponents per scale; >0 upweights harder regions.
+    betas: Tuple[float, ...] = (2.0,)
+    # lambdas: per-scale weights to balance contributions across scales.
+    lambdas: Tuple[float, ...] = (1.0,)
+    # max_weight: optional clamp for hardness weights to avoid extreme scaling.
+    max_weight: float = 100.0
+    # strides: optional stride for the blur (reduces compute, may downsample before reprojecting).
+    strides: Tuple[int, ...] = (16,)
 
 @dataclass
 class VisConfig:
@@ -337,7 +354,8 @@ class TrainConfig:
     rollout: LossRolloutConfig = field(default_factory=LossRolloutConfig)
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
-    recon_multi: LossMultiScaleReconConfig = field(default_factory=LossMultiScaleReconConfig)
+    recon_multi_gauss: LossMultiScaleGaussReconConfig = field(default_factory=LossMultiScaleGaussReconConfig)
+    recon_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
 
     # Visualization
     vis: VisConfig = field(default_factory=VisConfig)
@@ -494,12 +512,22 @@ def gaussian_kernel_1d(size: int, sigma: float, device: torch.device, dtype: tor
     return kernel
 
 
-def gaussian_blur_separable_2d(x: torch.Tensor, kernel_1d: torch.Tensor) -> torch.Tensor:
+def gaussian_blur_separable_2d(x: torch.Tensor, kernel_1d: torch.Tensor, stride: int = 1) -> torch.Tensor:
     """Apply separable Gaussian blur to a single-channel map."""
+    if stride <= 0:
+        raise ValueError("Gaussian blur stride must be positive.")
     k = kernel_1d.numel()
-    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding="same")
-    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding="same")
+    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding="same", stride=stride)
+    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding="same", stride=stride)
     return horiz
+
+
+def box_kernel_2d(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Normalized box filter over an NxN window."""
+    if size <= 0:
+        raise ValueError("Box kernel size must be positive.")
+    kernel = torch.ones((1, 1, size, size), device=device, dtype=dtype)
+    return kernel / kernel.sum().clamp_min(1e-6)
 
 
 def _build_feature_pyramid(
@@ -515,13 +543,14 @@ def _build_feature_pyramid(
     return preds, targets
 
 
-def multi_scale_hardness_loss(
+def multi_scale_hardness_loss_gaussian(
     preds: List[torch.Tensor],
     targets: List[torch.Tensor],
     kernel_sizes: Sequence[int],
     sigmas: Sequence[float],
     betas: Sequence[float],
     lambdas: Sequence[float],
+    strides: Sequence[int],
     max_weight: float = 100.0,
     eps: float = 1e-6,
 ) -> torch.Tensor:
@@ -532,11 +561,20 @@ def multi_scale_hardness_loss(
     • sigmas: Gaussian blur stddev per scale (controls how far hardness spreads).
     • betas: hardness exponents; higher beta emphasizes harder regions.
     • lambdas: per-scale weights to balance contributions.
+    • strides: blur stride per scale (reduces compute; resampled back to original size if needed).
     """
     if max_weight <= 0:
         raise ValueError("max_weight must be positive.")
-    if not (len(preds) == len(targets) == len(kernel_sizes) == len(sigmas) == len(betas) == len(lambdas)):
-        raise ValueError("preds, targets, kernel_sizes, sigmas, betas, and lambdas must share length.")
+    if not (
+        len(preds)
+        == len(targets)
+        == len(kernel_sizes)
+        == len(sigmas)
+        == len(betas)
+        == len(lambdas)
+        == len(strides)
+    ):
+        raise ValueError("preds, targets, kernel_sizes, sigmas, betas, lambdas, and strides must share length.")
     if not preds:
         return torch.tensor(0.0, device="cpu")
     total = preds[0].new_tensor(0.0)
@@ -547,10 +585,63 @@ def multi_scale_hardness_loss(
         sigma = float(sigmas[idx])
         beta = float(betas[idx])
         lam = float(lambdas[idx])
+        stride = int(strides[idx])
+        if stride <= 0:
+            raise ValueError("Gaussian hardness stride must be positive.")
         per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
         per_pixel_detached = per_pixel.detach()
         g1d = gaussian_kernel_1d(k, sigma, device=per_pixel.device, dtype=per_pixel.dtype)
-        blurred_weight = gaussian_blur_separable_2d(per_pixel_detached, g1d)
+        blurred_weight = gaussian_blur_separable_2d(per_pixel_detached, g1d, stride=stride)
+        if blurred_weight.shape[-2:] != per_pixel.shape[-2:]:
+            blurred_weight = F.interpolate(blurred_weight, size=per_pixel.shape[-2:], mode="nearest")
+        weight = (blurred_weight + eps).pow(beta).clamp(max=max_weight)
+        scale_loss = (weight * (per_pixel + eps)).mean()
+        total = total + lam * scale_loss
+    return total
+
+
+def multi_scale_hardness_loss_box(
+    preds: List[torch.Tensor],
+    targets: List[torch.Tensor],
+    kernel_sizes: Sequence[int],
+    betas: Sequence[float],
+    lambdas: Sequence[float],
+    strides: Sequence[int],
+    max_weight: float = 100.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Compute hardness-weighted loss over multiple scales using a box filter.
+    """
+    if max_weight <= 0:
+        raise ValueError("max_weight must be positive.")
+    if not (
+        len(preds)
+        == len(targets)
+        == len(kernel_sizes)
+        == len(betas)
+        == len(lambdas)
+        == len(strides)
+    ):
+        raise ValueError("preds, targets, kernel_sizes, betas, lambdas, and strides must share length.")
+    if not preds:
+        return torch.tensor(0.0, device="cpu")
+    total = preds[0].new_tensor(0.0)
+    for idx, (p, t) in enumerate(zip(preds, targets)):
+        if p.shape != t.shape:
+            raise ValueError(f"Pred/target shape mismatch at scale {idx}: {p.shape} vs {t.shape}")
+        k = int(kernel_sizes[idx])
+        beta = float(betas[idx])
+        lam = float(lambdas[idx])
+        stride = int(strides[idx])
+        if stride <= 0:
+            raise ValueError("Box hardness stride must be positive.")
+        per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
+        per_pixel_detached = per_pixel.detach()
+        box = box_kernel_2d(k, device=per_pixel.device, dtype=per_pixel.dtype)
+        blurred_weight = F.conv2d(per_pixel_detached, box, padding="same", stride=stride)
+        if blurred_weight.shape[-2:] != per_pixel.shape[-2:]:
+            blurred_weight = F.interpolate(blurred_weight, size=per_pixel.shape[-2:], mode="nearest")
         weight = (blurred_weight + eps).pow(beta).clamp(max=max_weight)
         scale_loss = (weight * (per_pixel + eps)).mean()
         total = total + lam * scale_loss
@@ -600,10 +691,10 @@ def patch_recon_loss(
     return total / count if count > 0 else recon.new_tensor(0.0)
 
 
-def multi_scale_recon_loss(
+def multi_scale_recon_loss_gauss(
     recon: torch.Tensor,
     target: torch.Tensor,
-    cfg: LossMultiScaleReconConfig,
+    cfg: LossMultiScaleGaussReconConfig,
 ) -> torch.Tensor:
     """Multi-scale hardness-weighted reconstruction over an image pyramid."""
     # Flatten batch/time to apply pyramid on spatial dims only.
@@ -611,13 +702,36 @@ def multi_scale_recon_loss(
     target_bt = target.reshape(-1, *target.shape[2:])
     num_scales = len(cfg.kernel_sizes)
     preds_scales, targets_scales = _build_feature_pyramid(recon_bt, target_bt, num_scales)
-    loss_raw = multi_scale_hardness_loss(
+    loss_raw = multi_scale_hardness_loss_gaussian(
         preds_scales,
         targets_scales,
         cfg.kernel_sizes,
         cfg.sigmas,
         cfg.betas,
         cfg.lambdas,
+        cfg.strides,
+        cfg.max_weight,
+    )
+    return loss_raw
+
+
+def multi_scale_recon_loss_box(
+    recon: torch.Tensor,
+    target: torch.Tensor,
+    cfg: LossMultiScaleBoxReconConfig,
+) -> torch.Tensor:
+    """Multi-scale hardness-weighted reconstruction over an image pyramid using box filters."""
+    recon_bt = recon.reshape(-1, *recon.shape[2:])
+    target_bt = target.reshape(-1, *target.shape[2:])
+    num_scales = len(cfg.kernel_sizes)
+    preds_scales, targets_scales = _build_feature_pyramid(recon_bt, target_bt, num_scales)
+    loss_raw = multi_scale_hardness_loss_box(
+        preds_scales,
+        targets_scales,
+        cfg.kernel_sizes,
+        cfg.betas,
+        cfg.lambdas,
+        cfg.strides,
         cfg.max_weight,
     )
     return loss_raw
@@ -725,10 +839,16 @@ def training_step(
         loss_recon = images.new_tensor(0.0)
 
     # Multi-scale hardness-weighted reconstruction (image-space pyramid fallback).
-    if weights.recon_multi > 0 and recon is not None:
-        loss_recon_multi = multi_scale_recon_loss(recon, images, cfg.recon_multi)
+    if weights.recon_multi_gauss > 0 and recon is not None:
+        loss_recon_multi_gauss = multi_scale_recon_loss_gauss(recon, images, cfg.recon_multi_gauss)
     else:
-        loss_recon_multi = images.new_tensor(0.0)
+        loss_recon_multi_gauss = images.new_tensor(0.0)
+
+    # Multi-scale hardness-weighted reconstruction with box filter.
+    if weights.recon_multi_box > 0 and recon is not None:
+        loss_recon_multi_box = multi_scale_recon_loss_box(recon, images, cfg.recon_multi_box)
+    else:
+        loss_recon_multi_box = images.new_tensor(0.0)
 
     # Patch-space reconstruction.
     if weights.recon_patch > 0 and recon is not None:
@@ -746,7 +866,8 @@ def training_step(
         + weights.ema_consistency * loss_ema_consistency
         + weights.action_recon * loss_action
         + weights.recon * loss_recon
-        + weights.recon_multi * loss_recon_multi
+        + weights.recon_multi_gauss * loss_recon_multi_gauss
+        + weights.recon_multi_box * loss_recon_multi_box
         + weights.recon_patch * loss_recon_patch
     )
     optimizer.zero_grad()
@@ -781,7 +902,8 @@ def training_step(
         "loss_consistency": loss_consistency.item(),
         "loss_ema_consistency": loss_ema_consistency.item(),
         "loss_recon": loss_recon.item(),
-        "loss_recon_multi": loss_recon_multi.item(),
+        "loss_recon_multi_gauss": loss_recon_multi_gauss.item(),
+        "loss_recon_multi_box": loss_recon_multi_box.item(),
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_action": loss_action.item(),
         "loss_delta": loss_delta.item(),
@@ -915,8 +1037,10 @@ def log_metrics(
         filtered.pop("loss_ema_consistency", None)
     if weights.recon <= 0:
         filtered.pop("loss_recon", None)
-    if weights.recon_multi <= 0:
-        filtered.pop("loss_recon_multi", None)
+    if weights.recon_multi_gauss <= 0:
+        filtered.pop("loss_recon_multi_gauss", None)
+    if weights.recon_multi_box <= 0:
+        filtered.pop("loss_recon_multi_box", None)
     if weights.recon_patch <= 0:
         filtered.pop("loss_recon_patch", None)
     if weights.action_recon <= 0:
@@ -947,7 +1071,8 @@ LOSS_COLUMNS = [
     "loss_consistency",
     "loss_ema_consistency",
     "loss_recon",
-    "loss_recon_multi",
+    "loss_recon_multi_gauss",
+    "loss_recon_multi_box",
     "loss_recon_patch",
     "loss_action",
     "loss_delta",
@@ -970,7 +1095,8 @@ class LossHistory:
     consistency: List[float] = field(default_factory=list)
     ema_consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
-    recon_multi: List[float] = field(default_factory=list)
+    recon_multi_gauss: List[float] = field(default_factory=list)
+    recon_multi_box: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
     delta: List[float] = field(default_factory=list)
@@ -990,7 +1116,8 @@ class LossHistory:
         self.consistency.append(metrics["loss_consistency"])
         self.ema_consistency.append(metrics["loss_ema_consistency"])
         self.recon.append(metrics["loss_recon"])
-        self.recon_multi.append(metrics["loss_recon_multi"])
+        self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
+        self.recon_multi_box.append(metrics["loss_recon_multi_box"])
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.action.append(metrics["loss_action"])
         self.delta.append(metrics["loss_delta"])
@@ -1021,7 +1148,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.consistency,
             history.ema_consistency,
             history.recon,
-            history.recon_multi,
+            history.recon_multi_gauss,
+            history.recon_multi_box,
             history.recon_patch,
             history.action,
             history.delta,
@@ -1068,8 +1196,10 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         plt.plot(history.steps, history.action, label="action_recon", color=color_map["action"])
     if any(val != 0.0 for val in history.recon_patch):
         plt.plot(history.steps, history.recon_patch, label="recon_patch", color=_color(8))
-    if any(val != 0.0 for val in history.recon_multi):
-        plt.plot(history.steps, history.recon_multi, label="recon_multi", color=_color(9))
+    if any(val != 0.0 for val in history.recon_multi_gauss):
+        plt.plot(history.steps, history.recon_multi_gauss, label="recon_multi_gauss", color=_color(9))
+    if any(val != 0.0 for val in history.recon_multi_box):
+        plt.plot(history.steps, history.recon_multi_box, label="recon_multi_box", color=_color(10))
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")
