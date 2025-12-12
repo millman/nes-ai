@@ -314,7 +314,7 @@ class VisConfig:
 
 @dataclass
 class HardExampleConfig:
-    reservoir: int = 256
+    reservoir: int = 0
     mix_ratio: float = 0.5
     vis_rows: int = 4
     vis_columns: int = 6
