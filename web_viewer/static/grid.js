@@ -5,6 +5,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireTagsForms(document);
   wireMetadataToggles(document);
   formatAllNumbers(document);
+  wireDashboardNotes(document);
 });
 
 /**
@@ -148,6 +149,245 @@ function wireNotesForm(form) {
     saveNotes();
   });
   markDirty();
+}
+
+function wireDashboardNotes(root) {
+  const buttons = root.querySelectorAll(".notes-icon-btn");
+  if (!buttons.length || typeof bootstrap === "undefined") {
+    return;
+  }
+
+  let activePopover = null;
+
+  const escapeHtml = (value) =>
+    value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+
+  const renderNotesHtml = (value) => {
+    if (!value || !value.trim()) {
+      return '<span class="text-white-50">No notes yet</span>';
+    }
+    return escapeHtml(value).replace(/\n/g, "<br>");
+  };
+
+  const updateIconState = (buttonEl, textValue) => {
+    const icon = buttonEl.querySelector(".notes-icon");
+    const hasNotes = Boolean(textValue && textValue.trim());
+    icon?.classList.toggle("has-notes", hasNotes);
+    icon?.classList.toggle("no-notes", !hasNotes);
+  };
+
+  const closeActivePopover = (event) => {
+    if (!activePopover) {
+      return;
+    }
+    if (event && activePopover.tip && activePopover.tip.contains(event.target)) {
+      return;
+    }
+    activePopover.popover.hide();
+    if (activePopover.onClose) {
+      activePopover.onClose();
+    }
+    activePopover = null;
+  };
+
+  document.addEventListener("click", (event) => {
+    if (event.target.closest(".notes-icon-btn")) {
+      return;
+    }
+    // Don't close if clicking inside the popover itself
+    if (event.target.closest(".notes-popover")) {
+      return;
+    }
+    closeActivePopover(event);
+  });
+
+  buttons.forEach((button) => {
+    const expId = button.dataset.expId;
+    let notes = button.dataset.notes || "";
+    let popoverOpen = false;
+
+    const iconEl = button.querySelector(".notes-icon");
+    // Dispose any existing tooltip to avoid "more than one instance" error
+    if (iconEl) {
+      const existingTooltip = bootstrap.Tooltip.getInstance(iconEl);
+      if (existingTooltip) existingTooltip.dispose();
+    }
+    const tooltip =
+      iconEl &&
+      new bootstrap.Tooltip(iconEl, {
+        trigger: "manual",
+        html: true,
+        animation: false,
+        container: "body",
+        placement: "right",
+        offset: [0, 8],
+        title: () => renderNotesHtml(notes),
+        customClass: "notes-tooltip",
+      });
+
+    const showTooltip = () => {
+      if (!tooltip || popoverOpen) return;
+      tooltip.setContent({ ".tooltip-inner": renderNotesHtml(notes) });
+      tooltip.show();
+    };
+
+    const hideTooltip = () => {
+      tooltip?.hide();
+    };
+
+    const saveNotes = (textarea, statusEl, saveBtn) => {
+      saveBtn.disabled = true;
+      statusEl.textContent = "Saving…";
+      fetch(`/experiments/${expId}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: textarea.value }),
+      })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error("Failed to save notes");
+          }
+          return response.json();
+        })
+        .then(() => {
+          notes = textarea.value;
+          button.dataset.notes = notes;
+          statusEl.textContent = "Saved";
+          updateIconState(button, notes);
+          tooltip.setContent({ ".tooltip-inner": renderNotesHtml(notes) });
+        })
+        .catch(() => {
+          statusEl.textContent = "Save failed";
+          saveBtn.disabled = false;
+        });
+    };
+
+    // Dispose any existing popover to avoid "more than one instance" error
+    const existingPopover = bootstrap.Popover.getInstance(button);
+    if (existingPopover) existingPopover.dispose();
+
+    const popover = new bootstrap.Popover(button, {
+      trigger: "manual",
+      html: true,
+      sanitize: false,
+      animation: false,
+      container: "body",
+      placement: "auto",
+      fallbackPlacements: ["bottom", "top", "right", "left"],
+      title: "Notes",
+      template:
+        '<div class="popover notes-popover" role="tooltip">' +
+        '<div class="popover-arrow"></div>' +
+        '<h3 class="popover-header"></h3>' +
+        '<div class="popover-body"></div>' +
+        "</div>",
+      content:
+        '<div class="notes-popover-body">' +
+        '<textarea class="form-control form-control-sm notes-popover-text" rows="6" placeholder="Add experiment notes..."></textarea>' +
+        '<div class="d-flex justify-content-between align-items-center gap-2 mt-2">' +
+        '<span class="notes-popover-status small text-muted" aria-live="polite"></span>' +
+        '<div class="btn-group btn-group-sm">' +
+        '<button type="button" class="btn btn-outline-secondary notes-popover-close">Close</button>' +
+        '<button type="button" class="btn btn-primary notes-popover-save">Save</button>' +
+        "</div></div></div>",
+    });
+
+    updateIconState(button, notes);
+
+    button.addEventListener("mouseenter", showTooltip);
+    button.addEventListener("mouseleave", hideTooltip);
+    button.addEventListener("focus", showTooltip);
+    button.addEventListener("blur", hideTooltip);
+
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      hideTooltip();
+
+      // If this button's popover is already active, do nothing (it's already open)
+      if (activePopover && activePopover.button === button) {
+        return;
+      }
+
+      if (activePopover && activePopover.button !== button) {
+        closeActivePopover();
+      }
+
+      popoverOpen = true;
+
+      // Use one-time shown event to set up popover content after it's rendered
+      const onShown = () => {
+        button.removeEventListener("shown.bs.popover", onShown);
+        const tip = document.querySelector(".notes-popover");
+        if (!tip) {
+          popoverOpen = false;
+          return;
+        }
+
+        const textarea = tip.querySelector(".notes-popover-text");
+        const saveBtn = tip.querySelector(".notes-popover-save");
+        const closeBtn = tip.querySelector(".notes-popover-close");
+        const statusEl = tip.querySelector(".notes-popover-status");
+
+        if (textarea) textarea.value = notes;
+        if (statusEl) statusEl.textContent = "";
+
+        const markDirty = () => {
+          const dirty = textarea && textarea.value !== notes;
+          if (statusEl) statusEl.textContent = dirty ? "Unsaved changes" : "";
+        };
+
+        if (textarea) textarea.oninput = markDirty;
+        if (saveBtn) {
+          saveBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            saveNotes(textarea, statusEl, saveBtn);
+          };
+        }
+        if (closeBtn) {
+          closeBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeActivePopover();
+          };
+        }
+
+        markDirty();
+        activePopover = { popover, button, tip, onClose: () => { popoverOpen = false; } };
+
+        // Prevent focusin from bubbling and potentially triggering unwanted handlers
+        tip.addEventListener("focusin", (e) => e.stopPropagation());
+        tip.addEventListener("focusout", (e) => e.stopPropagation());
+
+        // Delay focus to avoid race conditions with event handlers
+        requestAnimationFrame(() => {
+          if (textarea) textarea.focus();
+        });
+      };
+
+      button.addEventListener("shown.bs.popover", onShown);
+      popover.show();
+    });
+  });
+
+  window.addEventListener(
+    "scroll",
+    (event) => {
+      // Don't close if scrolling inside the popover (e.g., textarea scroll on paste)
+      if (activePopover && activePopover.tip && activePopover.tip.contains(event.target)) {
+        return;
+      }
+      if (activePopover) {
+        closeActivePopover();
+      }
+    },
+    true
+  );
 }
 
 function wireTitleForms(root) {
