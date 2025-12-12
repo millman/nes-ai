@@ -612,7 +612,7 @@ def multi_scale_hardness_loss_box(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """
-    Compute hardness-weighted loss over multiple scales using a separable-style box filter on per-pixel L1.
+    Compute hardness-weighted loss over multiple scales mirroring patch_recon_loss (hardness-weighted L1).
     """
     if max_weight <= 0:
         raise ValueError("max_weight must be positive.")
@@ -637,14 +637,17 @@ def multi_scale_hardness_loss_box(
         stride = int(strides[idx])
         if stride <= 0:
             raise ValueError("Box hardness stride must be positive.")
+        b, _, h, w = p.shape
+        if k > h or k > w:
+            raise ValueError(f"kernel_size={k} exceeds feature map size {(h, w)} at scale {idx}.")
         per_pixel_l1 = (p - t).abs().mean(dim=1, keepdim=True)  # Bx1xHxW
-        per_pixel_detached = per_pixel_l1.detach()
-        # Separable-style box smoothing of detached errors; padding keeps centers aligned.
-        norm = F.avg_pool2d(per_pixel_detached, kernel_size=k, stride=stride, padding=k // 2)
-        if norm.shape[-2:] != per_pixel_l1.shape[-2:]:
-            norm = F.interpolate(norm, size=per_pixel_l1.shape[-2:], mode="nearest")
-        rel = (per_pixel_detached / norm.clamp_min(eps)).pow(beta).clamp(max=max_weight)
-        scale_loss = (rel * per_pixel_l1).mean()
+        # Extract patches without padding to mirror patch_recon_loss behaviour.
+        patches = per_pixel_l1.unfold(2, k, stride).unfold(3, k, stride)  # Bx1xNr xNc xk xk
+        patches_detached = patches.detach()
+        norm = patches_detached.mean(dim=(1, 4, 5), keepdim=True).clamp_min(eps)
+        weight = (patches_detached / norm).pow(beta).clamp(max=max_weight)
+        weighted = weight * patches
+        scale_loss = weighted.mean()
         total = total + lam * scale_loss
     return total
 
