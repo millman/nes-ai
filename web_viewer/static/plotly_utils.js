@@ -45,18 +45,86 @@ function toggleTracesByPattern(gd, pattern) {
   }
 }
 
+function extractTraceMetric(name = "") {
+  const parts = name.split(":").map((p) => p.trim());
+  return parts.length > 1 ? parts[1] : parts[0];
+}
+
+function extractTraceExperiment(name = "") {
+  const parts = name.split(":").map((p) => p.trim());
+  return parts.length > 1 ? parts[0] : null;
+}
+
 function toggleTracesByMetricName(gd, metricName) {
   if (!gd || !gd.data || !gd.data.length) {
+    return;
+  }
+  if (!metricName) {
     return;
   }
   const indices = [];
   const visibilities = [];
   gd.data.forEach((trace, idx) => {
-    const name = trace.name || "";
-    // Trace names are typically "experiment: metric"
-    const parts = name.split(":").map((p) => p.trim());
-    const traceMetric = parts.length > 1 ? parts[1] : parts[0];
+    const traceMetric = extractTraceMetric(trace.name);
     if (traceMetric === metricName) {
+      indices.push(idx);
+      const currentlyVisible = trace.visible === true || trace.visible === undefined;
+      visibilities.push(currentlyVisible ? "legendonly" : true);
+    }
+  });
+  if (indices.length > 0) {
+    Plotly.restyle(gd, { visible: visibilities }, indices);
+  }
+}
+
+function pickLossReconMetricsByExperiment(gd) {
+  if (!gd || !gd.data || !gd.data.length) {
+    return new Map();
+  }
+  const exact = new Map();
+  const fallback = new Map();
+  gd.data.forEach((trace) => {
+    const metric = extractTraceMetric(trace.name);
+    const experiment = extractTraceExperiment(trace.name);
+    if (!experiment || !metric) {
+      return;
+    }
+    if (metric === "loss_recon") {
+      exact.set(experiment, metric);
+      return;
+    }
+    if (!fallback.has(experiment) && metric.startsWith("loss_recon_")) {
+      fallback.set(experiment, metric);
+    }
+  });
+  const chosen = new Map();
+  fallback.forEach((metric, experiment) => {
+    chosen.set(experiment, metric);
+  });
+  exact.forEach((metric, experiment) => {
+    chosen.set(experiment, metric);
+  });
+  return chosen;
+}
+
+function toggleLossReconPerExperiment(gd) {
+  if (!gd || !gd.data || !gd.data.length) {
+    return;
+  }
+  const selectedByExperiment = pickLossReconMetricsByExperiment(gd);
+  if (!selectedByExperiment.size) {
+    return;
+  }
+  const indices = [];
+  const visibilities = [];
+  gd.data.forEach((trace, idx) => {
+    const metric = extractTraceMetric(trace.name);
+    const experiment = extractTraceExperiment(trace.name);
+    if (!experiment || !metric) {
+      return;
+    }
+    const targetMetric = selectedByExperiment.get(experiment);
+    if (targetMetric && metric === targetMetric) {
       indices.push(idx);
       const currentlyVisible = trace.visible === true || trace.visible === undefined;
       visibilities.push(currentlyVisible ? "legendonly" : true);
@@ -83,7 +151,7 @@ function buildPlotlyConfig(baseConfig = {}) {
     {
       name: "Toggle loss_recon",
       icon: PLOTLY_RECON_ICON,
-      click: (gd) => toggleTracesByMetricName(gd, "loss_recon"),
+      click: (gd) => toggleLossReconPerExperiment(gd),
     },
   ];
   const existingButtons = Array.isArray(clone.modeBarButtonsToAdd) ? clone.modeBarButtonsToAdd : [];
