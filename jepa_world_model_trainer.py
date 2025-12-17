@@ -1151,6 +1151,12 @@ def log_metrics(
         filtered["loss_val_world"] = metrics["loss_val_world"]
     if "loss_val_recon" in metrics:
         filtered["loss_val_recon"] = metrics["loss_val_recon"]
+    if "loss_val_recon_multi_gauss" in metrics:
+        filtered["loss_val_recon_multi_gauss"] = metrics["loss_val_recon_multi_gauss"]
+    if "loss_val_recon_multi_box" in metrics:
+        filtered["loss_val_recon_multi_box"] = metrics["loss_val_recon_multi_box"]
+    if "loss_val_recon_patch" in metrics:
+        filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
@@ -1175,6 +1181,9 @@ LOSS_COLUMNS = [
     "loss_world",
     "loss_val_world",
     "loss_val_recon",
+    "loss_val_recon_multi_gauss",
+    "loss_val_recon_multi_box",
+    "loss_val_recon_patch",
     "loss_jepa",
     "loss_sigreg",
     "loss_rollout",
@@ -1201,6 +1210,9 @@ class LossHistory:
     world: List[float] = field(default_factory=list)
     val_world: List[float] = field(default_factory=list)
     val_recon: List[float] = field(default_factory=list)
+    val_recon_multi_gauss: List[float] = field(default_factory=list)
+    val_recon_multi_box: List[float] = field(default_factory=list)
+    val_recon_patch: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
     rollout: List[float] = field(default_factory=list)
@@ -1224,6 +1236,9 @@ class LossHistory:
         self.world.append(metrics["loss_world"])
         self.val_world.append(metrics.get("loss_val_world", 0.0))
         self.val_recon.append(metrics.get("loss_val_recon", 0.0))
+        self.val_recon_multi_gauss.append(metrics.get("loss_val_recon_multi_gauss", 0.0))
+        self.val_recon_multi_box.append(metrics.get("loss_val_recon_multi_box", 0.0))
+        self.val_recon_patch.append(metrics.get("loss_val_recon_patch", 0.0))
         self.jepa.append(metrics["loss_jepa"])
         self.sigreg.append(metrics["loss_sigreg"])
         self.rollout.append(metrics["loss_rollout"])
@@ -1258,6 +1273,9 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.world,
             history.val_world,
             history.val_recon,
+            history.val_recon_multi_gauss,
+            history.val_recon_multi_box,
+            history.val_recon_patch,
             history.jepa,
             history.sigreg,
             history.rollout,
@@ -1303,6 +1321,12 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         plt.plot(history.steps, history.val_world, label="val_world", color=_color(11))
     if any(val != 0.0 for val in history.val_recon):
         plt.plot(history.steps, history.val_recon, label="val_recon", color=_color(12))
+    if any(val != 0.0 for val in history.val_recon_multi_gauss):
+        plt.plot(history.steps, history.val_recon_multi_gauss, label="val_recon_multi_gauss", color=_color(13))
+    if any(val != 0.0 for val in history.val_recon_multi_box):
+        plt.plot(history.steps, history.val_recon_multi_box, label="val_recon_multi_box", color=_color(14))
+    if any(val != 0.0 for val in history.val_recon_patch):
+        plt.plot(history.steps, history.val_recon_patch, label="val_recon_patch", color=_color(15))
     plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
     plt.plot(history.steps, history.sigreg, label="sigreg", color=color_map["sigreg"])
     plt.plot(history.steps, history.recon, label="recon", color=color_map["recon"])
@@ -2170,6 +2194,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             if val_metrics is not None:
                 metrics_for_log["loss_val_world"] = val_metrics["loss_world"]
                 metrics_for_log["loss_val_recon"] = val_metrics["loss_recon"]
+                metrics_for_log["loss_val_recon_multi_gauss"] = val_metrics["loss_recon_multi_gauss"]
+                metrics_for_log["loss_val_recon_multi_box"] = val_metrics["loss_recon_multi_box"]
+                metrics_for_log["loss_val_recon_patch"] = val_metrics["loss_recon_patch"]
             log_metrics(
                 global_step,
                 metrics_for_log,
