@@ -218,22 +218,14 @@
     font-size: 0.9rem;
 }
 
-.metadata-popover.locked {
-    position: relative;
-}
-
-.metadata-popover.locked::after {
-    content: "Pinned";
-    position: absolute;
-    top: 6px;
-    right: 8px;
-    background: #343a40;
-    color: #f8f9fa;
+.metadata-pinned-badge {
+    display: inline-block;
+    background: #6c757d;
+    color: #fff;
     padding: 2px 6px;
-    border-radius: 999px;
+    border-radius: 4px;
     font-size: 0.65rem;
-    line-height: 1.2;
-    letter-spacing: 0.02em;
+    margin-bottom: 6px;
 }
 
 .notes-tooltip .tooltip-inner {

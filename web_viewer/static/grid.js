@@ -171,118 +171,35 @@ function wireMetadataPopovers(root) {
     return;
   }
 
-  const popoverMap = new Map();
+  buttons.forEach((button) => {
+    // Dispose any existing popover
+    const existing = bootstrap.Popover.getInstance(button);
+    if (existing) existing.dispose();
 
-  const renderMetadata = (textValue) => {
-    const safeValue = escapeHtml(textValue || "");
-    return (
-      '<div class="metadata-popover-body">' +
-      `<pre class="metadata-popover-pre">${safeValue}</pre>` +
-      "</div>"
-    );
-  };
-
-  const setLockedState = (tipEl, locked) => {
-    if (!tipEl) return;
-    tipEl.classList.toggle("locked", locked);
-  };
-
-  const ensurePopoverState = (button) => {
-    let state = popoverMap.get(button);
-    if (state) return state;
-    const popover = new bootstrap.Popover(button, {
-      trigger: "manual",
+    // Use focus trigger - click focuses the button, clicking elsewhere blurs it
+    new bootstrap.Popover(button, {
+      trigger: "hover focus",
       html: true,
       sanitize: false,
+      animation: false,
       container: "body",
       placement: "auto",
       fallbackPlacements: ["bottom", "top", "right", "left"],
       customClass: "metadata-popover",
-      content: () => renderMetadata(button.dataset.metadata || ""),
-    });
-    state = {
-      popover,
-      tip: null,
-      pinned: false,
-      hideTimer: null,
-    };
-    popoverMap.set(button, state);
-    return state;
-  };
-
-  const clearHideTimer = (state) => {
-    if (state.hideTimer) {
-      clearTimeout(state.hideTimer);
-      state.hideTimer = null;
-    }
-  };
-
-  const scheduleHide = (button) => {
-    const state = popoverMap.get(button);
-    if (!state || state.pinned) return;
-    clearHideTimer(state);
-    state.hideTimer = setTimeout(() => {
-      state.hideTimer = null;
-      if (!state.pinned) {
-        setLockedState(state.tip, false);
-        state.popover.hide();
-      }
-    }, 120);
-  };
-
-  const showPopover = (button, pinned = false) => {
-    const state = ensurePopoverState(button);
-    clearHideTimer(state);
-    state.pinned = pinned;
-    state.popover.show();
-    state.tip = state.popover.tip;
-    setLockedState(state.tip, pinned);
-
-    if (state.tip && state.tip.dataset.handlersAttached !== "1") {
-      state.tip.dataset.handlersAttached = "1";
-      state.tip.addEventListener("mouseenter", () => {
-        clearHideTimer(state);
-      });
-      state.tip.addEventListener("mouseleave", () => {
-        scheduleHide(button);
-      });
-    }
-  };
-
-  const hidePopover = (button, force = false) => {
-    const state = popoverMap.get(button);
-    if (!state) return;
-    clearHideTimer(state);
-    if (state.pinned && !force) return;
-    state.pinned = false;
-    setLockedState(state.tip, false);
-    state.popover.hide();
-  };
-
-  buttons.forEach((button) => {
-    button.addEventListener("mouseenter", () => {
-      const state = ensurePopoverState(button);
-      if (state.pinned) return;
-      showPopover(button, false);
+      content: () => {
+        const text = button.dataset.metadata || "";
+        return `<pre class="metadata-popover-pre">${escapeHtml(text)}</pre>`;
+      },
     });
 
-    button.addEventListener("mouseleave", (event) => {
-      const state = ensurePopoverState(button);
-      if (state.pinned) return;
-      const movingToTip = state.tip && state.tip.contains(event.relatedTarget);
-      if (!movingToTip) scheduleHide(button);
-    });
+    // Make button focusable
+    button.setAttribute("tabindex", "0");
 
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-
-      const state = ensurePopoverState(button);
-      const wasPinned = state.pinned;
-      if (wasPinned) {
-        hidePopover(button, true);
-      } else {
-        showPopover(button, true);
+    // Toggle focus on click - if already focused, blur to close
+    button.addEventListener("mousedown", (event) => {
+      if (document.activeElement === button) {
+        event.preventDefault(); // Prevent the click from re-focusing
+        button.blur();
       }
     });
   });
