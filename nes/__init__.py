@@ -7,6 +7,7 @@ from setuptools import setup, Extension, find_packages
 from Cython.Build import cythonize
 import Cython.Compiler.Options
 Cython.Compiler.Options.annotate = True
+import os
 import numpy
 
 extensions = [Extension("cycore.*", ["nes/cycore/*.pyx"], include_dirs=[numpy.get_include()], extra_compile_args=["-fsanitize=address"],
@@ -18,8 +19,9 @@ import numpy
 print(numpy.get_include())
 
 import pyximport
-pyximport.install(setup_args={"include_dirs":numpy.get_include()}, reload_support=True)
+build_dir = os.path.join(os.path.dirname(__file__), ".pyxbld")
+os.makedirs(build_dir, exist_ok=True)
+pyximport.install(setup_args={"include_dirs":numpy.get_include()}, reload_support=True, build_dir=build_dir)
 
 from nes.cycore.system import NES   # make the key NES object available at the top level
-
 

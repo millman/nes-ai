@@ -554,8 +554,11 @@ cdef class NESAPU:
             self.output[i] = 0
 
     def save(self):
-        cdef short [:] output = self.output
-        cdef short [:] buffer = self.buffer
+        # create typed views with explicit lengths to avoid Cython shape inference issues
+        cdef int output_length = APU_BUFFER_LENGTH
+        cdef int buffer_length = CHUNK_SIZE
+        cdef short[::1] output = <short[:output_length]> self.output
+        cdef short[::1] buffer = <short[:buffer_length]> self.buffer
 
         output_np = np.asarray(output, copy=True)
         buffer_np = np.asarray(buffer, copy=True)
@@ -593,11 +596,13 @@ cdef class NESAPU:
         )
 
     def load(self, state):
-        cdef short [:] output = self.output
-        cdef short [:] buffer = self.buffer
+        cdef int output_length = APU_BUFFER_LENGTH
+        cdef int buffer_length = CHUNK_SIZE
+        cdef short[::1] output = <short[:output_length]> self.output
+        cdef short[::1] buffer = <short[:buffer_length]> self.buffer
 
-        cdef const short [:] np_output
-        cdef const short [:] np_buffer
+        cdef const short[::1] np_output
+        cdef const short[::1] np_buffer
 
         (
         #### master volume

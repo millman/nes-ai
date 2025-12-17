@@ -72,7 +72,8 @@ cdef class MOS6502:
         self.reset()
 
     def save(self):
-        cdef int[:] instr_size_bytes = self.instr_size_bytes
+        cdef int instr_table_len = 256
+        cdef int[::1] instr_size_bytes = <int[:instr_table_len]> self.instr_size_bytes
 
         instr_size_bytes_np = np.asarray(instr_size_bytes, copy=True)
         instr_size_bytes_np.setflags(write=False)
@@ -89,7 +90,7 @@ cdef class MOS6502:
         )
 
     def load(self, state):
-        cdef const int[:] np_instr_size_bytes
+        cdef const int[::1] np_instr_size_bytes
 
         (
             self.A, self.X, self.Y,     # registers
@@ -102,7 +103,8 @@ cdef class MOS6502:
             np_instr_size_bytes
         ) = state
 
-        cdef int[:] instr_size_bytes = self.instr_size_bytes
+        cdef int instr_table_len = 256
+        cdef int[::1] instr_size_bytes = <int[:instr_table_len]> self.instr_size_bytes
 
         instr_size_bytes[:] = np_instr_size_bytes
 

@@ -196,8 +196,10 @@ cdef class NESVRAM(MemoryBase):
             self.palette_ram[address % PALETTE_SIZE_BYTES] = value
 
     def save(self):
-        cdef unsigned char[:] _nametables = self._nametables
-        cdef unsigned char[:] palette_ram = self.palette_ram
+        cdef int nametable_len = XX_NAMETABLES_SIZE_BYTES
+        cdef int palette_len = PALETTE_SIZE_BYTES
+        cdef unsigned char[::1] _nametables = <unsigned char[:nametable_len]> self._nametables
+        cdef unsigned char[::1] palette_ram = <unsigned char[:palette_len]> self.palette_ram
 
         _nametables_np = np.asarray(_nametables, copy=True)
         palette_ram_np = np.asarray(palette_ram, copy=True)
@@ -212,8 +214,8 @@ cdef class NESVRAM(MemoryBase):
         )
 
     def load(self, state):
-        cdef const unsigned char[:] np__nametables
-        cdef const unsigned char[:] np_palette_ram
+        cdef const unsigned char[::1] np__nametables
+        cdef const unsigned char[::1] np_palette_ram
 
         (
             np__nametables,
@@ -221,8 +223,10 @@ cdef class NESVRAM(MemoryBase):
             state_cart,
         ) = state
 
-        cdef unsigned char[:] _nametables = self._nametables
-        cdef unsigned char[:] palette_ram = self.palette_ram
+        cdef int nametable_len = XX_NAMETABLES_SIZE_BYTES
+        cdef int palette_len = PALETTE_SIZE_BYTES
+        cdef unsigned char[::1] _nametables = <unsigned char[:nametable_len]> self._nametables
+        cdef unsigned char[::1] palette_ram = <unsigned char[:palette_len]> self.palette_ram
 
         _nametables[:] = np__nametables
         palette_ram[:] = np_palette_ram

@@ -128,9 +128,12 @@ cdef class NESCart0(NESCart):
         """
         Save the state of the cart to a tuple of numpy arrays
         """
-        cdef unsigned char [:] ram = self.ram
-        cdef unsigned char [:] prg_rom = self.prg_rom
-        cdef unsigned char [:] chr_mem = self.chr_mem
+        cdef int ram_len = M0_MAX_CART_RAM_SIZE
+        cdef int prg_len = M0_MAX_PRG_ROM_SIZE
+        cdef int chr_len = M0_CHR_MEM_SIZE
+        cdef unsigned char[::1] ram = <unsigned char[:ram_len]> self.ram
+        cdef unsigned char[::1] prg_rom = <unsigned char[:prg_len]> self.prg_rom
+        cdef unsigned char[::1] chr_mem = <unsigned char[:chr_len]> self.chr_mem
 
         ram_np = np.asarray(ram, copy=True)
         prg_rom_np = np.asarray(prg_rom, copy=True)
@@ -156,9 +159,9 @@ cdef class NESCart0(NESCart):
         """
         Load the state of the cart from a tuple of numpy arrays
         """
-        cdef const unsigned char [:] np_ram
-        cdef const unsigned char [:] np_prg_rom
-        cdef const unsigned char [:] np_chr_mem
+        cdef const unsigned char[::1] np_ram
+        cdef const unsigned char[::1] np_prg_rom
+        cdef const unsigned char[::1] np_chr_mem
 
         (
             np_ram,
@@ -172,9 +175,12 @@ cdef class NESCart0(NESCart):
             self.prg_rom_writeable,
         ) = state
 
-        cdef unsigned char [:] ram = self.ram
-        cdef unsigned char [:] prg_rom = self.prg_rom
-        cdef unsigned char [:] chr_mem = self.chr_mem
+        cdef int ram_len = M0_MAX_CART_RAM_SIZE
+        cdef int prg_len = M0_MAX_PRG_ROM_SIZE
+        cdef int chr_len = M0_CHR_MEM_SIZE
+        cdef unsigned char[::1] ram = <unsigned char[:ram_len]> self.ram
+        cdef unsigned char[::1] prg_rom = <unsigned char[:prg_len]> self.prg_rom
+        cdef unsigned char[::1] chr_mem = <unsigned char[:chr_len]> self.chr_mem
 
         ram[:] = np_ram
         prg_rom[:] = np_prg_rom
@@ -290,10 +296,18 @@ cdef class NESCart1(NESCart):
         """
         Save the state of the cart to a tuple of numpy arrays
         """
-        cdef unsigned char[:] chr_bank = self.chr_bank
-        cdef unsigned char[:,:] banked_prg_rom_1 = self.banked_prg_rom_1
-        cdef unsigned char[:,:] banked_chr_rom_1 = self.banked_chr_rom_1
-        cdef unsigned char[:,:] ram_1 = self.ram_1
+        cdef int chr_bank_len = 2  # fixed length array
+        cdef int prg_banks = M1_MAX_PRG_BANKS
+        cdef int prg_bank_size = M1_PRG_ROM_BANK_SIZE
+        cdef int chr_banks = M1_MAX_CHR_BANKS
+        cdef int chr_bank_size = M1_CHR_ROM_BANK_SIZE
+        cdef int ram_banks = M1_MAX_PRG_RAM_BANKS
+        cdef int ram_bank_size = M1_PRG_RAM_BANK_SIZE
+
+        cdef unsigned char[::1] chr_bank = <unsigned char[:chr_bank_len]> self.chr_bank
+        cdef unsigned char[:, ::1] banked_prg_rom_1 = <unsigned char[:prg_banks, :prg_bank_size]> self.banked_prg_rom_1
+        cdef unsigned char[:, ::1] banked_chr_rom_1 = <unsigned char[:chr_banks, :chr_bank_size]> self.banked_chr_rom_1
+        cdef unsigned char[:, ::1] ram_1 = <unsigned char[:ram_banks, :ram_bank_size]> self.ram_1
 
         chr_bank_np = np.asarray(chr_bank, copy=True)
         banked_prg_rom_1_np = np.asarray(banked_prg_rom_1, copy=True)
@@ -324,10 +338,10 @@ cdef class NESCart1(NESCart):
         Load the state of the cart from a tuple of numpy arrays
         """
 
-        cdef const unsigned char[:] np_chr_bank
-        cdef const unsigned char[:,:] np_banked_prg_rom_1
-        cdef const unsigned char[:,:] np_banked_chr_rom_1
-        cdef const unsigned char[:,:] np_ram_1
+        cdef const unsigned char[::1] np_chr_bank
+        cdef const unsigned char[:, ::1] np_banked_prg_rom_1
+        cdef const unsigned char[:, ::1] np_banked_chr_rom_1
+        cdef const unsigned char[:, ::1] np_ram_1
 
         (
             state_super,
@@ -342,10 +356,18 @@ cdef class NESCart1(NESCart):
             np_ram_1,
         ) = state
 
-        cdef unsigned char[:] chr_bank = self.chr_bank
-        cdef unsigned char[:,:] banked_prg_rom_1 = self.banked_prg_rom_1
-        cdef unsigned char[:,:] banked_chr_rom_1 = self.banked_chr_rom_1
-        cdef unsigned char[:,:] ram_1 = self.ram_1
+        cdef int chr_bank_len = 2  # fixed length array
+        cdef int prg_banks = M1_MAX_PRG_BANKS
+        cdef int prg_bank_size = M1_PRG_ROM_BANK_SIZE
+        cdef int chr_banks = M1_MAX_CHR_BANKS
+        cdef int chr_bank_size = M1_CHR_ROM_BANK_SIZE
+        cdef int ram_banks = M1_MAX_PRG_RAM_BANKS
+        cdef int ram_bank_size = M1_PRG_RAM_BANK_SIZE
+
+        cdef unsigned char[::1] chr_bank = <unsigned char[:chr_bank_len]> self.chr_bank
+        cdef unsigned char[:, ::1] banked_prg_rom_1 = <unsigned char[:prg_banks, :prg_bank_size]> self.banked_prg_rom_1
+        cdef unsigned char[:, ::1] banked_chr_rom_1 = <unsigned char[:chr_banks, :chr_bank_size]> self.banked_chr_rom_1
+        cdef unsigned char[:, ::1] ram_1 = <unsigned char[:ram_banks, :ram_bank_size]> self.ram_1
 
         super().load(state_super)
         ram_1[:,:] = np_ram_1
@@ -794,6 +816,4 @@ cdef class NESCart4(NESCart):
             self.irq_reload = True  # reload counter next time
             if self.irq_enabled:
                 self.interrupt_listener.raise_irq()
-
-
 

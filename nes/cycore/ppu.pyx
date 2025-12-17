@@ -94,18 +94,33 @@ cdef class NESPPU:
         self.irq_tick_triggers[:] = [False] * 68
 
     def save(self):
-        cdef unsigned char [:] ppu_scroll = self.ppu_scroll
-        cdef unsigned char [:] oam = self.oam
-        cdef unsigned char [:] _oam = self._oam
-        cdef int [:] _active_sprite_addrs = self._active_sprite_addrs
-        cdef unsigned char [:] _sprite_bkg_priority = self._sprite_bkg_priority
-        cdef int [:] _sprite_line = self._sprite_line
-        cdef char [:,:] _sprite_pattern = self._sprite_pattern
-        cdef int [:,:] _palette = self._palette
-        cdef unsigned int [:] hex_palette = self.hex_palette
-        cdef int [:,:] _palette_cache = self._palette_cache
-        cdef int [:] _palette_cache_valid = self._palette_cache_valid
-        cdef unsigned int [:,:] screen_buffer = self.screen_buffer
+        cdef int ppu_scroll_len = 2
+        cdef int oam_len = OAM_SIZE_BYTES
+        cdef int secondary_oam_len = 32
+        cdef int active_sprite_len = 8
+        cdef int sprite_pattern_rows = 8
+        cdef int sprite_pattern_cols = 8
+        cdef int palette_rows = 2
+        cdef int palette_cols = 4
+        cdef int hex_palette_len = 64
+        cdef int palette_cache_rows = 8
+        cdef int palette_cache_cols = 4
+        cdef int palette_cache_valid_len = 8
+        cdef int screen_width = SCREEN_WIDTH_PX
+        cdef int screen_height = SCREEN_HEIGHT_PX
+
+        cdef unsigned char[::1] ppu_scroll = <unsigned char[:ppu_scroll_len]> self.ppu_scroll
+        cdef unsigned char[::1] oam = <unsigned char[:oam_len]> self.oam
+        cdef unsigned char[::1] _oam = <unsigned char[:secondary_oam_len]> self._oam
+        cdef int[::1] _active_sprite_addrs = <int[:active_sprite_len]> self._active_sprite_addrs
+        cdef unsigned char[::1] _sprite_bkg_priority = <unsigned char[:active_sprite_len]> self._sprite_bkg_priority
+        cdef int[::1] _sprite_line = <int[:active_sprite_len]> self._sprite_line
+        cdef char[:, ::1] _sprite_pattern = <char[:sprite_pattern_rows, :sprite_pattern_cols]> self._sprite_pattern
+        cdef int[:, ::1] _palette = <int[:palette_rows, :palette_cols]> self._palette
+        cdef unsigned int[::1] hex_palette = <unsigned int[:hex_palette_len]> self.hex_palette
+        cdef int[:, ::1] _palette_cache = <int[:palette_cache_rows, :palette_cache_cols]> self._palette_cache
+        cdef int[::1] _palette_cache_valid = <int[:palette_cache_valid_len]> self._palette_cache_valid
+        cdef unsigned int[:, ::1] screen_buffer = <unsigned int[:screen_width, :screen_height]> self.screen_buffer
 
         ppu_scroll_np = np.asarray(ppu_scroll, copy=True)
         ppu_scroll_np.setflags(write=False)
@@ -200,33 +215,49 @@ cdef class NESPPU:
         )
 
     def load(self, buffer):
-        cdef unsigned char [:] ppu_scroll = self.ppu_scroll
-        cdef unsigned char [:] oam = self.oam
-        cdef unsigned char [:] _oam = self._oam
-        cdef int [:] _active_sprite_addrs = self._active_sprite_addrs
-        cdef unsigned char [:] _sprite_bkg_priority = self._sprite_bkg_priority
-        cdef int [:] _sprite_line = self._sprite_line
-        cdef char [:,:] _sprite_pattern = self._sprite_pattern
-        cdef bint [:] irq_tick_triggers = self.irq_tick_triggers
-        cdef int [:,:] _palette = self._palette
-        cdef unsigned int [:] hex_palette = self.hex_palette
-        cdef int [:,:] _palette_cache = self._palette_cache
-        cdef int [:] _palette_cache_valid = self._palette_cache_valid
-        cdef unsigned int [:,:] screen_buffer = self.screen_buffer
+        cdef int ppu_scroll_len = 2
+        cdef int oam_len = OAM_SIZE_BYTES
+        cdef int secondary_oam_len = 32
+        cdef int active_sprite_len = 8
+        cdef int sprite_pattern_rows = 8
+        cdef int sprite_pattern_cols = 8
+        cdef int palette_rows = 2
+        cdef int palette_cols = 4
+        cdef int hex_palette_len = 64
+        cdef int palette_cache_rows = 8
+        cdef int palette_cache_cols = 4
+        cdef int palette_cache_valid_len = 8
+        cdef int irq_trigger_len = 68
+        cdef int screen_width = SCREEN_WIDTH_PX
+        cdef int screen_height = SCREEN_HEIGHT_PX
 
-        cdef const unsigned char [:] np_ppu_scroll
-        cdef const unsigned char [:] np_oam
-        cdef const unsigned char [:] np__oam
-        cdef const int [:] np__active_sprite_addrs
-        cdef const unsigned char [:] np__sprite_bkg_priority
-        cdef const int [:] np__sprite_line
-        cdef const char [:,:] np__sprite_pattern
-        cdef const bint [:] np_irq_tick_triggers
-        cdef const int [:,:] np__palette
-        cdef const unsigned int [:] np_hex_palette
-        cdef const int [:,:] np__palette_cache
-        cdef const int [:] np__palette_cache_valid
-        cdef const unsigned int [:,:] np_screen_buffer
+        cdef unsigned char[::1] ppu_scroll = <unsigned char[:ppu_scroll_len]> self.ppu_scroll
+        cdef unsigned char[::1] oam = <unsigned char[:oam_len]> self.oam
+        cdef unsigned char[::1] _oam = <unsigned char[:secondary_oam_len]> self._oam
+        cdef int[::1] _active_sprite_addrs = <int[:active_sprite_len]> self._active_sprite_addrs
+        cdef unsigned char[::1] _sprite_bkg_priority = <unsigned char[:active_sprite_len]> self._sprite_bkg_priority
+        cdef int[::1] _sprite_line = <int[:active_sprite_len]> self._sprite_line
+        cdef char[:, ::1] _sprite_pattern = <char[:sprite_pattern_rows, :sprite_pattern_cols]> self._sprite_pattern
+        cdef bint[::1] irq_tick_triggers = <bint[:irq_trigger_len]> self.irq_tick_triggers
+        cdef int[:, ::1] _palette = <int[:palette_rows, :palette_cols]> self._palette
+        cdef unsigned int[::1] hex_palette = <unsigned int[:hex_palette_len]> self.hex_palette
+        cdef int[:, ::1] _palette_cache = <int[:palette_cache_rows, :palette_cache_cols]> self._palette_cache
+        cdef int[::1] _palette_cache_valid = <int[:palette_cache_valid_len]> self._palette_cache_valid
+        cdef unsigned int[:, ::1] screen_buffer = <unsigned int[:screen_width, :screen_height]> self.screen_buffer
+
+        cdef const unsigned char[::1] np_ppu_scroll
+        cdef const unsigned char[::1] np_oam
+        cdef const unsigned char[::1] np__oam
+        cdef const int[::1] np__active_sprite_addrs
+        cdef const unsigned char[::1] np__sprite_bkg_priority
+        cdef const int[::1] np__sprite_line
+        cdef const char[:, ::1] np__sprite_pattern
+        cdef const bint[::1] np_irq_tick_triggers
+        cdef const int[:, ::1] np__palette
+        cdef const unsigned int[::1] np_hex_palette
+        cdef const int[:, ::1] np__palette_cache
+        cdef const int[::1] np__palette_cache_valid
+        cdef const unsigned int[:, ::1] np_screen_buffer
 
         if False:
             (
@@ -543,6 +574,8 @@ cdef class NESPPU:
         Copy the screen buffer to a supplied destination.  Up to the caller to ensure that the destination buffer
         has sufficient space to write into.
         """
+        cdef int screen_width = SCREEN_WIDTH_PX
+        cdef int screen_height = SCREEN_HEIGHT_PX
         cdef int start_line=VERTICAL_OVERSCAN_PX, end_line=SCREEN_HEIGHT_PX - VERTICAL_OVERSCAN_PX
         cdef int start_row=HORIZONTAL_OVERSCAN_PX, end_row=SCREEN_WIDTH_PX - HORIZONTAL_OVERSCAN_PX
         if v_overscan:
@@ -552,17 +585,21 @@ cdef class NESPPU:
             start_row = 0
             end_row = SCREEN_WIDTH_PX
         # create a memory view to the screen to allow it to be treated as a buffer in the Numpy-esque style
-        cdef unsigned int[:, :] scr_mv = <unsigned int[:SCREEN_WIDTH_PX, :SCREEN_HEIGHT_PX]>self.screen_buffer
+        cdef unsigned int[:, ::1] scr_mv = <unsigned int[:screen_width, :screen_height]> self.screen_buffer
         dest[:, :] = scr_mv[start_row:end_row, start_line:end_line]
         #dest[:, :] = self.screen_buffer[start_row:end_row, start_line:end_line]
 
     def get_screen_buffer_view_full(self):
-        cdef unsigned int [:,:] view = self.screen_buffer
+        cdef int screen_width = SCREEN_WIDTH_PX
+        cdef int screen_height = SCREEN_HEIGHT_PX
+        cdef unsigned int[:, ::1] view = <unsigned int[:screen_width, :screen_height]> self.screen_buffer
         return view
 
     # TODO(millman): For some reason, defining this as a cpdef causes memory violation errors.
     #   Maybe the python GIL is saving us somehow?
     def get_screen_buffer_view(self, v_overscan=False, h_overscan=False):
+        cdef int screen_width = SCREEN_WIDTH_PX
+        cdef int screen_height = SCREEN_HEIGHT_PX
         cdef int start_line=VERTICAL_OVERSCAN_PX, end_line=SCREEN_HEIGHT_PX - VERTICAL_OVERSCAN_PX
         cdef int start_row=HORIZONTAL_OVERSCAN_PX, end_row=SCREEN_WIDTH_PX - HORIZONTAL_OVERSCAN_PX
         if v_overscan:
@@ -572,7 +609,7 @@ cdef class NESPPU:
             start_row = 0
             end_row = SCREEN_WIDTH_PX
         # create a memory view to the screen to allow it to be treated as a buffer in the Numpy-esque style
-        cdef unsigned int [:,:] view = self.screen_buffer
+        cdef unsigned int[:, ::1] view = <unsigned int[:screen_width, :screen_height]> self.screen_buffer
         return view[start_row:end_row, start_line:end_line]
 
 
@@ -1124,5 +1161,3 @@ cdef class NESPPU:
 
                 if pixel_color_ix > 0:
                     dest[x0 + xx, y0 + yy] = self.hex_palette[palette[pixel_color_ix]]
-
-
