@@ -158,6 +158,7 @@ dmypy.json
 /videos
 
 # Cython objects
+/nes/.pyxbld
 /nes/cycore/*.c
 /nes/cycore/*.html
 /nes/cycore/*.so
