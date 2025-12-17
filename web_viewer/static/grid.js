@@ -176,9 +176,11 @@ function wireMetadataPopovers(root) {
     const existing = bootstrap.Popover.getInstance(button);
     if (existing) existing.dispose();
 
-    // Use focus trigger - click focuses the button, clicking elsewhere blurs it
-    new bootstrap.Popover(button, {
-      trigger: "hover focus",
+    let pinned = false;
+    let hovering = false;
+
+    const popover = new bootstrap.Popover(button, {
+      trigger: "manual",
       html: true,
       sanitize: false,
       animation: false,
@@ -188,19 +190,41 @@ function wireMetadataPopovers(root) {
       customClass: "metadata-popover",
       content: () => {
         const text = button.dataset.metadata || "";
-        return `<pre class="metadata-popover-pre">${escapeHtml(text)}</pre>`;
+        const pin = pinned ? '<div class="metadata-pinned-icon"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/></svg></div>' : '';
+        return `${pin}<pre class="metadata-popover-pre">${escapeHtml(text)}</pre>`;
       },
     });
 
-    // Make button focusable
-    button.setAttribute("tabindex", "0");
-
-    // Toggle focus on click - if already focused, blur to close
-    button.addEventListener("mousedown", (event) => {
-      if (document.activeElement === button) {
-        event.preventDefault(); // Prevent the click from re-focusing
-        button.blur();
+    const update = () => {
+      const shouldShow = pinned || hovering;
+      const isShown = popover.tip && popover.tip.classList.contains("show");
+      if (shouldShow && !isShown) {
+        popover.show();
+      } else if (!shouldShow && isShown) {
+        popover.hide();
       }
+    };
+
+    button.addEventListener("mouseenter", () => {
+      hovering = true;
+      if (!pinned) update();
+    });
+
+    button.addEventListener("mouseleave", () => {
+      hovering = false;
+      if (!pinned) update();
+    });
+
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      pinned = !pinned;
+      // Force content refresh to update badge
+      if (popover.tip) {
+        const body = popover.tip.querySelector(".popover-body");
+        if (body) body.innerHTML = popover._config.content();
+      }
+      update();
     });
   });
 }
