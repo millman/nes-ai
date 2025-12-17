@@ -185,6 +185,57 @@
     color: #adb5bd;
 }
 
+.metadata-icon,
+.git-icon {
+    transition: color 0.15s ease-in-out;
+}
+
+.metadata-icon {
+    color: #0d6efd;
+}
+
+.git-icon {
+    color: #198754;
+}
+
+.metadata-popover {
+    max-width: none;
+    width: auto;
+}
+
+.metadata-popover .popover-body {
+    max-width: none;
+    max-height: 260px;
+    overflow: auto;
+    width: auto;
+}
+
+.metadata-popover-pre {
+    margin: 0;
+    white-space: pre-wrap;
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.9rem;
+}
+
+.metadata-popover.locked {
+    position: relative;
+}
+
+.metadata-popover.locked::after {
+    content: "Pinned";
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    background: #343a40;
+    color: #f8f9fa;
+    padding: 2px 6px;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+}
+
 .notes-tooltip .tooltip-inner {
     max-width: 360px;
     white-space: pre-wrap;

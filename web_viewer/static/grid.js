@@ -4,6 +4,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireTitleForms(document);
   wireTagsForms(document);
   wireMetadataToggles(document);
+  wireMetadataPopovers(document);
   formatAllNumbers(document);
   wireDashboardNotes(document);
 });
@@ -93,6 +94,19 @@ function formatFlops(flops) {
   return flops + " FLOPs";
 }
 
+/**
+ * Safely escape HTML entities in a string.
+ * @param {string} value - Raw string to escape.
+ * @returns {string} - Escaped string safe for HTML.
+ */
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
 function wireNotesForm(form) {
   const expId = form.dataset.expId;
   const textarea = form.querySelector("textarea");
@@ -151,6 +165,129 @@ function wireNotesForm(form) {
   markDirty();
 }
 
+function wireMetadataPopovers(root) {
+  const buttons = root.querySelectorAll(".metadata-icon-btn, .git-icon-btn");
+  if (!buttons.length || typeof bootstrap === "undefined") {
+    return;
+  }
+
+  const popoverMap = new Map();
+
+  const renderMetadata = (textValue) => {
+    const safeValue = escapeHtml(textValue || "");
+    return (
+      '<div class="metadata-popover-body">' +
+      `<pre class="metadata-popover-pre">${safeValue}</pre>` +
+      "</div>"
+    );
+  };
+
+  const setLockedState = (tipEl, locked) => {
+    if (!tipEl) return;
+    tipEl.classList.toggle("locked", locked);
+  };
+
+  const ensurePopoverState = (button) => {
+    let state = popoverMap.get(button);
+    if (state) return state;
+    const popover = new bootstrap.Popover(button, {
+      trigger: "manual",
+      html: true,
+      sanitize: false,
+      container: "body",
+      placement: "auto",
+      fallbackPlacements: ["bottom", "top", "right", "left"],
+      customClass: "metadata-popover",
+      content: () => renderMetadata(button.dataset.metadata || ""),
+    });
+    state = {
+      popover,
+      tip: null,
+      pinned: false,
+      hideTimer: null,
+    };
+    popoverMap.set(button, state);
+    return state;
+  };
+
+  const clearHideTimer = (state) => {
+    if (state.hideTimer) {
+      clearTimeout(state.hideTimer);
+      state.hideTimer = null;
+    }
+  };
+
+  const scheduleHide = (button) => {
+    const state = popoverMap.get(button);
+    if (!state || state.pinned) return;
+    clearHideTimer(state);
+    state.hideTimer = setTimeout(() => {
+      state.hideTimer = null;
+      if (!state.pinned) {
+        setLockedState(state.tip, false);
+        state.popover.hide();
+      }
+    }, 120);
+  };
+
+  const showPopover = (button, pinned = false) => {
+    const state = ensurePopoverState(button);
+    clearHideTimer(state);
+    state.pinned = pinned;
+    state.popover.show();
+    state.tip = state.popover.tip;
+    setLockedState(state.tip, pinned);
+
+    if (state.tip && state.tip.dataset.handlersAttached !== "1") {
+      state.tip.dataset.handlersAttached = "1";
+      state.tip.addEventListener("mouseenter", () => {
+        clearHideTimer(state);
+      });
+      state.tip.addEventListener("mouseleave", () => {
+        scheduleHide(button);
+      });
+    }
+  };
+
+  const hidePopover = (button, force = false) => {
+    const state = popoverMap.get(button);
+    if (!state) return;
+    clearHideTimer(state);
+    if (state.pinned && !force) return;
+    state.pinned = false;
+    setLockedState(state.tip, false);
+    state.popover.hide();
+  };
+
+  buttons.forEach((button) => {
+    button.addEventListener("mouseenter", () => {
+      const state = ensurePopoverState(button);
+      if (state.pinned) return;
+      showPopover(button, false);
+    });
+
+    button.addEventListener("mouseleave", (event) => {
+      const state = ensurePopoverState(button);
+      if (state.pinned) return;
+      const movingToTip = state.tip && state.tip.contains(event.relatedTarget);
+      if (!movingToTip) scheduleHide(button);
+    });
+
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const state = ensurePopoverState(button);
+      const wasPinned = state.pinned;
+      if (wasPinned) {
+        hidePopover(button, true);
+      } else {
+        showPopover(button, true);
+      }
+    });
+  });
+}
+
 function wireDashboardNotes(root) {
   const buttons = root.querySelectorAll(".notes-icon-btn");
   if (!buttons.length || typeof bootstrap === "undefined") {
@@ -158,13 +295,6 @@ function wireDashboardNotes(root) {
   }
 
   let activePopover = null;
-
-  const escapeHtml = (value) =>
-    value
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;");
 
   const renderNotesHtml = (value) => {
     if (!value || !value.trim()) {
@@ -239,7 +369,7 @@ function wireDashboardNotes(root) {
       tooltip?.hide();
     };
 
-    const saveNotes = (textarea, statusEl, saveBtn) => {
+    const saveNotes = (textarea, statusEl, saveBtn, onSuccess, onError) => {
       saveBtn.disabled = true;
       statusEl.textContent = "Saving…";
       fetch(`/experiments/${expId}/notes`, {
@@ -259,10 +389,13 @@ function wireDashboardNotes(root) {
           statusEl.textContent = "Saved";
           updateIconState(button, notes);
           tooltip.setContent({ ".tooltip-inner": renderNotesHtml(notes) });
+          saveBtn.disabled = false;
+          if (onSuccess) onSuccess();
         })
         .catch(() => {
           statusEl.textContent = "Save failed";
           saveBtn.disabled = false;
+          if (onError) onError();
         });
     };
 
@@ -310,6 +443,12 @@ function wireDashboardNotes(root) {
 
       // If this button's popover is already active, do nothing (it's already open)
       if (activePopover && activePopover.button === button) {
+        const { textarea, statusEl, saveBtn } = activePopover;
+        if (textarea && saveBtn && statusEl) {
+          saveNotes(textarea, statusEl, saveBtn, () => closeActivePopover());
+        } else {
+          closeActivePopover();
+        }
         return;
       }
 
@@ -358,7 +497,17 @@ function wireDashboardNotes(root) {
         }
 
         markDirty();
-        activePopover = { popover, button, tip, onClose: () => { popoverOpen = false; } };
+        activePopover = {
+          popover,
+          button,
+          tip,
+          textarea,
+          saveBtn,
+          statusEl,
+          onClose: () => {
+            popoverOpen = false;
+          },
+        };
 
         // Prevent focusin from bubbling and potentially triggering unwanted handlers
         tip.addEventListener("focusin", (e) => e.stopPropagation());
