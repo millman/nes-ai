@@ -62,10 +62,10 @@
                 <div class="fw-semibold">{{ exp.name }}</div>
                 <div class="font-monospace text-muted small mt-1">{{ exp.git_commit }}</div>
                 <div class="text-muted small mt-1">
-                    Parameters: <span class="font-monospace format-params" data-value="{{ exp.total_params if exp.total_params is not none else '' }}">—</span>
+                    Parameters: <span class="font-monospace format-params" data-value="{{ exp.total_params if exp.total_params is not none else '' }}">-</span>
                 </div>
                 <div class="text-muted small">
-                    FLOPs/step: <span class="font-monospace format-flops" data-value="{{ exp.flops_per_step if exp.flops_per_step is not none else '' }}">—</span>
+                    FLOPs/step: <span class="font-monospace format-flops" data-value="{{ exp.flops_per_step if exp.flops_per_step is not none else '' }}">-</span>
                 </div>
             </td>
             <td data-col-id="metadata">

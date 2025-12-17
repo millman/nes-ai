@@ -196,7 +196,14 @@
                     {% endif %}
                 </td>
                 <td class="small text-nowrap" style="width: 1%;">
-                    <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}" class="btn btn-outline-secondary btn-sm">Detail view</a>
+                    <div class="d-flex gap-2">
+                        <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}" class="btn btn-outline-secondary btn-sm">Detail view</a>
+                        {% if exp.self_distance_csv %}
+                        <a href="{{ url_for('self_distance', exp_id=exp.id) }}" class="btn btn-outline-primary btn-sm">Self-distance</a>
+                        {% else %}
+                        <button class="btn btn-outline-secondary btn-sm" disabled title="self_distance.csv missing">Self-distance</button>
+                        {% endif %}
+                    </div>
                 </td>
             </tr>
             {% endfor %}

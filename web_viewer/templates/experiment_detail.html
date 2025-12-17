@@ -11,339 +11,349 @@
 {% set heading_title = experiment.title if experiment.title != "Untitled" else "Untitled" %}
 <h2 class="mb-4">{{ heading_title }} <small class="text-muted">({{ experiment.name }})</small></h2>
 
-<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
-    <label class="form-label mb-0 small text-muted" for="detail-xaxis-select">X-axis:</label>
-    <select id="detail-xaxis-select" class="form-select form-select-sm" style="width: auto;">
-        <option value="steps">Steps</option>
-        <option value="flops">Cumulative FLOPs</option>
-    </select>
-</div>
+<ul class="nav nav-tabs mb-3" id="detail-tabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="tab-metrics-link" data-bs-toggle="tab" data-bs-target="#tab-metrics" type="button" role="tab" aria-controls="tab-metrics" aria-selected="true">Metrics</button>
+    </li>
+</ul>
 
-<div id="detail-plot" class="plot-area mb-3">
-    {% if figure %}
-    <script>
-                document.addEventListener("DOMContentLoaded", () => {
-                    const figure = {{ figure|tojson }};
-                    const rolloutSteps = {{ experiment.rollout_steps|tojson }};
-                    const plotEl = document.getElementById("detail-plot");
+<div class="tab-content">
+    <div class="tab-pane fade show active" id="tab-metrics" role="tabpanel" aria-labelledby="tab-metrics-link">
+        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+            <label class="form-label mb-0 small text-muted" for="detail-xaxis-select">X-axis:</label>
+            <select id="detail-xaxis-select" class="form-select form-select-sm" style="width: auto;">
+                <option value="steps">Steps</option>
+                <option value="flops">Cumulative FLOPs</option>
+            </select>
+        </div>
 
-                    // Parse view state from URL
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const xMin = urlParams.get("xmin");
-                    const xMax = urlParams.get("xmax");
-                    const yMin = urlParams.get("ymin");
-                    const yMax = urlParams.get("ymax");
+        <div id="detail-plot" class="plot-area mb-3">
+            {% if figure %}
+            <script>
+                        document.addEventListener("DOMContentLoaded", () => {
+                            const figure = {{ figure|tojson }};
+                            const rolloutSteps = {{ experiment.rollout_steps|tojson }};
+                            const plotEl = document.getElementById("detail-plot");
 
-                    // Apply saved view state to figure layout
-                    if (xMin !== null && xMax !== null) {
-                        figure.layout.xaxis = figure.layout.xaxis || {};
-                        figure.layout.xaxis.range = [parseFloat(xMin), parseFloat(xMax)];
-                        figure.layout.xaxis.autorange = false;
-                    }
-                    if (yMin !== null && yMax !== null) {
-                        figure.layout.yaxis = figure.layout.yaxis || {};
-                        figure.layout.yaxis.range = [parseFloat(yMin), parseFloat(yMax)];
-                        figure.layout.yaxis.autorange = false;
-                    }
+                            // Parse view state from URL
+                            const urlParams = new URLSearchParams(window.location.search);
+                            const xMin = urlParams.get("xmin");
+                            const xMax = urlParams.get("xmax");
+                            const yMin = urlParams.get("ymin");
+                            const yMax = urlParams.get("ymax");
 
-                    // Store original x-axis data for toggling
-                    const originalSteps = figure.data.map(trace => trace.x ? [...trace.x] : []);
-                    const cumulativeFlops = figure.data.map(trace => {
-                        // Extract cumulative_flops from meta (stored by plots.py)
-                        if (trace.meta && trace.meta.cumulative_flops) {
-                            return trace.meta.cumulative_flops;
-                        }
-                        // Fallback: use customdata if available (cumulative_flops is at index 1)
-                        if (trace.customdata && Array.isArray(trace.customdata)) {
-                            return trace.customdata.map(cd => Array.isArray(cd) ? cd[1] : null);
-                        }
-                        return trace.x ? [...trace.x] : [];  // Fallback to steps
-                    });
-
-                    Plotly.react(plotEl, figure.data, figure.layout, buildPlotlyConfig(figure.config || {})).then(() => {
-                        attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps);
-
-                        // X-axis toggle handler
-                        const xAxisSelect = document.getElementById("detail-xaxis-select");
-                        if (xAxisSelect) {
-                            // Restore x-axis mode from URL
-                            const xAxisParam = urlParams.get("xaxis");
-                            if (xAxisParam === "flops") {
-                                xAxisSelect.value = "flops";
-                                // Apply flops x-axis
-                                const updates = {};
-                                for (let i = 0; i < figure.data.length; i++) {
-                                    updates[i] = { x: [cumulativeFlops[i]] };
-                                }
-                                Plotly.restyle(plotEl, { x: cumulativeFlops });
-                                Plotly.relayout(plotEl, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
+                            // Apply saved view state to figure layout
+                            if (xMin !== null && xMax !== null) {
+                                figure.layout.xaxis = figure.layout.xaxis || {};
+                                figure.layout.xaxis.range = [parseFloat(xMin), parseFloat(xMax)];
+                                figure.layout.xaxis.autorange = false;
+                            }
+                            if (yMin !== null && yMax !== null) {
+                                figure.layout.yaxis = figure.layout.yaxis || {};
+                                figure.layout.yaxis.range = [parseFloat(yMin), parseFloat(yMax)];
+                                figure.layout.yaxis.autorange = false;
                             }
 
-                            xAxisSelect.addEventListener("change", () => {
-                                const mode = xAxisSelect.value;
-                                const url = new URL(window.location.href);
-                                url.searchParams.set("xaxis", mode);
-                                // Clear zoom state when switching axes
-                                url.searchParams.delete("xmin");
-                                url.searchParams.delete("xmax");
-                                window.history.replaceState({}, "", url.toString());
-
-                                if (mode === "flops") {
-                                    Plotly.restyle(plotEl, { x: cumulativeFlops });
-                                    Plotly.relayout(plotEl, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
-                                } else {
-                                    Plotly.restyle(plotEl, { x: originalSteps });
-                                    Plotly.relayout(plotEl, { "xaxis.title": "Step", "xaxis.autorange": true });
+                            // Store original x-axis data for toggling
+                            const originalSteps = figure.data.map(trace => trace.x ? [...trace.x] : []);
+                            const cumulativeFlops = figure.data.map(trace => {
+                                // Extract cumulative_flops from meta (stored by plots.py)
+                                if (trace.meta && trace.meta.cumulative_flops) {
+                                    return trace.meta.cumulative_flops;
                                 }
+                                // Fallback: use customdata if available (cumulative_flops is at index 1)
+                                if (trace.customdata && Array.isArray(trace.customdata)) {
+                                    return trace.customdata.map(cd => Array.isArray(cd) ? cd[1] : null);
+                                }
+                                return trace.x ? [...trace.x] : [];  // Fallback to steps
                             });
-                        }
 
-                        // Save view state to URL on zoom/pan
-                        plotEl.on("plotly_relayout", (eventData) => {
-                            if (!eventData) return;
-                            const url = new URL(window.location.href);
+                            Plotly.react(plotEl, figure.data, figure.layout, buildPlotlyConfig(figure.config || {})).then(() => {
+                                attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps);
 
-                            if (eventData["xaxis.autorange"] || eventData["yaxis.autorange"]) {
-                                // Reset to autorange - remove params
-                                url.searchParams.delete("xmin");
-                                url.searchParams.delete("xmax");
-                                url.searchParams.delete("ymin");
-                                url.searchParams.delete("ymax");
-                            } else {
-                                if (eventData["xaxis.range[0]"] !== undefined) {
-                                    url.searchParams.set("xmin", eventData["xaxis.range[0]"]);
-                                    url.searchParams.set("xmax", eventData["xaxis.range[1]"]);
+                                // X-axis toggle handler
+                                const xAxisSelect = document.getElementById("detail-xaxis-select");
+                                if (xAxisSelect) {
+                                    // Restore x-axis mode from URL
+                                    const xAxisParam = urlParams.get("xaxis");
+                                    if (xAxisParam === "flops") {
+                                        xAxisSelect.value = "flops";
+                                        // Apply flops x-axis
+                                        const updates = {};
+                                        for (let i = 0; i < figure.data.length; i++) {
+                                            updates[i] = { x: [cumulativeFlops[i]] };
+                                        }
+                                        Plotly.restyle(plotEl, { x: cumulativeFlops });
+                                        Plotly.relayout(plotEl, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
+                                    }
+
+                                    xAxisSelect.addEventListener("change", () => {
+                                        const mode = xAxisSelect.value;
+                                        const url = new URL(window.location.href);
+                                        url.searchParams.set("xaxis", mode);
+                                        // Clear zoom state when switching axes
+                                        url.searchParams.delete("xmin");
+                                        url.searchParams.delete("xmax");
+                                        window.history.replaceState({}, "", url.toString());
+
+                                        if (mode === "flops") {
+                                            Plotly.restyle(plotEl, { x: cumulativeFlops });
+                                            Plotly.relayout(plotEl, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
+                                        } else {
+                                            Plotly.restyle(plotEl, { x: originalSteps });
+                                            Plotly.relayout(plotEl, { "xaxis.title": "Step", "xaxis.autorange": true });
+                                        }
+                                    });
                                 }
-                                if (eventData["yaxis.range[0]"] !== undefined) {
-                                    url.searchParams.set("ymin", eventData["yaxis.range[0]"]);
-                                    url.searchParams.set("ymax", eventData["yaxis.range[1]"]);
-                                }
-                            }
 
-                            window.history.replaceState({}, "", url.toString());
+                                // Save view state to URL on zoom/pan
+                                plotEl.on("plotly_relayout", (eventData) => {
+                                    if (!eventData) return;
+                                    const url = new URL(window.location.href);
+
+                                    if (eventData["xaxis.autorange"] || eventData["yaxis.autorange"]) {
+                                        // Reset to autorange - remove params
+                                        url.searchParams.delete("xmin");
+                                        url.searchParams.delete("xmax");
+                                        url.searchParams.delete("ymin");
+                                        url.searchParams.delete("ymax");
+                                    } else {
+                                        if (eventData["xaxis.range[0]"] !== undefined) {
+                                            url.searchParams.set("xmin", eventData["xaxis.range[0]"]);
+                                            url.searchParams.set("xmax", eventData["xaxis.range[1]"]);
+                                        }
+                                        if (eventData["yaxis.range[0]"] !== undefined) {
+                                            url.searchParams.set("ymin", eventData["yaxis.range[0]"]);
+                                            url.searchParams.set("ymax", eventData["yaxis.range[1]"]);
+                                        }
+                                    }
+
+                                    window.history.replaceState({}, "", url.toString());
+                                });
+                            });
                         });
-                    });
-                });
-                function attachRolloutPreview(plotEl, expId, previewId, steps) {
-                    const preview = document.getElementById(previewId);
-                    const folderSelect = document.getElementById("detail-folder-select");
-                    if (!plotEl || !preview || typeof Plotly === "undefined") {
-                        return;
-                    }
-
-                    const IMAGE_FOLDER_OPTIONS = {
-                        "vis_fixed_0": "rollout_",
-                        "vis_fixed_1": "rollout_",
-                        "vis_rolling_0": "rollout_",
-                        "vis_rolling_1": "rollout_",
-                        "embeddings": "embeddings_",
-                        "samples_hard": "hard_",
-                    };
-
-                    // Restore folder from URL
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const folderParam = urlParams.get("folder");
-                    if (folderParam && IMAGE_FOLDER_OPTIONS[folderParam] && folderSelect) {
-                        folderSelect.value = folderParam;
-                    }
-
-                    // Save folder to URL on change
-                    if (folderSelect) {
-                        folderSelect.addEventListener("change", () => {
-                            const url = new URL(window.location.href);
-                            url.searchParams.set("folder", folderSelect.value);
-                            window.history.replaceState({}, "", url.toString());
-                        });
-                    }
-
-                    const getFolder = () => folderSelect ? folderSelect.value : "vis_fixed_0";
-                    const getPrefix = () => IMAGE_FOLDER_OPTIONS[getFolder()] || "rollout_";
-
-                    const ensurePreviewStructure = () => {
-                        if (preview.dataset.initialized === "1") {
-                            return;
-                        }
-                        preview.innerHTML = `
-                            <div class="small text-muted mb-1 rollout-path">Hover a point to preview rollout.</div>
-                            <img class="img-fluid rounded border rollout-img d-none" alt="Rollout preview">
-                            <div class="text-muted fst-italic rollout-missing d-none">No rollout image available.</div>
-                        `;
-                        preview.dataset.initialized = "1";
-                    };
-                    ensurePreviewStructure();
-                    const pathEl = () => preview.querySelector(".rollout-path");
-                    const imgEl = () => preview.querySelector(".rollout-img");
-                    const missingEl = () => preview.querySelector(".rollout-missing");
-                    const nearestStep = (target, list) => {
-                        if (!Array.isArray(list) || list.length === 0) {
-                            return null;
-                        }
-                        let best = null;
-                        for (let i = 0; i < list.length; i++) {
-                            const step = list[i];
-                            if (step > target) {
-                                continue;
+                        function attachRolloutPreview(plotEl, expId, previewId, steps) {
+                            const preview = document.getElementById(previewId);
+                            const folderSelect = document.getElementById("detail-folder-select");
+                            if (!plotEl || !preview || typeof Plotly === "undefined") {
+                                return;
                             }
-                            if (best === null || step > best) {
-                                best = step;
-                            }
-                        }
-                        return best;
-                    };
-                    const render = (step) => {
-                        const target = Math.max(0, Math.round(step));
-                        const matched = nearestStep(target, steps);
-                        if (matched === null) {
-                            const miss = missingEl();
-                            const img = imgEl();
-                            const path = pathEl();
-                            if (path) {
-                                path.textContent = "No images available.";
-                            }
-                            if (img) {
-                                img.classList.add("d-none");
-                            }
-                            if (miss) {
-                                miss.textContent = "No images available.";
-                                miss.classList.remove("d-none");
-                            }
-                            return;
-                        }
-                        const folder = getFolder();
-                        const prefix = getPrefix();
-                        const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
-                        const src = `/assets/${expId}/${folder}/${filename}`;
-                        const path = pathEl();
-                        const img = imgEl();
-                        const miss = missingEl();
-                        if (path) {
-                            path.textContent = `${folder}/${filename} (hovered ${target}, showing ${matched})`;
-                        }
-                        if (img) {
-                            img.src = src;
-                            img.alt = `${folder} ${matched}`;
-                            img.dataset.step = String(matched);
-                            img.classList.remove("d-none");
-                            img.onerror = () => {
-                                img.classList.add("d-none");
-                                if (miss) {
-                                    miss.textContent = `No image for step ${matched}`;
-                                    miss.classList.remove("d-none");
-                                }
+
+                            const IMAGE_FOLDER_OPTIONS = {
+                                "vis_fixed_0": "rollout_",
+                                "vis_fixed_1": "rollout_",
+                                "vis_rolling_0": "rollout_",
+                                "vis_rolling_1": "rollout_",
+                                "embeddings": "embeddings_",
+                                "samples_hard": "hard_",
                             };
-                            img.onload = () => {
+
+                            // Restore folder from URL
+                            const urlParams = new URLSearchParams(window.location.search);
+                            const folderParam = urlParams.get("folder");
+                            if (folderParam && IMAGE_FOLDER_OPTIONS[folderParam] && folderSelect) {
+                                folderSelect.value = folderParam;
+                            }
+
+                            // Save folder to URL on change
+                            if (folderSelect) {
+                                folderSelect.addEventListener("change", () => {
+                                    const url = new URL(window.location.href);
+                                    url.searchParams.set("folder", folderSelect.value);
+                                    window.history.replaceState({}, "", url.toString());
+                                });
+                            }
+
+                            const getFolder = () => folderSelect ? folderSelect.value : "vis_fixed_0";
+                            const getPrefix = () => IMAGE_FOLDER_OPTIONS[getFolder()] || "rollout_";
+
+                            const ensurePreviewStructure = () => {
+                                if (preview.dataset.initialized === "1") {
+                                    return;
+                                }
+                                preview.innerHTML = `
+                                    <div class="small text-muted mb-1 rollout-path">Hover a point to preview rollout.</div>
+                                    <img class="img-fluid rounded border rollout-img d-none" alt="Rollout preview">
+                                    <div class="text-muted fst-italic rollout-missing d-none">No rollout image available.</div>
+                                `;
+                                preview.dataset.initialized = "1";
+                            };
+                            ensurePreviewStructure();
+                            const pathEl = () => preview.querySelector(".rollout-path");
+                            const imgEl = () => preview.querySelector(".rollout-img");
+                            const missingEl = () => preview.querySelector(".rollout-missing");
+                            const nearestStep = (target, list) => {
+                                if (!Array.isArray(list) || list.length === 0) {
+                                    return null;
+                                }
+                                let best = null;
+                                for (let i = 0; i < list.length; i++) {
+                                    const step = list[i];
+                                    if (step > target) {
+                                        continue;
+                                    }
+                                    if (best === null || step > best) {
+                                        best = step;
+                                    }
+                                }
+                                return best;
+                            };
+                            const render = (step) => {
+                                const target = Math.max(0, Math.round(step));
+                                const matched = nearestStep(target, steps);
+                                if (matched === null) {
+                                    const miss = missingEl();
+                                    const img = imgEl();
+                                    const path = pathEl();
+                                    if (path) {
+                                        path.textContent = "No images available.";
+                                    }
+                                    if (img) {
+                                        img.classList.add("d-none");
+                                    }
+                                    if (miss) {
+                                        miss.textContent = "No images available.";
+                                        miss.classList.remove("d-none");
+                                    }
+                                    return;
+                                }
+                                const folder = getFolder();
+                                const prefix = getPrefix();
+                                const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
+                                const src = `/assets/${expId}/${folder}/${filename}`;
+                                const path = pathEl();
+                                const img = imgEl();
+                                const miss = missingEl();
+                                if (path) {
+                                    path.textContent = `${folder}/${filename} (hovered ${target}, showing ${matched})`;
+                                }
+                                if (img) {
+                                    img.src = src;
+                                    img.alt = `${folder} ${matched}`;
+                                    img.dataset.step = String(matched);
+                                    img.classList.remove("d-none");
+                                    img.onerror = () => {
+                                        img.classList.add("d-none");
+                                        if (miss) {
+                                            miss.textContent = `No image for step ${matched}`;
+                                            miss.classList.remove("d-none");
+                                        }
+                                    };
+                                    img.onload = () => {
+                                        if (miss) {
+                                            miss.classList.add("d-none");
+                                        }
+                                    };
+                                }
                                 if (miss) {
                                     miss.classList.add("d-none");
                                 }
                             };
+                            plotEl.on("plotly_hover", (event) => {
+                                const point = event?.points?.[0];
+                                if (!point || typeof point.x === "undefined") {
+                                    return;
+                                }
+                                render(point.x);
+                            });
                         }
-                        if (miss) {
-                            miss.classList.add("d-none");
-                        }
-                    };
-                    plotEl.on("plotly_hover", (event) => {
-                        const point = event?.points?.[0];
-                        if (!point || typeof point.x === "undefined") {
-                            return;
-                        }
-                        render(point.x);
-                    });
-                }
-    </script>
-    {% else %}
-    <p class="text-muted fst-italic">No metrics available for this experiment.</p>
-    {% endif %}
-</div>
+            </script>
+            {% else %}
+            <p class="text-muted fst-italic">No metrics available for this experiment.</p>
+            {% endif %}
+        </div>
 
-<div class="mb-4">
-    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
-        <label class="form-label mb-0 small text-muted" for="detail-folder-select">Image folder:</label>
-        <select id="detail-folder-select" class="form-select form-select-sm" style="width: auto;">
-            <option value="vis_fixed_0">vis_fixed_0</option>
-            <option value="vis_fixed_1">vis_fixed_1</option>
-            <option value="vis_rolling_0">vis_rolling_0</option>
-            <option value="vis_rolling_1">vis_rolling_1</option>
-            <option value="embeddings">embeddings</option>
-            <option value="samples_hard">samples_hard</option>
-        </select>
+        <div class="mb-4">
+            <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+                <label class="form-label mb-0 small text-muted" for="detail-folder-select">Image folder:</label>
+                <select id="detail-folder-select" class="form-select form-select-sm" style="width: auto;">
+                    <option value="vis_fixed_0">vis_fixed_0</option>
+                    <option value="vis_fixed_1">vis_fixed_1</option>
+                    <option value="vis_rolling_0">vis_rolling_0</option>
+                    <option value="vis_rolling_1">vis_rolling_1</option>
+                    <option value="embeddings">embeddings</option>
+                    <option value="samples_hard">samples_hard</option>
+                </select>
+            </div>
+            <div id="detail-rollout-preview" class="mt-0"></div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-bordered align-top exp-table">
+                <colgroup>
+                    <col data-col-id="notes">
+                    <col data-col-id="name">
+                    <col data-col-id="metadata">
+                    <col data-col-id="metadata_git">
+                    <col data-col-id="image">
+                </colgroup>
+                <thead class="table-light">
+                <tr>
+                    <th data-col-id="notes">Notes</th>
+                    <th data-col-id="name">Experiment</th>
+                    <th data-col-id="metadata">metadata.txt</th>
+                    <th data-col-id="metadata_git">metadata_git.txt</th>
+                    <th data-col-id="image">metrics/loss_curves.png</th>
+                </tr>
+                </thead>
+                <tbody>
+                <tr data-exp-id="{{ experiment.id }}">
+                    <td class="notes-cell" data-col-id="notes">
+                        <form class="notes-form d-flex flex-column h-100" data-exp-id="{{ experiment.id }}">
+                            <textarea class="form-control font-monospace flex-grow-1 mb-2" rows="6" placeholder="Add experiment notes...">{{- experiment.notes_text -}}</textarea>
+                            <div class="d-flex align-items-center gap-2">
+                                <button type="button" class="btn btn-primary btn-sm save-notes">Save</button>
+                                <span class="notes-status small text-muted" aria-live="polite"></span>
+                            </div>
+                        </form>
+                    </td>
+                    <td data-col-id="name" class="experiment-cell">
+                        {% set title_value = "" if experiment.title == "Untitled" else experiment.title %}
+                        <form class="title-form" data-exp-id="{{ experiment.id }}">
+                            <div class="input-group input-group-sm title-input-group">
+                                <input
+                                    type="text"
+                                    class="form-control form-control-sm exp-title-input"
+                                    value="{{ title_value }}"
+                                    placeholder="Untitled"
+                                    aria-label="Experiment title"
+                                    readonly
+                                >
+                            </div>
+                            <span class="title-status small text-muted" aria-live="polite"></span>
+                        </form>
+                        <div class="fw-semibold">{{ experiment.name }}</div>
+                        <div class="font-monospace text-muted small mt-1">{{ experiment.git_commit }}</div>
+                        <div class="text-muted small mt-1">
+                            Parameters: <span class="font-monospace format-params" data-value="{{ experiment.total_params if experiment.total_params is not none else '' }}">-</span>
+                        </div>
+                        <div class="text-muted small">
+                            FLOPs/step: <span class="font-monospace format-flops" data-value="{{ experiment.flops_per_step if experiment.flops_per_step is not none else '' }}">-</span>
+                        </div>
+                    </td>
+                    <td data-col-id="metadata">
+                        <div class="metadata-wrapper card card-body p-2" data-exp-id="{{ experiment.id }}">
+                            <pre class="metadata-block">{{ experiment.metadata_text }}</pre>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-secondary mt-2 metadata-toggle" data-target="{{ experiment.id }}">Expand</button>
+                    </td>
+                    <td data-col-id="metadata_git">
+                        <div class="metadata-wrapper card card-body p-2" data-exp-id="{{ experiment.id }}-git">
+                            <pre class="metadata-block">{{ experiment.git_metadata_text }}</pre>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-secondary mt-2 metadata-toggle" data-target="{{ experiment.id }}-git">Expand</button>
+                    </td>
+                    <td class="image-cell" data-col-id="image">
+                        {% if experiment.loss_image %}
+                        <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/metrics/loss_curves.png') }}" alt="Loss curves for {{ experiment.name }}" class="img-fluid rounded border h-100 w-100 object-fit-contain">
+                        {% else %}
+                        <div class="text-muted fst-italic">metrics/loss_curves.png missing</div>
+                        {% endif %}
+                    </td>
+                </tr>
+                </tbody>
+            </table>
+        </div>
     </div>
-    <div id="detail-rollout-preview" class="mt-0"></div>
-</div>
-
-<div class="table-responsive">
-    <table class="table table-bordered align-top exp-table">
-        <colgroup>
-            <col data-col-id="notes">
-            <col data-col-id="name">
-            <col data-col-id="metadata">
-            <col data-col-id="metadata_git">
-            <col data-col-id="image">
-        </colgroup>
-        <thead class="table-light">
-        <tr>
-            <th data-col-id="notes">Notes</th>
-            <th data-col-id="name">Experiment</th>
-            <th data-col-id="metadata">metadata.txt</th>
-            <th data-col-id="metadata_git">metadata_git.txt</th>
-            <th data-col-id="image">metrics/loss_curves.png</th>
-        </tr>
-        </thead>
-        <tbody>
-        <tr data-exp-id="{{ experiment.id }}">
-            <td class="notes-cell" data-col-id="notes">
-                <form class="notes-form d-flex flex-column h-100" data-exp-id="{{ experiment.id }}">
-                    <textarea class="form-control font-monospace flex-grow-1 mb-2" rows="6" placeholder="Add experiment notes...">{{- experiment.notes_text -}}</textarea>
-                    <div class="d-flex align-items-center gap-2">
-                        <button type="button" class="btn btn-primary btn-sm save-notes">Save</button>
-                        <span class="notes-status small text-muted" aria-live="polite"></span>
-                    </div>
-                </form>
-            </td>
-            <td data-col-id="name" class="experiment-cell">
-                {% set title_value = "" if experiment.title == "Untitled" else experiment.title %}
-                <form class="title-form" data-exp-id="{{ experiment.id }}">
-                    <div class="input-group input-group-sm title-input-group">
-                        <input
-                            type="text"
-                            class="form-control form-control-sm exp-title-input"
-                            value="{{ title_value }}"
-                            placeholder="Untitled"
-                            aria-label="Experiment title"
-                            readonly
-                        >
-                    </div>
-                    <span class="title-status small text-muted" aria-live="polite"></span>
-                </form>
-                <div class="fw-semibold">{{ experiment.name }}</div>
-                <div class="font-monospace text-muted small mt-1">{{ experiment.git_commit }}</div>
-                <div class="text-muted small mt-1">
-                    Parameters: <span class="font-monospace format-params" data-value="{{ experiment.total_params if experiment.total_params is not none else '' }}">—</span>
-                </div>
-                <div class="text-muted small">
-                    FLOPs/step: <span class="font-monospace format-flops" data-value="{{ experiment.flops_per_step if experiment.flops_per_step is not none else '' }}">—</span>
-                </div>
-            </td>
-            <td data-col-id="metadata">
-                <div class="metadata-wrapper card card-body p-2" data-exp-id="{{ experiment.id }}">
-                    <pre class="metadata-block">{{ experiment.metadata_text }}</pre>
-                </div>
-                <button type="button" class="btn btn-sm btn-outline-secondary mt-2 metadata-toggle" data-target="{{ experiment.id }}">Expand</button>
-            </td>
-            <td data-col-id="metadata_git">
-                <div class="metadata-wrapper card card-body p-2" data-exp-id="{{ experiment.id }}-git">
-                    <pre class="metadata-block">{{ experiment.git_metadata_text }}</pre>
-                </div>
-                <button type="button" class="btn btn-sm btn-outline-secondary mt-2 metadata-toggle" data-target="{{ experiment.id }}-git">Expand</button>
-            </td>
-            <td class="image-cell" data-col-id="image">
-                {% if experiment.loss_image %}
-                <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/metrics/loss_curves.png') }}" alt="Loss curves for {{ experiment.name }}" class="img-fluid rounded border h-100 w-100 object-fit-contain">
-                {% else %}
-                <div class="text-muted fst-italic">metrics/loss_curves.png missing</div>
-                {% endif %}
-            </td>
-        </tr>
-        </tbody>
-    </table>
 </div>
 {% endblock %}

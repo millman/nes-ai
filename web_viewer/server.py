@@ -122,6 +122,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             current_page=current_page,
             page_size=page_size,
             active_nav="dashboard",
+            first_experiment_id=index_rows[0].id if index_rows else None,
         )
 
     @app.route("/experiments")
@@ -132,6 +133,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             experiments=experiments,
             cfg=cfg,
             active_nav="experiments",
+            first_experiment_id=experiments[0].id if experiments else None,
         )
 
     @app.route("/comparison")
@@ -158,6 +160,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             selected_ids=selected_ids,
             selected_map=selected_map,
             active_nav="comparison",
+            first_experiment_id=experiments[0].id if experiments else None,
         )
 
     @app.route("/experiments/<exp_id>")
@@ -170,6 +173,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg=cfg,
             figure=figure,
             active_nav="detail",
+            active_experiment_id=experiment.id,
+            first_experiment_id=experiment.id,
         )
 
     @app.post("/experiments/<exp_id>/notes")
@@ -213,6 +218,35 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 "figure": overlay_data,
                 "experiments": comparison_rows,
             }
+        )
+
+    @app.route("/self_distance", defaults={"exp_id": None})
+    @app.route("/self_distance/<exp_id>")
+    def self_distance(exp_id: Optional[str]):
+        experiments = [exp for exp in _load_all() if exp.self_distance_csv is not None]
+        if not experiments:
+            return render_template(
+                "self_distance_page.html",
+                experiments=[],
+                experiment=None,
+                cfg=cfg,
+                active_nav="self_distance",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+        requested = exp_id or request.args.get("id")
+        exp_map = {exp.id: exp for exp in experiments}
+        selected = exp_map.get(requested) if requested else experiments[0]
+        if selected is None:
+            abort(404, "Experiment not found for self-distance.")
+        return render_template(
+            "self_distance_page.html",
+            experiments=experiments,
+            experiment=selected,
+            cfg=cfg,
+            active_nav="self_distance",
+            active_experiment_id=selected.id,
+            first_experiment_id=experiments[0].id if experiments else None,
         )
 
     @app.route("/assets/<path:relative_path>")

@@ -32,6 +32,9 @@ class Experiment:
     last_modified: Optional[datetime]
     total_params: Optional[int]
     flops_per_step: Optional[int]
+    self_distance_csv: Optional[Path]
+    self_distance_images: List[Path]
+    self_distance_csvs: List[Path]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -86,6 +89,9 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     metrics_dir = path / "metrics"
     loss_png = metrics_dir / "loss_curves.png"
     loss_csv = _resolve_loss_csv(metrics_dir)
+    self_distance_csvs = _collect_self_distance_csvs(path)
+    latest_self_distance_csv = self_distance_csvs[-1] if self_distance_csvs else None
+    self_distance_images = _collect_self_distance_images(path)
     notes_path = path / "notes.txt"
     metadata_custom_path = path / "experiment_metadata.txt"
     title, tags = _read_metadata(metadata_custom_path)
@@ -114,6 +120,9 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         last_modified=last_modified,
         total_params=total_params,
         flops_per_step=flops_per_step,
+        self_distance_csv=latest_self_distance_csv,
+        self_distance_images=self_distance_images,
+        self_distance_csvs=self_distance_csvs,
     )
 
 
@@ -284,6 +293,20 @@ def _collect_rollout_steps(root: Path) -> List[int]:
         except ValueError:
             continue
     return sorted(steps)
+
+
+def _collect_self_distance_images(root: Path) -> List[Path]:
+    folder = root / "vis_self_distance"
+    if not folder.exists():
+        return []
+    return sorted(folder.glob("self_distance_*.png"))
+
+
+def _collect_self_distance_csvs(root: Path) -> List[Path]:
+    folder = root / "self_distance"
+    if not folder.exists():
+        return []
+    return sorted(folder.glob("self_distance_*.csv"))
 
 
 def _get_max_step(csv_path: Path) -> Optional[int]:

@@ -8,6 +8,7 @@ from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tup
 
 import math
 import random
+import shutil
 
 import csv
 import numpy as np
@@ -22,7 +23,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from time import perf_counter
 
-from recon.data import list_trajectories, load_frame_as_tensor
+from recon.data import list_trajectories, load_frame_as_tensor, short_traj_state_label
 from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
 from jepa_world_model.loss import FocalL1Loss, HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
@@ -333,6 +334,7 @@ class TrainConfig:
     output_dir: Path = Path("out.jepa_world_model_trainer")
     log_every_steps: int = 10
     vis_every_steps: int = 50
+    checkpoint_every_steps: int = 100
     steps: int = 100_000
     show_timing_breakdown: bool = True
     seed: Optional[int] = 0
@@ -375,6 +377,14 @@ class TrainConfig:
 class VisualizationSelection:
     row_indices: torch.Tensor
     time_indices: torch.Tensor
+
+
+@dataclass
+class SelfDistanceInputs:
+    frames: torch.Tensor  # [1, T, C, H, W] on CPU
+    frame_paths: List[Path]  # relative to run directory
+    frame_labels: List[str]
+    trajectory_label: str
 
 
 @dataclass
@@ -1839,6 +1849,146 @@ def _build_embedding_batch(
     return (embed_batch[0].clone(), embed_batch[1].clone())
 
 
+def _prepare_self_distance_inputs(
+    data_root: Path,
+    train_trajs: List[str],
+    image_hw: Tuple[int, int],
+    run_dir: Path,
+) -> Optional[SelfDistanceInputs]:
+    traj_map = list_trajectories(data_root)
+    if not traj_map:
+        return None
+    ordered = train_trajs if train_trajs else list(traj_map.keys())
+    chosen: Optional[str] = None
+    for name in ordered:
+        if name in traj_map and len(traj_map[name]) >= 2:
+            chosen = name
+            break
+    if chosen is None:
+        return None
+    src_paths = traj_map[chosen]
+    frames: List[torch.Tensor] = []
+    rel_paths: List[Path] = []
+    labels: List[str] = []
+    frames_dir = run_dir / "self_distance_frames"
+    for src in src_paths:
+        dst = frames_dir / chosen / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not dst.exists():
+            shutil.copy2(src, dst)
+        frames.append(load_frame_as_tensor(src, size=image_hw))
+        rel_paths.append(dst.relative_to(run_dir))
+        labels.append(short_traj_state_label(str(src)))
+    if not frames:
+        return None
+    stacked = torch.stack(frames, dim=0).unsqueeze(0)
+    traj_label = f"{data_root.name}/{chosen}" if data_root.name else chosen
+    return SelfDistanceInputs(
+        frames=stacked,
+        frame_paths=rel_paths,
+        frame_labels=labels,
+        trajectory_label=traj_label,
+    )
+
+
+def _write_self_distance_outputs(
+    model: JEPAWorldModel,
+    traj_inputs: SelfDistanceInputs,
+    device: torch.device,
+    csv_dir: Path,
+    plot_dir: Path,
+    global_step: int,
+) -> None:
+    if traj_inputs.frames.shape[1] < 2:
+        return
+    frames = traj_inputs.frames.to(device)
+    with torch.no_grad():
+        embeddings = model.encode_sequence(frames)["embeddings"][0]
+    dist_to_first = torch.norm(embeddings - embeddings[0:1], dim=-1)
+    deltas = embeddings[1:] - embeddings[:-1]
+    dist_to_prior = torch.cat(
+        [
+            dist_to_first.new_zeros(1),
+            torch.norm(deltas, dim=-1),
+        ],
+        dim=0,
+    )
+    steps = list(range(dist_to_first.shape[0]))
+    dist_first_np = dist_to_first.detach().cpu().numpy()
+    dist_prior_np = dist_to_prior.detach().cpu().numpy()
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = csv_dir / f"self_distance_{global_step:06d}.csv"
+    fieldnames = [
+        "trajectory",
+        "trajectory_label",
+        "timestep",
+        "distance_to_first",
+        "distance_to_prior",
+        "frame_path",
+        "first_frame_path",
+        "prior_frame_path",
+        "frame_label",
+    ]
+    first_frame = traj_inputs.frame_paths[0].as_posix()
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for idx, step in enumerate(steps):
+            prior_idx = max(0, idx - 1)
+            writer.writerow(
+                {
+                    "trajectory": traj_inputs.trajectory_label,
+                    "trajectory_label": traj_inputs.trajectory_label,
+                    "timestep": step,
+                    "distance_to_first": float(dist_first_np[idx]),
+                    "distance_to_prior": float(dist_prior_np[idx]),
+                    "frame_path": traj_inputs.frame_paths[idx].as_posix(),
+                    "first_frame_path": first_frame,
+                    "prior_frame_path": traj_inputs.frame_paths[prior_idx].as_posix(),
+                    "frame_label": traj_inputs.frame_labels[idx] if idx < len(traj_inputs.frame_labels) else f"t={step}",
+                }
+            )
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.2))
+    axes[0].plot(steps, dist_first_np, marker="o")
+    axes[0].set_title("Distance to first")
+    axes[0].set_xlabel("timestep")
+    axes[0].set_ylabel("||z0 - zt||")
+    axes[1].plot(steps, dist_prior_np, marker="o", color="tab:orange")
+    axes[1].set_title("Distance to prior")
+    axes[1].set_xlabel("timestep")
+    axes[1].set_ylabel("||z(t-1) - zt||")
+    sc = axes[2].scatter(dist_first_np, dist_prior_np, c=steps, cmap="viridis", s=20)
+    axes[2].set_title("Distance to first vs prior")
+    axes[2].set_xlabel("||z0 - zt||")
+    axes[2].set_ylabel("||z(t-1) - zt||")
+    fig.suptitle(f"Self-distance: {traj_inputs.trajectory_label}", fontsize=12)
+    fig.colorbar(sc, ax=axes[2], label="timestep")
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    out_path = plot_dir / f"self_distance_{global_step:07d}.png"
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_checkpoint(
+    checkpoints_dir: Path,
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    optimizer: torch.optim.Optimizer,
+    global_step: int,
+    tag: str,
+) -> None:
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "global_step": global_step,
+        "model_state": model.state_dict(),
+        "decoder_state": decoder.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+    }
+    target = checkpoints_dir / f"{tag}.pt"
+    torch.save(payload, target)
+
+
 def _render_visualization_batch(
     model: JEPAWorldModel,
     decoder: VisualizationDecoder,
@@ -1968,6 +2118,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     samples_hard_val_dir = run_dir / "samples_hard_val"
     inputs_vis_dir = run_dir / "vis_inputs"
     pair_vis_dir = run_dir / "vis_pairs"
+    vis_self_distance_dir = run_dir / "vis_self_distance"
+    self_distance_dir = run_dir / "self_distance"
+    checkpoints_dir = run_dir / "checkpoints"
 
     print(f"[run] Writing outputs to {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1975,6 +2128,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
+    vis_self_distance_dir.mkdir(parents=True, exist_ok=True)
+    self_distance_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     debug_vis = cfg.debug_visualization
     if debug_vis.input_vis_every_steps > 0:
@@ -2013,6 +2169,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         raise AssertionError(
             "val_fraction > 0 but no validation samples are available; check dataset size, val_fraction, and max_traj."
         )
+
+    self_distance_inputs = _prepare_self_distance_inputs(
+        cfg.data_root,
+        train_trajs,
+        (model_cfg.image_size, model_cfg.image_size),
+        run_dir,
+    )
 
     dataset_action_dim = getattr(dataset, "action_dim", model_cfg.action_dim)
     if val_dataset is not None:
@@ -2138,6 +2301,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     # --- Main optimization loop ---
     data_iter = iter(dataloader)
     val_iter = iter(val_dataloader) if val_dataloader is not None else None
+    last_step = -1
     for global_step in range(cfg.steps):
         # Get next batch of inputs.
         try:
@@ -2317,12 +2481,56 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         cfg.hard_example.vis_rows,
                         dataset.image_hw,
                     )
+                if self_distance_inputs is not None:
+                    _write_self_distance_outputs(
+                        model,
+                        self_distance_inputs,
+                        device,
+                        self_distance_dir,
+                        vis_self_distance_dir,
+                        global_step,
+                    )
 
             # --- Train ---
             model.train()
             timing_totals["vis"] += perf_counter() - vis_start
 
+        if (
+            cfg.checkpoint_every_steps > 0
+            and global_step % cfg.checkpoint_every_steps == 0
+        ):
+            _save_checkpoint(
+                checkpoints_dir,
+                model,
+                decoder,
+                optimizer,
+                global_step,
+                tag="last",
+            )
+        last_step = global_step
+
     # --- Final metrics export ---
+    last_step = global_step if cfg.steps > 0 else last_step
+    if self_distance_inputs is not None:
+        model.eval()
+        with torch.no_grad():
+            _write_self_distance_outputs(
+                model,
+                self_distance_inputs,
+                device,
+                self_distance_dir,
+                vis_self_distance_dir,
+                last_step if last_step >= 0 else 0,
+            )
+    if last_step >= 0:
+        _save_checkpoint(
+            checkpoints_dir,
+            model,
+            decoder,
+            optimizer,
+            last_step,
+            tag="last",
+        )
     if len(loss_history):
         write_loss_csv(loss_history, metrics_dir / "loss.csv")
         plot_loss_curves(loss_history, metrics_dir)

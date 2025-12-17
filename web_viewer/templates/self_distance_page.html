@@ -1,0 +1,322 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div>
+        <h3 class="mb-1">Self-distance</h3>
+        {% if experiment %}
+        <div class="text-muted small">Showing: {{ experiment.title if experiment.title != "Untitled" else experiment.name }}</div>
+        {% else %}
+        <div class="text-muted small">No experiments with self_distance.csv</div>
+        {% endif %}
+    </div>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        <label class="form-label mb-0 small text-muted" for="self-distance-select">Experiment:</label>
+        <select id="self-distance-select" class="form-select form-select-sm" style="width: auto;" {% if not experiments %}disabled{% endif %}>
+            {% for exp in experiments %}
+            <option value="{{ exp.id }}" {% if experiment and exp.id == experiment.id %}selected{% endif %}>
+                {{ exp.title if exp.title != "Untitled" else exp.name }}
+            </option>
+            {% endfor %}
+        </select>
+        {% if experiment %}
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('experiment_detail', exp_id=experiment.id) }}">Open experiment</a>
+        {% endif %}
+    </div>
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No self_distance.csv found in any experiments.</div>
+{% else %}
+<div class="small text-muted mb-2">
+    Loaded from {{ experiment.self_distance_csv.name }}{% if experiment.self_distance_images %}, latest PNG in vis_self_distance{% endif %}.
+    <span class="ms-2">Experiment ID: <span class="font-monospace">{{ experiment.id }}</span></span>
+</div>
+<div class="row g-3">
+    <div class="col-12 col-lg-4">
+        <div id="self-distance-first-plot" class="plot-area"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="self-distance-prior-plot" class="plot-area"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="self-distance-scatter-plot" class="plot-area"></div>
+    </div>
+</div>
+<div class="row g-3 mt-3" id="self-distance-frame-row">
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">First frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="self-distance-first-img" class="img-fluid rounded border d-none" alt="First frame preview">
+                <div class="text-muted small mt-2" id="self-distance-first-label"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">Prior frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="self-distance-prior-img" class="img-fluid rounded border d-none" alt="Prior frame preview">
+                <div class="text-muted small mt-2" id="self-distance-prior-label"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">Current frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="self-distance-current-img" class="img-fluid rounded border d-none" alt="Current frame preview">
+                <div class="text-muted small mt-2" id="self-distance-current-label"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% if experiment.self_distance_images %}
+{% set latest_self = experiment.self_distance_images[-1].relative_to(experiment.path) %}
+<div class="mt-4">
+    <div class="small text-muted mb-1">Latest saved visualization:</div>
+    <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ latest_self) }}" alt="Self-distance snapshot for {{ experiment.name }}" class="img-fluid rounded border">
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if experiment %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const select = document.getElementById("self-distance-select");
+    if (select) {
+        select.addEventListener("change", () => {
+            const id = select.value;
+            window.location.href = "{{ url_for('self_distance') }}/" + encodeURIComponent(id);
+        });
+    }
+});
+</script>
+<script>
+    document.addEventListener("DOMContentLoaded", () => {
+        if (typeof Plotly === "undefined") {
+            const firstPlot = document.getElementById("self-distance-first-plot");
+            if (firstPlot) {
+                firstPlot.innerHTML = "<p class='text-danger small'>Plotly failed to load.</p>";
+            }
+            return;
+        }
+        const csvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.self_distance_csv.relative_to(experiment.path)) }}";
+        const plotConfig = buildPlotlyConfig({});
+        const firstPlot = document.getElementById("self-distance-first-plot");
+        const priorPlot = document.getElementById("self-distance-prior-plot");
+        const scatterPlot = document.getElementById("self-distance-scatter-plot");
+        const firstImg = document.getElementById("self-distance-first-img");
+        const priorImg = document.getElementById("self-distance-prior-img");
+        const currentImg = document.getElementById("self-distance-current-img");
+        const firstLabel = document.getElementById("self-distance-first-label");
+        const priorLabel = document.getElementById("self-distance-prior-label");
+        const currentLabel = document.getElementById("self-distance-current-label");
+        const frameRow = document.getElementById("self-distance-frame-row");
+
+        const assetPath = (rel) => `/assets/{{ experiment.id }}/${rel.replace(/^\/+/, "")}`;
+        const setImage = (imgEl, labelEl, relPath, labelText) => {
+            if (!imgEl || !labelEl) return;
+            if (!relPath) {
+                imgEl.classList.add("d-none");
+                labelEl.textContent = "";
+                return;
+            }
+            imgEl.src = assetPath(relPath);
+            imgEl.alt = labelText || relPath;
+            imgEl.classList.remove("d-none");
+            labelEl.textContent = labelText || relPath;
+        };
+
+        const updateFrameVisibility = (showPrior) => {
+            if (!frameRow) return;
+            const priorCol = frameRow.querySelector(".col-md-4:nth-child(2)");
+            if (priorCol) {
+                if (showPrior) {
+                    priorCol.classList.remove("d-none");
+                } else {
+                    priorCol.classList.add("d-none");
+                }
+            }
+        };
+
+        const attachHover = (plotEl, mode) => {
+            plotEl.on("plotly_hover", (event) => {
+                const point = event?.points?.[0];
+                if (!point || !point.customdata) return;
+                const payload = point.customdata;
+                const trajectory = payload[0];
+                const step = payload[1];
+                const framePath = payload[2];
+                const firstPath = payload[3];
+                const priorPath = payload[4];
+                const frameLabelText = payload[5] || `t=${step}`;
+                const headerText = `${trajectory} • t=${step}`;
+
+                if (mode === "first") {
+                    updateFrameVisibility(false);
+                    setImage(firstImg, firstLabel, firstPath, `first: ${frameLabelText}`);
+                    setImage(currentImg, currentLabel, framePath, headerText);
+                    if (priorImg && priorLabel) {
+                        priorImg.classList.add("d-none");
+                        priorLabel.textContent = "";
+                    }
+                } else if (mode === "prior") {
+                    updateFrameVisibility(true);
+                    setImage(firstImg, firstLabel, firstPath, `first: ${frameLabelText}`);
+                    setImage(priorImg, priorLabel, priorPath, `prior: t=${Math.max(0, step - 1)}`);
+                    setImage(currentImg, currentLabel, framePath, headerText);
+                } else {
+                    updateFrameVisibility(true);
+                    setImage(firstImg, firstLabel, firstPath, `first: ${frameLabelText}`);
+                    setImage(priorImg, priorLabel, priorPath, `prior: t=${Math.max(0, step - 1)}`);
+                    setImage(currentImg, currentLabel, framePath, headerText);
+                }
+            });
+        };
+
+        const buildPlots = (rows) => {
+            if (!rows.length) {
+                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance.csv.</p>";
+                if (priorPlot) priorPlot.innerHTML = "";
+                if (scatterPlot) scatterPlot.innerHTML = "";
+                return;
+            }
+            const steps = rows.map(r => Number(r.timestep));
+            const distFirst = rows.map(r => Number(r.distance_to_first));
+            const distPrior = rows.map(r => Number(r.distance_to_prior));
+            const custom = rows.map(r => [
+                r.trajectory,
+                Number(r.timestep),
+                r.frame_path,
+                r.first_frame_path,
+                r.prior_frame_path,
+                r.frame_label,
+            ]);
+
+            const layoutBase = {
+                margin: { t: 32, r: 16, l: 50, b: 50 },
+                template: "plotly_white",
+            };
+
+            const layoutLineChart = {
+                ...layoutBase,
+                hovermode: "x unified",
+                xaxis: {
+                    title: "timestep",
+                    showspikes: true,
+                    spikemode: "across",
+                    spikethickness: 1,
+                    spikedash: "dot",
+                    spikecolor: "#999",
+                },
+            };
+
+            Plotly.newPlot(
+                firstPlot,
+                [
+                    {
+                        x: steps,
+                        y: distFirst,
+                        mode: "lines+markers",
+                        name: "distance to first",
+                        marker: { size: 6 },
+                        line: { width: 2 },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Distance to first latent",
+                    yaxis: { title: "||z0 - zt||" },
+                },
+                plotConfig,
+            ).then(() => attachHover(firstPlot, "first"));
+
+            Plotly.newPlot(
+                priorPlot,
+                [
+                    {
+                        x: steps,
+                        y: distPrior,
+                        mode: "lines+markers",
+                        name: "distance to prior",
+                        marker: { size: 6, color: "orange" },
+                        line: { width: 2, color: "orange" },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Distance to prior latent",
+                    yaxis: { title: "||z(t-1) - zt||" },
+                },
+                plotConfig,
+            ).then(() => attachHover(priorPlot, "prior"));
+
+            Plotly.newPlot(
+                scatterPlot,
+                [
+                    {
+                        x: distFirst,
+                        y: distPrior,
+                        mode: "markers",
+                        name: "distance pairs",
+                        marker: {
+                            size: 7,
+                            color: steps,
+                            colorscale: "Viridis",
+                            showscale: true,
+                            colorbar: { title: "timestep" },
+                        },
+                        customdata: custom,
+                        hovertemplate: "dist vs first=%{x:.4f}<br>dist vs prior=%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutBase,
+                    hovermode: "closest",
+                    title: "Distance vs first vs prior",
+                    xaxis: { title: "||z0 - zt||" },
+                    yaxis: { title: "||z(t-1) - zt||" },
+                },
+                plotConfig,
+            ).then(() => attachHover(scatterPlot, "scatter"));
+        };
+
+        Papa.parse(csvUrl, {
+            download: true,
+            header: true,
+            skipEmptyLines: true,
+            complete: (results) => {
+                const rows = results.data;
+                buildPlots(rows);
+                if (rows.length) {
+                    const firstRow = rows[0];
+                    setImage(firstImg, firstLabel, firstRow.first_frame_path, `first: ${firstRow.frame_label || "t=0"}`);
+                    setImage(priorImg, priorLabel, firstRow.prior_frame_path, "prior: t=0");
+                    setImage(currentImg, currentLabel, firstRow.frame_path, `t=${firstRow.timestep}`);
+                    updateFrameVisibility(true);
+                }
+            },
+            error: (err) => {
+                if (firstPlot) {
+                    firstPlot.innerHTML = `<p class="text-danger small">Error loading self_distance.csv: ${err.message}</p>`;
+                }
+            }
+        });
+    });
+</script>
+{% endif %}
+{% endblock %}
