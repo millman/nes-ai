@@ -18,6 +18,8 @@ const PLOTLY_RECON_ICON = {
   path: "M200 200 L800 200 L800 800 L200 800 Z M350 350 L650 650 M650 350 L350 650",
 };
 
+const DEFAULT_EXPERIMENT_KEY = "__single__";
+
 function toggleTraceVisibility(gd, visibility) {
   if (!gd || !gd.data || !gd.data.length) {
     return;
@@ -85,10 +87,10 @@ function pickLossReconMetricsByExperiment(gd) {
   const fallback = new Map();
   gd.data.forEach((trace) => {
     const metric = extractTraceMetric(trace.name);
-    const experiment = extractTraceExperiment(trace.name);
-    if (!experiment || !metric) {
+    if (!metric) {
       return;
     }
+    const experiment = extractTraceExperiment(trace.name) || DEFAULT_EXPERIMENT_KEY;
     if (metric === "loss_recon") {
       exact.set(experiment, metric);
       return;
@@ -119,10 +121,10 @@ function toggleLossReconPerExperiment(gd) {
   const visibilities = [];
   gd.data.forEach((trace, idx) => {
     const metric = extractTraceMetric(trace.name);
-    const experiment = extractTraceExperiment(trace.name);
-    if (!experiment || !metric) {
+    if (!metric) {
       return;
     }
+    const experiment = extractTraceExperiment(trace.name) || DEFAULT_EXPERIMENT_KEY;
     const targetMetric = selectedByExperiment.get(experiment);
     if (targetMetric && metric === targetMetric) {
       indices.push(idx);
