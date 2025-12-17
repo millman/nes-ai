@@ -644,7 +644,8 @@ cdef class NESAPU:
         The absolute maximum that will be returned is 1s of audio.
         """
         cdef int i
-        samples = min(samples, CHUNK_SIZE, self._buffer_end - self._buffer_start)
+        cdef int available = <int>(self._buffer_end - self._buffer_start)
+        samples = min(samples, CHUNK_SIZE, available)
         for i in range(samples):
             self.buffer[i] = self.output[(self._buffer_start + i) & (APU_BUFFER_LENGTH - 1)]
         self._buffer_start += samples

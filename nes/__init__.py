@@ -10,8 +10,16 @@ Cython.Compiler.Options.annotate = True
 import os
 import numpy
 
-extensions = [Extension("cycore.*", ["nes/cycore/*.pyx"], include_dirs=[numpy.get_include()], extra_compile_args=["-fsanitize=address"],
-                            extra_link_args=["-fsanitize=address"],)]
+common_compile_args = ["-fsanitize=address"]
+extensions = [
+    Extension(
+        "cycore.*",
+        ["nes/cycore/*.pyx"],
+        include_dirs=[numpy.get_include()],
+        extra_compile_args=common_compile_args,
+        extra_link_args=["-fsanitize=address"],
+    )
+]
 extensions = cythonize(extensions, compiler_directives={"language_level": 3, "profile": False, "boundscheck": False, "nonecheck": False, "cdivision": True}, annotate=True)
 
 
@@ -21,7 +29,14 @@ print(numpy.get_include())
 import pyximport
 build_dir = os.path.join(os.path.dirname(__file__), ".pyxbld")
 os.makedirs(build_dir, exist_ok=True)
-pyximport.install(setup_args={"include_dirs":numpy.get_include()}, reload_support=True, build_dir=build_dir)
+pyximport.install(
+    setup_args={
+        "include_dirs": numpy.get_include(),
+        "extra_compile_args": ["-fsanitize=address"],
+        "extra_link_args": ["-fsanitize=address"],
+    },
+    reload_support=True,
+    build_dir=build_dir,
+)
 
 from nes.cycore.system import NES   # make the key NES object available at the top level
-
