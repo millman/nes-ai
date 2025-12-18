@@ -13,16 +13,6 @@
     {% if experiment %}
     <div class="d-flex align-items-center gap-2 flex-wrap">
         <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('experiment_detail', exp_id=experiment.id) }}">Open experiment</a>
-        {% if experiments|length > 1 %}
-        <div class="input-group input-group-sm" style="max-width: 320px;">
-            <label class="input-group-text" for="diagnostics-select">Switch</label>
-            <select class="form-select" id="diagnostics-select">
-                {% for exp in experiments %}
-                <option value="{{ exp.id }}" {% if exp.id == experiment.id %}selected{% endif %}>{{ exp.title if exp.title != "Untitled" else exp.name }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        {% endif %}
     </div>
     {% endif %}
 </div>
@@ -93,7 +83,7 @@
                 <span id="diagnostics-frame-label">No frame selected</span>
             </div>
         </div>
-        <img id="diagnostics-frame-img" class="img-fluid rounded border d-none" alt="Diagnostic frame preview">
+        <img id="diagnostics-frame-img" class="rounded border d-none" alt="Diagnostic frame preview">
     </div>
 </div>
 {% else %}
@@ -237,19 +227,6 @@ document.addEventListener("DOMContentLoaded", () => {
             updateFrameForIndex(Number(ev.target.value));
         });
     }
-});
-</script>
-{% endif %}
-{% if experiment and experiments|length > 1 %}
-<script>
-document.addEventListener("DOMContentLoaded", () => {
-    const select = document.getElementById("diagnostics-select");
-    if (!select) return;
-    select.addEventListener("change", () => {
-        const id = select.value;
-        if (!id) return;
-        window.location.href = "{{ url_for('diagnostics') }}/" + encodeURIComponent(id);
-    });
 });
 </script>
 {% endif %}

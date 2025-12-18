@@ -2058,6 +2058,7 @@ def _compute_action_alignment_stats(
                 "mean": float(cos_np.mean()),
                 "std": float(cos_np.std()),
                 "pct_high": float((cos_np > cfg.cosine_high_threshold).mean()),
+                "cosines": cos_np,
             }
         )
         if len(stats) >= cfg.max_actions_to_plot:
@@ -2081,26 +2082,47 @@ def _save_action_alignment_plot(
         plt.close(fig)
         return
     labels = [_decode_action_id(s["action_id"], action_dim) for s in stats]
-    mean_vals = [s["mean"] for s in stats]
-    std_vals = [s["std"] for s in stats]
-    pct_vals = [s["pct_high"] for s in stats]
     counts = [s["count"] for s in stats]
 
     x = np.arange(len(stats))
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-    axes[0].bar(x, mean_vals, yerr=std_vals, color="tab:purple", alpha=0.8, capsize=3)
-    axes[0].axhline(cfg.cosine_high_threshold, color="gray", linestyle="--", linewidth=1)
-    axes[0].set_ylabel("cosine alignment (mean ± std)")
-    axes[0].set_title("Action-conditioned cosine alignment")
-    for idx, count in enumerate(counts):
-        axes[0].text(x[idx], mean_vals[idx], f"n={count}", ha="center", va="bottom", fontsize=8, rotation=90)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    rng = np.random.default_rng(0)
+    for idx, stat in enumerate(stats):
+        cos_values = stat.get("cosines")
+        cos = np.asarray([] if cos_values is None else cos_values, dtype=np.float32)
+        if cos.size == 0:
+            continue
+        jitter = rng.uniform(-0.2, 0.2, size=cos.shape[0])
+        ax.scatter(
+            np.full_like(cos, x[idx], dtype=np.float32) + jitter,
+            cos,
+            s=18,
+            alpha=0.35,
+            color="tab:blue",
+            edgecolors="none",
+        )
+        ax.plot(
+            [x[idx] - 0.25, x[idx] + 0.25],
+            [stat["mean"], stat["mean"]],
+            color="tab:red",
+            linewidth=2,
+            alpha=0.9,
+        )
+        ax.text(
+            x[idx],
+            1.02,
+            f"n={stat['count']}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
 
-    axes[1].bar(x, pct_vals, color="tab:orange", alpha=0.8)
-    axes[1].set_ylabel(f"fraction > {cfg.cosine_high_threshold:.2f}")
-    axes[1].set_ylim(0, 1.05)
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
-
+    ax.axhline(cfg.cosine_high_threshold, color="gray", linestyle="--", linewidth=1, alpha=0.8)
+    ax.set_ylabel("cosine alignment")
+    ax.set_ylim(-1.05, 1.05)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
+    ax.set_title("Action-conditioned cosine alignment (strip plot)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -2110,8 +2132,8 @@ def _compute_cycle_errors(
     z_proj_sequences: List[np.ndarray],
     actions_seq: np.ndarray,
     inverse_map: Dict[int, int],
-) -> Tuple[List[float], Dict[int, List[float]]]:
-    errors: List[float] = []
+) -> Tuple[List[Tuple[int, float]], Dict[int, List[float]]]:
+    errors: List[Tuple[int, float]] = []
     per_action: Dict[int, List[float]] = defaultdict(list)
     if actions_seq.shape[0] != len(z_proj_sequences):
         return errors, per_action
@@ -2123,12 +2145,27 @@ def _compute_cycle_errors(
         for t in range(len(action_ids) - 2):
             a = int(action_ids[t])
             b = int(action_ids[t + 1])
-            expected = inverse_map.get(a)
-            if expected is None or expected != b:
+            start_idx: Optional[int] = None
+            end_idx: Optional[int] = None
+            if inverse_map.get(a) == b:
+                start_idx, end_idx = t, t + 2
+                action_for_log = a
+            elif inverse_map.get(b) == a:
+                # Symmetric assumption: inverse moves back along the trajectory.
+                if t - 1 >= 0:
+                    start_idx, end_idx = t - 1, t + 1
+                    action_for_log = b
+                else:
+                    start_idx = end_idx = None
+            else:
+                start_idx = end_idx = None
+            if start_idx is None or end_idx is None:
                 continue
-            cycle_err = float(np.linalg.norm(z_seq[t + 2] - z_seq[t]))
-            errors.append(cycle_err)
-            per_action[a].append(cycle_err)
+            if end_idx >= len(z_seq):
+                continue
+            cycle_err = float(np.linalg.norm(z_seq[end_idx] - z_seq[start_idx]))
+            errors.append((action_for_log, cycle_err))
+            per_action[action_for_log].append(cycle_err)
     return errors, per_action
 
 
@@ -2152,12 +2189,33 @@ def _save_cycle_error_plot(
     if per_action:
         actions_sorted = sorted(per_action.items(), key=lambda kv: len(kv[1]), reverse=True)
         labels = [_decode_action_id(aid, action_dim) for aid, _ in actions_sorted]
-        means = [np.mean(vals) if vals else 0.0 for _, vals in actions_sorted]
-        axes[1].bar(np.arange(len(actions_sorted)), means, color="tab:blue", alpha=0.8)
-        axes[1].set_xticks(np.arange(len(actions_sorted)))
+        x = np.arange(len(actions_sorted))
+        rng = np.random.default_rng(0)
+        for idx, (aid, vals) in enumerate(actions_sorted):
+            vals_arr = np.asarray(vals, dtype=np.float32)
+            if vals_arr.size == 0:
+                continue
+            jitter = rng.uniform(-0.2, 0.2, size=vals_arr.shape[0])
+            axes[1].scatter(
+                np.full_like(vals_arr, x[idx], dtype=np.float32) + jitter,
+                vals_arr,
+                s=18,
+                alpha=0.35,
+                color="tab:blue",
+                edgecolors="none",
+            )
+            axes[1].plot(
+                [x[idx] - 0.25, x[idx] + 0.25],
+                [vals_arr.mean(), vals_arr.mean()],
+                color="tab:red",
+                linewidth=2,
+                alpha=0.9,
+            )
+            axes[1].text(x[idx], vals_arr.mean(), f"n={len(vals_arr)}", ha="center", va="bottom", fontsize=8)
+        axes[1].set_xticks(x)
         axes[1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
-        axes[1].set_ylabel("mean cycle error")
-        axes[1].set_title("Cycle error by action")
+        axes[1].set_ylabel("cycle error")
+        axes[1].set_title("Cycle error by action (strip plot)")
     else:
         axes[1].text(0.5, 0.5, "No per-action stats available.", ha="center", va="center")
         axes[1].axis("off")
@@ -2174,20 +2232,23 @@ def _write_diagnostics_csvs(
     global_step: int,
     motion: Dict[str, Any],
     alignment_stats: List[Dict[str, Any]],
-    cycle_errors: List[float],
+    cycle_errors: List[Tuple[int, float]],
     cycle_per_action: Dict[int, List[float]],
 ) -> None:
     delta_dir.mkdir(parents=True, exist_ok=True)
     alignment_dir.mkdir(parents=True, exist_ok=True)
     cycle_dir.mkdir(parents=True, exist_ok=True)
 
-    delta_csv = delta_dir / f"delta_z_pca_{global_step:07d}.csv"
-    with delta_csv.open("w", newline="") as handle:
+    delta_var_csv = delta_dir / f"delta_z_pca_variance_{global_step:07d}.csv"
+    with delta_var_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["component", "variance_ratio"])
         for idx, val in enumerate(motion["variance_ratio"][:64]):  # cap rows
             writer.writerow([idx, float(val)])
-        writer.writerow([])
+
+    delta_samples_csv = delta_dir / f"delta_z_pca_samples_{global_step:07d}.csv"
+    with delta_samples_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
         writer.writerow(["sample_index", "frame_index", "frame_path"])
         paths = motion.get("paths") or []
         if paths:
@@ -2212,13 +2273,16 @@ def _write_diagnostics_csvs(
                 ]
             )
 
-    cycle_csv = cycle_dir / f"cycle_error_{global_step:07d}.csv"
-    with cycle_csv.open("w", newline="") as handle:
+    cycle_values_csv = cycle_dir / f"cycle_error_values_{global_step:07d}.csv"
+    with cycle_values_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["cycle_error"])
-        for val in cycle_errors:
-            writer.writerow([val])
-        writer.writerow([])
+        writer.writerow(["action_id", "action_label", "cycle_error"])
+        for aid, val in cycle_errors:
+            writer.writerow([aid, _decode_action_id(aid, motion["action_dim"]), val])
+
+    cycle_summary_csv = cycle_dir / f"cycle_error_summary_{global_step:07d}.csv"
+    with cycle_summary_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
         writer.writerow(["action_id", "action_label", "count", "mean_cycle_error"])
         for aid, vals in sorted(cycle_per_action.items(), key=lambda kv: len(kv[1]), reverse=True):
             if not vals:
@@ -2233,17 +2297,64 @@ def _save_diagnostics_frames(
     global_step: int,
 ) -> None:
     frames_dir.mkdir(parents=True, exist_ok=True)
-    step_dir = frames_dir / f"frames_{global_step:07d}"
-    step_dir.mkdir(parents=True, exist_ok=True)
     csv_path = frames_dir / f"frames_{global_step:07d}.csv"
-    records: List[Tuple[int, str, str]] = []
     max_save = frames.shape[0]
+    entries: List[Tuple[str, int]] = []
     for idx in range(max_save):
-        frame_img = tensor_to_uint8_image(frames[idx, 0])
-        out_path = step_dir / f"frame_{idx:04d}.png"
-        Image.fromarray(frame_img).save(out_path)
         src_path = paths[idx][0] if paths and idx < len(paths) and paths[idx] else ""
-        records.append((idx, out_path.relative_to(step_dir.parent).as_posix(), src_path))
+        entries.append((src_path, idx))
+    entries.sort(key=lambda t: t[0])
+    new_sources_sorted = [src for src, _ in entries]
+
+    # Try to reuse existing frames if the sources match exactly.
+    reuse_image_lookup: Optional[Dict[str, str]] = None
+    for existing_csv in sorted(frames_dir.glob("frames_*.csv")):
+        try:
+            with existing_csv.open("r", newline="") as handle:
+                reader = csv.DictReader(handle)
+                existing_records = list(reader)
+        except (OSError, csv.Error):
+            continue
+        if not existing_records:
+            continue
+        existing_sources = [row.get("source_path", "") for row in existing_records]
+        existing_sources_sorted = sorted(existing_sources)
+        if len(existing_sources_sorted) != len(new_sources_sorted):
+            continue
+        if existing_sources_sorted == new_sources_sorted:
+            reuse_image_lookup = {}
+            for row in existing_records:
+                src = row.get("source_path", "")
+                img_rel = row.get("image_path", "")
+                if src and img_rel:
+                    reuse_image_lookup[src] = img_rel
+            break
+
+    records: List[Tuple[int, str, str]] = []
+    if reuse_image_lookup:
+        for out_idx, (src, _) in enumerate(entries):
+            img_rel = reuse_image_lookup.get(src, "")
+            if not img_rel:
+                reuse_image_lookup = None
+                records.clear()
+                break
+            records.append((out_idx, img_rel, src))
+
+    if not records:
+        step_dir = frames_dir / f"frames_{global_step:07d}"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        for out_idx, (src, orig_idx) in enumerate(entries):
+            frame_img = tensor_to_uint8_image(frames[orig_idx, 0])
+            out_path = step_dir / f"frame_{out_idx:04d}.png"
+            Image.fromarray(frame_img).save(out_path)
+            records.append(
+                (
+                    out_idx,
+                    out_path.relative_to(step_dir.parent).as_posix(),
+                    src,
+                )
+            )
+
     with csv_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["frame_index", "image_path", "source_path"])
@@ -2286,7 +2397,7 @@ def _save_diagnostics_outputs(
     _save_action_alignment_plot(alignment_path, stats, cfg, motion["action_dim"])
     cycle_path = cycle_dir / f"cycle_error_{global_step:07d}.png"
     errors, per_action = _compute_cycle_errors(motion["z_proj_sequences"], motion["actions_seq"], inverse_map)
-    _save_cycle_error_plot(cycle_path, errors, per_action, motion["action_dim"])
+    _save_cycle_error_plot(cycle_path, [e[1] for e in errors], per_action, motion["action_dim"])
     _write_diagnostics_csvs(
         delta_dir,
         alignment_dir,
