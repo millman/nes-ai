@@ -9,26 +9,18 @@
 {% block body %}
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div>
-        <h3 class="mb-1">Self-distance</h3>
         {% if experiment %}
-        <div class="text-muted small">Showing: {{ experiment.title if experiment.title != "Untitled" else experiment.name }}</div>
+        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.name }})</small></h3>
         {% else %}
+        <h3 class="mb-1">Self-distance</h3>
         <div class="text-muted small">No experiments with self_distance.csv</div>
         {% endif %}
     </div>
+    {% if experiment %}
     <div class="d-flex align-items-center gap-2 flex-wrap">
-        <label class="form-label mb-0 small text-muted" for="self-distance-select">Experiment:</label>
-        <select id="self-distance-select" class="form-select form-select-sm" style="width: auto;" {% if not experiments %}disabled{% endif %}>
-            {% for exp in experiments %}
-            <option value="{{ exp.id }}" {% if experiment and exp.id == experiment.id %}selected{% endif %}>
-                {{ exp.title if exp.title != "Untitled" else exp.name }}
-            </option>
-            {% endfor %}
-        </select>
-        {% if experiment %}
         <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('experiment_detail', exp_id=experiment.id) }}">Open experiment</a>
-        {% endif %}
     </div>
+    {% endif %}
 </div>
 
 {% if not experiment %}
