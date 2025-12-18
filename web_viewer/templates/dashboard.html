@@ -203,6 +203,11 @@
                         {% else %}
                         <button class="btn btn-outline-secondary btn-sm" disabled title="self_distance.csv missing">Self-distance</button>
                         {% endif %}
+                        {% if exp.diagnostics_steps %}
+                        <a href="{{ url_for('diagnostics', exp_id=exp.id) }}" class="btn btn-outline-primary btn-sm">Diagnostics</a>
+                        {% else %}
+                        <button class="btn btn-outline-secondary btn-sm" disabled title="diagnostics outputs missing">Diagnostics</button>
+                        {% endif %}
                     </div>
                 </td>
             </tr>

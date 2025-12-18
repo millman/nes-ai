@@ -249,6 +249,84 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=experiments[0].id if experiments else None,
         )
 
+    @app.route("/diagnostics", defaults={"exp_id": None})
+    @app.route("/diagnostics/<exp_id>")
+    def diagnostics(exp_id: Optional[str]):
+        experiments = [exp for exp in _load_all() if exp.diagnostics_images]
+        if not experiments:
+            return render_template(
+                "diagnostics_page.html",
+                experiments=[],
+                experiment=None,
+                diagnostics_map={},
+                diagnostics_csv_map={},
+                frame_map={},
+                cfg=cfg,
+                active_nav="diagnostics",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+        requested = exp_id or request.args.get("id")
+        exp_map = {exp.id: exp for exp in experiments}
+        selected = exp_map.get(requested) if requested else experiments[0]
+        if selected is None:
+            abort(404, "Experiment not found for diagnostics.")
+
+        diagnostics_map: Dict[str, Dict[int, str]] = {}
+        for name, paths in selected.diagnostics_images.items():
+            per_step: Dict[int, str] = {}
+            for path in paths:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map[name] = per_step
+
+        diagnostics_csv_map: Dict[str, Dict[int, str]] = {}
+        for name, paths in selected.diagnostics_csvs.items():
+            per_step: Dict[int, str] = {}
+            for path in paths:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_csv_map[name] = per_step
+
+        frame_map: Dict[int, List[str]] = {}
+        for step, images in selected.diagnostics_frames.items():
+            urls: List[str] = []
+            for img in images:
+                try:
+                    rel = img.relative_to(selected.path)
+                except ValueError:
+                    continue
+                urls.append(url_for("serve_asset", relative_path=f"{selected.id}/{rel}"))
+            if urls:
+                frame_map[step] = urls
+
+        return render_template(
+            "diagnostics_page.html",
+            experiments=experiments,
+            experiment=selected,
+            diagnostics_map=diagnostics_map,
+            diagnostics_csv_map=diagnostics_csv_map,
+            frame_map=frame_map,
+            cfg=cfg,
+            active_nav="diagnostics",
+            active_experiment_id=selected.id,
+            first_experiment_id=experiments[0].id if experiments else None,
+        )
+
     @app.route("/assets/<path:relative_path>")
     def serve_asset(relative_path: str):
         target = _resolve_asset_path(cfg.output_dir, relative_path)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from collections import defaultdict
 from pathlib import Path
 from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -24,6 +25,7 @@ from datetime import datetime
 from time import perf_counter
 
 from recon.data import list_trajectories, load_frame_as_tensor, short_traj_state_label
+from nes_controller import CONTROLLER_STATE_DESC
 from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
 from jepa_world_model.loss import FocalL1Loss, HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
@@ -34,6 +36,7 @@ from jepa_world_model.vis import (
     save_input_batch_visualization,
     save_rollout_sequence_batch,
     save_temporal_pair_visualization,
+    tensor_to_uint8_image,
 )
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
 
@@ -329,6 +332,16 @@ class DebugVisualization:
 
 
 @dataclass
+class DiagnosticsConfig:
+    enabled: bool = True
+    sample_sequences: int = 128
+    top_k_components: int = 4
+    min_action_count: int = 5
+    max_actions_to_plot: int = 12
+    cosine_high_threshold: float = 0.7
+
+
+@dataclass
 class TrainConfig:
     data_root: Path = Path("data.gridworldkey_wander_to_key")
     output_dir: Path = Path("out.jepa_world_model_trainer")
@@ -368,6 +381,7 @@ class TrainConfig:
     vis: VisConfig = field(default_factory=VisConfig)
     hard_example: HardExampleConfig = field(default_factory=HardExampleConfig)
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
+    diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
 
     # CLI-only field (not part of training config, used for experiment metadata)
     title: Annotated[Optional[str], tyro.conf.arg(aliases=["-m"])] = None
@@ -1833,7 +1847,7 @@ def _build_embedding_batch(
     dataset: TrajectorySequenceDataset,
     sample_count: int,
     generator: torch.Generator = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]:
     if sample_count <= 0:
         raise ValueError("sample_count must be positive for embedding projection batches.")
     if generator is None:
@@ -1846,8 +1860,444 @@ def _build_embedding_batch(
         generator=generator,
     )
     embed_batch = next(iter(embed_loader))
-    return (embed_batch[0].clone(), embed_batch[1].clone())
+    paths = [list(p) for p in embed_batch[2]] if len(embed_batch) > 2 else None
+    return (embed_batch[0].clone(), embed_batch[1].clone(), paths)
 
+
+def _compress_actions_to_ids(actions: np.ndarray) -> np.ndarray:
+    """Convert multi-hot controller vectors to integer action ids."""
+    if actions.ndim < 2:
+        raise ValueError("Expected at least 2D actions array for compression.")
+    flat = actions.reshape(-1, actions.shape[-1])
+    binary = (flat > 0.5).astype(np.int64)
+    weights = (1 << np.arange(binary.shape[1], dtype=np.int64))
+    return (binary * weights).sum(axis=1)
+
+
+def _decode_action_id(action_id: int, action_dim: int) -> str:
+    names = CONTROLLER_STATE_DESC[:action_dim]
+    parts = [names[idx] for idx in range(len(names)) if action_id & (1 << idx)]
+    return "+".join(parts) if parts else "NOOP"
+
+
+def _build_inverse_action_map(action_dim: int, observed_ids: Iterable[int]) -> Dict[int, int]:
+    """Approximate inverse mapping by swapping up/down and left/right bits."""
+    weights = (1 << np.arange(action_dim, dtype=np.int64))
+
+    def _invert_bits(action_id: int) -> int:
+        bits = np.array([(action_id >> idx) & 1 for idx in range(action_dim)], dtype=np.int64)
+        if action_dim > 5:
+            bits[4], bits[5] = bits[5], bits[4]
+        if action_dim > 7:
+            bits[6], bits[7] = bits[7], bits[6]
+        return int((bits * weights).sum())
+
+    mapping: Dict[int, int] = {}
+    for aid in observed_ids:
+        mapping[int(aid)] = _invert_bits(int(aid))
+    return mapping
+
+
+def _compute_pca(delta_z_centered: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    if delta_z_centered.shape[0] < 2:
+        raise ValueError("Need at least two delta steps to compute PCA.")
+    try:
+        _, s, vt = np.linalg.svd(delta_z_centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        jitter = np.random.normal(scale=1e-6, size=delta_z_centered.shape)
+        _, s, vt = np.linalg.svd(delta_z_centered + jitter, full_matrices=False)
+    eigvals = (s ** 2) / max(1, delta_z_centered.shape[0] - 1)
+    total_var = float(eigvals.sum()) if eigvals.size else 0.0
+    if total_var <= 0:
+        var_ratio = np.zeros_like(eigvals)
+    else:
+        var_ratio = eigvals / total_var
+    return vt, var_ratio
+
+
+def _compute_motion_subspace(
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    top_k: int,
+    paths: Optional[List[List[str]]] = None,
+) -> Optional[Dict[str, Any]]:
+    if embeddings.shape[1] < 2:
+        return None
+    z_np = embeddings.detach().cpu().numpy()
+    action_np = actions.detach().cpu().numpy()
+    batch, seq_len, latent_dim = z_np.shape
+    delta_list: List[np.ndarray] = []
+    action_vecs: List[np.ndarray] = []
+    for b in range(batch):
+        delta_list.append(z_np[b, 1:] - z_np[b, :-1])
+        action_vecs.append(action_np[b, :-1])
+    delta_z = np.concatenate(delta_list, axis=0)
+    if delta_z.shape[0] < 2:
+        return None
+    actions_flat = np.concatenate(action_vecs, axis=0)
+    action_ids = _compress_actions_to_ids(actions_flat)
+    delta_mean = delta_z.mean(axis=0, keepdims=True)
+    delta_centered = delta_z - delta_mean
+    components, variance_ratio = _compute_pca(delta_centered)
+    use_k = max(1, min(top_k, components.shape[0]))
+    projection = components[:use_k].T
+    flat_z = z_np.reshape(-1, latent_dim)
+    z_centered = flat_z - flat_z.mean(axis=0, keepdims=True)
+    delta_proj = delta_centered @ projection
+    z_proj_flat = z_centered @ projection
+    z_proj_sequences: List[np.ndarray] = []
+    offset = 0
+    for _ in range(batch):
+        z_proj_sequences.append(z_proj_flat[offset : offset + seq_len])
+        offset += seq_len
+    return {
+        "delta_proj": delta_proj,
+        "z_proj_flat": z_proj_flat,
+        "z_proj_sequences": z_proj_sequences,
+        "variance_ratio": variance_ratio,
+        "components": components,
+        "action_ids": action_ids,
+        "action_dim": action_np.shape[-1],
+        "actions_seq": action_np,
+        "paths": paths,
+    }
+
+
+def _save_delta_z_pca_plot(
+    out_path: Path,
+    variance_ratio: np.ndarray,
+    delta_proj: np.ndarray,
+    z_proj_flat: np.ndarray,
+    action_ids: np.ndarray,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    num_var = min(10, variance_ratio.shape[0])
+    axes[0, 0].bar(np.arange(num_var), variance_ratio[:num_var], color="tab:blue")
+    axes[0, 0].set_title("Delta PCA variance ratio")
+    axes[0, 0].set_xlabel("component")
+    axes[0, 0].set_ylabel("explained variance")
+
+    if delta_proj.shape[1] >= 2:
+        scatter = axes[0, 1].scatter(
+            delta_proj[:, 0],
+            delta_proj[:, 1],
+            c=action_ids,
+            cmap="tab20",
+            s=8,
+            alpha=0.7,
+        )
+        axes[0, 1].set_xlabel("PC1 (delta)")
+        axes[0, 1].set_ylabel("PC2 (delta)")
+        cbar = fig.colorbar(scatter, ax=axes[0, 1], fraction=0.046, pad=0.04)
+        cbar.set_label("action id")
+    else:
+        axes[0, 1].plot(delta_proj[:, 0], np.zeros_like(delta_proj[:, 0]), ".", alpha=0.6)
+        axes[0, 1].set_xlabel("PC1 (delta)")
+        axes[0, 1].set_ylabel("density")
+    axes[0, 1].set_title("Delta projections")
+
+    if z_proj_flat.shape[1] >= 2:
+        t = np.linspace(0, 1, num=z_proj_flat.shape[0])
+        sc2 = axes[1, 0].scatter(z_proj_flat[:, 0], z_proj_flat[:, 1], c=t, cmap="viridis", s=6, alpha=0.6)
+        axes[1, 0].set_xlabel("PC1 (z)")
+        axes[1, 0].set_ylabel("PC2 (z)")
+        fig.colorbar(sc2, ax=axes[1, 0], fraction=0.046, pad=0.04, label="time (normalized)")
+    else:
+        axes[1, 0].plot(z_proj_flat[:, 0], np.zeros_like(z_proj_flat[:, 0]), ".", alpha=0.6)
+        axes[1, 0].set_xlabel("PC1 (z)")
+        axes[1, 0].set_ylabel("density")
+    axes[1, 0].set_title("Latent projections")
+
+    cumulative = np.cumsum(variance_ratio)
+    axes[1, 1].plot(np.arange(len(cumulative)), cumulative, marker="o", color="tab:green")
+    axes[1, 1].set_ylim(0, 1.05)
+    axes[1, 1].set_xlabel("component")
+    axes[1, 1].set_ylabel("cumulative variance")
+    axes[1, 1].set_title("Cumulative explained variance")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _compute_action_alignment_stats(
+    delta_proj: np.ndarray,
+    action_ids: np.ndarray,
+    cfg: DiagnosticsConfig,
+) -> List[Dict[str, Any]]:
+    stats: List[Dict[str, Any]] = []
+    unique_actions, counts = np.unique(action_ids, return_counts=True)
+    if unique_actions.size == 0:
+        return stats
+    order = np.argsort(counts)[::-1]
+    for idx in order:
+        aid = int(unique_actions[idx])
+        mask = action_ids == aid
+        delta_a = delta_proj[mask]
+        if delta_a.shape[0] < cfg.min_action_count:
+            continue
+        mean_dir = delta_a.mean(axis=0)
+        norm = np.linalg.norm(mean_dir)
+        if norm < 1e-8:
+            continue
+        v_unit = mean_dir / norm
+        cosines: List[float] = []
+        for vec in delta_a:
+            denom = np.linalg.norm(vec)
+            if denom < 1e-8:
+                continue
+            cosines.append(float(np.dot(vec / denom, v_unit)))
+        if not cosines:
+            continue
+        cos_np = np.array(cosines, dtype=np.float32)
+        stats.append(
+            {
+                "action_id": aid,
+                "count": len(cos_np),
+                "mean": float(cos_np.mean()),
+                "std": float(cos_np.std()),
+                "pct_high": float((cos_np > cfg.cosine_high_threshold).mean()),
+            }
+        )
+        if len(stats) >= cfg.max_actions_to_plot:
+            break
+    return stats
+
+
+def _save_action_alignment_plot(
+    out_path: Path,
+    stats: List[Dict[str, Any]],
+    cfg: DiagnosticsConfig,
+    action_dim: int,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not stats:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, "No actions met alignment criteria.", ha="center", va="center")
+        ax.axis("off")
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        return
+    labels = [_decode_action_id(s["action_id"], action_dim) for s in stats]
+    mean_vals = [s["mean"] for s in stats]
+    std_vals = [s["std"] for s in stats]
+    pct_vals = [s["pct_high"] for s in stats]
+    counts = [s["count"] for s in stats]
+
+    x = np.arange(len(stats))
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    axes[0].bar(x, mean_vals, yerr=std_vals, color="tab:purple", alpha=0.8, capsize=3)
+    axes[0].axhline(cfg.cosine_high_threshold, color="gray", linestyle="--", linewidth=1)
+    axes[0].set_ylabel("cosine alignment (mean ± std)")
+    axes[0].set_title("Action-conditioned cosine alignment")
+    for idx, count in enumerate(counts):
+        axes[0].text(x[idx], mean_vals[idx], f"n={count}", ha="center", va="bottom", fontsize=8, rotation=90)
+
+    axes[1].bar(x, pct_vals, color="tab:orange", alpha=0.8)
+    axes[1].set_ylabel(f"fraction > {cfg.cosine_high_threshold:.2f}")
+    axes[1].set_ylim(0, 1.05)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _compute_cycle_errors(
+    z_proj_sequences: List[np.ndarray],
+    actions_seq: np.ndarray,
+    inverse_map: Dict[int, int],
+) -> Tuple[List[float], Dict[int, List[float]]]:
+    errors: List[float] = []
+    per_action: Dict[int, List[float]] = defaultdict(list)
+    if actions_seq.shape[0] != len(z_proj_sequences):
+        return errors, per_action
+    for seq_idx, z_seq in enumerate(z_proj_sequences):
+        seq_actions = actions_seq[seq_idx]
+        action_ids = _compress_actions_to_ids(seq_actions)
+        if len(action_ids) < 3:
+            continue
+        for t in range(len(action_ids) - 2):
+            a = int(action_ids[t])
+            b = int(action_ids[t + 1])
+            expected = inverse_map.get(a)
+            if expected is None or expected != b:
+                continue
+            cycle_err = float(np.linalg.norm(z_seq[t + 2] - z_seq[t]))
+            errors.append(cycle_err)
+            per_action[a].append(cycle_err)
+    return errors, per_action
+
+
+def _save_cycle_error_plot(
+    out_path: Path,
+    errors: List[float],
+    per_action: Dict[int, List[float]],
+    action_dim: int,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    if errors:
+        axes[0].hist(errors, bins=20, color="tab:green", alpha=0.8)
+        axes[0].set_title("Cycle error distribution")
+        axes[0].set_xlabel("||z_t - z_{t+2}||")
+        axes[0].set_ylabel("count")
+    else:
+        axes[0].text(0.5, 0.5, "No action+inverse pairs found.", ha="center", va="center")
+        axes[0].axis("off")
+
+    if per_action:
+        actions_sorted = sorted(per_action.items(), key=lambda kv: len(kv[1]), reverse=True)
+        labels = [_decode_action_id(aid, action_dim) for aid, _ in actions_sorted]
+        means = [np.mean(vals) if vals else 0.0 for _, vals in actions_sorted]
+        axes[1].bar(np.arange(len(actions_sorted)), means, color="tab:blue", alpha=0.8)
+        axes[1].set_xticks(np.arange(len(actions_sorted)))
+        axes[1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
+        axes[1].set_ylabel("mean cycle error")
+        axes[1].set_title("Cycle error by action")
+    else:
+        axes[1].text(0.5, 0.5, "No per-action stats available.", ha="center", va="center")
+        axes[1].axis("off")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _write_diagnostics_csvs(
+    delta_dir: Path,
+    alignment_dir: Path,
+    cycle_dir: Path,
+    global_step: int,
+    motion: Dict[str, Any],
+    alignment_stats: List[Dict[str, Any]],
+    cycle_errors: List[float],
+    cycle_per_action: Dict[int, List[float]],
+) -> None:
+    delta_dir.mkdir(parents=True, exist_ok=True)
+    alignment_dir.mkdir(parents=True, exist_ok=True)
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+
+    delta_csv = delta_dir / f"delta_z_pca_{global_step:07d}.csv"
+    with delta_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["component", "variance_ratio"])
+        for idx, val in enumerate(motion["variance_ratio"][:64]):  # cap rows
+            writer.writerow([idx, float(val)])
+        writer.writerow([])
+        writer.writerow(["sample_index", "frame_index", "frame_path"])
+        paths = motion.get("paths") or []
+        if paths:
+            for sample_idx, frame_list in enumerate(paths):
+                if not frame_list:
+                    continue
+                writer.writerow([sample_idx, 0, frame_list[0]])
+
+    align_csv = alignment_dir / f"action_alignment_{global_step:07d}.csv"
+    with align_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["action_id", "action_label", "count", "mean_cos", "std_cos", "pct_high"])
+        for stat in alignment_stats:
+            writer.writerow(
+                [
+                    stat["action_id"],
+                    _decode_action_id(stat["action_id"], motion["action_dim"]),
+                    stat["count"],
+                    stat["mean"],
+                    stat["std"],
+                    stat["pct_high"],
+                ]
+            )
+
+    cycle_csv = cycle_dir / f"cycle_error_{global_step:07d}.csv"
+    with cycle_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["cycle_error"])
+        for val in cycle_errors:
+            writer.writerow([val])
+        writer.writerow([])
+        writer.writerow(["action_id", "action_label", "count", "mean_cycle_error"])
+        for aid, vals in sorted(cycle_per_action.items(), key=lambda kv: len(kv[1]), reverse=True):
+            if not vals:
+                continue
+            writer.writerow([aid, _decode_action_id(aid, motion["action_dim"]), len(vals), float(np.mean(vals))])
+
+
+def _save_diagnostics_frames(
+    frames: torch.Tensor,
+    paths: Optional[List[List[str]]],
+    frames_dir: Path,
+    global_step: int,
+) -> None:
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    step_dir = frames_dir / f"frames_{global_step:07d}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = frames_dir / f"frames_{global_step:07d}.csv"
+    records: List[Tuple[int, str, str]] = []
+    max_save = frames.shape[0]
+    for idx in range(max_save):
+        frame_img = tensor_to_uint8_image(frames[idx, 0])
+        out_path = step_dir / f"frame_{idx:04d}.png"
+        Image.fromarray(frame_img).save(out_path)
+        src_path = paths[idx][0] if paths and idx < len(paths) and paths[idx] else ""
+        records.append((idx, out_path.relative_to(step_dir.parent).as_posix(), src_path))
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["frame_index", "image_path", "source_path"])
+        writer.writerows(records)
+
+def _save_diagnostics_outputs(
+    model: JEPAWorldModel,
+    frames_cpu: torch.Tensor,
+    actions_cpu: torch.Tensor,
+    paths: Optional[List[List[str]]],
+    device: torch.device,
+    cfg: DiagnosticsConfig,
+    delta_dir: Path,
+    alignment_dir: Path,
+    cycle_dir: Path,
+    frames_dir: Path,
+    global_step: int,
+) -> None:
+    if frames_cpu.shape[0] == 0 or frames_cpu.shape[1] < 2:
+        return
+    with torch.no_grad():
+        embeddings = model.encode_sequence(frames_cpu.to(device))["embeddings"]
+    motion = _compute_motion_subspace(embeddings, actions_cpu, cfg.top_k_components, paths)
+    if motion is None:
+        return
+    inverse_map = _build_inverse_action_map(
+        motion["action_dim"],
+        np.unique(_compress_actions_to_ids(motion["actions_seq"].reshape(-1, motion["actions_seq"].shape[-1]))),
+    )
+    delta_path = delta_dir / f"delta_z_pca_{global_step:07d}.png"
+    _save_delta_z_pca_plot(
+        delta_path,
+        motion["variance_ratio"],
+        motion["delta_proj"],
+        motion["z_proj_flat"],
+        motion["action_ids"],
+    )
+    alignment_path = alignment_dir / f"action_alignment_{global_step:07d}.png"
+    stats = _compute_action_alignment_stats(motion["delta_proj"], motion["action_ids"], cfg)
+    _save_action_alignment_plot(alignment_path, stats, cfg, motion["action_dim"])
+    cycle_path = cycle_dir / f"cycle_error_{global_step:07d}.png"
+    errors, per_action = _compute_cycle_errors(motion["z_proj_sequences"], motion["actions_seq"], inverse_map)
+    _save_cycle_error_plot(cycle_path, errors, per_action, motion["action_dim"])
+    _write_diagnostics_csvs(
+        delta_dir,
+        alignment_dir,
+        cycle_dir,
+        global_step,
+        motion,
+        stats,
+        errors,
+        per_action,
+    )
+    _save_diagnostics_frames(frames_cpu, paths, frames_dir, global_step)
 
 def _prepare_self_distance_inputs(
     data_root: Path,
@@ -2105,6 +2555,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     val_dataloader_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     embedding_generator = torch.Generator()
     embedding_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+    diagnostics_generator = torch.Generator()
+    diagnostics_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_rng = random.Random(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_val_rng = random.Random(python_rng.randint(0, 2**32 - 1))
 
@@ -2114,6 +2566,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     fixed_vis_dir = run_dir / "vis_fixed"
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
+    diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
+    diagnostics_alignment_dir = run_dir / "vis_action_alignment"
+    diagnostics_cycle_dir = run_dir / "vis_cycle_error"
+    diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
     samples_hard_dir = run_dir / "samples_hard"
     samples_hard_val_dir = run_dir / "samples_hard_val"
     inputs_vis_dir = run_dir / "vis_inputs"
@@ -2126,6 +2582,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.diagnostics.enabled:
+        diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_dir.mkdir(parents=True, exist_ok=True)
@@ -2269,7 +2730,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     # --- Fixed visualization batch (required later) ---
     fixed_batch_cpu, fixed_selection = _build_fixed_vis_batch(dataloader, cfg.vis.rows)
     rolling_batch_cpu: Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]] = fixed_batch_cpu
-    embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor]]
+    embedding_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]]
     if cfg.vis.embedding_projection_samples > 0:
         embedding_batch_cpu = _build_embedding_batch(
             dataset,
@@ -2278,6 +2739,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         )
     else:
         embedding_batch_cpu = None
+
+    diagnostics_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
+    if cfg.diagnostics.enabled and cfg.diagnostics.sample_sequences > 0:
+        try:
+            diagnostics_batch_cpu = _build_embedding_batch(
+                dataset,
+                cfg.diagnostics.sample_sequences,
+                generator=diagnostics_generator,
+            )
+        except Exception as exc:
+            print(f"[diagnostics] Failed to build batch: {exc}")
 
     def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
         total_time = sum(totals.values())
@@ -2488,6 +2960,23 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         device,
                         self_distance_dir,
                         vis_self_distance_dir,
+                        global_step,
+                    )
+                if cfg.diagnostics.enabled:
+                    diag_frames = diagnostics_batch_cpu[0] if diagnostics_batch_cpu is not None else rolling_batch_cpu[0]
+                    diag_actions = diagnostics_batch_cpu[1] if diagnostics_batch_cpu is not None else rolling_batch_cpu[1]
+                    diag_paths = diagnostics_batch_cpu[2] if diagnostics_batch_cpu is not None and len(diagnostics_batch_cpu) > 2 else rolling_batch_cpu[2]
+                    _save_diagnostics_outputs(
+                        model,
+                        diag_frames,
+                        diag_actions,
+                        diag_paths,
+                        device,
+                        cfg.diagnostics,
+                        diagnostics_delta_dir,
+                        diagnostics_alignment_dir,
+                        diagnostics_cycle_dir,
+                        diagnostics_frames_dir,
                         global_step,
                     )
 

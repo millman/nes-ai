@@ -35,6 +35,10 @@ class Experiment:
     self_distance_csv: Optional[Path]
     self_distance_images: List[Path]
     self_distance_csvs: List[Path]
+    diagnostics_images: Dict[str, List[Path]]
+    diagnostics_steps: List[int]
+    diagnostics_csvs: Dict[str, List[Path]]
+    diagnostics_frames: Dict[int, List[Path]]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -92,6 +96,10 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     self_distance_csvs = _collect_self_distance_csvs(path)
     latest_self_distance_csv = self_distance_csvs[-1] if self_distance_csvs else None
     self_distance_images = _collect_self_distance_images(path)
+    diagnostics_images = _collect_diagnostics_images(path)
+    diagnostics_steps = _collect_diagnostics_steps(diagnostics_images)
+    diagnostics_csvs = _collect_diagnostics_csvs(path)
+    diagnostics_frames = _collect_diagnostics_frames(path)
     notes_path = path / "notes.txt"
     metadata_custom_path = path / "experiment_metadata.txt"
     title, tags = _read_metadata(metadata_custom_path)
@@ -123,6 +131,10 @@ def load_experiment(path: Path) -> Optional[Experiment]:
         self_distance_csv=latest_self_distance_csv,
         self_distance_images=self_distance_images,
         self_distance_csvs=self_distance_csvs,
+        diagnostics_images=diagnostics_images,
+        diagnostics_steps=diagnostics_steps,
+        diagnostics_csvs=diagnostics_csvs,
+        diagnostics_frames=diagnostics_frames,
     )
 
 
@@ -307,6 +319,79 @@ def _collect_self_distance_csvs(root: Path) -> List[Path]:
     if not folder.exists():
         return []
     return sorted(folder.glob("self_distance_*.csv"))
+
+
+def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
+    diag_dirs = {
+        "delta_z_pca": root / "vis_delta_z_pca",
+        "action_alignment": root / "vis_action_alignment",
+        "cycle_error": root / "vis_cycle_error",
+    }
+    images: Dict[str, List[Path]] = {}
+    for name, folder in diag_dirs.items():
+        if folder.exists():
+            imgs = sorted(folder.glob("*.png"))
+            if imgs:
+                images[name] = imgs
+    return images
+
+
+def _collect_diagnostics_steps(diagnostics_images: Dict[str, List[Path]]) -> List[int]:
+    steps: set[int] = set()
+    for paths in diagnostics_images.values():
+        for path in paths:
+            stem = path.stem
+            parts = stem.split("_")
+            if not parts:
+                continue
+            suffix = parts[-1]
+            try:
+                steps.add(int(suffix))
+            except ValueError:
+                continue
+    return sorted(steps)
+
+
+def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
+    diag_dirs = {
+        "delta_z_pca": root / "vis_delta_z_pca",
+        "action_alignment": root / "vis_action_alignment",
+        "cycle_error": root / "vis_cycle_error",
+    }
+    csvs: Dict[str, List[Path]] = {}
+    for name, folder in diag_dirs.items():
+        if folder.exists():
+            files = sorted(folder.glob("*.csv"))
+            if files:
+                csvs[name] = files
+    return csvs
+
+
+def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Path]]:
+    frames_root = root / "vis_diagnostics_frames"
+    if not frames_root.exists():
+        return {}
+    frame_map: Dict[int, List[Path]] = {}
+    for csv_path in sorted(frames_root.glob("frames_*.csv")):
+        stem = csv_path.stem
+        suffix = stem.split("_")[-1]
+        try:
+            step = int(suffix)
+        except ValueError:
+            continue
+        try:
+            with csv_path.open("r", newline="") as handle:
+                reader = csv.DictReader(handle)
+                images: List[Path] = []
+                for row in reader:
+                    rel = row.get("image_path")
+                    if rel:
+                        images.append(frames_root / rel)
+                if images:
+                    frame_map[step] = images
+        except (OSError, csv.Error):
+            continue
+    return frame_map
 
 
 def _get_max_step(csv_path: Path) -> Optional[int]:

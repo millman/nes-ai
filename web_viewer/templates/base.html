@@ -47,6 +47,15 @@
                         <span class="nav-link disabled text-secondary">Self-distance</span>
                         {% endif %}
                     </li>
+                    <li class="nav-item">
+                        {% if active_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics', exp_id=active_experiment_id) }}">Diagnostics</a>
+                        {% elif first_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics', exp_id=first_experiment_id) }}">Diagnostics</a>
+                        {% else %}
+                        <span class="nav-link disabled text-secondary">Diagnostics</span>
+                        {% endif %}
+                    </li>
                 </ul>
             </div>
         </div>
