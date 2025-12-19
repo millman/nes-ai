@@ -210,7 +210,7 @@ def load_frame_as_tensor(
     *,
     size: Tuple[int, int] = (H, W),
     normalize: Optional[NormalizeFn] = None,
-    resample: int = Image.NEAREST,
+    resample: int = Image.BILINEAR,
 ) -> torch.Tensor:
     """Read state PNG and return normalized tensor."""
     open_ctx = _logged_image_open(path) if _log_file_opens else Image.open(path)
