@@ -7,7 +7,6 @@
 {% endblock %}
 
 {% block body %}
-<a href="{{ url_for('experiments_index') }}" class="btn btn-outline-secondary btn-sm mb-3">&larr; Back to all experiments</a>
 {% set heading_title = experiment.title if experiment.title != "Untitled" else "Untitled" %}
 <h2 class="mb-4">{{ heading_title }} <small class="text-muted">({{ experiment.name }})</small></h2>
 

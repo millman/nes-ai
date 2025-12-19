@@ -360,6 +360,7 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
         "delta_z_pca": root / "vis_delta_z_pca",
         "action_alignment": root / "vis_action_alignment",
         "cycle_error": root / "vis_cycle_error",
+        "frame_alignment": root / "vis_diagnostics_frames",
     }
     csvs: Dict[str, List[Path]] = {}
     for name, folder in diag_dirs.items():

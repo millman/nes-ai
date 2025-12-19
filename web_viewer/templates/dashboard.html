@@ -361,7 +361,11 @@ document.addEventListener("DOMContentLoaded", () => {
     if (hoverExpId) {
       const hoverExp = experimentById[hoverExpId];
       if (hoverExp) {
-        previews.push(buildPreviewCard(hoverExp, { selected: false, highlight: false }));
+        if (selectionSet.has(hoverExpId)) {
+          previews.push(buildPlaceholderCard("Selected row is already pinned"));
+        } else {
+          previews.push(buildPreviewCard(hoverExp, { selected: false, highlight: true }));
+        }
       }
     } else {
       previews.push(buildPlaceholderCard("Hover preview will appear here"));
