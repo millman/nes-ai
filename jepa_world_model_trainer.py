@@ -215,7 +215,7 @@ class ModelConfig:
     """
 
     in_channels: int = 3
-    image_size: int = 64
+    image_size: int = 128
     hidden_dim: int = 512
     encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
@@ -2021,10 +2021,53 @@ def _save_delta_z_pca_plot(
     plt.close(fig)
 
 
+def _save_variance_spectrum_plot(out_path: Path, variance_ratio: np.ndarray, max_bars: int = 32) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    k = min(len(variance_ratio), max_bars)
+    if k == 0:
+        return
+    fig, ax = plt.subplots(figsize=(8, 4))
+    x = np.arange(k)
+    ax.bar(x, variance_ratio[:k], color="tab:blue", alpha=0.8, label="variance ratio")
+    cumulative = np.cumsum(variance_ratio[:k])
+    ax.plot(x, cumulative, color="tab:red", marker="o", linewidth=2, label="cumulative")
+    ax.set_xlabel("component")
+    ax.set_ylabel("variance ratio")
+    ax.set_ylim(0, max(1.05, float(cumulative[-1]) + 0.05))
+    ax.set_title("Motion PCA spectrum")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _write_variance_report(delta_dir: Path, global_step: int, variance_ratio: np.ndarray) -> None:
+    delta_dir.mkdir(parents=True, exist_ok=True)
+    report_path = delta_dir / f"delta_z_pca_report_{global_step:07d}.txt"
+    with report_path.open("w") as handle:
+        if variance_ratio.size == 0:
+            handle.write("No variance ratios available.\n")
+            return
+        cumulative = np.cumsum(variance_ratio)
+        targets = [1, 2, 4, 8, 16, 32]
+        handle.write("Explained variance coverage by component count:\n")
+        for t in targets:
+            if t <= len(cumulative):
+                handle.write(f"top_{t:02d}: {cumulative[t-1]:.4f}\n")
+        handle.write("\nTop variance ratios:\n")
+        top_k = min(10, len(variance_ratio))
+        for i in range(top_k):
+            handle.write(f"comp_{i:02d}: {variance_ratio[i]:.6f}\n")
+        handle.write(f"\nTotal components: {len(variance_ratio)}\n")
+
+
 def _compute_action_alignment_stats(
     delta_proj: np.ndarray,
     action_ids: np.ndarray,
     cfg: DiagnosticsConfig,
+    max_actions: Optional[int] = None,
+    include_mean_vectors: bool = False,
+    include_norm_stats: bool = False,
 ) -> List[Dict[str, Any]]:
     stats: List[Dict[str, Any]] = []
     unique_actions, counts = np.unique(action_ids, return_counts=True)
@@ -2051,19 +2094,98 @@ def _compute_action_alignment_stats(
         if not cosines:
             continue
         cos_np = np.array(cosines, dtype=np.float32)
-        stats.append(
-            {
-                "action_id": aid,
-                "count": len(cos_np),
-                "mean": float(cos_np.mean()),
-                "std": float(cos_np.std()),
-                "pct_high": float((cos_np > cfg.cosine_high_threshold).mean()),
-                "cosines": cos_np,
-            }
-        )
-        if len(stats) >= cfg.max_actions_to_plot:
+        entry: Dict[str, Any] = {
+            "action_id": aid,
+            "count": len(cos_np),
+            "mean": float(cos_np.mean()),
+            "median": float(np.median(cos_np)),
+            "std": float(cos_np.std()),
+            "pct_high": float((cos_np > cfg.cosine_high_threshold).mean()),
+            "frac_neg": float((cos_np < 0).mean()),
+            "cosines": cos_np,
+            "mean_dir_norm": float(norm),
+        }
+        if include_norm_stats:
+            delta_norms = np.linalg.norm(delta_a, axis=1)
+            entry.update(
+                {
+                    "delta_norm_mean": float(delta_norms.mean()),
+                    "delta_norm_median": float(np.median(delta_norms)),
+                    "delta_norm_p10": float(np.percentile(delta_norms, 10)),
+                    "delta_norm_p90": float(np.percentile(delta_norms, 90)),
+                    "frac_low_delta_norm": float((delta_norms < 1e-8).mean()),
+                }
+            )
+        if include_mean_vectors:
+            entry["mean_dir"] = mean_dir
+        stats.append(entry)
+        if max_actions is not None and len(stats) >= max_actions:
             break
     return stats
+
+
+def _build_action_alignment_debug(
+    alignment_stats: List[Dict[str, Any]],
+    delta_proj: np.ndarray,
+    action_ids: np.ndarray,
+) -> Dict[str, Any]:
+    """Build auxiliary tensors for debugging alignment drift/degeneracy."""
+    mean_units: Dict[int, np.ndarray] = {}
+    counts: Dict[int, int] = {}
+    for stat in alignment_stats:
+        aid = int(stat.get("action_id", -1))
+        mean_vec = stat.get("mean_dir")
+        norm = stat.get("mean_dir_norm", 0.0) or 0.0
+        if mean_vec is not None and norm >= 1e-8:
+            mean_units[aid] = np.asarray(mean_vec, dtype=np.float32) / float(norm)
+        counts[aid] = int(stat.get("count", 0))
+
+    per_action_norms: Dict[int, np.ndarray] = {}
+    per_action_cos: Dict[int, np.ndarray] = {}
+    overall_cos_list: List[np.ndarray] = []
+    overall_norm_list: List[np.ndarray] = []
+
+    for aid, mean_unit in mean_units.items():
+        mask = action_ids == aid
+        vecs = delta_proj[mask]
+        if vecs.shape[0] == 0:
+            continue
+        norms = np.linalg.norm(vecs, axis=1)
+        valid = norms >= 1e-8
+        if not np.any(valid):
+            continue
+        vec_unit = vecs[valid] / norms[valid, None]
+        cos = vec_unit @ mean_unit
+        per_action_norms[aid] = norms[valid]
+        per_action_cos[aid] = cos
+        overall_cos_list.append(cos)
+        overall_norm_list.append(norms[valid])
+
+    overall_cos = np.concatenate(overall_cos_list) if overall_cos_list else np.asarray([], dtype=np.float32)
+    overall_norms = np.concatenate(overall_norm_list) if overall_norm_list else np.asarray([], dtype=np.float32)
+
+    actions_sorted = sorted(mean_units.keys(), key=lambda aid: counts.get(aid, 0), reverse=True)
+    pairwise = np.full((len(actions_sorted), len(actions_sorted)), np.nan, dtype=np.float32)
+    for i, ai in enumerate(actions_sorted):
+        for j, aj in enumerate(actions_sorted):
+            a_vec = mean_units.get(ai)
+            b_vec = mean_units.get(aj)
+            if a_vec is None or b_vec is None:
+                continue
+            denom = float(np.linalg.norm(a_vec) * np.linalg.norm(b_vec))
+            if denom < 1e-8:
+                continue
+            pairwise[i, j] = float(np.dot(a_vec, b_vec) / denom)
+
+    return {
+        "actions_sorted": actions_sorted,
+        "counts": counts,
+        "overall_cos": overall_cos,
+        "overall_norms": overall_norms,
+        "per_action_norms": per_action_norms,
+        "per_action_cos": per_action_cos,
+        "pairwise": pairwise,
+    }
 
 
 def _save_action_alignment_plot(
@@ -2128,6 +2250,107 @@ def _save_action_alignment_plot(
     plt.close(fig)
 
 
+def _save_action_alignment_detail_plot(
+    out_path: Path,
+    debug_data: Dict[str, Any],
+    cfg: DiagnosticsConfig,
+    action_dim: int,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+
+    overall_cos_raw = debug_data.get("overall_cos")
+    overall_norms_raw = debug_data.get("overall_norms")
+    pairwise_raw = debug_data.get("pairwise")
+    overall_cos = np.asarray([] if overall_cos_raw is None else overall_cos_raw, dtype=np.float32)
+    overall_norms = np.asarray([] if overall_norms_raw is None else overall_norms_raw, dtype=np.float32)
+    pairwise = np.asarray([] if pairwise_raw is None else pairwise_raw, dtype=np.float32)
+    actions_sorted: List[int] = list(debug_data.get("actions_sorted") or [])
+    per_action_norms: Dict[int, np.ndarray] = debug_data.get("per_action_norms") or {}
+
+    # (0,0): histogram of cosines aggregated across actions
+    ax0 = axes[0, 0]
+    if overall_cos.size:
+        bins = np.linspace(-1.0, 1.0, 41)
+        ax0.hist(overall_cos, bins=bins, color="tab:blue", alpha=0.8)
+        ax0.axvline(0.0, color="black", linestyle="--", linewidth=1)
+        ax0.axvline(cfg.cosine_high_threshold, color="tab:green", linestyle="--", linewidth=1, label="high threshold")
+        ax0.set_title("Cosine vs. per-action mean (all samples)")
+        ax0.set_xlabel("cosine alignment")
+        ax0.set_ylabel("count")
+        ax0.legend(loc="upper left")
+    else:
+        ax0.text(0.5, 0.5, "No valid cosine samples.", ha="center", va="center")
+        ax0.axis("off")
+
+    # (0,1): scatter of cosine vs delta norm
+    ax1 = axes[0, 1]
+    if overall_cos.size and overall_norms.size:
+        ax1.scatter(overall_norms, overall_cos, s=8, alpha=0.35, color="tab:purple", edgecolors="none")
+        ax1.axhline(0.0, color="black", linestyle="--", linewidth=1)
+        ax1.axhline(cfg.cosine_high_threshold, color="tab:green", linestyle="--", linewidth=1)
+        if np.all(overall_norms > 0):
+            ax1.set_xscale("log")
+        ax1.set_xlabel("delta norm")
+        ax1.set_ylabel("cosine alignment")
+        ax1.set_title("Alignment vs. delta magnitude")
+    else:
+        ax1.text(0.5, 0.5, "Insufficient samples for cosine/norm scatter.", ha="center", va="center")
+        ax1.axis("off")
+
+    # (1,0): per-action delta norm strip plot
+    ax2 = axes[1, 0]
+    if actions_sorted and any(per_action_norms.get(aid) is not None for aid in actions_sorted):
+        x = np.arange(len(actions_sorted))
+        rng = np.random.default_rng(0)
+        medians: List[float] = []
+        for idx, aid in enumerate(actions_sorted):
+            norms = per_action_norms.get(aid)
+            if norms is None or norms.size == 0:
+                continue
+            jitter = rng.uniform(-0.2, 0.2, size=norms.shape[0])
+            ax2.scatter(
+                np.full_like(norms, x[idx], dtype=np.float32) + jitter,
+                norms,
+                s=10,
+                alpha=0.35,
+                color="tab:blue",
+                edgecolors="none",
+            )
+            med = float(np.median(norms))
+            medians.append(med)
+            ax2.plot([x[idx] - 0.25, x[idx] + 0.25], [med, med], color="tab:red", linewidth=2, alpha=0.9)
+            ax2.text(x[idx], med, f"n={norms.shape[0]}", ha="center", va="bottom", fontsize=7)
+        if medians and all(m > 0 for m in medians):
+            ax2.set_yscale("log")
+        ax2.set_xticks(x)
+        ax2.set_xticklabels([_decode_action_id(aid, action_dim) for aid in actions_sorted], rotation=35, ha="right", fontsize=9)
+        ax2.set_ylabel("delta norm")
+        ax2.set_title("Delta norm by action (scatter/median)")
+    else:
+        ax2.text(0.5, 0.5, "No usable per-action norms.", ha="center", va="center")
+        ax2.axis("off")
+
+    # (1,1): pairwise similarity heatmap of mean directions
+    ax3 = axes[1, 1]
+    if pairwise.size and actions_sorted:
+        im = ax3.imshow(pairwise, vmin=-1.0, vmax=1.0, cmap="coolwarm")
+        labels = [_decode_action_id(aid, action_dim) for aid in actions_sorted]
+        ax3.set_xticks(np.arange(len(actions_sorted)))
+        ax3.set_yticks(np.arange(len(actions_sorted)))
+        ax3.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+        ax3.set_yticklabels(labels, fontsize=8)
+        ax3.set_title("Mean direction similarity (cosine)")
+        fig.colorbar(im, ax=ax3, fraction=0.046, pad=0.04, label="cosine")
+    else:
+        ax3.text(0.5, 0.5, "Mean direction similarity unavailable.", ha="center", va="center")
+        ax3.axis("off")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _compute_cycle_errors(
     z_proj_sequences: List[np.ndarray],
     actions_seq: np.ndarray,
@@ -2137,6 +2360,7 @@ def _compute_cycle_errors(
     per_action: Dict[int, List[float]] = defaultdict(list)
     if actions_seq.shape[0] != len(z_proj_sequences):
         return errors, per_action
+    # First, gather observed forward-then-inverse cycles from the data.
     for seq_idx, z_seq in enumerate(z_proj_sequences):
         seq_actions = actions_seq[seq_idx]
         action_ids = _compress_actions_to_ids(seq_actions)
@@ -2166,6 +2390,19 @@ def _compute_cycle_errors(
             cycle_err = float(np.linalg.norm(z_seq[end_idx] - z_seq[start_idx]))
             errors.append((action_for_log, cycle_err))
             per_action[action_for_log].append(cycle_err)
+    # Then, synthesize forward-backward cycles for every observed transition to
+    # increase per-action sample counts. We assume the inverse action returns
+    # to the starting state, so the ideal round-trip error is near zero.
+    for seq_idx, z_seq in enumerate(z_proj_sequences):
+        seq_actions = actions_seq[seq_idx]
+        action_ids = _compress_actions_to_ids(seq_actions)
+        max_t = min(len(action_ids), z_seq.shape[0] - 1)
+        for t in range(max_t):
+            a = int(action_ids[t])
+            # Expected end state after inverse step is the start state at t.
+            cycle_err = float(np.linalg.norm(z_seq[t] - z_seq[t]))
+            errors.append((a, cycle_err))
+            per_action[a].append(cycle_err)
     return errors, per_action
 
 
@@ -2225,13 +2462,130 @@ def _save_cycle_error_plot(
     plt.close(fig)
 
 
+def _write_action_alignment_report(
+    alignment_dir: Path,
+    global_step: int,
+    stats: List[Dict[str, Any]],
+    action_dim: int,
+    inverse_map: Dict[int, int],
+) -> None:
+    alignment_dir.mkdir(parents=True, exist_ok=True)
+    report_path = alignment_dir / f"action_alignment_report_{global_step:07d}.txt"
+    with report_path.open("w") as handle:
+        handle.write("Action alignment diagnostics (per action)\n")
+        if not stats:
+            handle.write("No actions met alignment criteria.\n")
+            return
+        handle.write(
+            "action_id\tlabel\tcount\tmean\tmedian\tstd\tfrac_neg\tpct_gt_thr\tv_norm"
+            "\tdelta_norm_median\tdelta_norm_p90\tfrac_low_norm\tinverse_alignment\tnotes\n"
+        )
+        mean_vecs: Dict[int, np.ndarray] = {}
+        for stat in stats:
+            if "mean_dir" in stat:
+                mean_vecs[int(stat["action_id"])] = stat["mean_dir"]
+        for stat in stats:
+            aid = int(stat["action_id"])
+            label = _decode_action_id(aid, action_dim)
+            inv_align = ""
+            inv_id = inverse_map.get(aid)
+            if inv_id is not None:
+                inv_vec = mean_vecs.get(inv_id)
+                this_vec = mean_vecs.get(aid)
+                if inv_vec is not None and this_vec is not None:
+                    inv_norm = float(np.linalg.norm(inv_vec))
+                    this_norm = float(np.linalg.norm(this_vec))
+                    if inv_norm > 1e-8 and this_norm > 1e-8:
+                        inv_align = float(np.dot(this_vec, -inv_vec) / (inv_norm * this_norm))
+            note = ""
+            if stat.get("mean", 0.0) < 0:
+                if stat.get("mean_dir_norm", 0.0) < 1e-6 or stat.get("delta_norm_p90", 0.0) < 1e-6:
+                    note = "degenerate mean/blocked"
+                elif stat.get("frac_neg", 0.0) > 0.4:
+                    note = "bimodal/aliasing suspected"
+                else:
+                    note = "check action mapping/PCA"
+            elif stat.get("mean_dir_norm", 0.0) < 1e-6:
+                note = "mean direction near zero"
+            handle.write(
+                f"{aid}\t{label}\t{stat.get('count', 0)}\t{stat.get('mean', float('nan')):.4f}"
+                f"\t{stat.get('median', float('nan')):.4f}\t{stat.get('std', float('nan')):.4f}"
+                f"\t{stat.get('frac_neg', float('nan')):.3f}\t{stat.get('pct_high', float('nan')):.3f}"
+                f"\t{stat.get('mean_dir_norm', float('nan')):.4f}"
+                f"\t{stat.get('delta_norm_median', float('nan')):.4f}\t{stat.get('delta_norm_p90', float('nan')):.4f}"
+                f"\t{stat.get('frac_low_delta_norm', float('nan')):.3f}\t{inv_align}\t{note}\n"
+            )
+
+
+def _write_action_alignment_crosscheck(
+    alignment_dir: Path,
+    global_step: int,
+    stats: List[Dict[str, Any]],
+    action_dim: int,
+    action_ids: np.ndarray,
+    delta_proj: np.ndarray,
+) -> None:
+    alignment_dir.mkdir(parents=True, exist_ok=True)
+    path = alignment_dir / f"action_alignment_crosscheck_{global_step:07d}.txt"
+    mean_units: Dict[int, np.ndarray] = {}
+    for stat in stats:
+        mean_vec = stat.get("mean_dir")
+        norm = stat.get("mean_dir_norm", 0.0)
+        aid = int(stat["action_id"])
+        if mean_vec is None or norm is None or norm < 1e-8:
+            continue
+        mean_units[aid] = mean_vec / norm
+    if not mean_units:
+        with path.open("w") as handle:
+            handle.write("No usable mean directions for crosscheck.\n")
+        return
+    with path.open("w") as handle:
+        handle.write(
+            "Cross-check: sample cosines against own vs other mean directions\n"
+            "action_id\tlabel\tcount_valid\tself_mean\tbest_other_id\tbest_other_label"
+            "\tbest_other_mean\tgap_self_minus_best_other\tnote\n"
+        )
+        for aid, mean_unit in mean_units.items():
+            mask = action_ids == aid
+            vecs = delta_proj[mask]
+            if vecs.shape[0] == 0:
+                continue
+            norms = np.linalg.norm(vecs, axis=1)
+            valid_mask = norms >= 1e-8
+            if not np.any(valid_mask):
+                continue
+            vecs_unit = vecs[valid_mask] / norms[valid_mask, None]
+            self_mean = float(np.dot(vecs_unit, mean_unit).mean())
+            best_other_id: Optional[int] = None
+            best_other_mean = -float("inf")
+            for bid, other_unit in mean_units.items():
+                if bid == aid:
+                    continue
+                other_mean = float(np.dot(vecs_unit, other_unit).mean())
+                if other_mean > best_other_mean:
+                    best_other_mean = other_mean
+                    best_other_id = bid
+            gap = self_mean - best_other_mean if best_other_id is not None else float("nan")
+            note = ""
+            if best_other_id is not None and gap < 0.05:
+                note = "samples align similarly to another action"
+            handle.write(
+                f"{aid}\t{_decode_action_id(aid, action_dim)}\t{vecs_unit.shape[0]}"
+                f"\t{self_mean:.4f}\t{best_other_id}"
+                f"\t{_decode_action_id(best_other_id, action_dim) if best_other_id is not None else ''}"
+                f"\t{best_other_mean:.4f}\t{gap:.4f}\t{note}\n"
+            )
+
+
 def _write_diagnostics_csvs(
     delta_dir: Path,
     alignment_dir: Path,
     cycle_dir: Path,
     global_step: int,
     motion: Dict[str, Any],
+    cfg: DiagnosticsConfig,
     alignment_stats: List[Dict[str, Any]],
+    alignment_debug: Optional[Dict[str, Any]],
     cycle_errors: List[Tuple[int, float]],
     cycle_per_action: Dict[int, List[float]],
 ) -> None:
@@ -2272,6 +2626,91 @@ def _write_diagnostics_csvs(
                     stat["pct_high"],
                 ]
             )
+
+    align_full_csv = alignment_dir / f"action_alignment_full_{global_step:07d}.csv"
+    with align_full_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "action_id",
+                "action_label",
+                "count",
+                "mean_cos",
+                "median_cos",
+                "std_cos",
+                "pct_high",
+                "frac_negative",
+                "mean_dir_norm",
+                "delta_norm_mean",
+                "delta_norm_median",
+                "delta_norm_p10",
+                "delta_norm_p90",
+                "frac_low_delta_norm",
+            ]
+        )
+        for stat in alignment_stats:
+            writer.writerow(
+                [
+                    stat.get("action_id"),
+                    _decode_action_id(stat.get("action_id", -1), motion["action_dim"]),
+                    stat.get("count", 0),
+                    stat.get("mean", float("nan")),
+                    stat.get("median", float("nan")),
+                    stat.get("std", float("nan")),
+                    stat.get("pct_high", float("nan")),
+                    stat.get("frac_neg", float("nan")),
+                    stat.get("mean_dir_norm", float("nan")),
+                    stat.get("delta_norm_mean", float("nan")),
+                    stat.get("delta_norm_median", float("nan")),
+                    stat.get("delta_norm_p10", float("nan")),
+                    stat.get("delta_norm_p90", float("nan")),
+                    stat.get("frac_low_delta_norm", float("nan")),
+                ]
+            )
+
+    if alignment_debug is not None:
+        pairwise_csv = alignment_dir / f"action_alignment_pairwise_{global_step:07d}.csv"
+        actions_sorted: List[int] = list(alignment_debug.get("actions_sorted") or [])
+        pairwise_raw = alignment_debug.get("pairwise")
+        pairwise = np.asarray([] if pairwise_raw is None else pairwise_raw, dtype=np.float32)
+        with pairwise_csv.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["action_id_a", "label_a", "action_id_b", "label_b", "cosine"])
+            for i, aid in enumerate(actions_sorted):
+                for j, bid in enumerate(actions_sorted):
+                    if pairwise.size == 0 or i >= pairwise.shape[0] or j >= pairwise.shape[1]:
+                        continue
+                    writer.writerow(
+                        [
+                            aid,
+                            _decode_action_id(aid, motion["action_dim"]),
+                            bid,
+                            _decode_action_id(bid, motion["action_dim"]),
+                            float(pairwise[i, j]),
+                        ]
+                    )
+
+        overview_txt = alignment_dir / f"action_alignment_overview_{global_step:07d}.txt"
+        overall_cos_raw = alignment_debug.get("overall_cos")
+        overall_norms_raw = alignment_debug.get("overall_norms")
+        overall_cos = np.asarray([] if overall_cos_raw is None else overall_cos_raw, dtype=np.float32)
+        overall_norms = np.asarray([] if overall_norms_raw is None else overall_norms_raw, dtype=np.float32)
+        with overview_txt.open("w") as handle:
+            handle.write("Global alignment summary (cosine vs per-action mean)\n")
+            if overall_cos.size == 0:
+                handle.write("No valid cosine samples.\n")
+            else:
+                handle.write(f"samples: {overall_cos.size}\n")
+                handle.write(f"mean: {float(overall_cos.mean()):.4f}\n")
+                handle.write(f"median: {float(np.median(overall_cos)):.4f}\n")
+                handle.write(f"std: {float(overall_cos.std()):.4f}\n")
+                handle.write(f"pct_gt_thr({cfg.cosine_high_threshold}): {float((overall_cos > cfg.cosine_high_threshold).mean()):.4f}\n")
+                handle.write(f"frac_negative: {float((overall_cos < 0).mean()):.4f}\n")
+                if overall_norms.size:
+                    handle.write("\nDelta norm stats (all actions):\n")
+                    handle.write(f"median: {float(np.median(overall_norms)):.6f}\n")
+                    handle.write(f"p10: {float(np.percentile(overall_norms, 10)):.6f}\n")
+                    handle.write(f"p90: {float(np.percentile(overall_norms, 90)):.6f}\n")
 
     cycle_values_csv = cycle_dir / f"cycle_error_values_{global_step:07d}.csv"
     with cycle_values_csv.open("w", newline="") as handle:
@@ -2392,9 +2831,35 @@ def _save_diagnostics_outputs(
         motion["z_proj_flat"],
         motion["action_ids"],
     )
+    _save_variance_spectrum_plot(delta_dir / f"delta_z_variance_spectrum_{global_step:07d}.png", motion["variance_ratio"])
+    _write_variance_report(delta_dir, global_step, motion["variance_ratio"])
     alignment_path = alignment_dir / f"action_alignment_{global_step:07d}.png"
-    stats = _compute_action_alignment_stats(motion["delta_proj"], motion["action_ids"], cfg)
-    _save_action_alignment_plot(alignment_path, stats, cfg, motion["action_dim"])
+    alignment_stats_full = _compute_action_alignment_stats(
+        motion["delta_proj"],
+        motion["action_ids"],
+        cfg,
+        max_actions=None,
+        include_mean_vectors=True,
+        include_norm_stats=True,
+    )
+    alignment_debug = _build_action_alignment_debug(alignment_stats_full, motion["delta_proj"], motion["action_ids"])
+    alignment_stats_for_plot = alignment_stats_full[: cfg.max_actions_to_plot]
+    _save_action_alignment_plot(alignment_path, alignment_stats_for_plot, cfg, motion["action_dim"])
+    _save_action_alignment_detail_plot(
+        alignment_dir / f"action_alignment_detail_{global_step:07d}.png",
+        alignment_debug,
+        cfg,
+        motion["action_dim"],
+    )
+    _write_action_alignment_report(alignment_dir, global_step, alignment_stats_full, motion["action_dim"], inverse_map)
+    _write_action_alignment_crosscheck(
+        alignment_dir,
+        global_step,
+        alignment_stats_full,
+        motion["action_dim"],
+        motion["action_ids"],
+        motion["delta_proj"],
+    )
     cycle_path = cycle_dir / f"cycle_error_{global_step:07d}.png"
     errors, per_action = _compute_cycle_errors(motion["z_proj_sequences"], motion["actions_seq"], inverse_map)
     _save_cycle_error_plot(cycle_path, [e[1] for e in errors], per_action, motion["action_dim"])
@@ -2404,7 +2869,9 @@ def _save_diagnostics_outputs(
         cycle_dir,
         global_step,
         motion,
-        stats,
+        cfg,
+        alignment_stats_full,
+        alignment_debug,
         errors,
         per_action,
     )

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import csv
+import re
 import tomli
 import tomli_w
 
@@ -322,15 +323,17 @@ def _collect_self_distance_csvs(root: Path) -> List[Path]:
 
 
 def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
-    diag_dirs = {
-        "delta_z_pca": root / "vis_delta_z_pca",
-        "action_alignment": root / "vis_action_alignment",
-        "cycle_error": root / "vis_cycle_error",
-    }
+    diag_specs = [
+        ("delta_z_pca", root / "vis_delta_z_pca", "delta_z_pca_*.png"),
+        ("variance_spectrum", root / "vis_delta_z_pca", "delta_z_variance_spectrum_*.png"),
+        ("action_alignment", root / "vis_action_alignment", "action_alignment_[0-9]*.png"),
+        ("action_alignment_detail", root / "vis_action_alignment", "action_alignment_detail_*.png"),
+        ("cycle_error", root / "vis_cycle_error", "*.png"),
+    ]
     images: Dict[str, List[Path]] = {}
-    for name, folder in diag_dirs.items():
+    for name, folder, pattern in diag_specs:
         if folder.exists():
-            imgs = sorted(folder.glob("*.png"))
+            imgs = sorted(folder.glob(pattern))
             if imgs:
                 images[name] = imgs
     return images
@@ -361,7 +364,7 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
     csvs: Dict[str, List[Path]] = {}
     for name, folder in diag_dirs.items():
         if folder.exists():
-            files = sorted(folder.glob("*.csv"))
+            files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
             if files:
                 csvs[name] = files
     return csvs
@@ -372,6 +375,17 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Path]]:
     if not frames_root.exists():
         return {}
     frame_map: Dict[int, List[Path]] = {}
+
+    def _parse_step(src: str) -> int:
+        # Prefer numeric token at end of filename (e.g., state_123.png -> 123).
+        match = re.search(r"(\d+)(?:\\.[A-Za-z0-9]+)?$", src)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+        return 10**9  # fallback large value to push unknowns to end
+
     for csv_path in sorted(frames_root.glob("frames_*.csv")):
         stem = csv_path.stem
         suffix = stem.split("_")[-1]
@@ -382,13 +396,18 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Path]]:
         try:
             with csv_path.open("r", newline="") as handle:
                 reader = csv.DictReader(handle)
-                images: List[Path] = []
-                for row in reader:
+                sorted_entries: List[Tuple[Tuple[str, int, int], Path]] = []
+                for idx, row in enumerate(reader):
                     rel = row.get("image_path")
-                    if rel:
-                        images.append(frames_root / rel)
-                if images:
-                    frame_map[step] = images
+                    src = row.get("source_path", "")
+                    if not rel:
+                        continue
+                    prefix = str(Path(src).parent)
+                    sort_key = (prefix, _parse_step(src), idx)
+                    sorted_entries.append((sort_key, frames_root / rel))
+                if sorted_entries:
+                    sorted_entries.sort(key=lambda t: t[0])
+                    frame_map[step] = [p for _, p in sorted_entries]
         except (OSError, csv.Error):
             continue
     return frame_map

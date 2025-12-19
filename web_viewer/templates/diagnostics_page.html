@@ -21,7 +21,7 @@
 <div class="text-muted fst-italic">No diagnostics images found in any experiments.</div>
 {% else %}
 <div class="small text-muted mb-2">
-    Saved PNGs in vis_delta_z_pca, vis_action_alignment, vis_cycle_error.
+    Saved PNGs in vis_delta_z_pca (including variance spectrum), vis_action_alignment (alignment + detail), vis_cycle_error.
     <span class="ms-2">Experiment ID: <span class="font-monospace">{{ experiment.id }}</span></span>
 </div>
 
@@ -38,7 +38,7 @@
     </div>
 </div>
 <div class="row g-3">
-    <div class="col-12 col-lg-4">
+    <div class="col-12 col-lg-3">
         <div class="card h-100">
             <div class="card-header py-2">Delta-z PCA</div>
             <div class="card-body d-flex flex-column gap-2">
@@ -47,7 +47,16 @@
             </div>
         </div>
     </div>
-    <div class="col-12 col-lg-4">
+    <div class="col-12 col-lg-3">
+        <div class="card h-100">
+            <div class="card-header py-2">Variance spectrum</div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-spectrum-img" class="img-fluid rounded border d-none" alt="Variance spectrum">
+                <div class="text-muted small" id="diagnostics-spectrum-caption"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-3">
         <div class="card h-100">
             <div class="card-header py-2">Cosine alignment</div>
             <div class="card-body d-flex flex-column gap-2">
@@ -56,12 +65,21 @@
             </div>
         </div>
     </div>
-    <div class="col-12 col-lg-4">
+    <div class="col-12 col-lg-3">
         <div class="card h-100">
             <div class="card-header py-2">Cycle error</div>
             <div class="card-body d-flex flex-column gap-2">
                 <img id="diagnostics-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error diagnostic">
                 <div class="text-muted small" id="diagnostics-cycle-caption"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-6">
+        <div class="card h-100">
+            <div class="card-header py-2">Alignment detail</div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-alignment-detail-img" class="img-fluid rounded border d-none" alt="Alignment detail diagnostic">
+                <div class="text-muted small" id="diagnostics-alignment-detail-caption"></div>
             </div>
         </div>
     </div>
@@ -108,10 +126,20 @@ document.addEventListener("DOMContentLoaded", () => {
             caption: document.getElementById("diagnostics-delta-caption"),
             label: "vis_delta_z_pca",
         },
+        variance_spectrum: {
+            img: document.getElementById("diagnostics-spectrum-img"),
+            caption: document.getElementById("diagnostics-spectrum-caption"),
+            label: "variance spectrum",
+        },
         action_alignment: {
             img: document.getElementById("diagnostics-alignment-img"),
             caption: document.getElementById("diagnostics-alignment-caption"),
             label: "vis_action_alignment",
+        },
+        action_alignment_detail: {
+            img: document.getElementById("diagnostics-alignment-detail-img"),
+            caption: document.getElementById("diagnostics-alignment-detail-caption"),
+            label: "alignment detail",
         },
         cycle_error: {
             img: document.getElementById("diagnostics-cycle-img"),

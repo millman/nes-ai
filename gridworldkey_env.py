@@ -68,8 +68,11 @@ COMPLEX_DIRECTIONS = [
 DISCRETE_ACTIONS = [_to_controller_presses(buttons) for buttons in COMPLEX_DIRECTIONS]
 
 
-def _default_grid() -> np.ndarray:
+def _default_grid(with_obstacles: bool = True) -> np.ndarray:
     grid = np.zeros((GRID_PLAY_ROWS, GRID_COLS), dtype=np.int8)
+
+    if not with_obstacles:
+        return grid
 
     # Surrounding walls.
     grid[0, :] = 1
@@ -89,10 +92,18 @@ def _default_grid() -> np.ndarray:
 class GridworldKeyEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
-    def __init__(self, render_mode: Optional[str] = None, keyboard_override: bool = True):
+    def __init__(
+        self,
+        render_mode: Optional[str] = None,
+        keyboard_override: bool = True,
+        obstacles: bool = True,
+        start_manual_control: bool = False,
+    ):
         self.render_mode = render_mode
         self.keyboard_override = keyboard_override
-        self.grid = _default_grid()
+        self.start_manual_control = start_manual_control
+        self.obstacles_enabled = obstacles
+        self.grid = _default_grid(with_obstacles=self.obstacles_enabled)
         self.action_space = spaces.Discrete(len(DISCRETE_ACTIONS))
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8
@@ -231,7 +242,7 @@ class GridworldKeyEnv(gym.Env):
         self._episode_steps = 0
         self.key_present = True
         self.inventory_has_key = False
-        self._manual_control = False
+        self._manual_control = self.start_manual_control
         self._keyboard_toggle_prev = False
         self._reset_agent()
         observation = self._render_frame()
@@ -366,6 +377,8 @@ class GridworldRunnerArgs:
     episodes: int = 3
     max_steps: int = 1500
     keyboard_override: bool = True
+    disable_random_movement: bool = False
+    disable_obstacles: bool = False
     dump_trajectories: bool = True
     render_mode: str = "human"
     run_root: Path = Path("runs")
@@ -394,7 +407,12 @@ def main():
         traj_dir = run_dir / "traj_dumps"
         trajectory_store = TrajectoryStore(traj_dir, image_shape=(DISPLAY_HEIGHT, DISPLAY_WIDTH, 3))
 
-    env = GridworldKeyEnv(render_mode=args.render_mode, keyboard_override=args.keyboard_override)
+    env = GridworldKeyEnv(
+        render_mode=args.render_mode,
+        keyboard_override=args.keyboard_override,
+        obstacles=not args.disable_obstacles,
+        start_manual_control=args.disable_random_movement,
+    )
 
     stop_running = False
 
