@@ -5,24 +5,19 @@
 {% endblock %}
 
 {% block body %}
-<div class="card mb-4">
-    <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-3">
-        <div>
-            <h2 class="h4 mb-1">Experiment Dashboard</h2>
-            <p class="text-muted mb-0">Select a run to inspect metrics or open the full experiment grid.</p>
-        </div>
-        <a class="btn btn-primary" href="{{ url_for('experiments_index') }}">Open Experiment Grid</a>
-    </div>
-</div>
-
 {% if experiments %}
-<div id="selected-preview" class="mb-4" style="display: none; max-height: 300px; overflow-y: auto;">
-    <div class="row g-3" id="preview-container"></div>
+<div id="selected-preview" class="mb-4">
+    <div class="card">
+        <div class="card-body">
+            <div class="row g-3 align-items-start" id="preview-container" style="min-height: 220px;"></div>
+        </div>
+    </div>
 </div>
 
 <div class="mb-3">
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
-        <div class="d-flex align-items-center gap-3 flex-wrap">
+        <button type="button" id="dashboard-compare" class="btn btn-primary">Compare selected</button>
+        <div class="d-flex align-items-center gap-3 flex-wrap justify-content-end flex-grow-1">
             <div class="d-flex align-items-center gap-2 flex-wrap">
                 <span class="small text-muted">Page</span>
                 <div class="d-flex align-items-center gap-1 flex-wrap">
@@ -50,7 +45,6 @@
                 <button type="submit" class="btn btn-outline-secondary btn-sm">Apply</button>
             </form>
         </div>
-        <button type="button" id="dashboard-compare" class="btn btn-primary">Compare selected</button>
     </div>
 </div>
     <div class="table-responsive">
@@ -75,7 +69,7 @@
             {% for exp in experiments %}
             {% set title_text = exp.title if exp.title != "Untitled" else "" %}
             {% set tags_text = exp.tags if exp.tags else "" %}
-            <tr class="align-middle">
+            <tr class="align-middle" data-exp-id="{{ exp.id }}">
                 <td>
                     <input class="form-check-input" type="checkbox" name="ids" value="{{ exp.id }}">
                 </td>
@@ -230,6 +224,21 @@ document.addEventListener("DOMContentLoaded", () => {
     }{% if not loop.last %},{% endif %}
     {% endfor %}
   ];
+  const experimentById = Object.fromEntries(experiments.map((exp) => [exp.id, exp]));
+  const previewContainer = document.getElementById("preview-container");
+  const checkboxes = Array.from(document.querySelectorAll("input[name='ids']"));
+  const checkboxById = new Map(checkboxes.map((checkbox) => [checkbox.value, checkbox]));
+  const tableRows = Array.from(document.querySelectorAll("tbody tr[data-exp-id]"));
+
+  let selectionOrder = [];
+  let selectionSet = new Set();
+  let hoverExpId = null;
+  let highlightedSelectedId = null;
+
+  function setSelectionOrder(order) {
+    selectionOrder = order.filter((id, index) => order.indexOf(id) === index);
+    selectionSet = new Set(selectionOrder);
+  }
 
   function updateUrl(selectedIds) {
     const url = new URL(window.location.href);
@@ -253,106 +262,185 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  function updatePreview() {
-    const selectedIds = Array.from(document.querySelectorAll("input[name='ids']:checked"))
-      .map((input) => input.value);
+  function buildLossImage(exp) {
+    const lossImageContainer = document.createElement("div");
+    lossImageContainer.className = "d-flex align-items-center justify-content-center";
+    if (exp.loss_image) {
+      const link = document.createElement("a");
+      link.href = "{{ url_for('experiment_detail', exp_id='__EXP_ID__') }}".replace("__EXP_ID__", exp.id);
+      const img = document.createElement("img");
+      img.src = "{{ url_for('serve_asset', relative_path='__REL_PATH__') }}".replace("__REL_PATH__", `${exp.id}/metrics/loss_curves.png`);
+      img.alt = `Loss curves for ${exp.name}`;
+      img.className = "img-fluid rounded border";
+      img.style.maxHeight = "200px";
+      img.style.objectFit = "contain";
+      img.loading = "lazy";
+      link.appendChild(img);
+      lossImageContainer.appendChild(link);
+    } else {
+      const placeholder = document.createElement("div");
+      placeholder.className = "text-muted fst-italic";
+      placeholder.textContent = "No loss curves available";
+      lossImageContainer.appendChild(placeholder);
+    }
+    return lossImageContainer;
+  }
 
-    const previewSection = document.getElementById("selected-preview");
-    const previewContainer = document.getElementById("preview-container");
+  function buildPreviewCard(exp, { label, highlight, role }) {
+    const col = document.createElement("div");
+    col.className = "col-12 col-md-6 col-lg-4";
 
-    if (selectedIds.length === 0) {
-      previewSection.style.display = "none";
+    const card = document.createElement("div");
+    card.className = "card h-100";
+    card.dataset.expId = exp.id;
+    if (highlight) {
+      card.classList.add("border-primary", "border-2", "shadow-sm");
+    }
+
+    const cardBody = document.createElement("div");
+    cardBody.className = "card-body d-flex flex-column gap-2";
+
+    const titleRow = document.createElement("div");
+    titleRow.className = "d-flex justify-content-between align-items-start gap-2";
+
+    const title = document.createElement("div");
+    title.className = "fw-semibold";
+    const titleText = exp.title && exp.title !== "Untitled" ? exp.title : exp.name;
+    title.textContent = titleText;
+    titleRow.appendChild(title);
+
+    if (label) {
+      const badge = document.createElement("span");
+      badge.className = role === "hover" ? "badge text-bg-info" : "badge text-bg-secondary";
+      badge.textContent = label;
+      titleRow.appendChild(badge);
+    }
+
+    const lossImage = buildLossImage(exp);
+
+    cardBody.appendChild(titleRow);
+    cardBody.appendChild(lossImage);
+    card.appendChild(cardBody);
+    col.appendChild(card);
+    return col;
+  }
+
+  function buildPlaceholderCard() {
+    const col = document.createElement("div");
+    col.className = "col-12";
+
+    const card = document.createElement("div");
+    card.className = "card h-100 border-0 bg-light";
+
+    const body = document.createElement("div");
+    body.className = "card-body d-flex flex-column justify-content-center align-items-center text-muted";
+    body.style.minHeight = "200px";
+    body.innerHTML = "<div class=\"fw-semibold mb-1\">Preview loss curves here</div><div>Hover a row to preview, select rows to pin.</div>";
+
+    card.appendChild(body);
+    col.appendChild(card);
+    return col;
+  }
+
+  function renderPreview() {
+    if (!previewContainer) return;
+    previewContainer.innerHTML = "";
+
+    const previews = [];
+    if (hoverExpId) {
+      const hoverExp = experimentById[hoverExpId];
+      if (hoverExp) {
+        previews.push(buildPreviewCard(hoverExp, { label: "Hover preview", highlight: false, role: "hover" }));
+      }
+    }
+
+    selectionOrder.forEach((id) => {
+      const exp = experimentById[id];
+      if (!exp) return;
+      const highlight = highlightedSelectedId === id;
+      previews.push(buildPreviewCard(exp, { label: "Selected", highlight, role: "selected" }));
+    });
+
+    if (previews.length === 0) {
+      previewContainer.appendChild(buildPlaceholderCard());
       return;
     }
 
-    previewSection.style.display = "block";
-    previewContainer.innerHTML = "";
+    previews.forEach((node) => previewContainer.appendChild(node));
+  }
 
-    selectedIds.forEach((id) => {
-      const exp = experiments.find((e) => e.id === id);
-      if (!exp) return;
+  function persistSelection() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(selectionOrder));
+    updateUrl(selectionOrder);
+    renderPreview();
+  }
 
-      const col = document.createElement("div");
-      col.className = "col";
-
-      const card = document.createElement("div");
-      card.className = "card";
-
-      const cardBody = document.createElement("div");
-      cardBody.className = "card-body";
-
-      const title = document.createElement("div");
-      title.className = "fw-semibold mb-2";
-      const titleText = exp.title && exp.title !== "Untitled" ? exp.title : exp.name;
-      title.textContent = titleText;
-
-      const lossImageContainer = document.createElement("div");
-      if (exp.loss_image) {
-        const link = document.createElement("a");
-        link.href = "{{ url_for('experiment_detail', exp_id='__EXP_ID__') }}".replace("__EXP_ID__", exp.id);
-        const img = document.createElement("img");
-        img.src = "{{ url_for('serve_asset', relative_path='__REL_PATH__') }}".replace("__REL_PATH__", `${exp.id}/metrics/loss_curves.png`);
-        img.alt = `Loss curves for ${exp.name}`;
-        img.className = "img-fluid rounded border";
-        img.style.maxHeight = "200px";
-        img.style.objectFit = "contain";
-        img.loading = "lazy";
-        link.appendChild(img);
-        lossImageContainer.appendChild(link);
-      } else {
-        const placeholder = document.createElement("div");
-        placeholder.className = "text-muted fst-italic";
-        placeholder.textContent = "No loss curves available";
-        lossImageContainer.appendChild(placeholder);
-      }
-
-      cardBody.appendChild(title);
-      cardBody.appendChild(lossImageContainer);
-      card.appendChild(cardBody);
-      col.appendChild(card);
-      previewContainer.appendChild(col);
-    });
+  function clearHover(expId) {
+    if (hoverExpId !== expId) return;
+    hoverExpId = null;
+    highlightedSelectedId = null;
+    renderPreview();
   }
 
   // Restore selections from URL first, then localStorage as fallback
   const urlParams = new URLSearchParams(window.location.search);
   const urlIds = urlParams.getAll("ids");
-  let idsToRestore = [];
-
   if (urlIds.length > 0) {
-    idsToRestore = urlIds;
+    setSelectionOrder(urlIds);
   } else {
     const savedSelections = localStorage.getItem(STORAGE_KEY);
     if (savedSelections) {
       try {
-        idsToRestore = JSON.parse(savedSelections);
+        setSelectionOrder(JSON.parse(savedSelections) || []);
       } catch (e) {
         console.error("Failed to restore selections:", e);
       }
     }
   }
 
-  idsToRestore.forEach((id) => {
-    const checkbox = document.querySelector(`input[name='ids'][value='${id}']`);
+  // Sync checkboxes to restored state
+  selectionOrder.forEach((id) => {
+    const checkbox = checkboxById.get(id);
     if (checkbox) {
       checkbox.checked = true;
     }
   });
 
-  // Initial preview update and URL sync
-  updatePreview();
-  const initialIds = Array.from(document.querySelectorAll("input[name='ids']:checked"))
-    .map((input) => input.value);
-  updateUrl(initialIds);
+  renderPreview();
+  updateUrl(selectionOrder);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(selectionOrder));
 
-  // Save selections and update preview whenever checkboxes change
-  document.querySelectorAll("input[name='ids']").forEach((checkbox) => {
+  checkboxes.forEach((checkbox) => {
     checkbox.addEventListener("change", () => {
-      const selectedIds = Array.from(document.querySelectorAll("input[name='ids']:checked"))
-        .map((input) => input.value);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(selectedIds));
-      updateUrl(selectedIds);
-      updatePreview();
+      const { value: id, checked } = checkbox;
+      if (checked) {
+        setSelectionOrder([id, ...selectionOrder.filter((existing) => existing !== id)]);
+      } else {
+        setSelectionOrder(selectionOrder.filter((existing) => existing !== id));
+      }
+      persistSelection();
+    });
+  });
+
+  tableRows.forEach((row) => {
+    const expId = row.dataset.expId;
+    row.addEventListener("mouseenter", () => {
+      hoverExpId = expId;
+      highlightedSelectedId = selectionSet.has(expId) ? expId : null;
+      renderPreview();
+    });
+    row.addEventListener("mouseleave", () => {
+      clearHover(expId);
+    });
+    row.addEventListener("focusin", () => {
+      hoverExpId = expId;
+      highlightedSelectedId = selectionSet.has(expId) ? expId : null;
+      renderPreview();
+    });
+    row.addEventListener("focusout", (event) => {
+      if (!row.contains(event.relatedTarget)) {
+        clearHover(expId);
+      }
     });
   });
 
@@ -360,10 +448,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const button = document.getElementById("dashboard-compare");
   if (!button) return;
   button.addEventListener("click", () => {
-    const ids = Array.from(document.querySelectorAll("input[name='ids']:checked"))
-      .map((input) => input.value);
     const params = new URLSearchParams();
-    ids.forEach((id) => params.append("ids", id));
+    selectionOrder.forEach((id) => params.append("ids", id));
     window.location = "{{ url_for('comparison') }}" + "?" + params.toString();
   });
 });
