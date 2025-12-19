@@ -9,7 +9,11 @@
 <div id="selected-preview" class="mb-4">
     <div class="card">
         <div class="card-body">
-            <div class="row g-3 align-items-start" id="preview-container" style="min-height: 220px;"></div>
+            <div
+                class="d-flex gap-3 align-items-stretch flex-nowrap w-100"
+                id="preview-container"
+                style="height: 260px; overflow-x: auto;"
+            ></div>
         </div>
     </div>
 </div>
@@ -264,7 +268,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function buildLossImage(exp) {
     const lossImageContainer = document.createElement("div");
-    lossImageContainer.className = "d-flex align-items-center justify-content-center";
+    lossImageContainer.className = "d-flex align-items-center";
+    lossImageContainer.style.justifyContent = "flex-start";
     if (exp.loss_image) {
       const link = document.createElement("a");
       link.href = "{{ url_for('experiment_detail', exp_id='__EXP_ID__') }}".replace("__EXP_ID__", exp.id);
@@ -286,12 +291,14 @@ document.addEventListener("DOMContentLoaded", () => {
     return lossImageContainer;
   }
 
-  function buildPreviewCard(exp, { label, highlight, role }) {
+  function buildPreviewCard(exp, { selected, highlight }) {
     const col = document.createElement("div");
-    col.className = "col-12 col-md-6 col-lg-4";
+    col.className = "preview-item";
+    col.style.flex = "1 1 0";
+    col.style.minWidth = "200px";
 
     const card = document.createElement("div");
-    card.className = "card h-100";
+    card.className = "card h-100 position-relative";
     card.dataset.expId = exp.id;
     if (highlight) {
       card.classList.add("border-primary", "border-2", "shadow-sm");
@@ -300,42 +307,50 @@ document.addEventListener("DOMContentLoaded", () => {
     const cardBody = document.createElement("div");
     cardBody.className = "card-body d-flex flex-column gap-2";
 
-    const titleRow = document.createElement("div");
-    titleRow.className = "d-flex justify-content-between align-items-start gap-2";
-
     const title = document.createElement("div");
     title.className = "fw-semibold";
+    title.style.whiteSpace = "nowrap";
+    title.style.overflowX = "auto";
+    title.style.overflowY = "hidden";
+    title.style.paddingRight = "18px";
     const titleText = exp.title && exp.title !== "Untitled" ? exp.title : exp.name;
     title.textContent = titleText;
-    titleRow.appendChild(title);
-
-    if (label) {
-      const badge = document.createElement("span");
-      badge.className = role === "hover" ? "badge text-bg-info" : "badge text-bg-secondary";
-      badge.textContent = label;
-      titleRow.appendChild(badge);
-    }
 
     const lossImage = buildLossImage(exp);
 
-    cardBody.appendChild(titleRow);
+    cardBody.appendChild(title);
     cardBody.appendChild(lossImage);
     card.appendChild(cardBody);
+
+    if (selected) {
+      const pin = document.createElement("div");
+      pin.className = "position-absolute";
+      pin.style.top = "8px";
+      pin.style.right = "8px";
+      pin.innerHTML =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">' +
+        '<path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>' +
+        '</svg>';
+      card.appendChild(pin);
+    }
+
     col.appendChild(card);
     return col;
   }
 
-  function buildPlaceholderCard() {
+  function buildPlaceholderCard(text) {
     const col = document.createElement("div");
-    col.className = "col-12";
+    col.className = "preview-item";
+    col.style.flex = "1 1 0";
+    col.style.minWidth = "200px";
 
     const card = document.createElement("div");
-    card.className = "card h-100 border-0 bg-light";
+    card.className = "card h-100 border-0 bg-light w-100";
 
     const body = document.createElement("div");
     body.className = "card-body d-flex flex-column justify-content-center align-items-center text-muted";
-    body.style.minHeight = "200px";
-    body.innerHTML = "<div class=\"fw-semibold mb-1\">Preview loss curves here</div><div>Hover a row to preview, select rows to pin.</div>";
+    body.style.minHeight = "220px";
+    body.innerHTML = `<div class="fw-semibold mb-1">${text || "Preview loss curves here"}</div><div>Hover a row to preview, select rows to pin.</div>`;
 
     card.appendChild(body);
     col.appendChild(card);
@@ -350,21 +365,18 @@ document.addEventListener("DOMContentLoaded", () => {
     if (hoverExpId) {
       const hoverExp = experimentById[hoverExpId];
       if (hoverExp) {
-        previews.push(buildPreviewCard(hoverExp, { label: "Hover preview", highlight: false, role: "hover" }));
+        previews.push(buildPreviewCard(hoverExp, { selected: false, highlight: false }));
       }
+    } else {
+      previews.push(buildPlaceholderCard("Hover preview will appear here"));
     }
 
     selectionOrder.forEach((id) => {
       const exp = experimentById[id];
       if (!exp) return;
       const highlight = highlightedSelectedId === id;
-      previews.push(buildPreviewCard(exp, { label: "Selected", highlight, role: "selected" }));
+      previews.push(buildPreviewCard(exp, { selected: true, highlight }));
     });
-
-    if (previews.length === 0) {
-      previewContainer.appendChild(buildPlaceholderCard());
-      return;
-    }
 
     previews.forEach((node) => previewContainer.appendChild(node));
   }
