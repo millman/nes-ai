@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Utility to thin out step image files (e.g., step_00010.png) within a directory tree.
+Utility to thin out step image files (e.g., step_00010.png or ep01_step00010.png)
+within a directory tree.
 
 Given a root directory and a keep interval, the script walks every subdirectory,
 identifies files that match the pattern `step_<number>.<ext>`, and removes files whose
@@ -16,7 +17,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
-STEP_REGEX = re.compile(r"step_(\d+)")
+# Matches both step_00010 and ep01_step00010 style filenames.
+STEP_REGEX = re.compile(r"step_?(\d+)")
+DEFAULT_GLOBS = ["step_*.png", "*_step*.png", "*step*.png"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,10 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--glob",
         action="append",
-        default=["step_*.png"],
+        default=DEFAULT_GLOBS.copy(),
         help=(
             "Glob pattern to match files (relative to each path). "
-            "May be supplied multiple times. Defaults to step_*.png."
+            "May be supplied multiple times. Defaults to step_*.png, *_step*.png, "
+            "and *step*.png (covers epXX_stepNNNN and losses_step_NNNNN files)."
         ),
     )
     parser.add_argument(
@@ -140,4 +144,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # Allow piping to tools like `head` without noisy tracebacks.
+        pass
