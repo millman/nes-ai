@@ -302,17 +302,22 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             if per_step:
                 diagnostics_csv_map[name] = per_step
 
-        frame_map: Dict[int, List[str]] = {}
-        for step, images in selected.diagnostics_frames.items():
-            urls: List[str] = []
-            for img in images:
+        frame_map: Dict[int, List[Dict[str, str]]] = {}
+        for step, frames in selected.diagnostics_frames.items():
+            entries: List[Dict[str, str]] = []
+            for img_path, src_path in frames:
                 try:
-                    rel = img.relative_to(selected.path)
+                    rel = img_path.relative_to(selected.path)
                 except ValueError:
                     continue
-                urls.append(url_for("serve_asset", relative_path=f"{selected.id}/{rel}"))
-            if urls:
-                frame_map[step] = urls
+                entries.append(
+                    {
+                        "url": url_for("serve_asset", relative_path=f"{selected.id}/{rel}"),
+                        "source": src_path or rel.as_posix(),
+                    }
+                )
+            if entries:
+                frame_map[step] = entries
 
         return render_template(
             "diagnostics_page.html",

@@ -39,7 +39,7 @@ class Experiment:
     diagnostics_images: Dict[str, List[Path]]
     diagnostics_steps: List[int]
     diagnostics_csvs: Dict[str, List[Path]]
-    diagnostics_frames: Dict[int, List[Path]]
+    diagnostics_frames: Dict[int, List[Tuple[Path, str]]]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -370,21 +370,24 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
     return csvs
 
 
-def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Path]]:
+def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str]]]:
     frames_root = root / "vis_diagnostics_frames"
     if not frames_root.exists():
         return {}
-    frame_map: Dict[int, List[Path]] = {}
+    frame_map: Dict[int, List[Tuple[Path, str]]] = {}
 
-    def _parse_step(src: str) -> int:
-        # Prefer numeric token at end of filename (e.g., state_123.png -> 123).
-        match = re.search(r"(\d+)(?:\\.[A-Za-z0-9]+)?$", src)
-        if match:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                pass
-        return 10**9  # fallback large value to push unknowns to end
+    def _natural_sort_key(path_str: str) -> Tuple:
+        """Split a path into text/int chunks so state_2 comes before state_10."""
+        parts = re.split(r"(\d+)", path_str)
+        key: List = []
+        for part in parts:
+            if not part:
+                continue
+            if part.isdigit():
+                key.append(int(part))
+            else:
+                key.append(part.lower())
+        return tuple(key)
 
     for csv_path in sorted(frames_root.glob("frames_*.csv")):
         stem = csv_path.stem
@@ -396,18 +399,18 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Path]]:
         try:
             with csv_path.open("r", newline="") as handle:
                 reader = csv.DictReader(handle)
-                sorted_entries: List[Tuple[Tuple[str, int, int], Path]] = []
+                sorted_entries: List[Tuple[Tuple, Path, str]] = []
                 for idx, row in enumerate(reader):
                     rel = row.get("image_path")
-                    src = row.get("source_path", "")
+                    src = (row.get("source_path") or "").strip()
                     if not rel:
                         continue
-                    prefix = str(Path(src).parent)
-                    sort_key = (prefix, _parse_step(src), idx)
-                    sorted_entries.append((sort_key, frames_root / rel))
+                    sort_basis = src if src else rel
+                    sort_key = (_natural_sort_key(sort_basis), idx)
+                    sorted_entries.append((sort_key, frames_root / rel, src))
                 if sorted_entries:
                     sorted_entries.sort(key=lambda t: t[0])
-                    frame_map[step] = [p for _, p in sorted_entries]
+                    frame_map[step] = [(p, src) for _, p, src in sorted_entries]
         except (OSError, csv.Error):
             continue
     return frame_map

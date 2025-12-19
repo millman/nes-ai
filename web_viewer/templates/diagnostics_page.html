@@ -102,6 +102,7 @@
             </div>
         </div>
         <img id="diagnostics-frame-img" class="rounded border d-none" alt="Diagnostic frame preview">
+        <div class="small text-muted font-monospace mt-1" id="diagnostics-frame-path"></div>
     </div>
 </div>
 {% else %}
@@ -152,7 +153,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const frameCount = document.getElementById("diagnostics-frame-count");
     const frameLabel = document.getElementById("diagnostics-frame-label");
     const frameImg = document.getElementById("diagnostics-frame-img");
-    let currentFrameUrls = [];
+    const framePath = document.getElementById("diagnostics-frame-path");
+    let currentFrames = [];
 
     function resolveUrl(diagKey, step) {
         const perDiag = diagnostics[diagKey] || {};
@@ -195,31 +197,38 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function updateFrameForIndex(idx) {
-        if (!frameImg || !frameLabel || !currentFrameUrls.length) return;
-        const clamped = Math.min(Math.max(idx, 0), currentFrameUrls.length - 1);
-        frameImg.src = currentFrameUrls[clamped];
+        if (!frameImg || !frameLabel || !currentFrames.length) return;
+        const clamped = Math.min(Math.max(idx, 0), currentFrames.length - 1);
+        const frame = currentFrames[clamped];
+        frameImg.src = frame.url;
         frameImg.classList.remove("d-none");
-        frameLabel.textContent = `Frame ${clamped + 1} / ${currentFrameUrls.length}`;
+        frameLabel.textContent = `Frame ${clamped + 1} / ${currentFrames.length}`;
+        if (framePath) {
+            framePath.textContent = frame.source || "Unknown source path";
+        }
     }
 
     function updateFrameSlider(step) {
         if (!frameSlider || !frameCount || !frameLabel || !frameImg) return;
-        const urls = frameMap[step] || frameMap[String(step)] || [];
-        currentFrameUrls = urls;
-        if (!urls.length) {
+        const frames = frameMap[step] || frameMap[String(step)] || [];
+        currentFrames = frames;
+        if (!frames.length) {
             frameSlider.disabled = true;
             frameSlider.max = 0;
             frameSlider.value = 0;
             frameCount.textContent = "0";
             frameLabel.textContent = "No frames for this step";
             frameImg.classList.add("d-none");
+            if (framePath) {
+                framePath.textContent = "";
+            }
             return;
         }
         frameSlider.disabled = false;
-        frameSlider.max = urls.length - 1;
-        const newVal = Math.min(Number(frameSlider.value || 0), urls.length - 1);
+        frameSlider.max = frames.length - 1;
+        const newVal = Math.min(Number(frameSlider.value || 0), frames.length - 1);
         frameSlider.value = newVal;
-        frameCount.textContent = String(urls.length);
+        frameCount.textContent = String(frames.length);
         updateFrameForIndex(newVal);
     }
 

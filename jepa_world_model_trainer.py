@@ -10,6 +10,7 @@ from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tup
 import math
 import random
 import shutil
+import re
 
 import csv
 import numpy as np
@@ -215,7 +216,7 @@ class ModelConfig:
     """
 
     in_channels: int = 3
-    image_size: int = 128
+    image_size: int = 64
     hidden_dim: int = 512
     encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
@@ -332,6 +333,12 @@ class DebugVisualization:
 
 
 @dataclass
+class NormalizeLossesConfig:
+    decay: float = 0.99
+    epsilon: float = 1e-4
+
+
+@dataclass
 class DiagnosticsConfig:
     enabled: bool = True
     sample_sequences: int = 128
@@ -368,6 +375,8 @@ class TrainConfig:
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
+    loss_normalization_enabled: bool = True
+    normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
 
     # Specific losses
     ema: LossEMAConfig = field(default_factory=LossEMAConfig)
@@ -819,6 +828,7 @@ def training_step(
     weights: LossWeights,
     ema_model: Optional[JEPAWorldModel] = None,
     ema_momentum: float = 0.0,
+    loss_norm_ema: Optional[Dict[str, float]] = None,
 ) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo]]:
     metrics, difficulty_info, world_loss, grads = _compute_losses_and_metrics(
         model,
@@ -831,6 +841,10 @@ def training_step(
         track_hard_examples=True,
         for_training=True,
         optimizer=optimizer,
+        loss_norm_ema=loss_norm_ema,
+        loss_norm_enabled=cfg.loss_normalization_enabled,
+        loss_norm_decay=cfg.normalize_losses.decay,
+        update_loss_norm=True,
     )
     return metrics, difficulty_info
 
@@ -842,6 +856,7 @@ def validation_step(
     batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
     cfg: TrainConfig,
     weights: LossWeights,
+    loss_norm_ema: Optional[Dict[str, float]],
 ) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo]]:
     metrics, difficulty_info, _, _ = _compute_losses_and_metrics(
         model,
@@ -854,6 +869,10 @@ def validation_step(
         track_hard_examples=True,
         for_training=False,
         optimizer=None,
+        loss_norm_ema=loss_norm_ema,
+        loss_norm_enabled=cfg.loss_normalization_enabled,
+        loss_norm_decay=cfg.normalize_losses.decay,
+        update_loss_norm=False,
     )
     return metrics, difficulty_info
 
@@ -869,6 +888,10 @@ def _compute_losses_and_metrics(
     track_hard_examples: bool,
     for_training: bool,
     optimizer: Optional[torch.optim.Optimizer],
+    loss_norm_ema: Optional[Dict[str, float]] = None,
+    loss_norm_enabled: bool = True,
+    loss_norm_decay: float = 0.99,
+    update_loss_norm: bool = True,
 ) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo], torch.Tensor, Tuple[float, float]]:
     images, actions = batch[0], batch[1]
     batch_paths = batch[2] if len(batch) > 2 else None
@@ -899,6 +922,17 @@ def _compute_losses_and_metrics(
         loss_action = ACTION_RECON_LOSS(action_logits, prev_actions)
     else:
         loss_action = images.new_tensor(0.0)
+
+    with torch.no_grad():
+        if prev_actions.numel() > 0:
+            action_probs = torch.sigmoid(action_logits)
+            action_pred = (action_probs >= 0.5).float()
+            action_target = prev_actions.float()
+            action_accuracy_bit = (action_pred == action_target).float().mean()
+            action_accuracy_all = (action_pred == action_target).all(dim=-1).float().mean()
+        else:
+            action_accuracy_bit = images.new_tensor(0.0)
+            action_accuracy_all = images.new_tensor(0.0)
 
     loss_rollout = (
         rollout_loss(model, outputs["embeddings"], actions, cfg.rollout.horizon)
@@ -941,18 +975,34 @@ def _compute_losses_and_metrics(
     else:
         loss_recon_patch = images.new_tensor(0.0)
 
+    def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
+        if not loss_norm_enabled:
+            return loss_tensor
+        if loss_norm_ema is None:
+            return loss_tensor
+        val = float(loss_tensor.detach().mean().item())
+        prev = loss_norm_ema.get(name)
+        if prev is None:
+            ema_val = val
+        else:
+            ema_val = loss_norm_decay * prev + (1.0 - loss_norm_decay) * val
+        if update_loss_norm:
+            loss_norm_ema[name] = ema_val
+        denom = max(ema_val, cfg.normalize_losses.epsilon)
+        return loss_tensor / denom
+
     world_loss = (
-        weights.jepa * loss_jepa
-        + weights.delta * loss_delta
-        + weights.sigreg * loss_sigreg
-        + weights.rollout * loss_rollout
-        + weights.consistency * loss_consistency
-        + weights.ema_consistency * loss_ema_consistency
-        + weights.action_recon * loss_action
-        + weights.recon * loss_recon
-        + weights.recon_multi_gauss * loss_recon_multi_gauss
-        + weights.recon_multi_box * loss_recon_multi_box
-        + weights.recon_patch * loss_recon_patch
+        weights.jepa * _scaled("loss_jepa", loss_jepa)
+        + weights.delta * _scaled("loss_delta", loss_delta)
+        + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
+        + weights.rollout * _scaled("loss_rollout", loss_rollout)
+        + weights.consistency * _scaled("loss_consistency", loss_consistency)
+        + weights.ema_consistency * _scaled("loss_ema_consistency", loss_ema_consistency)
+        + weights.action_recon * _scaled("loss_action", loss_action)
+        + weights.recon * _scaled("loss_recon", loss_recon)
+        + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
+        + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
+        + weights.recon_patch * _scaled("loss_recon_patch", loss_recon_patch)
     )
 
     world_grad_norm = 0.0
@@ -998,6 +1048,8 @@ def _compute_losses_and_metrics(
         "delta_pred_norm": delta_pred_norm.item(),
         "delta_target_norm": delta_target_norm.item(),
         "loss_world": world_loss.item(),
+        "action_accuracy_bit": action_accuracy_bit.item(),
+        "action_accuracy_all": action_accuracy_all.item(),
     }
     if for_training:
         metrics["grad_world"] = world_grad_norm
@@ -1221,6 +1273,8 @@ LOSS_COLUMNS = [
     "loss_delta",
     "delta_pred_norm",
     "delta_target_norm",
+    "action_accuracy_bit",
+    "action_accuracy_all",
     "grad_world",
     "grad_decoder",
 ]
@@ -1250,6 +1304,8 @@ class LossHistory:
     delta: List[float] = field(default_factory=list)
     delta_pred_norm: List[float] = field(default_factory=list)
     delta_target_norm: List[float] = field(default_factory=list)
+    action_acc_bit: List[float] = field(default_factory=list)
+    action_acc_all: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
 
@@ -1276,6 +1332,8 @@ class LossHistory:
         self.delta.append(metrics["loss_delta"])
         self.delta_pred_norm.append(metrics["delta_pred_norm"])
         self.delta_target_norm.append(metrics["delta_target_norm"])
+        self.action_acc_bit.append(metrics.get("action_accuracy_bit", 0.0))
+        self.action_acc_all.append(metrics.get("action_accuracy_all", 0.0))
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
 
@@ -1313,6 +1371,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.delta,
             history.delta_pred_norm,
             history.delta_target_norm,
+            history.action_acc_bit,
+            history.action_acc_all,
             history.grad_world,
             history.grad_decoder,
         ):
@@ -2517,6 +2577,44 @@ def _write_action_alignment_report(
             )
 
 
+def _write_action_alignment_strength(
+    alignment_dir: Path,
+    global_step: int,
+    stats: List[Dict[str, Any]],
+    action_dim: int,
+) -> None:
+    """Summarize per-action directional strength relative to step magnitude."""
+    path = alignment_dir / f"action_alignment_strength_{global_step:07d}.txt"
+    with path.open("w") as handle:
+        if not stats:
+            handle.write("No actions met alignment criteria.\n")
+            return
+        handle.write(
+            "Per-action directional strength (mean_dir_norm / delta_norm_median)\n"
+            "Lower ratios imply the average direction is weak relative to per-step magnitude (possible aliasing/sign flips).\n\n"
+        )
+        handle.write(
+            "action_id\tlabel\tcount\tmean_cos\tstd\tfrac_neg\tmean_dir_norm\tdelta_norm_median\tstrength_ratio\tnote\n"
+        )
+        for stat in stats:
+            delta_med = float(stat.get("delta_norm_median", float("nan")))
+            mean_norm = float(stat.get("mean_dir_norm", float("nan")))
+            strength = float("nan")
+            if np.isfinite(delta_med) and delta_med > 0 and np.isfinite(mean_norm):
+                strength = mean_norm / delta_med
+            note = ""
+            if not np.isfinite(strength) or strength < 0.05:
+                note = "weak mean vs magnitude"
+            elif strength < 0.15:
+                note = "moderate mean vs magnitude"
+            handle.write(
+                f"{stat.get('action_id')}\t{_decode_action_id(stat.get('action_id', -1), action_dim)}"
+                f"\t{stat.get('count', 0)}\t{stat.get('mean', float('nan')):.4f}"
+                f"\t{stat.get('std', float('nan')):.4f}\t{stat.get('frac_neg', float('nan')):.3f}"
+                f"\t{mean_norm:.4f}\t{delta_med:.4f}\t{strength:.4f}\t{note}\n"
+            )
+
+
 def _write_action_alignment_crosscheck(
     alignment_dir: Path,
     global_step: int,
@@ -2739,10 +2837,20 @@ def _save_diagnostics_frames(
     csv_path = frames_dir / f"frames_{global_step:07d}.csv"
     max_save = frames.shape[0]
     entries: List[Tuple[str, int]] = []
+
+    def _natural_path_key(path_str: str) -> Tuple:
+        parts = re.split(r"(\d+)", path_str)
+        key: List = []
+        for part in parts:
+            if not part:
+                continue
+            key.append(int(part) if part.isdigit() else part.lower())
+        return tuple(key)
+
     for idx in range(max_save):
         src_path = paths[idx][0] if paths and idx < len(paths) and paths[idx] else ""
         entries.append((src_path, idx))
-    entries.sort(key=lambda t: t[0])
+    entries.sort(key=lambda t: _natural_path_key(t[0]))
     new_sources_sorted = [src for src, _ in entries]
 
     # Try to reuse existing frames if the sources match exactly.
@@ -2757,7 +2865,7 @@ def _save_diagnostics_frames(
         if not existing_records:
             continue
         existing_sources = [row.get("source_path", "") for row in existing_records]
-        existing_sources_sorted = sorted(existing_sources)
+        existing_sources_sorted = sorted(existing_sources, key=_natural_path_key)
         if len(existing_sources_sorted) != len(new_sources_sorted):
             continue
         if existing_sources_sorted == new_sources_sorted:
@@ -2852,6 +2960,7 @@ def _save_diagnostics_outputs(
         motion["action_dim"],
     )
     _write_action_alignment_report(alignment_dir, global_step, alignment_stats_full, motion["action_dim"], inverse_map)
+    _write_action_alignment_strength(alignment_dir, global_step, alignment_stats_full, motion["action_dim"])
     _write_action_alignment_crosscheck(
         alignment_dir,
         global_step,
@@ -3347,6 +3456,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     timing_totals: Dict[str, float] = {"train": 0.0, "log": 0.0, "vis": 0.0}
     total_samples_processed = 0
     run_start_time = perf_counter()
+    loss_norm_ema: Dict[str, float] = {}
 
     # --- Main optimization loop ---
     data_iter = iter(dataloader)
@@ -3369,7 +3479,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         # Take a training step.
         train_start = perf_counter()
         metrics, difficulty_info = training_step(
-            model, decoder, optimizer, batch, cfg, weights, ema_model, cfg.ema.momentum
+            model, decoder, optimizer, batch, cfg, weights, ema_model, cfg.ema.momentum, loss_norm_ema
         )
         timing_totals["train"] += perf_counter() - train_start
 
@@ -3390,7 +3500,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 except StopIteration:
                     val_iter = iter(val_dataloader)
                     val_batch = next(val_iter)
-                val_metrics, val_difficulty = validation_step(model, decoder, val_batch, cfg, weights)
+                val_metrics, val_difficulty = validation_step(model, decoder, val_batch, cfg, weights, loss_norm_ema)
                 if hard_reservoir_val is not None and val_difficulty is not None:
                     hard_reservoir_val.update(
                         val_difficulty.indices,
