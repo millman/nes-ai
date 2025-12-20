@@ -252,11 +252,11 @@ class ModelConfig:
 @dataclass
 class LossWeights:
     jepa: float = 1.0
-    sigreg: float = 1.0
+    sigreg: float = 0.01
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 1.0
+    recon_multi_box: float = 0.3
     action_recon: float = 0.0
     delta: float = 0.0
     rollout: float = 0.0
@@ -375,7 +375,7 @@ class TrainConfig:
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
-    loss_normalization_enabled: bool = True
+    loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
 
     # Specific losses
