@@ -7,10 +7,17 @@
 {% endblock %}
 
 {% block body %}
+<style>
+.self-distance-plot {
+    height: 300px;
+    min-height: 300px;
+    max-height: 320px;
+}
+</style>
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div>
         {% if experiment %}
-        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.name }})</small></h3>
+        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
         <h3 class="mb-1">Self-distance</h3>
         <div class="text-muted small">No experiments with self_distance.csv</div>
@@ -28,28 +35,27 @@
 {% else %}
 <div class="small text-muted mb-2">
     Loaded from {{ experiment.self_distance_csv.name }}{% if experiment.self_distance_images %}, latest PNG in vis_self_distance{% endif %}.
-    <span class="ms-2">Experiment ID: <span class="font-monospace">{{ experiment.id }}</span></span>
 </div>
-<div class="row g-3">
+<div class="row gy-1 gx-3">
     <div class="col-12 col-lg-4">
-        <div id="self-distance-first-plot" class="plot-area"></div>
+        <div id="self-distance-first-plot" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="self-distance-prior-plot" class="plot-area"></div>
+        <div id="self-distance-prior-plot" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="self-distance-scatter-plot" class="plot-area"></div>
+        <div id="self-distance-scatter-plot" class="plot-area self-distance-plot"></div>
     </div>
 </div>
-<div class="row g-3 mt-3">
+<div class="row gy-1 gx-3 mt-1">
     <div class="col-12 col-lg-4">
-        <div id="self-distance-first-plot-cos" class="plot-area"></div>
+        <div id="self-distance-first-plot-cos" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="self-distance-prior-plot-cos" class="plot-area"></div>
+        <div id="self-distance-prior-plot-cos" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="self-distance-scatter-plot-cos" class="plot-area"></div>
+        <div id="self-distance-scatter-plot-cos" class="plot-area self-distance-plot"></div>
     </div>
 </div>
 <div class="row g-3 mt-3" id="self-distance-frame-row">
@@ -224,6 +230,9 @@ document.addEventListener("DOMContentLoaded", () => {
             const layoutBase = {
                 margin: { t: 32, r: 16, l: 50, b: 50 },
                 template: "plotly_white",
+                height: 300,
+                title: { font: { size: 12 } },
+                font: { size: 11 },
             };
 
             const layoutLineChart = {
@@ -247,8 +256,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         y: distFirst,
                         mode: "lines+markers",
                         name: "distance to first",
-                        marker: { size: 6 },
-                        line: { width: 2 },
+                        marker: { size: 4 },
+                        line: { width: 1.5 },
                         customdata: custom,
                         hovertemplate: "%{y:.4f}<extra></extra>",
                     },
@@ -269,8 +278,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         y: distPrior,
                         mode: "lines+markers",
                         name: "distance to prior",
-                        marker: { size: 6, color: "orange" },
-                        line: { width: 2, color: "orange" },
+                        marker: { size: 4, color: "orange" },
+                        line: { width: 1.5, color: "orange" },
                         customdata: custom,
                         hovertemplate: "%{y:.4f}<extra></extra>",
                     },
@@ -292,7 +301,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         mode: "markers",
                         name: "distance pairs",
                         marker: {
-                            size: 7,
+                            size: 5,
                             color: steps,
                             colorscale: "Viridis",
                             showscale: true,
@@ -320,8 +329,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         y: distFirstCos,
                         mode: "lines+markers",
                         name: "cosine distance to first",
-                        marker: { size: 6, color: "green" },
-                        line: { width: 2, color: "green" },
+                        marker: { size: 4, color: "green" },
+                        line: { width: 1.5, color: "green" },
                         customdata: custom,
                         hovertemplate: "%{y:.4f}<extra></extra>",
                     },
@@ -342,8 +351,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         y: distPriorCos,
                         mode: "lines+markers",
                         name: "cosine distance to prior",
-                        marker: { size: 6, color: "red" },
-                        line: { width: 2, color: "red" },
+                        marker: { size: 4, color: "red" },
+                        line: { width: 1.5, color: "red" },
                         customdata: custom,
                         hovertemplate: "%{y:.4f}<extra></extra>",
                     },
@@ -365,7 +374,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         mode: "markers",
                         name: "cosine distance pairs",
                         marker: {
-                            size: 7,
+                            size: 5,
                             color: steps,
                             colorscale: "Plasma",
                             showscale: true,

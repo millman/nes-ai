@@ -346,6 +346,7 @@ class DiagnosticsConfig:
     min_action_count: int = 5
     max_actions_to_plot: int = 12
     cosine_high_threshold: float = 0.7
+    synthesize_cycle_samples: bool = False
 
 
 @dataclass
@@ -2415,6 +2416,7 @@ def _compute_cycle_errors(
     z_proj_sequences: List[np.ndarray],
     actions_seq: np.ndarray,
     inverse_map: Dict[int, int],
+    include_synthetic: bool = False,
 ) -> Tuple[List[Tuple[int, float]], Dict[int, List[float]]]:
     errors: List[Tuple[int, float]] = []
     per_action: Dict[int, List[float]] = defaultdict(list)
@@ -2450,19 +2452,20 @@ def _compute_cycle_errors(
             cycle_err = float(np.linalg.norm(z_seq[end_idx] - z_seq[start_idx]))
             errors.append((action_for_log, cycle_err))
             per_action[action_for_log].append(cycle_err)
-    # Then, synthesize forward-backward cycles for every observed transition to
-    # increase per-action sample counts. We assume the inverse action returns
-    # to the starting state, so the ideal round-trip error is near zero.
-    for seq_idx, z_seq in enumerate(z_proj_sequences):
-        seq_actions = actions_seq[seq_idx]
-        action_ids = _compress_actions_to_ids(seq_actions)
-        max_t = min(len(action_ids), z_seq.shape[0] - 1)
-        for t in range(max_t):
-            a = int(action_ids[t])
-            # Expected end state after inverse step is the start state at t.
-            cycle_err = float(np.linalg.norm(z_seq[t] - z_seq[t]))
-            errors.append((a, cycle_err))
-            per_action[a].append(cycle_err)
+    if include_synthetic:
+        # Synthesize forward-backward cycles for every observed transition to
+        # increase per-action sample counts. We assume the inverse action returns
+        # to the starting state, so the ideal round-trip error is near zero.
+        for seq_idx, z_seq in enumerate(z_proj_sequences):
+            seq_actions = actions_seq[seq_idx]
+            action_ids = _compress_actions_to_ids(seq_actions)
+            max_t = min(len(action_ids), z_seq.shape[0] - 1)
+            for t in range(max_t):
+                a = int(action_ids[t])
+                # Expected end state after inverse step is the start state at t.
+                cycle_err = float(np.linalg.norm(z_seq[t] - z_seq[t]))
+                errors.append((a, cycle_err))
+                per_action[a].append(cycle_err)
     return errors, per_action
 
 
@@ -3048,7 +3051,12 @@ def _save_diagnostics_outputs(
         motion["delta_proj"],
     )
     cycle_path = cycle_dir / f"cycle_error_{global_step:07d}.png"
-    errors, per_action = _compute_cycle_errors(motion["z_proj_sequences"], motion["actions_seq"], inverse_map)
+    errors, per_action = _compute_cycle_errors(
+        motion["z_proj_sequences"],
+        motion["actions_seq"],
+        inverse_map,
+        include_synthetic=cfg.synthesize_cycle_samples,
+    )
     _save_cycle_error_plot(cycle_path, [e[1] for e in errors], per_action, motion["action_dim"])
     _write_diagnostics_csvs(
         delta_dir,

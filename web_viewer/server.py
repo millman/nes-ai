@@ -381,6 +381,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             abort(404, "Experiment not found for diagnostics.")
 
         build_maps_start = time.perf_counter()
+        figure = _build_single_experiment_figure(selected)
         diagnostics_map: Dict[str, Dict[int, str]] = {}
         for name, paths in selected.diagnostics_images.items():
             per_step: Dict[int, str] = {}
@@ -395,6 +396,21 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
             if per_step:
                 diagnostics_map[name] = per_step
+
+        # Add self-distance images keyed by step (matching self_distance_page)
+        if selected.self_distance_images:
+            per_step: Dict[int, str] = {}
+            for path in selected.self_distance_images:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map["self_distance"] = per_step
 
         diagnostics_csv_map: Dict[str, Dict[int, str]] = {}
         for name, paths in selected.diagnostics_csvs.items():
@@ -445,6 +461,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             diagnostics_map=diagnostics_map,
             diagnostics_csv_map=diagnostics_csv_map,
             frame_map=frame_map,
+            figure=figure,
             cfg=cfg,
             active_nav="diagnostics",
             active_experiment_id=selected.id,
