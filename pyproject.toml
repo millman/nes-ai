@@ -38,6 +38,7 @@ dependencies = [
     "PyOpenGL",
     "python-dotenv",
     "pytorch-lightning",
+    "pytorch-optimizer",
     "scikit-learn",
     "sqlitedict",
     "stable-baselines3",

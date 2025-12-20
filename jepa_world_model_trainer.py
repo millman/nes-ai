@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from collections import defaultdict
+import os
 from pathlib import Path
 from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -15,6 +16,7 @@ import re
 import csv
 import numpy as np
 from PIL import Image
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,6 +26,13 @@ from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
 from datetime import datetime
 from time import perf_counter
+
+try:
+    from pytorch_optimizer import SOAP
+except ImportError as _soap_import_error:
+    SOAP = None
+else:
+    _soap_import_error = None
 
 from recon.data import list_trajectories, load_frame_as_tensor, short_traj_state_label
 from nes_controller import CONTROLLER_STATE_DESC
@@ -373,6 +382,7 @@ class TrainConfig:
     lr: float = 1e-4
     weight_decay: float = 0.03
     device: Optional[str] = "mps"
+    use_soap: bool = False
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
@@ -3554,11 +3564,28 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     (run_dir / "metadata_model.txt").write_text(tomli_w.dumps(model_metadata))
 
     # --- Optimizer initialization ---
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(decoder.parameters()),
-        lr=cfg.lr,
-        weight_decay=cfg.weight_decay,
-    )
+    params = list(model.parameters()) + list(decoder.parameters())
+    if cfg.use_soap:
+        if SOAP is None:
+            raise ImportError(
+                "SOAP optimizer requires the pytorch-optimizer package. Install with `pip install pytorch-optimizer`."
+            ) from _soap_import_error
+        if device.type == "mps" and os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") not in {"1", "true", "TRUE"}:
+            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            print(
+                "[warning] Enabled PYTORCH_ENABLE_MPS_FALLBACK=1 for SOAP on MPS to allow CPU fallback for missing ops."
+            )
+        optimizer = SOAP(
+            params,
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            params,
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
+        )
 
     # --- Fixed visualization batch (required later) ---
     fixed_batch_cpu, fixed_selection = _build_fixed_vis_batch(dataloader, cfg.vis.rows)
