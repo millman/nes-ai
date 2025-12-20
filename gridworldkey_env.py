@@ -21,8 +21,8 @@ GRID_COLS = 16
 DISPLAY_WIDTH = GRID_COLS * TILE_SIZE
 DISPLAY_HEIGHT = 224
 INVENTORY_HEIGHT = DISPLAY_HEIGHT - GRID_PLAY_ROWS * TILE_SIZE
-AGENT_SPEED = 2
-AGENT_SIZE = TILE_SIZE
+AGENT_SPEED = 6
+AGENT_SIZE = TILE_SIZE + 6
 AGENT_RENDER_INSET = 2
 AGENT_COLLISION_INSET = 2
 KEY_RENDER_INSET = 3
@@ -98,11 +98,15 @@ class GridworldKeyEnv(gym.Env):
         keyboard_override: bool = True,
         obstacles: bool = True,
         start_manual_control: bool = False,
+        agent_size: int = AGENT_SIZE,
+        agent_speed: int = AGENT_SPEED,
     ):
         self.render_mode = render_mode
         self.keyboard_override = keyboard_override
         self.start_manual_control = start_manual_control
         self.obstacles_enabled = obstacles
+        self.agent_size = agent_size
+        self.agent_speed = agent_speed
         self.grid = _default_grid(with_obstacles=self.obstacles_enabled)
         self.action_space = spaces.Discrete(len(DISCRETE_ACTIONS))
         self.observation_space = spaces.Box(
@@ -164,8 +168,8 @@ class GridworldKeyEnv(gym.Env):
         y0 = int(self.agent_y)
         inset = AGENT_RENDER_INSET
         frame[
-            y0 + inset : y0 + AGENT_SIZE - inset,
-            x0 + inset : x0 + AGENT_SIZE - inset,
+            y0 + inset : y0 + self.agent_size - inset,
+            x0 + inset : x0 + self.agent_size - inset,
         ] = COLOR_AGENT
 
     def _draw_inventory(self, frame: np.ndarray):
@@ -251,8 +255,8 @@ class GridworldKeyEnv(gym.Env):
     def _can_occupy(self, x: int, y: int) -> bool:
         left = x + AGENT_COLLISION_INSET
         top = y + AGENT_COLLISION_INSET
-        right = x + AGENT_SIZE - AGENT_COLLISION_INSET
-        bottom = y + AGENT_SIZE - AGENT_COLLISION_INSET
+        right = x + self.agent_size - AGENT_COLLISION_INSET
+        bottom = y + self.agent_size - AGENT_COLLISION_INSET
 
         if left < 0 or top < INVENTORY_HEIGHT:
             return False
@@ -283,8 +287,8 @@ class GridworldKeyEnv(gym.Env):
         agent_rect = (
             self.agent_x + AGENT_COLLISION_INSET,
             self.agent_y + AGENT_COLLISION_INSET,
-            self.agent_x + AGENT_SIZE - AGENT_COLLISION_INSET,
-            self.agent_y + AGENT_SIZE - AGENT_COLLISION_INSET,
+            self.agent_x + self.agent_size - AGENT_COLLISION_INSET,
+            self.agent_y + self.agent_size - AGENT_COLLISION_INSET,
         )
         key_rect = (
             key_x + KEY_COLLISION_INSET,
@@ -315,8 +319,8 @@ class GridworldKeyEnv(gym.Env):
         else:
             controller_action = DISCRETE_ACTIONS[int(action)]
 
-        dx = (int(controller_action[BUTTON_RIGHT]) - int(controller_action[BUTTON_LEFT])) * AGENT_SPEED
-        dy = (int(controller_action[BUTTON_DOWN]) - int(controller_action[BUTTON_UP])) * AGENT_SPEED
+        dx = (int(controller_action[BUTTON_RIGHT]) - int(controller_action[BUTTON_LEFT])) * self.agent_speed
+        dy = (int(controller_action[BUTTON_DOWN]) - int(controller_action[BUTTON_UP])) * self.agent_speed
 
         self._slide_axis(dx, axis="x")
         self._slide_axis(dy, axis="y")
@@ -382,6 +386,8 @@ class GridworldRunnerArgs:
     dump_trajectories: bool = True
     render_mode: str = "human"
     run_root: Path = Path("runs")
+    agent_size: int = AGENT_SIZE
+    agent_speed: int = AGENT_SPEED
 
 
 def _build_run_directory(args: GridworldRunnerArgs) -> tuple[Path, str]:
@@ -412,6 +418,8 @@ def main():
         keyboard_override=args.keyboard_override,
         obstacles=not args.disable_obstacles,
         start_manual_control=args.disable_random_movement,
+        agent_size=args.agent_size,
+        agent_speed=args.agent_speed,
     )
 
     stop_running = False
