@@ -51,6 +51,59 @@
     grid-column: 4 / span 1;
 }
 
+.diagnostics-loss-wrapper {
+    position: relative;
+}
+
+.diagnostics-loss-plot {
+    height: 220px;
+}
+
+.diagnostics-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+
+.diagnostics-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.diagnostics-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+
+.diagnostics-loss-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
+}
+
+.diagnostic-subtitle {
+    font-size: 0.88em;
+    color: #6c757d;
+    font-weight: 400;
+    margin-left: 4px;
+ }
+
 @media (max-width: 991.98px) {
     .diagnostic-grid-top,
     .diagnostic-grid-bottom {
@@ -113,22 +166,32 @@
 {% else %}
 
 {% if step_count %}
-<div class="card mb-3">
-    <div class="card-body">
-        <div id="diagnostics-loss-plot" style="height: 220px;"></div>
-    </div>
+<div class="diagnostics-loss-wrapper mb-3" id="diagnostics-loss-wrapper">
+    <button
+        type="button"
+        class="diagnostics-pin-btn"
+        id="diagnostics-loss-pin"
+        aria-pressed="false"
+        aria-label="Pin diagnostics plot"
+        title="Pin diagnostics plot"
+    >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+        </svg>
+    </button>
+    <div id="diagnostics-loss-plot" class="diagnostics-loss-plot"></div>
 </div>
 <div id="diagnostics-top-grid" class="collapse show">
     <div class="diagnostic-grid-top mb-3">
         <div class="card h-100 diag-delta">
-            <div class="card-header py-2">Delta-z PCA</div>
+            <div class="card-header py-2" id="diagnostics-delta-header">Delta-z PCA</div>
             <div class="card-body d-flex flex-column gap-2">
                 <img id="diagnostics-delta-img" class="img-fluid rounded border d-none" alt="Delta-z PCA diagnostic">
                 <div class="text-muted small" id="diagnostics-delta-caption"></div>
             </div>
         </div>
         <div class="card h-100 diag-align-detail">
-            <div class="card-header py-2">Alignment detail</div>
+            <div class="card-header py-2" id="diagnostics-alignment-detail-header">Alignment detail</div>
             <div class="card-body d-flex flex-column gap-2">
                 <img id="diagnostics-alignment-detail-img" class="img-fluid rounded border d-none" alt="Alignment detail diagnostic">
                 <div class="text-muted small" id="diagnostics-alignment-detail-caption"></div>
@@ -138,21 +201,21 @@
 </div>
 <div class="diagnostic-grid-bottom mb-3">
     <div class="card h-100 diag-self-distance">
-        <div class="card-header py-2">Self-distance</div>
+        <div class="card-header py-2" id="diagnostics-self-distance-header">Self-distance</div>
         <div class="card-body d-flex flex-column gap-2">
             <img id="diagnostics-self-distance-img" class="img-fluid rounded border d-none" alt="Self-distance diagnostic">
             <div class="text-muted small" id="diagnostics-self-distance-caption"></div>
         </div>
     </div>
     <div class="card h-100 diag-cosine">
-        <div class="card-header py-2">Cosine alignment</div>
+        <div class="card-header py-2" id="diagnostics-alignment-header">Cosine alignment</div>
         <div class="card-body d-flex flex-column gap-2">
             <img id="diagnostics-alignment-img" class="img-fluid rounded border d-none" alt="Cosine alignment diagnostic">
             <div class="text-muted small" id="diagnostics-alignment-caption"></div>
         </div>
     </div>
     <div class="card h-100 diag-cycle">
-        <div class="card-header py-2">Cycle error</div>
+        <div class="card-header py-2" id="diagnostics-cycle-header">Cycle error</div>
         <div class="card-body d-flex flex-column gap-2">
             <img id="diagnostics-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error diagnostic">
             <div class="text-muted small" id="diagnostics-cycle-caption"></div>
@@ -192,6 +255,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const frameSteps = Object.keys(frameMap || {}).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
     const stepLabel = document.getElementById("diagnostics-step-label");
     const lossPlot = document.getElementById("diagnostics-loss-plot");
+    const lossWrapper = document.getElementById("diagnostics-loss-wrapper");
+    const lossPinButton = document.getElementById("diagnostics-loss-pin");
     const figure = {{ figure | tojson if figure else 'null' }};
     const topGrid = document.getElementById("diagnostics-top-grid");
     const toggleBtn = document.getElementById("diagnostics-toggle-btn");
@@ -199,26 +264,36 @@ document.addEventListener("DOMContentLoaded", () => {
         delta_z_pca: {
             img: document.getElementById("diagnostics-delta-img"),
             caption: document.getElementById("diagnostics-delta-caption"),
+            header: document.getElementById("diagnostics-delta-header"),
+            title: "Delta-z PCA",
             label: "vis_delta_z_pca",
         },
         action_alignment: {
             img: document.getElementById("diagnostics-alignment-img"),
             caption: document.getElementById("diagnostics-alignment-caption"),
+            header: document.getElementById("diagnostics-alignment-header"),
+            title: "Cosine alignment",
             label: "vis_action_alignment",
         },
         action_alignment_detail: {
             img: document.getElementById("diagnostics-alignment-detail-img"),
             caption: document.getElementById("diagnostics-alignment-detail-caption"),
+            header: document.getElementById("diagnostics-alignment-detail-header"),
+            title: "Alignment detail",
             label: "alignment detail",
         },
         cycle_error: {
             img: document.getElementById("diagnostics-cycle-img"),
             caption: document.getElementById("diagnostics-cycle-caption"),
+            header: document.getElementById("diagnostics-cycle-header"),
+            title: "Cycle error",
             label: "vis_cycle_error",
         },
         self_distance: {
             img: document.getElementById("diagnostics-self-distance-img"),
             caption: document.getElementById("diagnostics-self-distance-caption"),
+            header: document.getElementById("diagnostics-self-distance-header"),
+            title: "Self-distance",
             label: "self_distance",
         },
     };
@@ -231,6 +306,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const frameDimensions = document.getElementById("diagnostics-frame-dimensions");
     let hasHover = false;
     let currentFrames = [];
+    let lossPinned = false;
+
+    // Update CSV links for the selected step if present (no-op fallback).
+    function populateCsvLinks(step) {
+        const csvLink = document.getElementById("diagnostics-csv-link");
+        if (!csvLink || !diagnostics?.csv_base_url) return;
+        const nearest = nearestStep(step);
+        const resolvedStep = nearest !== null ? nearest : step;
+        csvLink.href = `${diagnostics.csv_base_url}/${resolvedStep}.csv`;
+        csvLink.classList.remove("d-none");
+    }
 
     function resolveUrl(diagKey, step) {
         const perDiag = diagnostics[diagKey] || {};
@@ -309,12 +395,19 @@ document.addEventListener("DOMContentLoaded", () => {
         Object.entries(targets).forEach(([key, refs]) => {
             if (!refs.img || !refs.caption) return;
             const url = resolveUrl(key, step);
+            const headerText = refs.title ? refs.title : "";
             if (url) {
                 refs.img.src = url;
                 refs.img.classList.remove("d-none");
-                refs.caption.textContent = `${refs.label} @ step ${step}`;
+                if (refs.header) {
+                    refs.header.innerHTML = `${headerText} <span class="diagnostic-subtitle">(${refs.label} @ step ${step})</span>`;
+                }
+                refs.caption.textContent = "";
             } else {
                 refs.img.classList.add("d-none");
+                if (refs.header) {
+                    refs.header.textContent = headerText;
+                }
                 refs.caption.textContent = `No image for step ${step} in ${refs.label}`;
             }
         });
@@ -344,6 +437,19 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         });
     }
+
+    // Toggle sticky positioning for the diagnostics loss plot.
+    function setLossPinned(pinned) {
+        if (!lossWrapper || !lossPinButton) return;
+        lossPinned = pinned;
+        lossWrapper.classList.toggle("sticky-active", pinned);
+        lossPinButton.classList.toggle("active", pinned);
+        lossPinButton.setAttribute("aria-pressed", pinned ? "true" : "false");
+        lossPinButton.setAttribute("title", pinned ? "Unpin diagnostics plot" : "Pin diagnostics plot");
+    }
+
+    // Ensure initial state is rendered.
+    setLossPinned(false);
 
     if (frameSlider) {
         frameSlider.addEventListener("input", (ev) => {
@@ -387,6 +493,11 @@ document.addEventListener("DOMContentLoaded", () => {
         topGrid.addEventListener("hidden.bs.collapse", () => {
             toggleBtn.textContent = "Expand Delta/Alignment";
             toggleBtn.setAttribute("aria-expanded", "false");
+        });
+    }
+    if (lossPinButton && lossWrapper) {
+        lossPinButton.addEventListener("click", () => {
+            setLossPinned(!lossPinned);
         });
     }
 });

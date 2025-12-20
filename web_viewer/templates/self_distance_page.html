@@ -13,6 +13,54 @@
     min-height: 300px;
     max-height: 320px;
 }
+
+.plot-pin-wrapper {
+    position: relative;
+}
+
+.plot-pin-plot {
+    height: 220px;
+}
+
+.plot-pin-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
+    padding-bottom: 0.5rem;
+}
+
+.plot-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+
+.plot-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.plot-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+
 </style>
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div>
@@ -36,7 +84,7 @@
 <div class="small text-muted mb-2">
     Loaded from {{ experiment.self_distance_csv.name }}{% if experiment.self_distance_images %}, latest PNG in vis_self_distance{% endif %}.
 </div>
-<div class="row gy-1 gx-3">
+<div class="row gy-1 gx-3 mt-3">
     <div class="col-12 col-lg-4">
         <div id="self-distance-first-plot" class="plot-area self-distance-plot"></div>
     </div>
@@ -87,20 +135,31 @@
         </div>
     </div>
 </div>
-{% if experiment.self_distance_images %}
-<div class="mt-4">
-    <div class="small text-muted mb-2">Saved visualizations (latest last):</div>
-    <div class="row g-2">
-        {% for img in experiment.self_distance_images %}
-        {% set rel_img = img.relative_to(experiment.path) %}
-        <div class="col-12 col-md-6 col-lg-4">
-            <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}" alt="Self-distance snapshot {{ rel_img }}" class="img-fluid rounded border">
-            <div class="text-muted small font-monospace mt-1">{{ rel_img }}</div>
-        </div>
-        {% endfor %}
+<div class="d-flex align-items-center justify-content-between mb-2 mt-4">
+    <h6 class="mb-0">Training metrics (loss)</h6>
+</div>
+<div class="plot-pin-wrapper mb-3" id="self-distance-loss-wrapper">
+    <button
+        type="button"
+        class="plot-pin-btn"
+        id="self-distance-loss-pin"
+        aria-pressed="false"
+        aria-label="Pin training metrics plot"
+        title="Pin training metrics plot"
+    >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+        </svg>
+    </button>
+    <div id="self-distance-loss-plot" class="plot-pin-plot"></div>
+</div>
+<div class="card mt-3">
+    <div class="card-header py-2">Self-distance image</div>
+    <div class="card-body d-flex flex-column gap-2 align-items-start">
+        <img id="self-distance-step-img" class="img-fluid rounded border d-none" alt="Self-distance step">
+        <div class="text-muted small font-monospace" id="self-distance-step-path"></div>
     </div>
 </div>
-{% endif %}
 {% endif %}
 {% endblock %}
 
@@ -141,6 +200,13 @@ document.addEventListener("DOMContentLoaded", () => {
         const priorLabel = document.getElementById("self-distance-prior-label");
         const currentLabel = document.getElementById("self-distance-current-label");
         const frameRow = document.getElementById("self-distance-frame-row");
+        const stepImg = document.getElementById("self-distance-step-img");
+        const stepPath = document.getElementById("self-distance-step-path");
+        const diagLossPlot = document.getElementById("self-distance-loss-plot");
+        const diagLossWrapper = document.getElementById("self-distance-loss-wrapper");
+        const diagLossPin = document.getElementById("self-distance-loss-pin");
+        const diagFigure = {{ figure | tojson if figure else 'null' }};
+        let diagLossPinned = false;
 
         const assetPath = (rel) => `/assets/{{ experiment.id }}/${rel.replace(/^\/+/, "")}`;
         const setImage = (imgEl, labelEl, relPath, labelText) => {
@@ -166,6 +232,51 @@ document.addEventListener("DOMContentLoaded", () => {
                     priorCol.classList.add("d-none");
                 }
             }
+        };
+
+        const selfDistanceMap = {};
+        {% if experiment.self_distance_images %}
+        {% for img in experiment.self_distance_images %}
+        {% if "cosine" not in img.stem %}
+        {% set rel_img = img.relative_to(experiment.path) %}
+        {% set stem = img.stem.split('_')|last %}
+        {% set step = stem|int %}
+        selfDistanceMap[{{ step }}] = {
+            url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
+            path: "{{ rel_img }}",
+        };
+        {% endif %}
+        {% endfor %}
+        {% endif %}
+        const selfDistanceSteps = Object.keys(selfDistanceMap).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+
+        const nearestSelfStep = (step) => {
+            if (!selfDistanceSteps.length) return null;
+            let best = selfDistanceSteps[0];
+            let bestDiff = Math.abs(step - selfDistanceSteps[0]);
+            for (let i = 1; i < selfDistanceSteps.length; i++) {
+                const diff = Math.abs(step - selfDistanceSteps[i]);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
+                    best = selfDistanceSteps[i];
+                }
+            }
+            return best;
+        };
+
+        const updateSelfDistanceImage = (step) => {
+            if (!stepImg || !stepPath) return;
+            const nearest = nearestSelfStep(step);
+            if (nearest === null || !selfDistanceMap[nearest]) {
+                stepImg.classList.add("d-none");
+                stepPath.textContent = "No self-distance image available.";
+                return;
+            }
+            const entry = selfDistanceMap[nearest];
+            stepImg.src = entry.url;
+            stepImg.alt = `Self-distance step ${nearest}`;
+            stepImg.classList.remove("d-none");
+            stepPath.textContent = `${entry.path} (step ${nearest})`;
         };
 
         const attachHover = (plotEl, mode) => {
@@ -200,6 +311,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     setImage(priorImg, priorLabel, priorPath, `prior: t=${Math.max(0, step - 1)}`);
                     setImage(currentImg, currentLabel, framePath, headerText);
                 }
+                updateSelfDistanceImage(step);
             });
         };
 
@@ -416,6 +528,40 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
         });
+
+        const initialStep = {{ experiment.rollout_steps[-1] if experiment.rollout_steps else 0 }};
+        updateSelfDistanceImage(initialStep);
+
+        const setLossPinned = (pinned) => {
+            if (!diagLossWrapper || !diagLossPin) return;
+            diagLossPinned = pinned;
+            diagLossWrapper.classList.toggle("sticky-active", pinned);
+            diagLossPin.classList.toggle("active", pinned);
+            diagLossPin.setAttribute("aria-pressed", pinned ? "true" : "false");
+            diagLossPin.setAttribute("title", pinned ? "Unpin training metrics plot" : "Pin training metrics plot");
+        };
+
+        if (diagLossPlot && diagFigure && diagFigure.data && diagFigure.layout) {
+            const diagLayout = {
+                ...diagFigure.layout,
+                height: 220,
+                margin: { ...(diagFigure.layout?.margin || {}), t: 30, b: 50, l: 50, r: 10 },
+            };
+            Plotly.react(diagLossPlot, diagFigure.data, diagLayout, buildPlotlyConfig(diagFigure.config || {})).then(() => {
+                diagLossPlot.on("plotly_hover", (event) => {
+                    const point = event?.points?.[0];
+                    if (!point || typeof point.x === "undefined") return;
+                    updateSelfDistanceImage(point.x);
+                });
+            });
+        }
+
+        if (diagLossPin && diagLossWrapper) {
+            diagLossPin.addEventListener("click", () => {
+                setLossPinned(!diagLossPinned);
+            });
+            setLossPinned(false);
+        }
     });
 </script>
 {% endif %}

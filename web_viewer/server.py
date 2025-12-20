@@ -324,10 +324,13 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if selected is None or selected.self_distance_csv is None:
             abort(404, "Experiment not found for self-distance.")
 
+        figure = _build_single_experiment_figure(selected)
+
         return render_template(
             "self_distance_page.html",
             experiments=[],
             experiment=selected,
+            figure=figure,
             cfg=cfg,
             active_nav="self_distance",
             active_experiment_id=selected.id,
