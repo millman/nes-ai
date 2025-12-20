@@ -41,6 +41,17 @@
         <div id="self-distance-scatter-plot" class="plot-area"></div>
     </div>
 </div>
+<div class="row g-3 mt-3">
+    <div class="col-12 col-lg-4">
+        <div id="self-distance-first-plot-cos" class="plot-area"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="self-distance-prior-plot-cos" class="plot-area"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="self-distance-scatter-plot-cos" class="plot-area"></div>
+    </div>
+</div>
 <div class="row g-3 mt-3" id="self-distance-frame-row">
     <div class="col-12 col-md-4">
         <div class="card h-100">
@@ -71,10 +82,17 @@
     </div>
 </div>
 {% if experiment.self_distance_images %}
-{% set latest_self = experiment.self_distance_images[-1].relative_to(experiment.path) %}
 <div class="mt-4">
-    <div class="small text-muted mb-1">Latest saved visualization:</div>
-    <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ latest_self) }}" alt="Self-distance snapshot for {{ experiment.name }}" class="img-fluid rounded border">
+    <div class="small text-muted mb-2">Saved visualizations (latest last):</div>
+    <div class="row g-2">
+        {% for img in experiment.self_distance_images %}
+        {% set rel_img = img.relative_to(experiment.path) %}
+        <div class="col-12 col-md-6 col-lg-4">
+            <img src="{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}" alt="Self-distance snapshot {{ rel_img }}" class="img-fluid rounded border">
+            <div class="text-muted small font-monospace mt-1">{{ rel_img }}</div>
+        </div>
+        {% endfor %}
+    </div>
 </div>
 {% endif %}
 {% endif %}
@@ -107,6 +125,9 @@ document.addEventListener("DOMContentLoaded", () => {
         const firstPlot = document.getElementById("self-distance-first-plot");
         const priorPlot = document.getElementById("self-distance-prior-plot");
         const scatterPlot = document.getElementById("self-distance-scatter-plot");
+        const firstPlotCos = document.getElementById("self-distance-first-plot-cos");
+        const priorPlotCos = document.getElementById("self-distance-prior-plot-cos");
+        const scatterPlotCos = document.getElementById("self-distance-scatter-plot-cos");
         const firstImg = document.getElementById("self-distance-first-img");
         const priorImg = document.getElementById("self-distance-prior-img");
         const currentImg = document.getElementById("self-distance-current-img");
@@ -181,11 +202,16 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance.csv.</p>";
                 if (priorPlot) priorPlot.innerHTML = "";
                 if (scatterPlot) scatterPlot.innerHTML = "";
+                if (firstPlotCos) firstPlotCos.innerHTML = "";
+                if (priorPlotCos) priorPlotCos.innerHTML = "";
+                if (scatterPlotCos) scatterPlotCos.innerHTML = "";
                 return;
             }
             const steps = rows.map(r => Number(r.timestep));
             const distFirst = rows.map(r => Number(r.distance_to_first));
             const distPrior = rows.map(r => Number(r.distance_to_prior));
+            const distFirstCos = rows.map(r => Number(r.cosine_distance_to_first ?? r.distance_to_first_cosine ?? 0));
+            const distPriorCos = rows.map(r => Number(r.cosine_distance_to_prior ?? r.distance_to_prior_cosine ?? 0));
             const custom = rows.map(r => [
                 r.trajectory,
                 Number(r.timestep),
@@ -285,6 +311,79 @@ document.addEventListener("DOMContentLoaded", () => {
                 },
                 plotConfig,
             ).then(() => attachHover(scatterPlot, "scatter"));
+
+            Plotly.newPlot(
+                firstPlotCos,
+                [
+                    {
+                        x: steps,
+                        y: distFirstCos,
+                        mode: "lines+markers",
+                        name: "cosine distance to first",
+                        marker: { size: 6, color: "green" },
+                        line: { width: 2, color: "green" },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Cosine distance to first latent",
+                    yaxis: { title: "1 - cos(z0, zt)" },
+                },
+                plotConfig,
+            ).then(() => attachHover(firstPlotCos, "first"));
+
+            Plotly.newPlot(
+                priorPlotCos,
+                [
+                    {
+                        x: steps,
+                        y: distPriorCos,
+                        mode: "lines+markers",
+                        name: "cosine distance to prior",
+                        marker: { size: 6, color: "red" },
+                        line: { width: 2, color: "red" },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Cosine distance to prior latent",
+                    yaxis: { title: "1 - cos(z(t-1), zt)" },
+                },
+                plotConfig,
+            ).then(() => attachHover(priorPlotCos, "prior"));
+
+            Plotly.newPlot(
+                scatterPlotCos,
+                [
+                    {
+                        x: distFirstCos,
+                        y: distPriorCos,
+                        mode: "markers",
+                        name: "cosine distance pairs",
+                        marker: {
+                            size: 7,
+                            color: steps,
+                            colorscale: "Plasma",
+                            showscale: true,
+                            colorbar: { title: "timestep" },
+                        },
+                        customdata: custom,
+                        hovertemplate: "cos dist vs first=%{x:.4f}<br>cos dist vs prior=%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutBase,
+                    hovermode: "closest",
+                    title: "Cosine distance: first vs prior",
+                    xaxis: { title: "1 - cos(z0, zt)" },
+                    yaxis: { title: "1 - cos(z(t-1), zt)" },
+                },
+                plotConfig,
+            ).then(() => attachHover(scatterPlotCos, "scatter"));
         };
 
         Papa.parse(csvUrl, {

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -29,6 +32,7 @@ from .experiments import (
     write_notes,
     write_tags,
     write_title,
+    _diagnostics_exists,
 )
 from .plots import build_overlay
 
@@ -59,6 +63,7 @@ def _format_last_modified(dt: Optional[datetime]) -> str:
 
 def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     cfg = config or ViewerConfig()
+    profile_enabled = os.environ.get("VIEWER_PROFILE", "").lower() in {"1", "true", "yes", "on"}
     app = Flask(
         __name__,
         template_folder=str(PACKAGE_ROOT / "templates"),
@@ -69,6 +74,25 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
     # Register custom Jinja filters
     app.jinja_env.filters["format_last_modified"] = _format_last_modified
+
+    if profile_enabled:
+        profile_logger = logging.getLogger("web_viewer.profile")
+        profile_logger.setLevel(logging.INFO)
+        profile_logger.propagate = True
+        # Mirror app logger handlers so profile logs show up alongside request logs.
+        if not profile_logger.handlers:
+            for handler in app.logger.handlers:
+                profile_logger.addHandler(handler)
+        if app.logger.level > logging.INFO:
+            app.logger.setLevel(logging.INFO)
+
+    def _log_timing(label: str, start_time: float, **fields) -> None:
+        """Log timing info when profiling is enabled."""
+        if not profile_enabled:
+            return
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        field_text = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+        app.logger.info("profile:%s %.1fms %s", label, elapsed_ms, field_text)
 
     def _load_all() -> List[Experiment]:
         return list_experiments(cfg.output_dir)
@@ -82,25 +106,21 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
     @app.route("/")
     def dashboard():
+        route_start = time.perf_counter()
         experiments = []
+        index_start = time.perf_counter()
         index_rows = build_experiment_index(cfg.output_dir)
+        _log_timing("dashboard.index", index_start, rows=len(index_rows))
         total_items = len(index_rows)
         requested_page = request.args.get("page", type=int)
         requested_page_size = request.args.get("page_size", type=int)
-        use_default = not requested_page and not requested_page_size
-        selected_ids: List[str] = []
         current_page = 1
         page_size = DEFAULT_PAGE_SIZE
 
-        if use_default:
-            now = datetime.now()
-            start_of_week = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
-            week_ids = [row.id for row in index_rows if row.last_modified and row.last_modified >= start_of_week]
-            page_size = max(DEFAULT_PAGE_SIZE, len(week_ids)) if total_items else DEFAULT_PAGE_SIZE
-            current_page = 1
-        else:
-            page_size = requested_page_size if requested_page_size and requested_page_size > 0 else DEFAULT_PAGE_SIZE
-            current_page = requested_page if requested_page and requested_page > 0 else 1
+        if requested_page_size and requested_page_size > 0:
+            page_size = requested_page_size
+        if requested_page and requested_page > 0:
+            current_page = requested_page
 
         total_pages = max(1, ceil(total_items / page_size)) if total_items else 1
         if current_page > total_pages:
@@ -108,12 +128,35 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         start_idx = (current_page - 1) * page_size
         end_idx = start_idx + page_size
-        selected_ids = [row.id for row in index_rows[start_idx:end_idx]]
+        selected_ids: List[str] = [row.id for row in index_rows[start_idx:end_idx]]
 
+        load_block_start = time.perf_counter()
+        load_times = []
         for exp_id in selected_ids:
-            exp = load_experiment(cfg.output_dir / exp_id)
+            exp_start = time.perf_counter()
+            exp = load_experiment(
+                cfg.output_dir / exp_id,
+                include_self_distance=False,
+                include_diagnostics_images=False,
+                include_diagnostics_frames=False,
+                include_last_modified=False,
+            )
             if exp is not None:
                 experiments.append(exp)
+            load_times.append((exp_id, (time.perf_counter() - exp_start) * 1000.0))
+            _log_timing("dashboard.experiment", exp_start, exp_id=exp_id)
+        if profile_enabled and load_times:
+            total_load_ms = sum(ms for _, ms in load_times)
+            slowest = sorted(load_times, key=lambda t: t[1], reverse=True)[:5]
+            slowest_summary = ", ".join(f"{eid}:{ms:.1f}ms" for eid, ms in slowest)
+            _log_timing(
+                "dashboard.load_experiments",
+                load_block_start,
+                count=len(load_times),
+                total_ms=f"{total_load_ms:.1f}",
+                slowest=slowest_summary,
+            )
+        _log_timing("dashboard.total", route_start, rows=len(selected_ids))
         return render_template(
             "dashboard.html",
             experiments=experiments,
@@ -125,6 +168,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=index_rows[0].id if index_rows else None,
         )
 
+    @app.route("/grid")
     @app.route("/experiments")
     def experiments_index():
         experiments = _load_all()
@@ -138,16 +182,27 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
     @app.route("/comparison")
     def comparison():
-        experiments = _load_all()
+        index_rows = build_experiment_index(cfg.output_dir)
+        experiments = []
+        for row in index_rows:
+            exp = load_experiment(
+                row.path,
+                include_self_distance=False,
+                include_diagnostics_images=False,
+                include_diagnostics_frames=False,
+                include_last_modified=False,
+            )
+            if exp is not None:
+                experiments.append(exp)
+
         raw_ids = request.args.getlist("ids")
         if not raw_ids:
             ids_param = request.args.get("ids", "")
             raw_ids = ids_param.split(",") if ids_param else []
-        selected_ids = [exp_id for exp_id in raw_ids if exp_id]
+        selected_ids = [exp_id for exp_id in raw_ids if exp_id and (cfg.output_dir / exp_id).is_dir()]
         if len(selected_ids) < 2 and len(experiments) >= 2:
             selected_ids = [exp.id for exp in experiments[:2]]
         selected_map = {exp.id: exp for exp in experiments if exp.id in selected_ids}
-        # Sort selected_ids by last_modified date (most recent first)
         selected_ids = sorted(
             selected_ids,
             key=lambda eid: selected_map[eid].last_modified or datetime.min,
@@ -223,8 +278,34 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     @app.route("/self_distance", defaults={"exp_id": None})
     @app.route("/self_distance/<exp_id>")
     def self_distance(exp_id: Optional[str]):
-        experiments = [exp for exp in _load_all() if exp.self_distance_csv is not None]
-        if not experiments:
+        requested = exp_id or request.args.get("id")
+
+        def _latest_self_distance_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                csv_path = row.path / "self_distance" / "self_distance_000000.csv"
+                if csv_path.exists():
+                    return row.id
+            return None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                csv_dir = requested_path / "self_distance"
+                if csv_dir.exists() and any(csv_dir.glob("self_distance_*.csv")):
+                    selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_self_distance_id()
+
+        if selected_id is None:
             return render_template(
                 "self_distance_page.html",
                 experiments=[],
@@ -234,26 +315,54 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 active_experiment_id=None,
                 first_experiment_id=None,
             )
-        requested = exp_id or request.args.get("id")
-        exp_map = {exp.id: exp for exp in experiments}
-        selected = exp_map.get(requested) if requested else experiments[0]
-        if selected is None:
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_diagnostics_images=False,
+            include_diagnostics_frames=False,
+        )
+        if selected is None or selected.self_distance_csv is None:
             abort(404, "Experiment not found for self-distance.")
+
         return render_template(
             "self_distance_page.html",
-            experiments=experiments,
+            experiments=[],
             experiment=selected,
             cfg=cfg,
             active_nav="self_distance",
             active_experiment_id=selected.id,
-            first_experiment_id=experiments[0].id if experiments else None,
+            first_experiment_id=selected.id,
         )
 
     @app.route("/diagnostics", defaults={"exp_id": None})
     @app.route("/diagnostics/<exp_id>")
     def diagnostics(exp_id: Optional[str]):
-        experiments = [exp for exp in _load_all() if exp.diagnostics_images]
-        if not experiments:
+        route_start = time.perf_counter()
+        requested = exp_id or request.args.get("id")
+
+        def _latest_diagnostics_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                if _diagnostics_exists(row.path):
+                    return row.id
+            return None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir() and _diagnostics_exists(requested_path):
+                selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_diagnostics_id()
+
+        if selected_id is None:
             return render_template(
                 "diagnostics_page.html",
                 experiments=[],
@@ -266,12 +375,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 active_experiment_id=None,
                 first_experiment_id=None,
             )
-        requested = exp_id or request.args.get("id")
-        exp_map = {exp.id: exp for exp in experiments}
-        selected = exp_map.get(requested) if requested else experiments[0]
+
+        selected = load_experiment(cfg.output_dir / selected_id)
         if selected is None:
             abort(404, "Experiment not found for diagnostics.")
 
+        build_maps_start = time.perf_counter()
         diagnostics_map: Dict[str, Dict[int, str]] = {}
         for name, paths in selected.diagnostics_images.items():
             per_step: Dict[int, str] = {}
@@ -305,7 +414,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         frame_map: Dict[int, List[Dict[str, str]]] = {}
         for step, frames in selected.diagnostics_frames.items():
             entries: List[Dict[str, str]] = []
-            for img_path, src_path in frames:
+            for img_path, src_path, action_label, action_id in frames:
                 try:
                     rel = img_path.relative_to(selected.path)
                 except ValueError:
@@ -314,14 +423,24 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                     {
                         "url": url_for("serve_asset", relative_path=f"{selected.id}/{rel}"),
                         "source": src_path or rel.as_posix(),
+                        "action": action_label or "",
+                        "action_id": "" if action_id is None else str(action_id),
                     }
                 )
             if entries:
                 frame_map[step] = entries
 
+        _log_timing(
+            "diagnostics.build_maps",
+            build_maps_start,
+            images=sum(len(v) for v in diagnostics_map.values()),
+            csvs=sum(len(v) for v in diagnostics_csv_map.values()),
+            frames=sum(len(v) for v in frame_map.values()),
+        )
+        _log_timing("diagnostics.total", route_start, selected=selected.id)
         return render_template(
             "diagnostics_page.html",
-            experiments=experiments,
+            experiments=[],
             experiment=selected,
             diagnostics_map=diagnostics_map,
             diagnostics_csv_map=diagnostics_csv_map,
@@ -329,7 +448,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg=cfg,
             active_nav="diagnostics",
             active_experiment_id=selected.id,
-            first_experiment_id=experiments[0].id if experiments else None,
+            first_experiment_id=selected.id,
         )
 
     @app.route("/assets/<path:relative_path>")

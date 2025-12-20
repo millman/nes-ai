@@ -1,6 +1,17 @@
 {% extends "base.html" %}
 
 {% block body %}
+<style>
+.diagnostic-frame-img {
+    min-width: 224px;
+    min-height: 224px;
+    width: 100%;
+    max-width: 420px;
+    height: auto;
+    object-fit: contain;
+    background-color: #f8f9fa;
+}
+</style>
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div>
         {% if experiment %}
@@ -101,8 +112,10 @@
                 <span id="diagnostics-frame-label">No frame selected</span>
             </div>
         </div>
-        <img id="diagnostics-frame-img" class="rounded border d-none" alt="Diagnostic frame preview">
+        <img id="diagnostics-frame-img" class="rounded border d-none diagnostic-frame-img" alt="Diagnostic frame preview">
+        <div class="small text-muted" id="diagnostics-frame-action"></div>
         <div class="small text-muted font-monospace mt-1" id="diagnostics-frame-path"></div>
+        <div class="small text-muted" id="diagnostics-frame-dimensions"></div>
     </div>
 </div>
 {% else %}
@@ -154,6 +167,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const frameLabel = document.getElementById("diagnostics-frame-label");
     const frameImg = document.getElementById("diagnostics-frame-img");
     const framePath = document.getElementById("diagnostics-frame-path");
+    const frameAction = document.getElementById("diagnostics-frame-action");
+    const frameDimensions = document.getElementById("diagnostics-frame-dimensions");
     let currentFrames = [];
 
     function resolveUrl(diagKey, step) {
@@ -203,8 +218,17 @@ document.addEventListener("DOMContentLoaded", () => {
         frameImg.src = frame.url;
         frameImg.classList.remove("d-none");
         frameLabel.textContent = `Frame ${clamped + 1} / ${currentFrames.length}`;
+        if (frameAction) {
+            const label = frame.action || (frame.action_id ? `action ${frame.action_id}` : "");
+            frameAction.textContent = label ? `Action: ${label}` : "Action: (unknown)";
+        }
         if (framePath) {
             framePath.textContent = frame.source || "Unknown source path";
+        }
+        if (frameDimensions) {
+            frameDimensions.textContent = frameImg.naturalWidth && frameImg.naturalHeight
+                ? `Image size: ${frameImg.naturalWidth}×${frameImg.naturalHeight}px`
+                : "Loading dimensions…";
         }
     }
 
@@ -221,6 +245,12 @@ document.addEventListener("DOMContentLoaded", () => {
             frameImg.classList.add("d-none");
             if (framePath) {
                 framePath.textContent = "";
+            }
+            if (frameAction) {
+                frameAction.textContent = "";
+            }
+            if (frameDimensions) {
+                frameDimensions.textContent = "";
             }
             return;
         }
@@ -262,6 +292,15 @@ document.addEventListener("DOMContentLoaded", () => {
     if (frameSlider) {
         frameSlider.addEventListener("input", (ev) => {
             updateFrameForIndex(Number(ev.target.value));
+        });
+    }
+    if (frameImg && frameDimensions) {
+        frameImg.addEventListener("load", () => {
+            if (!frameImg.naturalWidth || !frameImg.naturalHeight) {
+                frameDimensions.textContent = "";
+                return;
+            }
+            frameDimensions.textContent = `Image size: ${frameImg.naturalWidth}×${frameImg.naturalHeight}px`;
         });
     }
 });

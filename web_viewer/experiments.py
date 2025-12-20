@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +14,22 @@ import tomli
 import tomli_w
 
 ALL_ZERO_EPS = 1e-12
+PROFILE_ENABLED = os.environ.get("VIEWER_PROFILE", "").lower() in {"1", "true", "yes", "on"}
+PROFILE_LOGGER = logging.getLogger("web_viewer.profile")
+PROFILE_LOGGER.setLevel(logging.INFO)
+
+
+def _profile(label: str, start_time: float, path: Optional[Path] = None, **fields) -> None:
+    """Log lightweight profiling info when VIEWER_PROFILE is enabled."""
+    if not PROFILE_ENABLED:
+        return
+    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+    parts = [f"{label} {elapsed_ms:.1f}ms"]
+    if path is not None:
+        parts.append(f"path={path}")
+    for key, value in fields.items():
+        parts.append(f"{key}={value}")
+    PROFILE_LOGGER.info(" ".join(parts))
 
 
 @dataclass
@@ -39,7 +58,7 @@ class Experiment:
     diagnostics_images: Dict[str, List[Path]]
     diagnostics_steps: List[int]
     diagnostics_csvs: Dict[str, List[Path]]
-    diagnostics_frames: Dict[int, List[Tuple[Path, str]]]
+    diagnostics_frames: Dict[int, List[Tuple[Path, str, str, Optional[int]]]]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -85,22 +104,69 @@ def build_experiment_index(output_dir: Path) -> List[ExperimentIndex]:
     return index
 
 
-def load_experiment(path: Path) -> Optional[Experiment]:
+def load_experiment(
+    path: Path,
+    include_self_distance: bool = True,
+    include_diagnostics_images: bool = True,
+    include_diagnostics_frames: bool = True,
+    include_last_modified: bool = True,
+) -> Optional[Experiment]:
     if not path.is_dir():
         return None
+    start_time = time.perf_counter()
+    section_start = start_time
     metadata_path = path / "metadata.txt"
     metadata_git_path = path / "metadata_git.txt"
     metadata_model_path = path / "metadata_model.txt"
     metrics_dir = path / "metrics"
     loss_png = metrics_dir / "loss_curves.png"
     loss_csv = _resolve_loss_csv(metrics_dir)
-    self_distance_csvs = _collect_self_distance_csvs(path)
-    latest_self_distance_csv = self_distance_csvs[-1] if self_distance_csvs else None
-    self_distance_images = _collect_self_distance_images(path)
-    diagnostics_images = _collect_diagnostics_images(path)
-    diagnostics_steps = _collect_diagnostics_steps(diagnostics_images)
-    diagnostics_csvs = _collect_diagnostics_csvs(path)
-    diagnostics_frames = _collect_diagnostics_frames(path)
+    _profile("load_experiment.paths", start_time, path, metrics_dir=metrics_dir)
+    section_start = time.perf_counter()
+
+    self_distance_csvs: List[Path] = []
+    latest_self_distance_csv: Optional[Path] = None
+    self_distance_images: List[Path] = []
+    if include_self_distance:
+        self_distance_csvs = _collect_self_distance_csvs(path)
+        latest_self_distance_csv = self_distance_csvs[-1] if self_distance_csvs else None
+        self_distance_images = _collect_self_distance_images(path)
+    else:
+        latest_self_distance_csv = _quick_self_distance_csv(path)
+    _profile(
+        "load_experiment.self_distance",
+        section_start,
+        path,
+        csvs=len(self_distance_csvs),
+        images=len(self_distance_images),
+        included=include_self_distance,
+    )
+    section_start = time.perf_counter()
+
+    diagnostics_images: Dict[str, List[Path]] = {}
+    diagnostics_steps: List[int] = []
+    diagnostics_csvs: Dict[str, List[Path]] = {}
+    diagnostics_frames: Dict[int, List[Tuple[Path, str]]] = {}
+    if include_diagnostics_images:
+        diagnostics_images = _collect_diagnostics_images(path)
+        diagnostics_steps = _collect_diagnostics_steps(diagnostics_images)
+        diagnostics_csvs = _collect_diagnostics_csvs(path)
+    else:
+        diagnostics_steps = [0] if _diagnostics_exists(path) else []
+    diagnostics_frames = _collect_diagnostics_frames(path) if include_diagnostics_frames else {}
+    _profile(
+        "load_experiment.diagnostics",
+        section_start,
+        path,
+        images=sum(len(v) for v in diagnostics_images.values()),
+        steps=len(diagnostics_steps),
+        csvs=sum(len(v) for v in diagnostics_csvs.values()),
+        frames=sum(len(v) for v in diagnostics_frames.values()),
+        include_frames=include_diagnostics_frames,
+        include_images=include_diagnostics_images,
+    )
+    section_start = time.perf_counter()
+
     notes_path = path / "notes.txt"
     metadata_custom_path = path / "experiment_metadata.txt"
     title, tags = _read_metadata(metadata_custom_path)
@@ -108,10 +174,31 @@ def load_experiment(path: Path) -> Optional[Experiment]:
     git_metadata_text = metadata_git_path.read_text() if metadata_git_path.exists() else "metadata_git.txt missing."
     git_commit = _extract_git_commit(git_metadata_text)
     notes_text = _read_or_create_notes(notes_path)
+    _profile("load_experiment.text_meta", section_start, path)
+    section_start = time.perf_counter()
+
     rollout_steps = _collect_rollout_steps(path)
     max_step = _get_max_step(loss_csv) if loss_csv and loss_csv.exists() else None
-    last_modified = _get_last_modified(path)
+    last_modified = _get_last_modified(path) if include_last_modified else _quick_last_modified(path)
     total_params, flops_per_step = _read_model_metadata(metadata_model_path)
+    _profile(
+        "load_experiment.metrics",
+        section_start,
+        path,
+        rollout_steps=len(rollout_steps),
+        max_step=max_step if max_step is not None else "",
+        loss_csv=bool(loss_csv and loss_csv.exists()),
+        last_modified_mode="deep" if include_last_modified else "quick",
+    )
+    _profile(
+        "load_experiment",
+        start_time,
+        path,
+        diagnostics_images=sum(len(v) for v in diagnostics_images.values()),
+        diagnostics_frames=sum(len(v) for v in diagnostics_frames.values()),
+        diagnostics_csvs=sum(len(v) for v in diagnostics_csvs.values()),
+        include_frames=include_diagnostics_frames,
+    )
     return Experiment(
         id=path.name,
         name=path.name,
@@ -322,6 +409,16 @@ def _collect_self_distance_csvs(root: Path) -> List[Path]:
     return sorted(folder.glob("self_distance_*.csv"))
 
 
+def _quick_self_distance_csv(root: Path) -> Optional[Path]:
+    """Cheap existence check for self-distance outputs."""
+    folder = root / "self_distance"
+    if not folder.exists():
+        return None
+    for path in folder.glob("self_distance_*.csv"):
+        return path
+    return None
+
+
 def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
     diag_specs = [
         ("delta_z_pca", root / "vis_delta_z_pca", "delta_z_pca_*.png"),
@@ -337,6 +434,28 @@ def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
             if imgs:
                 images[name] = imgs
     return images
+
+
+def _diagnostics_exists(root: Path) -> bool:
+    """Cheap check for any diagnostics output without globbing everything."""
+    diag_dirs = [
+        (root / "vis_delta_z_pca", "*.png"),
+        (root / "vis_delta_z_pca", "*.csv"),
+        (root / "vis_action_alignment", "*.png"),
+        (root / "vis_action_alignment", "*.csv"),
+        (root / "vis_cycle_error", "*.png"),
+        (root / "vis_cycle_error", "*.csv"),
+        (root / "vis_diagnostics_frames", "*.csv"),
+    ]
+    for folder, pattern in diag_dirs:
+        if not folder.exists():
+            continue
+        try:
+            for _ in folder.glob(pattern):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _collect_diagnostics_steps(diagnostics_images: Dict[str, List[Path]]) -> List[int]:
@@ -371,11 +490,14 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
     return csvs
 
 
-def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str]]]:
+def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str, str, Optional[int]]]]:
     frames_root = root / "vis_diagnostics_frames"
     if not frames_root.exists():
         return {}
-    frame_map: Dict[int, List[Tuple[Path, str]]] = {}
+    start_time = time.perf_counter()
+    frame_map: Dict[int, List[Tuple[Path, str, str, Optional[int]]]] = {}
+    csv_count = 0
+    frame_count = 0
 
     def _natural_sort_key(path_str: str) -> Tuple:
         """Split a path into text/int chunks so state_2 comes before state_10."""
@@ -400,20 +522,29 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str]]]
         try:
             with csv_path.open("r", newline="") as handle:
                 reader = csv.DictReader(handle)
-                sorted_entries: List[Tuple[Tuple, Path, str]] = []
+                sorted_entries: List[Tuple[Tuple, Path, str, str, Optional[int]]] = []
+                csv_count += 1
                 for idx, row in enumerate(reader):
                     rel = row.get("image_path")
                     src = (row.get("source_path") or "").strip()
+                    action_label = (row.get("action_label") or "").strip()
+                    aid_raw = row.get("action_id")
+                    try:
+                        action_id: Optional[int] = int(aid_raw) if aid_raw not in (None, "", "None") else None
+                    except (TypeError, ValueError):
+                        action_id = None
                     if not rel:
                         continue
                     sort_basis = src if src else rel
                     sort_key = (_natural_sort_key(sort_basis), idx)
-                    sorted_entries.append((sort_key, frames_root / rel, src))
+                    sorted_entries.append((sort_key, frames_root / rel, src, action_label, action_id))
                 if sorted_entries:
                     sorted_entries.sort(key=lambda t: t[0])
-                    frame_map[step] = [(p, src) for _, p, src in sorted_entries]
+                    frame_count += len(sorted_entries)
+                    frame_map[step] = [(p, src, action_label, action_id) for _, p, src, action_label, action_id in sorted_entries]
         except (OSError, csv.Error):
             continue
+    _profile("diagnostics.frames", start_time, root, csv_files=csv_count, frames=frame_count)
     return frame_map
 
 
@@ -443,12 +574,15 @@ def _get_last_modified(path: Path) -> Optional[datetime]:
     """Get the most recent modification time of any file in the directory tree."""
     if not path.is_dir():
         return None
+    start_time = time.perf_counter()
     latest_mtime: Optional[float] = None
+    files_scanned = 0
     try:
         for item in path.rglob("*"):
             if item.is_file():
                 try:
                     mtime = item.stat().st_mtime
+                    files_scanned += 1
                     if latest_mtime is None or mtime > latest_mtime:
                         latest_mtime = mtime
                 except OSError:
@@ -457,16 +591,29 @@ def _get_last_modified(path: Path) -> Optional[datetime]:
         return None
     if latest_mtime is None:
         return None
+    _profile("last_modified.rglob", start_time, path, files=files_scanned)
     return datetime.fromtimestamp(latest_mtime)
 
 
 def _quick_last_modified(path: Path) -> Optional[datetime]:
-    """Fast last-modified using directory mtime."""
+    """Fast last-modified using depth-1 files and dirs."""
+    latest_mtime: Optional[float] = None
     try:
-        stat = path.stat()
+        for child in path.iterdir():
+            try:
+                mtime = child.stat().st_mtime
+                if latest_mtime is None or mtime > latest_mtime:
+                    latest_mtime = mtime
+            except OSError:
+                continue
     except OSError:
         return None
-    return datetime.fromtimestamp(stat.st_mtime)
+    if latest_mtime is None:
+        try:
+            return datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            return None
+    return datetime.fromtimestamp(latest_mtime)
 
 
 def _is_all_zero(values: Iterable[float]) -> bool:
