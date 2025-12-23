@@ -3293,6 +3293,7 @@ def _render_visualization_batch(
     selection: Optional[VisualizationSelection],
     show_gradients: bool,
     log_deltas: bool,
+    rng: Optional[torch.Generator] = None,
 ) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
@@ -3320,8 +3321,8 @@ def _render_visualization_batch(
         base_starts = selection.time_indices[:num_rows].to(device=device)
     else:
         num_rows = min(rows, batch_size)
-        row_indices = torch.randperm(batch_size, device=device)[:num_rows]
-        base_starts = torch.randint(min_start, max_start + 1, (num_rows,), device=device)
+        row_indices = torch.randperm(batch_size, generator=rng, device=device)[:num_rows]
+        base_starts = torch.randint(min_start, max_start + 1, (num_rows,), device=device, generator=rng)
     sequences: List[VisualizationSequence] = []
     debug_lines: List[str] = []
     for row_offset, idx in enumerate(row_indices):
@@ -3402,6 +3403,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_rng = random.Random(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_val_rng = random.Random(python_rng.randint(0, 2**32 - 1))
+    # Dedicated RNGs keep visualization sampling consistent across experiments.
+    vis_selection_generator = torch.Generator(device=device)
+    vis_selection_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+    training_vis_generator = torch.Generator()
+    training_vis_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
@@ -3739,6 +3745,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 rolling_batch_cpu[0],
                 rolling_batch_cpu[1],
                 debug_vis.pair_vis_rows,
+                generator=training_vis_generator,
             )
 
         # --- Rollout/embedding/hard-sample visualizations ---
@@ -3761,6 +3768,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     selection=fixed_selection,
                     show_gradients=cfg.vis.gradient_norms,
                     log_deltas=cfg.vis.log_deltas,
+                    rng=vis_selection_generator,
                 )
                 save_rollout_sequence_batch(
                     fixed_vis_dir,
@@ -3781,6 +3789,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     selection=None,
                     show_gradients=cfg.vis.gradient_norms,
                     log_deltas=cfg.vis.log_deltas,
+                    rng=vis_selection_generator,
                 )
                 save_rollout_sequence_batch(
                     rolling_vis_dir,

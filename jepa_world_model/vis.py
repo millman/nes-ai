@@ -99,6 +99,7 @@ def save_temporal_pair_visualization(
     frames: torch.Tensor,
     actions: torch.Tensor,
     rows: int,
+    generator: torch.Generator | None = None,
 ) -> None:
     if frames.shape[1] < 2:
         return
@@ -106,10 +107,10 @@ def save_temporal_pair_visualization(
     actions = actions.detach().cpu()
     batch_size = frames.shape[0]
     num_rows = min(rows, batch_size)
-    order = torch.randperm(batch_size)[:num_rows]
+    order = torch.randperm(batch_size, generator=generator)[:num_rows]
     pairs: list[np.ndarray] = []
     for idx in order:
-        time_idx = torch.randint(1, frames.shape[1], ()).item()
+        time_idx = torch.randint(1, frames.shape[1], (), generator=generator).item()
         prev_frame = tensor_to_uint8_image(frames[idx, time_idx - 1])
         next_frame = tensor_to_uint8_image(frames[idx, time_idx])
         prev_frame = _annotate_with_text(prev_frame, describe_action_tensor(actions[idx, time_idx - 1]))
