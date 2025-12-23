@@ -55,6 +55,7 @@
                 <th class="text-nowrap" style="width: 1%;">Tags</th>
                 <th class="text-nowrap" style="width: 1%;">Notes</th>
                 <th style="min-width: 240px;">Title</th>
+                <th class="text-nowrap" style="width: 1%;">Model diff</th>
                 <th>Folder</th>
                 <th class="text-nowrap" style="width: 1%;">Metadata</th>
                 <th class="text-nowrap" style="width: 1%;">Git</th>
@@ -131,6 +132,13 @@
                         </div>
                         <span class="title-status small text-muted" aria-live="polite"></span>
                     </form>
+                </td>
+                <td class="small text-nowrap" style="width: 1%; min-width: 180px;">
+                    {% if exp.model_diff_text and exp.model_diff_text.strip() and not exp.model_diff_text.startswith('model_diff.txt missing') %}
+                    <pre class="mb-0 small" style="max-height: 160px; overflow: auto; overflow-x: auto; white-space: pre;">{{ exp.model_diff_text }}</pre>
+                    {% else %}
+                    <span class="text-muted fst-italic small">missing diff</span>
+                    {% endif %}
                 </td>
                 <td class="small">{{ exp.name }}</td>
                 <td class="small text-nowrap" style="width: 1%;">

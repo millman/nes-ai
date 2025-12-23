@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,6 +41,7 @@ class Experiment:
     name: str
     path: Path
     metadata_text: str
+    model_diff_text: str
     git_metadata_text: str
     git_commit: str
     notes_text: str
@@ -118,6 +120,7 @@ def load_experiment(
     section_start = start_time
     metadata_path = path / "metadata.txt"
     metadata_git_path = path / "metadata_git.txt"
+    metadata_model_diff_path = path / "server_cache" / "model_diff.txt"
     metadata_model_path = path / "metadata_model.txt"
     metrics_dir = path / "metrics"
     loss_png = metrics_dir / "loss_curves.png"
@@ -172,6 +175,10 @@ def load_experiment(
     metadata_custom_path = path / "experiment_metadata.txt"
     title, tags = _read_metadata(metadata_custom_path)
     metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
+    if metadata_model_diff_path.exists():
+        metadata_model_diff_text = metadata_model_diff_path.read_text()
+    else:
+        metadata_model_diff_text = _ensure_model_diff(path)
     git_metadata_text = metadata_git_path.read_text() if metadata_git_path.exists() else "metadata_git.txt missing."
     git_commit = _extract_git_commit(git_metadata_text)
     notes_text = _read_or_create_notes(notes_path)
@@ -205,6 +212,7 @@ def load_experiment(
         name=path.name,
         path=path,
         metadata_text=metadata_text,
+        model_diff_text=metadata_model_diff_text,
         git_metadata_text=git_metadata_text,
         git_commit=git_commit or "Unknown commit",
         notes_text=notes_text,
@@ -417,6 +425,36 @@ def _collect_self_distance_csvs(root: Path) -> List[Path]:
     if not folder.exists():
         return []
     return sorted(folder.glob("self_distance_*.csv"))
+
+
+def _ensure_model_diff(path: Path) -> str:
+    cache_path = path / "server_cache" / "model_diff.txt"
+    if cache_path.exists():
+        try:
+            return cache_path.read_text()
+        except OSError:
+            pass
+
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "web_viewer" / "model_diff.py"
+    cmd = [
+        "uv",
+        "run",
+        "python",
+        str(script_path),
+        "--experiment",
+        str(path),
+        "--repo-root",
+        str(repo_root),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_root))
+    if result.returncode != 0:
+        failure = result.stderr.strip() or result.stdout.strip() or "unknown failure"
+        return f"model diff generation failed: {failure}"
+    try:
+        return cache_path.read_text()
+    except OSError as exc:
+        return f"model diff cache missing after generation: {exc}"
 
 
 def _quick_self_distance_csv(root: Path) -> Optional[Path]:
