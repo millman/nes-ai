@@ -9,7 +9,7 @@ import tomli_w
 
 __all__ = ["write_run_metadata"]
 
-_TOML_NULL_SENTINEL = "__TOML_NULL__3d67a1c3a66a4d62ad0f0dec1d18454b__"
+_TOML_NULL_SENTINEL = "null"
 
 
 def _run_git_command(args: List[str]) -> str:
@@ -66,5 +66,4 @@ def write_run_metadata(
         "model_config": model_config,
     }
     metadata_text = tomli_w.dumps(toml_payload)
-    metadata_text = metadata_text.replace(f'"{_TOML_NULL_SENTINEL}"', "null")
     (run_dir / "metadata.txt").write_text(metadata_text)
