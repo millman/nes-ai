@@ -5,6 +5,8 @@ let currentXAxisMode = "steps";
 // Store original data for x-axis toggling
 let originalSteps = [];
 let cumulativeFlops = [];
+let elapsedSeconds = [];
+let hasElapsedSeconds = false;
 
 const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_fixed_0", label: "vis_fixed_0", prefix: "rollout_" },
@@ -30,11 +32,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Restore x-axis mode from URL
   const xAxisParam = urlParams.get("xaxis");
-  if (xAxisParam === "flops") {
-    currentXAxisMode = "flops";
+  if (xAxisParam === "flops" || xAxisParam === "elapsed") {
+    currentXAxisMode = xAxisParam;
     const xAxisSelect = document.getElementById("comparison-xaxis-select");
     if (xAxisSelect) {
-      xAxisSelect.value = "flops";
+      xAxisSelect.value = xAxisParam;
     }
   }
 
@@ -72,6 +74,7 @@ function runComparison(ids) {
 function renderComparison(payload) {
   const plot = document.getElementById("comparison-plot");
   const grid = document.getElementById("comparison-grid");
+  const xAxisSelect = document.getElementById("comparison-xaxis-select");
   if (!payload || !Array.isArray(payload.experiments) || payload.experiments.length === 0) {
     plot.innerHTML = "<p class='text-muted fst-italic'>No comparison data available.</p>";
     grid.innerHTML = "";
@@ -88,18 +91,74 @@ function renderComparison(payload) {
   const figure = payload.figure;
   if (figure) {
     // Store original x-axis data for toggling
-    originalSteps = figure.data.map(trace => trace.x ? [...trace.x] : []);
-    cumulativeFlops = figure.data.map(trace => {
+    originalSteps = figure.data.map((trace) => (trace.x ? [...trace.x] : []));
+    cumulativeFlops = figure.data.map((trace) => {
       // Extract cumulative_flops from meta (stored by plots.py)
-      if (trace.meta && trace.meta.cumulative_flops) {
-        return trace.meta.cumulative_flops;
+      if (trace.meta && Array.isArray(trace.meta.cumulative_flops)) {
+        return [...trace.meta.cumulative_flops];
       }
       // Fallback: use customdata if available (cumulative_flops is at index 1)
       if (trace.customdata && Array.isArray(trace.customdata)) {
-        return trace.customdata.map(cd => Array.isArray(cd) ? cd[1] : null);
+        return trace.customdata.map((cd) => (Array.isArray(cd) ? cd[1] : null));
       }
       return trace.x ? [...trace.x] : [];  // Fallback to steps
     });
+    hasElapsedSeconds = false;
+    elapsedSeconds = figure.data.map((trace) => {
+      const metaElapsed =
+        trace.meta && Array.isArray(trace.meta.elapsed_seconds) ? trace.meta.elapsed_seconds : null;
+      if (metaElapsed) {
+        if (trace.meta && trace.meta.has_elapsed_seconds) {
+          hasElapsedSeconds = true;
+        }
+        return [...metaElapsed];
+      }
+      if (trace.customdata && Array.isArray(trace.customdata)) {
+        const values = trace.customdata.map((cd) => (Array.isArray(cd) ? cd[2] : null));
+        if (values.some((v) => v !== null && v !== undefined)) {
+          return values;
+        }
+      }
+      return trace.x ? [...trace.x] : [];
+    });
+
+    const applyXAxisMode = (mode, { updateUrl = true } = {}) => {
+      let nextMode = mode;
+      if (nextMode === "elapsed" && !hasElapsedSeconds) {
+        nextMode = "steps";
+      }
+
+      if (xAxisSelect) {
+        const elapsedOption = xAxisSelect.querySelector('option[value="elapsed"]');
+        if (elapsedOption) {
+          elapsedOption.disabled = !hasElapsedSeconds;
+        }
+        xAxisSelect.value = nextMode;
+      }
+
+      if (updateUrl || nextMode !== mode) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("xaxis", nextMode);
+        // Clear zoom state when switching axes
+        url.searchParams.delete("xmin");
+        url.searchParams.delete("xmax");
+        window.history.replaceState({}, "", url.toString());
+      }
+
+      let xData = originalSteps;
+      let xTitle = "Step";
+      if (nextMode === "flops") {
+        xData = cumulativeFlops;
+        xTitle = "Cumulative FLOPs";
+      } else if (nextMode === "elapsed") {
+        xData = elapsedSeconds;
+        xTitle = "Elapsed time (s)";
+      }
+
+      Plotly.restyle(plot, { x: xData });
+      Plotly.relayout(plot, { "xaxis.title": xTitle, "xaxis.autorange": true });
+      currentXAxisMode = nextMode;
+    };
 
     // Parse view state from URL
     const urlParams = new URLSearchParams(window.location.search);
@@ -122,32 +181,12 @@ function renderComparison(payload) {
 
     const config = buildPlotlyConfig(figure.config);
     Plotly.react(plot, figure.data, figure.layout, config).then(() => {
-      // Apply x-axis mode if set to flops
-      if (currentXAxisMode === "flops") {
-        Plotly.restyle(plot, { x: cumulativeFlops });
-        Plotly.relayout(plot, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
-      }
+      applyXAxisMode(currentXAxisMode, { updateUrl: false });
 
       // X-axis toggle handler
-      const xAxisSelect = document.getElementById("comparison-xaxis-select");
       if (xAxisSelect) {
         xAxisSelect.addEventListener("change", () => {
-          const mode = xAxisSelect.value;
-          currentXAxisMode = mode;
-          const url = new URL(window.location.href);
-          url.searchParams.set("xaxis", mode);
-          // Clear zoom state when switching axes
-          url.searchParams.delete("xmin");
-          url.searchParams.delete("xmax");
-          window.history.replaceState({}, "", url.toString());
-
-          if (mode === "flops") {
-            Plotly.restyle(plot, { x: cumulativeFlops });
-            Plotly.relayout(plot, { "xaxis.title": "Cumulative FLOPs", "xaxis.autorange": true });
-          } else {
-            Plotly.restyle(plot, { x: originalSteps });
-            Plotly.relayout(plot, { "xaxis.title": "Step", "xaxis.autorange": true });
-          }
+          applyXAxisMode(xAxisSelect.value);
         });
       }
 

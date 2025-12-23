@@ -498,7 +498,12 @@ def _build_overlay_data(experiments: List[Experiment]):
         if not filtered:
             continue
         label = experiment.title if experiment.title and experiment.title != "Untitled" else experiment.name
-        curve_map[label] = LossCurveData(steps=curves.steps, cumulative_flops=curves.cumulative_flops, series=filtered)
+        curve_map[label] = LossCurveData(
+            steps=curves.steps,
+            cumulative_flops=curves.cumulative_flops,
+            elapsed_seconds=curves.elapsed_seconds,
+            series=filtered,
+        )
         trace_ids[label] = experiment.id
     return build_overlay(curve_map, trace_ids=trace_ids)
 
@@ -546,7 +551,12 @@ def _build_single_experiment_figure(experiment: Experiment):
     }
     if not filtered:
         return None
-    loss_curves = LossCurveData(steps=curves.steps, cumulative_flops=curves.cumulative_flops, series=filtered)
+    loss_curves = LossCurveData(
+        steps=curves.steps,
+        cumulative_flops=curves.cumulative_flops,
+        elapsed_seconds=curves.elapsed_seconds,
+        series=filtered,
+    )
     label = experiment.title or experiment.name
     return build_overlay({label: loss_curves}, include_experiment_in_trace=False, trace_ids={label: experiment.id})
 

@@ -14,7 +14,7 @@ def build_overlay(
 ) -> Optional[Dict]:
     """Build a Plotly figure with loss curves.
 
-    The figure includes both step-based and cumulative_flops-based x values,
+    The figure includes step-based, cumulative_flops-based, and elapsed time x values,
     allowing the UI to toggle between them via JavaScript.
     """
     if not curves:
@@ -23,13 +23,20 @@ def build_overlay(
     for exp_name, curve in curves.items():
         exp_id = trace_ids.get(exp_name) if trace_ids else None
         customdata_base = [exp_id] * len(curve.steps) if exp_id is not None else None
+        elapsed_axis = curve.elapsed_seconds if curve.elapsed_seconds else curve.steps
         for metric_name, values in curve.series.items():
             # Store both x options in customdata for toggle functionality
-            # customdata[i] = [exp_id, cumulative_flops[i]]
+            # customdata[i] = [exp_id, cumulative_flops[i], elapsed_axis[i]]
             if customdata_base is not None:
-                customdata = [[exp_id, flops] for flops in curve.cumulative_flops]
+                customdata = [
+                    [exp_id, flops, elapsed]
+                    for flops, elapsed in zip(curve.cumulative_flops, elapsed_axis)
+                ]
             else:
-                customdata = [[None, flops] for flops in curve.cumulative_flops]
+                customdata = [
+                    [None, flops, elapsed]
+                    for flops, elapsed in zip(curve.cumulative_flops, elapsed_axis)
+                ]
             fig.add_trace(
                 go.Scatter(
                     x=curve.steps,
@@ -38,7 +45,11 @@ def build_overlay(
                     name=f"{exp_name}: {metric_name}" if include_experiment_in_trace else metric_name,
                     customdata=customdata,
                     hovertemplate="%{y}<extra></extra>",
-                    meta={"cumulative_flops": curve.cumulative_flops},
+                    meta={
+                        "cumulative_flops": curve.cumulative_flops,
+                        "elapsed_seconds": elapsed_axis,
+                        "has_elapsed_seconds": bool(curve.elapsed_seconds),
+                    },
                 )
             )
     fig.update_layout(
