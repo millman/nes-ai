@@ -39,7 +39,7 @@ from nes_controller import CONTROLLER_STATE_DESC
 from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
 from jepa_world_model.loss import FocalL1Loss, HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
-from jepa_world_model.metadata import write_run_metadata
+from jepa_world_model.metadata import write_run_metadata, write_git_metadata
 from jepa_world_model.vis import (
     describe_action_tensor,
     save_embedding_projection,
@@ -3451,6 +3451,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     loss_history = LossHistory()
 
     write_run_metadata(run_dir, cfg, model_cfg, exclude_fields={"title"})
+    write_git_metadata(run_dir)
 
     # Write experiment title to experiment_metadata.txt only if provided
     if title is not None:

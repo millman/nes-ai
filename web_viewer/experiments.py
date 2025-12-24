@@ -33,6 +33,18 @@ def _profile(label: str, start_time: float, path: Optional[Path] = None, **field
     PROFILE_LOGGER.info(" ".join(parts))
 
 
+def _render_model_diff(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return stripped
+    if stripped.startswith("model_diff.txt missing"):
+        return stripped
+    parts = [line.strip() for line in text.splitlines() if line.strip()]
+    if not parts:
+        return stripped
+    return ", ".join(parts)
+
+
 @dataclass
 class Experiment:
     """Metadata bundled for rendering experiment summaries."""
@@ -176,9 +188,10 @@ def load_experiment(
     title, tags = _read_metadata(metadata_custom_path)
     metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
     if metadata_model_diff_path.exists():
-        metadata_model_diff_text = metadata_model_diff_path.read_text()
+        metadata_model_diff_text_raw = metadata_model_diff_path.read_text()
     else:
-        metadata_model_diff_text = _ensure_model_diff(path)
+        metadata_model_diff_text_raw = _ensure_model_diff(path)
+    metadata_model_diff_text = _render_model_diff(metadata_model_diff_text_raw)
     git_metadata_text = metadata_git_path.read_text() if metadata_git_path.exists() else "metadata_git.txt missing."
     git_commit = _extract_git_commit(git_metadata_text)
     notes_text = _read_or_create_notes(notes_path)

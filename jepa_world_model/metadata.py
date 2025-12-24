@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 import subprocess
 import tomli_w
 
-__all__ = ["write_run_metadata"]
+__all__ = ["write_run_metadata", "write_git_metadata"]
 
 _TOML_NULL_SENTINEL = "null"
 
@@ -35,12 +35,7 @@ def _serialize_for_json(value: Any):
     return value
 
 
-def write_run_metadata(
-    run_dir: Path,
-    cfg: Any,
-    model_cfg: Any,
-    exclude_fields: Optional[Set[str]] = None,
-) -> None:
+def write_git_metadata(run_dir: Path) -> None:
     commit_sha = _run_git_command(["git", "rev-parse", "HEAD"])
     diff_output = _run_git_command(["git", "diff", "--patch"])
     if not diff_output.strip():
@@ -56,6 +51,14 @@ def write_run_metadata(
         ]
     )
     (run_dir / "metadata_git.txt").write_text(git_metadata)
+
+
+def write_run_metadata(
+    run_dir: Path,
+    cfg: Any,
+    model_cfg: Any,
+    exclude_fields: Optional[Set[str]] = None,
+) -> None:
     train_config = _serialize_for_json(asdict(cfg))
     if exclude_fields:
         for field_name in exclude_fields:
