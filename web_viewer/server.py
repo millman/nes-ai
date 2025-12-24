@@ -33,6 +33,7 @@ from .experiments import (
     write_tags,
     write_title,
     _diagnostics_exists,
+    _collect_visualization_steps,
 )
 from .plots import build_overlay
 
@@ -517,6 +518,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
         diff_text = None
         if idx > 0:
             diff_text = diff_metadata(base_metadata, exp.metadata_text)
+        viz_steps = _collect_visualization_steps(exp.path)
         rows.append(
             {
                 "id": exp.id,
@@ -525,6 +527,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "title": exp.title,
                 "tags": exp.tags,
                 "rollout_steps": exp.rollout_steps,
+                "visualization_steps": viz_steps,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
                 "git_metadata": exp.git_metadata_text,

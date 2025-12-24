@@ -2,6 +2,59 @@
 
 {% block extra_head %}
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>
+<style>
+  .dashboard-title-cell {
+    min-width: 240px;
+    width: 100%;
+  }
+  .dashboard-model-diff-cell {
+    min-width: 180px;
+    width: 1%;
+  }
+  .dashboard-model-diff-content {
+    max-height: 160px;
+    overflow: auto;
+    white-space: nowrap;
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 0.8125rem;
+  }
+  .dashboard-model-diff-chip {
+    display: inline-block;
+    padding: 0 4px;
+    border-radius: 4px;
+    font-size: 0.8125rem;
+  }
+  .dashboard-model-diff-short {
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+  }
+  .dashboard-dataset {
+    max-width: 260px;
+  }
+  .dashboard-dataset-value {
+    max-width: 260px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 0.8125rem;
+  }
+  .dashboard-folder {
+    white-space: nowrap;
+  }
+  .dashboard-params,
+  .dashboard-steps {
+    font-size: 0.8125rem;
+  }
+  .dashboard-steps span,
+  .dashboard-params span {
+    font-size: 0.8125rem;
+  }
+  .tooltip-nowrap .tooltip-inner {
+    white-space: nowrap;
+    max-width: none;
+  }
+</style>
 {% endblock %}
 
 {% block body %}
@@ -54,13 +107,12 @@
                 <th>Select</th>
                 <th class="text-nowrap" style="width: 1%;">Tags</th>
                 <th class="text-nowrap" style="width: 1%;">Notes</th>
-                <th style="min-width: 240px;">Title</th>
-                <th class="text-nowrap" style="width: 1%;">Model diff</th>
-                <th>Folder</th>
+                <th class="dashboard-title-cell">Title</th>
+                <th class="text-nowrap dashboard-model-diff-cell" style="width: 1%;">Model diff</th>
+                <th class="text-nowrap dashboard-dataset" style="width: 1%;">Dataset</th>
+                <th class="dashboard-folder">Folder</th>
                 <th class="text-nowrap" style="width: 1%;">Metadata</th>
-                <th class="text-nowrap" style="width: 1%;">Git</th>
                 <th class="text-nowrap" style="width: 1%;">Parameters</th>
-                <th class="text-nowrap" style="width: 1%;">FLOPs/step</th>
                 <th class="text-nowrap" style="width: 1%;">Last Modified</th>
                 <th class="text-nowrap" style="width: 1%;">Steps</th>
                 <th class="text-nowrap" style="width: 1%;">Actions</th>
@@ -118,7 +170,7 @@
                         </svg>
                     </button>
                 </td>
-                <td style="min-width: 240px;">
+                <td class="dashboard-title-cell">
                     <form class="title-form" data-exp-id="{{ exp.id }}">
                         <div class="input-group input-group-sm title-input-group">
                             <input
@@ -133,64 +185,89 @@
                         <span class="title-status small text-muted" aria-live="polite"></span>
                     </form>
                 </td>
-                <td class="small text-nowrap" style="width: 1%; min-width: 180px;">
-                    {% if exp.model_diff_text and exp.model_diff_text.strip() and not exp.model_diff_text.startswith('model_diff.txt missing') %}
-                    <pre class="mb-0 small" style="max-height: 160px; overflow: auto; overflow-x: auto; white-space: pre;">{{ exp.model_diff_text }}</pre>
-                    {% else %}
+                <td class="small dashboard-model-diff-cell">
+                    {% set diff_missing = exp.model_diff_text and exp.model_diff_text.startswith('model_diff.txt missing') %}
+                    {% if diff_missing %}
                     <span class="text-muted fst-italic small">missing diff</span>
+                    {% elif exp.model_diff_items %}
+                    <div class="dashboard-model-diff-content small d-flex flex-wrap align-items-center gap-2">
+                        {% for display, full, shortened in exp.model_diff_items %}
+                        <span
+                            class="text-nowrap dashboard-model-diff-chip{% if shortened %} dashboard-model-diff-short{% endif %}"
+                            {% if shortened %}title="{{ full }}"{% endif %}
+                        >{{ display }}</span>
+                        {% endfor %}
+                    </div>
+                    {% elif exp.model_diff_text and exp.model_diff_text != '—' %}
+                    <span class="dashboard-model-diff-content small d-inline-block">{{ exp.model_diff_text }}</span>
+                    {% else %}
+                    <span class="text-muted">—</span>
                     {% endif %}
                 </td>
-                <td class="small">{{ exp.name }}</td>
-                <td class="small text-nowrap" style="width: 1%;">
-                    <button
-                        type="button"
-                        class="btn btn-link p-0 metadata-icon-btn"
-                        data-exp-id="{{ exp.id }}"
-                        data-metadata="{{ exp.metadata_text | e }}"
-                        aria-label="metadata.txt for {{ exp.name }}"
+                <td class="small text-nowrap dashboard-dataset">
+                    {% if exp.data_root %}
+                    {% set is_prefixed = exp.data_root.startswith('data.') %}
+                    {% set display_root = exp.data_root[5:] if is_prefixed else exp.data_root %}
+                    <div
+                        class="dashboard-dataset-value{% if is_prefixed %} dashboard-model-diff-short{% endif %}"
+                        title="{{ exp.data_root }}"
                     >
-                        <span class="visually-hidden">metadata.txt</span>
-                        <svg
-                            class="metadata-icon"
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="16"
-                            height="16"
-                            viewBox="0 0 16 16"
-                            fill="currentColor"
-                            aria-hidden="true"
-                        >
-                            <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1m0 2h3a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1z"/>
-                            <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
-                        </svg>
-                    </button>
+                        {{ display_root }}
+                    </div>
+                    {% else %}
+                    <span class="text-muted">—</span>
+                    {% endif %}
                 </td>
+                <td class="small dashboard-folder">{{ exp.name }}</td>
                 <td class="small text-nowrap" style="width: 1%;">
-                    <button
-                        type="button"
-                        class="btn btn-link p-0 git-icon-btn"
-                        data-exp-id="{{ exp.id }}"
-                        data-metadata="{{ exp.git_metadata_text | e }}"
-                        aria-label="metadata_git.txt for {{ exp.name }}"
-                    >
-                        <span class="visually-hidden">metadata_git.txt</span>
-                        <svg
-                            class="git-icon"
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="16"
-                            height="16"
-                            viewBox="0 0 16 16"
-                            fill="currentColor"
-                            aria-hidden="true"
+                    <div class="d-flex align-items-center gap-2">
+                        <button
+                            type="button"
+                            class="btn btn-link p-0 metadata-icon-btn"
+                            data-exp-id="{{ exp.id }}"
+                            data-metadata="{{ exp.metadata_text | e }}"
+                            aria-label="metadata.txt for {{ exp.name }}"
                         >
-                            <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1m0 2h3a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1z"/>
-                            <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
-                        </svg>
-                    </button>
+                            <span class="visually-hidden">metadata.txt</span>
+                            <svg
+                                class="metadata-icon"
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="16"
+                                height="16"
+                                viewBox="0 0 16 16"
+                                fill="currentColor"
+                                aria-hidden="true"
+                            >
+                                <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1z"/>
+                                <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
+                            </svg>
+                        </button>
+                        <button
+                            type="button"
+                            class="btn btn-link p-0 git-icon-btn"
+                            data-exp-id="{{ exp.id }}"
+                            data-metadata="{{ exp.git_metadata_text | e }}"
+                            aria-label="metadata_git.txt for {{ exp.name }}"
+                        >
+                            <span class="visually-hidden">metadata_git.txt</span>
+                            <svg
+                                class="git-icon"
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="16"
+                                height="16"
+                                viewBox="0 0 16 16"
+                                fill="currentColor"
+                                aria-hidden="true"
+                            >
+                                <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1z"/>
+                                <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
+                            </svg>
+                        </button>
+                    </div>
                 </td>
-                <td class="small font-monospace format-params text-nowrap" style="width: 1%;" data-value="{{ exp.total_params if exp.total_params is not none else '' }}">—</td>
-                <td class="small font-monospace format-flops text-nowrap" style="width: 1%;" data-value="{{ exp.flops_per_step if exp.flops_per_step is not none else '' }}">—</td>
+                <td class="small font-monospace format-params text-nowrap dashboard-params" style="width: 1%;" data-value="{{ exp.total_params if exp.total_params is not none else '' }}">—</td>
                 <td class="small text-nowrap" style="width: 1%;">{{ exp.last_modified | format_last_modified }}</td>
-                <td class="small text-nowrap" style="width: 1%;">
+                <td class="small text-nowrap dashboard-steps" style="width: 1%;">
                     {% if exp.max_step is not none %}
                     <span class="d-inline-block text-end font-monospace" style="min-width: 6ch;">{{ "{:,}".format(exp.max_step) }}</span>
                     {% else %}
@@ -221,6 +298,25 @@
 {{ super() }}
 <script>
 document.addEventListener("DOMContentLoaded", () => {
+  const initFastTooltips = () => {
+    const tooltipTargets = document.querySelectorAll(
+      ".dashboard-model-diff-chip.dashboard-model-diff-short[title], .dashboard-dataset-value.dashboard-model-diff-short[title]"
+    );
+    tooltipTargets.forEach((el) => {
+      if (!window.bootstrap || !el.title) return;
+      const existing = bootstrap.Tooltip.getInstance(el);
+      if (existing) existing.dispose();
+      new bootstrap.Tooltip(el, {
+        trigger: "hover focus",
+        placement: "top",
+        container: "body",
+        delay: { show: 0, hide: 0 },
+        animation: false,
+        customClass: el.classList.contains("dashboard-dataset-value") ? "tooltip-nowrap" : "",
+      });
+    });
+  };
+
   const STORAGE_KEY = "dashboard_selected_experiments";
   const experiments = [
     {% for exp in experiments %}
@@ -472,6 +568,8 @@ document.addEventListener("DOMContentLoaded", () => {
     selectionOrder.forEach((id) => params.append("ids", id));
     window.location = "{{ url_for('comparison') }}" + "?" + params.toString();
   });
+
+  initFastTooltips();
 });
 </script>
 {% endblock %}

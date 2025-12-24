@@ -33,16 +33,53 @@ def _profile(label: str, start_time: float, path: Optional[Path] = None, **field
     PROFILE_LOGGER.info(" ".join(parts))
 
 
-def _render_model_diff(text: str) -> str:
+_MODEL_DIFF_SHORTNAMES: Dict[str, str] = {
+    "loss_normalization_enabled": "norm",
+    "image_size": "img",
+}
+
+
+def _parse_model_diff_items(text: str) -> List[Tuple[str, str, bool]]:
+    """Return display, full text, shortened? tuples for model diff entries."""
     stripped = text.strip()
-    if not stripped:
-        return stripped
-    if stripped.startswith("model_diff.txt missing"):
-        return stripped
-    parts = [line.strip() for line in text.splitlines() if line.strip()]
-    if not parts:
-        return stripped
-    return ", ".join(parts)
+    if not stripped or stripped.startswith("model_diff.txt missing"):
+        return []
+    items: List[Tuple[str, str, bool]] = []
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        normalized = trimmed.lstrip("+- ").lower()
+        if normalized.startswith("data_root"):
+            continue
+        display = trimmed
+        shortened = False
+        sep = None
+        key = None
+        for candidate in ("=", ":"):
+            if candidate in trimmed:
+                key, rest = trimmed.split(candidate, 1)
+                sep = candidate
+                break
+        if key:
+            key_clean = key.strip()
+            short = _MODEL_DIFF_SHORTNAMES.get(key_clean)
+            if short and sep is not None:
+                display = f"{short}{sep}{rest.strip()}"
+                shortened = True
+        items.append((display, trimmed, shortened))
+    return items
+
+
+def _render_model_diff(text: str) -> str:
+    items = _parse_model_diff_items(text)
+    if not text.strip():
+        return "—"
+    if text.strip().startswith("model_diff.txt missing"):
+        return text.strip()
+    if not items:
+        return "—"
+    return ", ".join(display for display, _, _ in items)
 
 
 @dataclass
@@ -53,7 +90,9 @@ class Experiment:
     name: str
     path: Path
     metadata_text: str
+    data_root: Optional[str]
     model_diff_text: str
+    model_diff_items: List[Tuple[str, str, bool]]
     git_metadata_text: str
     git_commit: str
     notes_text: str
@@ -187,10 +226,12 @@ def load_experiment(
     metadata_custom_path = path / "experiment_metadata.txt"
     title, tags = _read_metadata(metadata_custom_path)
     metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
+    metadata_data_root = _extract_data_root_from_metadata(metadata_text) if metadata_text else None
     if metadata_model_diff_path.exists():
         metadata_model_diff_text_raw = metadata_model_diff_path.read_text()
     else:
         metadata_model_diff_text_raw = _ensure_model_diff(path)
+    metadata_model_diff_items = _parse_model_diff_items(metadata_model_diff_text_raw)
     metadata_model_diff_text = _render_model_diff(metadata_model_diff_text_raw)
     git_metadata_text = metadata_git_path.read_text() if metadata_git_path.exists() else "metadata_git.txt missing."
     git_commit = _extract_git_commit(git_metadata_text)
@@ -225,7 +266,9 @@ def load_experiment(
         name=path.name,
         path=path,
         metadata_text=metadata_text,
+        data_root=metadata_data_root,
         model_diff_text=metadata_model_diff_text,
+        model_diff_items=metadata_model_diff_items,
         git_metadata_text=git_metadata_text,
         git_commit=git_commit or "Unknown commit",
         notes_text=notes_text,
@@ -363,6 +406,31 @@ def _write_metadata(path: Path, title: Optional[str] = None, tags: Optional[str]
     path.write_text(tomli_w.dumps(payload))
 
 
+def _extract_data_root_from_metadata(metadata_text: str) -> Optional[str]:
+    """Return the first data_root value found within a TOML metadata blob."""
+    try:
+        parsed = tomli.loads(metadata_text)
+    except (tomli.TOMLDecodeError, OSError):
+        return None
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "data_root" and isinstance(value, str) and value.strip():
+                    return value.strip()
+                found = _walk(value)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = _walk(item)
+                if found:
+                    return found
+        return None
+
+    return _walk(parsed)
+
+
 def _extract_git_commit(metadata_git_text: str) -> str:
     lines = metadata_git_text.splitlines()
     found_commit_block = False
@@ -424,6 +492,53 @@ def _collect_rollout_steps(root: Path) -> List[int]:
         except ValueError:
             continue
     return sorted(steps)
+
+VIS_STEP_SPECS = [
+    ("vis_fixed_0", "vis_fixed_0", "rollout_*.png", "rollout_"),
+    ("vis_fixed_1", "vis_fixed_1", "rollout_*.png", "rollout_"),
+    ("vis_rolling_0", "vis_rolling_0", "rollout_*.png", "rollout_"),
+    ("vis_rolling_1", "vis_rolling_1", "rollout_*.png", "rollout_"),
+    ("embeddings", "embeddings", "embeddings_*.png", "embeddings_"),
+    ("samples_hard", "samples_hard", "hard_*.png", "hard_"),
+    ("vis_self_distance", "vis_self_distance", "self_distance_*.png", "self_distance_"),
+    ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
+    ("vis_action_alignment", "vis_action_alignment", "action_alignment_*.png", "action_alignment_"),
+    ("vis_action_alignment_detail", "vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_cycle_error", "vis_cycle_error", "cycle_error_*.png", "cycle_error_"),
+]
+
+
+def _parse_step_from_stem(stem: str, prefix: str) -> Optional[int]:
+    if prefix and stem.startswith(prefix):
+        suffix = stem[len(prefix) :]
+    else:
+        parts = stem.split("_")
+        suffix = parts[-1] if parts else stem
+    try:
+        return int(suffix)
+    except ValueError:
+        return None
+
+
+def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
+    """Gather per-visualization step lists used for comparison previews."""
+    step_map: Dict[str, List[int]] = {}
+    for key, folder_name, pattern, prefix in VIS_STEP_SPECS:
+        folder = root / folder_name
+        if not folder.exists():
+            continue
+        steps: set[int] = set()
+        try:
+            for png in folder.glob(pattern):
+                step = _parse_step_from_stem(png.stem, prefix)
+                if step is None:
+                    continue
+                steps.add(step)
+        except OSError:
+            continue
+        if steps:
+            step_map[key] = sorted(steps)
+    return step_map
 
 
 def _collect_self_distance_images(root: Path) -> List[Path]:

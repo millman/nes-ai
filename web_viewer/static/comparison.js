@@ -9,17 +9,36 @@ let elapsedSeconds = [];
 let hasElapsedSeconds = false;
 
 const IMAGE_FOLDER_OPTIONS = [
-  { value: "vis_fixed_0", label: "vis_fixed_0", prefix: "rollout_" },
-  { value: "vis_fixed_1", label: "vis_fixed_1", prefix: "rollout_" },
-  { value: "vis_rolling_0", label: "vis_rolling_0", prefix: "rollout_" },
-  { value: "vis_rolling_1", label: "vis_rolling_1", prefix: "rollout_" },
-  { value: "embeddings", label: "embeddings", prefix: "embeddings_" },
-  { value: "samples_hard", label: "samples_hard", prefix: "hard_" },
-];
+  { value: "vis_fixed_0", label: "vis_fixed_0", prefix: "rollout_", folder: "vis_fixed_0" },
+  { value: "vis_fixed_1", label: "vis_fixed_1", prefix: "rollout_", folder: "vis_fixed_1" },
+  { value: "vis_rolling_0", label: "vis_rolling_0", prefix: "rollout_", folder: "vis_rolling_0" },
+  { value: "vis_rolling_1", label: "vis_rolling_1", prefix: "rollout_", folder: "vis_rolling_1" },
+  { value: "embeddings", label: "embeddings", prefix: "embeddings_", folder: "embeddings" },
+  { value: "samples_hard", label: "samples_hard", prefix: "hard_", folder: "samples_hard" },
+  { value: "vis_self_distance", label: "vis_self_distance", prefix: "self_distance_", folder: "vis_self_distance" },
+  { value: "vis_delta_z_pca", label: "vis_delta_z_pca", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
+  { value: "vis_action_alignment", label: "vis_action_alignment", prefix: "action_alignment_", folder: "vis_action_alignment" },
+  {
+    value: "vis_action_alignment_detail",
+    label: "vis_action_alignment:detail",
+    prefix: "action_alignment_detail_",
+    folder: "vis_action_alignment",
+  },
+  { value: "vis_cycle_error", label: "vis_cycle_error", prefix: "cycle_error_", folder: "vis_cycle_error" },
+].sort((a, b) => a.value.localeCompare(b.value));
 
-function getImagePrefixForFolder(folder) {
-  const option = IMAGE_FOLDER_OPTIONS.find((opt) => opt.value === folder);
+function getImageOption(folderValue) {
+  return IMAGE_FOLDER_OPTIONS.find((opt) => opt.value === folderValue);
+}
+
+function getImagePrefixForFolder(folderValue) {
+  const option = getImageOption(folderValue);
   return option ? option.prefix : "rollout_";
+}
+
+function getImageFolderPath(folderValue) {
+  const option = getImageOption(folderValue);
+  return option ? option.folder || option.value : folderValue;
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -83,7 +102,15 @@ function renderComparison(payload) {
   const experiments = payload.experiments;
   const availableStepsByExp = {};
   experiments.forEach((exp) => {
-    availableStepsByExp[exp.id] = Array.isArray(exp.rollout_steps) ? exp.rollout_steps : [];
+    const map = exp.visualization_steps && typeof exp.visualization_steps === "object" ? { ...exp.visualization_steps } : {};
+    const rollout = Array.isArray(exp.rollout_steps) ? exp.rollout_steps : [];
+    if (rollout.length) {
+      map.vis_fixed_0 = map.vis_fixed_0 || rollout;
+    }
+    if (rollout.length && !map.__fallback) {
+      map.__fallback = rollout;
+    }
+    availableStepsByExp[exp.id] = map;
   });
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
@@ -261,6 +288,8 @@ function buildExperimentGrid(experiments) {
     const url = new URL(window.location.href);
     url.searchParams.set("folder", currentImageFolder);
     window.history.replaceState({}, "", url.toString());
+    // Refresh rollout previews for the newly selected folder
+    refreshPreviewImages(container, availableStepsByExp);
   });
 
   selectorRow.appendChild(selectorLabel);
@@ -482,10 +511,46 @@ function collectPreviewMap(root) {
   return map;
 }
 
+function refreshPreviewImages(container, stepsMap) {
+  const previews = collectPreviewMap(container);
+  Object.entries(previews).forEach(([expId, preview]) => {
+    const steps = stepsMap?.[expId]?.[currentImageFolder] || stepsMap?.[expId]?.__fallback || [];
+    const latestStep = steps.length ? steps[steps.length - 1] : null;
+    if (latestStep === null) {
+      preview.img.classList.add("d-none");
+      preview.missing.classList.remove("d-none");
+      preview.path.textContent = "No rollout image available.";
+      return;
+    }
+    const folderPath = getImageFolderPath(currentImageFolder);
+    const prefix = getImagePrefixForFolder(currentImageFolder);
+    preview.img.src = `/assets/${expId}/${folderPath}/${prefix}${latestStep}.png`;
+    preview.img.alt = `Rollout ${latestStep} for ${preview.displayTitle}`;
+    preview.img.classList.remove("d-none");
+    preview.missing.classList.add("d-none");
+    preview.path.textContent = `${folderPath}/${prefix}${latestStep}.png`;
+  });
+}
+
 function attachComparisonHover(plotEl, stepsMap, previews) {
   if (!plotEl || !previews || typeof Plotly === "undefined") {
     return;
   }
+  const getStepsForFolder = (expId, folderValue) => {
+    const map = stepsMap?.[expId];
+    if (!map) {
+      return [];
+    }
+    const direct = map[folderValue];
+    if (Array.isArray(direct) && direct.length) {
+      return direct;
+    }
+    const fallback = map.__fallback;
+    if (Array.isArray(fallback)) {
+      return fallback;
+    }
+    return [];
+  };
   const nearestStep = (target, list) => {
     if (!Array.isArray(list) || list.length === 0) {
       return null;
@@ -504,11 +569,12 @@ function attachComparisonHover(plotEl, stepsMap, previews) {
   };
   const renderAll = (step) => {
     const target = Math.max(0, Math.round(step));
-    const folder = currentImageFolder;
-    const prefix = getImagePrefixForFolder(folder);
+    const folderValue = currentImageFolder;
+    const folderPath = getImageFolderPath(folderValue);
+    const prefix = getImagePrefixForFolder(folderValue);
     Object.entries(previews).forEach(([expId, preview]) => {
       const displayTitle = preview.displayTitle || expId;
-      const available = stepsMap?.[expId] || [];
+      const available = getStepsForFolder(expId, folderValue);
       const matched = nearestStep(target, available);
       if (matched === null) {
         preview.title.textContent = displayTitle;
@@ -519,12 +585,12 @@ function attachComparisonHover(plotEl, stepsMap, previews) {
         return;
       }
       const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
-      const src = `/assets/${expId}/${folder}/${filename}`;
-      const pathText = `${expId}/${folder}/${filename} (hovered ${target}, showing ${matched})`;
+      const src = `/assets/${expId}/${folderPath}/${filename}`;
+      const pathText = `${expId}/${folderPath}/${filename} (hovered ${target}, showing ${matched})`;
       preview.title.textContent = displayTitle;
       preview.path.textContent = pathText;
       preview.img.src = src;
-      preview.img.alt = `${folder} ${matched}`;
+      preview.img.alt = `${folderPath} ${matched}`;
       preview.img.dataset.step = String(matched);
       preview.img.classList.remove("d-none");
       preview.img.onerror = () => {
