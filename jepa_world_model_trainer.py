@@ -919,6 +919,131 @@ def _transport_from_scores(
     return transport, scores
 
 
+def adjacency_loss_adj0(
+    embeddings: torch.Tensor,
+    z_noisy: torch.Tensor,
+    weights: LossWeights,
+    cfg: TrainConfig,
+) -> torch.Tensor:
+    if weights.adj0 <= 0 or embeddings.shape[1] < 2:
+        return embeddings.new_tensor(0.0)
+    return F.mse_loss(F.normalize(embeddings[:, :-1], dim=-1), F.normalize(z_noisy[:, :-1], dim=-1))
+
+
+def adjacency_loss_adj1(
+    embeddings: torch.Tensor,
+    z_noisy: torch.Tensor,
+    z_hat_next: torch.Tensor,
+    weights: LossWeights,
+    cfg: TrainConfig,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    zero = embeddings.new_tensor(0.0)
+    if weights.adj1 <= 0 or embeddings.shape[1] < 2:
+        return zero, zero, zero
+    z_next_noisy = z_noisy[:, 1:]
+    preds_flat = z_hat_next.reshape(-1, z_hat_next.shape[-1])
+    cand_flat = z_next_noisy.reshape(-1, z_next_noisy.shape[-1]).detach()
+    transport, _ = _transport_from_scores(
+        F.normalize(preds_flat, dim=-1),
+        F.normalize(cand_flat, dim=-1),
+        temp_score=cfg.adjacency.temp_score,
+        mask_self_edges=cfg.adjacency.mask_self_edges,
+        topk_candidates=cfg.adjacency.topk_candidates,
+        sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
+        sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
+    )
+    diag_idx = torch.arange(transport.shape[0], device=transport.device)
+    loss_adj1 = -torch.log(transport[diag_idx, diag_idx] + cfg.normalize_losses.epsilon).mean()
+    with torch.no_grad():
+        row_entropy = -(transport * torch.log(transport + cfg.normalize_losses.epsilon)).sum(dim=1)
+        adj_entropy = row_entropy.mean()
+        adj_hit = (transport.argmax(dim=1) == diag_idx).float().mean()
+    return loss_adj1, adj_entropy, adj_hit
+
+
+def adjacency_loss_adj2(
+    model: JEPAWorldModel,
+    z_hat_next: torch.Tensor,
+    z_noisy: torch.Tensor,
+    actions: torch.Tensor,
+    weights: LossWeights,
+    cfg: TrainConfig,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    zero = z_hat_next.new_tensor(0.0)
+    if weights.adj2 <= 0 or actions.shape[1] < 3 or z_hat_next.shape[1] < 2 or z_noisy.shape[1] < 3:
+        return zero, zero
+    actions_two = actions[:, 1:-1]
+    if actions_two.numel() == 0:
+        return zero, zero
+    second_queries, _ = model.predictor(z_hat_next[:, :-1], actions_two)
+    second_targets = z_noisy[:, 2:]
+    q2_flat = second_queries.reshape(-1, second_queries.shape[-1])
+    cand2_flat = second_targets.reshape(-1, second_targets.shape[-1]).detach()
+    transport2, _ = _transport_from_scores(
+        F.normalize(q2_flat, dim=-1),
+        F.normalize(cand2_flat, dim=-1),
+        temp_score=cfg.adjacency.temp_score,
+        mask_self_edges=cfg.adjacency.mask_self_edges,
+        topk_candidates=cfg.adjacency.topk_candidates,
+        sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
+        sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
+    )
+    if transport2.numel() == 0:
+        return zero, zero
+    diag2 = torch.arange(transport2.shape[0], device=transport2.device)
+    loss_adj2 = -torch.log(transport2[diag2, diag2] + cfg.normalize_losses.epsilon).mean()
+    with torch.no_grad():
+        adj2_hit = (transport2.argmax(dim=1) == diag2).float().mean()
+    return loss_adj2, adj2_hit
+
+
+def adjacency_losses(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    images: torch.Tensor,
+    z_hat_next: torch.Tensor,
+    weights: LossWeights,
+    cfg: TrainConfig,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute adjacency-related losses and metrics."""
+    zero = embeddings.new_tensor(0.0)
+    loss_adj0 = zero
+    loss_adj1 = zero
+    loss_adj2 = zero
+    adj_entropy = zero
+    adj_hit = zero
+    adj2_hit = zero
+
+    use_adjacency = (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0)
+    if not use_adjacency or embeddings.shape[1] < 2:
+        return loss_adj0, loss_adj1, loss_adj2, adj_entropy, adj_hit, adj2_hit
+
+    sigma = max(cfg.adjacency.sigma_aug, 0.0)
+    noisy_images = gaussian_augment(images, sigma)
+    noisy_outputs = model.encode_sequence(noisy_images)
+    z_noisy = noisy_outputs["embeddings"]
+
+    loss_adj0 = adjacency_loss_adj0(embeddings, z_noisy, weights, cfg)
+    loss_adj1, adj_entropy, adj_hit = adjacency_loss_adj1(
+        embeddings,
+        z_noisy,
+        z_hat_next,
+        weights,
+        cfg,
+    )
+    loss_adj2, adj2_hit = adjacency_loss_adj2(
+        model,
+        z_hat_next,
+        z_noisy,
+        actions,
+        weights,
+        cfg,
+    )
+
+    return loss_adj0, loss_adj1, loss_adj2, adj_entropy, adj_hit, adj2_hit
+
+
 # ------------------------------------------------------------
 # Training loop utilities
 # ------------------------------------------------------------
@@ -1088,64 +1213,15 @@ def _compute_losses_and_metrics(
     else:
         loss_recon_patch = images.new_tensor(0.0)
 
-    use_adjacency = (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0)
-    loss_adj0 = images.new_tensor(0.0)
-    loss_adj1 = images.new_tensor(0.0)
-    loss_adj2 = images.new_tensor(0.0)
-    adj_entropy = images.new_tensor(0.0)
-    adj_hit = images.new_tensor(0.0)
-    adj2_hit = images.new_tensor(0.0)
-    if use_adjacency and outputs["embeddings"].shape[1] >= 2:
-        sigma = max(cfg.adjacency.sigma_aug, 0.0)
-        noisy_images = gaussian_augment(images, sigma)
-        noisy_outputs = model.encode_sequence(noisy_images)
-        z = outputs["embeddings"]
-        z_noisy = noisy_outputs["embeddings"]
-        # 0-step invariance between clean and noisy frames (excluding final frame to match queries).
-        if weights.adj0 > 0:
-            loss_adj0 = F.mse_loss(F.normalize(z[:, :-1], dim=-1), F.normalize(z_noisy[:, :-1], dim=-1))
-        # 1-step adjacency using predicted next vs noisy next targets.
-        z_next_noisy = z_noisy[:, 1:]
-        preds_flat = z_hat_next.reshape(-1, z_hat_next.shape[-1])
-        cand_flat = z_next_noisy.reshape(-1, z_next_noisy.shape[-1]).detach()
-        transport, scores = _transport_from_scores(
-            F.normalize(preds_flat, dim=-1),
-            F.normalize(cand_flat, dim=-1),
-            temp_score=cfg.adjacency.temp_score,
-            mask_self_edges=cfg.adjacency.mask_self_edges,
-            topk_candidates=cfg.adjacency.topk_candidates,
-            sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
-            sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
-        )
-        diag_idx = torch.arange(transport.shape[0], device=transport.device)
-        if weights.adj1 > 0:
-            loss_adj1 = -torch.log(transport[diag_idx, diag_idx] + cfg.normalize_losses.epsilon).mean()
-        with torch.no_grad():
-            row_entropy = -(transport * torch.log(transport + cfg.normalize_losses.epsilon)).sum(dim=1)
-            adj_entropy = row_entropy.mean()
-            adj_hit = (transport.argmax(dim=1) == diag_idx).float().mean()
-        # 2-hop composition: predict from predicted next using a_{t+1} toward x_{t+2}.
-        if weights.adj2 > 0 and actions.shape[1] >= 3:
-            actions_two = actions[:, 1:-1]
-            if actions_two.numel() > 0 and z_hat_next.shape[1] >= 2 and z_noisy.shape[1] >= 3:
-                second_queries, _ = model.predictor(z_hat_next[:, :-1], actions_two)
-                second_targets = z_noisy[:, 2:]
-                q2_flat = second_queries.reshape(-1, second_queries.shape[-1])
-                cand2_flat = second_targets.reshape(-1, second_targets.shape[-1]).detach()
-                transport2, _ = _transport_from_scores(
-                    F.normalize(q2_flat, dim=-1),
-                    F.normalize(cand2_flat, dim=-1),
-                    temp_score=cfg.adjacency.temp_score,
-                    mask_self_edges=cfg.adjacency.mask_self_edges,
-                    topk_candidates=cfg.adjacency.topk_candidates,
-                    sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
-                    sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
-                )
-                if transport2.numel() > 0:
-                    diag2 = torch.arange(transport2.shape[0], device=transport2.device)
-                    loss_adj2 = -torch.log(transport2[diag2, diag2] + cfg.normalize_losses.epsilon).mean()
-                    with torch.no_grad():
-                        adj2_hit = (transport2.argmax(dim=1) == diag2).float().mean()
+    loss_adj0, loss_adj1, loss_adj2, adj_entropy, adj_hit, adj2_hit = adjacency_losses(
+        model=model,
+        embeddings=outputs["embeddings"],
+        actions=actions,
+        images=images,
+        z_hat_next=z_hat_next,
+        weights=weights,
+        cfg=cfg,
+    )
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
