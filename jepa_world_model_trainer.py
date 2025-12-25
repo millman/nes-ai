@@ -2753,7 +2753,7 @@ def _build_action_alignment_debug(
     overall_cos = np.concatenate(overall_cos_list) if overall_cos_list else np.asarray([], dtype=np.float32)
     overall_norms = np.concatenate(overall_norm_list) if overall_norm_list else np.asarray([], dtype=np.float32)
 
-    actions_sorted = sorted(mean_units.keys(), key=lambda aid: counts.get(aid, 0), reverse=True)
+    actions_sorted = sorted(mean_units.keys())
     pairwise = np.full((len(actions_sorted), len(actions_sorted)), np.nan, dtype=np.float32)
     for i, ai in enumerate(actions_sorted):
         for j, aj in enumerate(actions_sorted):
@@ -2861,6 +2861,7 @@ def _save_action_alignment_detail_plot(
     # (0,0): per-action cosine strip plot (mirrors cosine alignment view)
     ax0 = axes[0, 0]
     if actions_sorted and any(per_action_cos.get(aid) is not None for aid in actions_sorted):
+        actions_sorted = sorted(actions_sorted)
         x = np.arange(len(actions_sorted))
         rng = np.random.default_rng(0)
         for idx, aid in enumerate(actions_sorted):

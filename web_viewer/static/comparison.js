@@ -1,6 +1,7 @@
 let hasRenderedPlot = false;
 let currentImageFolder = "vis_fixed_0";
 let currentXAxisMode = "steps";
+let lastPreviewStep = null;
 
 // Store original data for x-axis toggling
 let originalSteps = [];
@@ -40,6 +41,81 @@ function getImagePrefixForFolder(folderValue) {
 function getImageFolderPath(folderValue) {
   const option = getImageOption(folderValue);
   return option ? option.folder || option.value : folderValue;
+}
+
+function getStepsForFolder(stepsMap, expId, folderValue) {
+  const map = stepsMap?.[expId];
+  if (!map) {
+    return [];
+  }
+  const direct = map[folderValue];
+  if (Array.isArray(direct) && direct.length) {
+    return direct;
+  }
+  const fallback = map.__fallback;
+  if (Array.isArray(fallback)) {
+    return fallback;
+  }
+  return [];
+}
+
+function nearestStepAtOrBelow(target, list) {
+  if (!Array.isArray(list) || list.length === 0) {
+    return null;
+  }
+  let best = null;
+  for (let i = 0; i < list.length; i++) {
+    const step = list[i];
+    if (step > target) {
+      continue;
+    }
+    if (best === null || step > best) {
+      best = step;
+    }
+  }
+  return best;
+}
+
+function renderPreviewsAtStep(step, previews, stepsMap) {
+  const targetStep = step !== null && step !== undefined ? Math.max(0, Math.round(step)) : null;
+  const folderValue = currentImageFolder;
+  const folderPath = getImageFolderPath(folderValue);
+  const prefix = getImagePrefixForFolder(folderValue);
+  Object.entries(previews || {}).forEach(([expId, preview]) => {
+    const displayTitle = preview.displayTitle || expId;
+    const available = getStepsForFolder(stepsMap, expId, folderValue);
+    const matched = targetStep !== null ? nearestStepAtOrBelow(targetStep, available) : (available.length ? available[available.length - 1] : null);
+    if (matched === null) {
+      preview.title.textContent = displayTitle;
+      preview.path.textContent = "No images available.";
+      preview.img.classList.add("d-none");
+      preview.missing.textContent = "No images available.";
+      preview.missing.classList.remove("d-none");
+      preview.img.removeAttribute("data-step");
+      return;
+    }
+    const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
+    const src = `/assets/${expId}/${folderPath}/${filename}`;
+    const pathText =
+      targetStep !== null
+        ? `${expId}/${folderPath}/${filename} (selected ${targetStep}, showing ${matched})`
+        : `${expId}/${folderPath}/${filename} (showing ${matched})`;
+    preview.title.textContent = displayTitle;
+    preview.path.textContent = pathText;
+    preview.img.src = src;
+    preview.img.alt = `${folderPath} ${matched}`;
+    preview.img.dataset.step = String(matched);
+    preview.img.classList.remove("d-none");
+    preview.img.onerror = () => {
+      preview.img.classList.add("d-none");
+      preview.missing.textContent = `No image for step ${matched}`;
+      preview.missing.classList.remove("d-none");
+    };
+    preview.img.onload = () => {
+      preview.missing.classList.add("d-none");
+    };
+    preview.missing.classList.add("d-none");
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -116,6 +192,8 @@ function renderComparison(payload) {
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
   const previewMap = collectPreviewMap(grid);
+  lastPreviewStep = null;
+  renderPreviewsAtStep(lastPreviewStep, previewMap, availableStepsByExp);
   refreshPreviewImages(grid, availableStepsByExp);
   const figure = payload.figure;
   if (figure) {
@@ -292,7 +370,8 @@ function buildExperimentGrid(experiments) {
     url.searchParams.set("folder", currentImageFolder);
     window.history.replaceState({}, "", url.toString());
     // Refresh rollout previews for the newly selected folder
-    refreshPreviewImages(container, availableStepsByExp);
+    const previews = collectPreviewMap(container);
+    renderPreviewsAtStep(lastPreviewStep, previews, availableStepsByExp);
   });
 
   selectorRow.appendChild(selectorLabel);
@@ -539,80 +618,14 @@ function attachComparisonHover(plotEl, stepsMap, previews) {
   if (!plotEl || !previews || typeof Plotly === "undefined") {
     return;
   }
-  const getStepsForFolder = (expId, folderValue) => {
-    const map = stepsMap?.[expId];
-    if (!map) {
-      return [];
-    }
-    const direct = map[folderValue];
-    if (Array.isArray(direct) && direct.length) {
-      return direct;
-    }
-    const fallback = map.__fallback;
-    if (Array.isArray(fallback)) {
-      return fallback;
-    }
-    return [];
-  };
-  const nearestStep = (target, list) => {
-    if (!Array.isArray(list) || list.length === 0) {
-      return null;
-    }
-    let best = null;
-    for (let i = 0; i < list.length; i++) {
-      const step = list[i];
-      if (step > target) {
-        continue;
-      }
-      if (best === null || step > best) {
-        best = step;
-      }
-    }
-    return best;
-  };
-  const renderAll = (step) => {
-    const target = Math.max(0, Math.round(step));
-    const folderValue = currentImageFolder;
-    const folderPath = getImageFolderPath(folderValue);
-    const prefix = getImagePrefixForFolder(folderValue);
-    Object.entries(previews).forEach(([expId, preview]) => {
-      const displayTitle = preview.displayTitle || expId;
-      const available = getStepsForFolder(expId, folderValue);
-      const matched = nearestStep(target, available);
-      if (matched === null) {
-        preview.title.textContent = displayTitle;
-        preview.path.textContent = "No images available.";
-        preview.img.classList.add("d-none");
-        preview.missing.textContent = "No images available.";
-        preview.missing.classList.remove("d-none");
-        return;
-      }
-      const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
-      const src = `/assets/${expId}/${folderPath}/${filename}`;
-      const pathText = `${expId}/${folderPath}/${filename} (hovered ${target}, showing ${matched})`;
-      preview.title.textContent = displayTitle;
-      preview.path.textContent = pathText;
-      preview.img.src = src;
-      preview.img.alt = `${folderPath} ${matched}`;
-      preview.img.dataset.step = String(matched);
-      preview.img.classList.remove("d-none");
-      preview.img.onerror = () => {
-        preview.img.classList.add("d-none");
-        preview.missing.textContent = `No image for step ${matched}`;
-        preview.missing.classList.remove("d-none");
-      };
-      preview.img.onload = () => {
-        preview.missing.classList.add("d-none");
-      };
-    });
-  };
   plotEl.on("plotly_hover", (event) => {
     const points = event?.points || [];
     const point = points.find((p) => p && typeof p.x !== "undefined");
     if (!point) {
       return;
     }
-    renderAll(point.x);
+    lastPreviewStep = point.x;
+    renderPreviewsAtStep(point.x, previews, stepsMap);
   });
 }
 
