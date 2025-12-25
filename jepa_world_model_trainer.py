@@ -70,7 +70,6 @@ class PredictorNetwork(nn.Module):
         self.in_proj = nn.Linear(embedding_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
-        self.action_head = nn.Linear(hidden_dim, action_dim)
         self.activation = nn.SiLU(inplace=True)
         self.action_embed = ActionEmbedding(action_dim, hidden_dim)
         self.action_embed_dim = hidden_dim
@@ -97,12 +96,10 @@ class PredictorNetwork(nn.Module):
             delta = torch.tanh(raw_delta) * self.delta_scale
         else:
             delta = raw_delta * self.delta_scale
-        action_logits = self.action_head(hidden)
         pred = emb_flat + delta
         return (
             pred.view(*original_shape, pred.shape[-1]),
             delta.view(*original_shape, delta.shape[-1]),
-            action_logits.view(*original_shape, action_logits.shape[-1]),
         )
 
     def shape_info(self) -> Dict[str, Any]:
@@ -113,6 +110,27 @@ class PredictorNetwork(nn.Module):
             "action_dim": self.action_dim,
             "film_layers": self.film_layers,
         }
+
+
+class ActionDeltaHead(nn.Module):
+    """Predict controller actions from latent deltas to avoid action-conditioning leakage."""
+
+    def __init__(self, latent_dim: int, hidden_dim: int, action_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(latent_dim),
+            nn.Linear(latent_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, delta: torch.Tensor) -> torch.Tensor:
+        original_shape = delta.shape[:-1]
+        flat = delta.reshape(-1, delta.shape[-1])
+        logits = self.net(flat)
+        return logits.view(*original_shape, logits.shape[-1])
 
 
 class ActionEmbedding(nn.Module):
@@ -267,7 +285,7 @@ class LossWeights:
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
     recon_multi_box: float = 0.3
-    action_recon: float = 0.0
+    action_recon: float = 1.0
     delta: float = 0.0
     rollout: float = 0.0
     consistency: float = 0.0
@@ -463,6 +481,11 @@ class JEPAWorldModel(nn.Module):
             cfg.action_dim,
             cfg.predictor_film_layers,
         )
+        self.action_delta_head = ActionDeltaHead(
+            self.embedding_dim,
+            cfg.hidden_dim,
+            cfg.action_dim,
+        )
 
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         b, t, _, _, _ = images.shape
@@ -484,7 +507,7 @@ class JEPAWorldModel(nn.Module):
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Standard one-step JEPA loss plus action logits from the predictor."""
+    """Standard one-step JEPA loss plus action logits from latent deltas (leak-free)."""
     embeddings = outputs["embeddings"]
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
@@ -493,8 +516,10 @@ def jepa_loss(
         return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape)
     prev_embed = embeddings[:, :-1]
     prev_actions = actions[:, :-1]
-    preds, delta_pred, action_logits = model.predictor(prev_embed, prev_actions)
+    preds, delta_pred = model.predictor(prev_embed, prev_actions)
     target = embeddings[:, 1:].detach()
+    delta_true = embeddings[:, 1:] - embeddings[:, :-1]
+    action_logits = model.action_delta_head(delta_true)
     return JEPA_LOSS(preds, target), action_logits, delta_pred, preds
 
 
@@ -530,7 +555,7 @@ def rollout_loss(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            pred, _, _ = model.predictor(current, act)
+            pred, _ = model.predictor(current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
@@ -1108,7 +1133,7 @@ def _compute_losses_and_metrics(
         if weights.adj2 > 0 and actions.shape[1] >= 3:
             actions_two = actions[:, 1:-1]
             if actions_two.numel() > 0 and z_hat_next.shape[1] >= 2 and z_noisy.shape[1] >= 3:
-                second_queries, _, _ = model.predictor(z_hat_next[:, :-1], actions_two)
+                second_queries, _ = model.predictor(z_hat_next[:, :-1], actions_two)
                 second_targets = z_noisy[:, 2:]
                 q2_flat = second_queries.reshape(-1, second_queries.shape[-1])
                 cand2_flat = second_targets.reshape(-1, second_targets.shape[-1]).detach()
@@ -1874,11 +1899,16 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     predictor_flops += _linear_flops(hidden_dim, hidden_dim)
     # out_proj
     predictor_flops += _linear_flops(hidden_dim, emb_dim)
-    # action_head
-    predictor_flops += _linear_flops(hidden_dim, action_dim)
 
     num_predictions = batch_size * (seq_len - 1)
     predictor_total = predictor_flops * num_predictions
+
+    # --- Action-from-delta head (per transition) ---
+    delta_head_flops = 0
+    delta_head_flops += _linear_flops(emb_dim, hidden_dim)
+    delta_head_flops += _linear_flops(hidden_dim, hidden_dim)
+    delta_head_flops += _linear_flops(hidden_dim, action_dim)
+    delta_head_total = delta_head_flops * num_predictions
 
     # --- Decoder FLOPs (per frame) ---
     decoder_schedule = cfg.decoder_schedule if cfg.decoder_schedule is not None else cfg.encoder_schedule
@@ -1910,7 +1940,7 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     decoder_total = decoder_flops * batch_size * seq_len
 
     # --- Total ---
-    forward_total = encoder_total + predictor_total + decoder_total
+    forward_total = encoder_total + predictor_total + decoder_total + delta_head_total
     backward_total = forward_total * 2  # Backward is roughly 2x forward
     total_per_step = forward_total + backward_total
 
@@ -3528,7 +3558,7 @@ def _render_visualization_batch(
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
             prev_embed = current_embed
-            next_embed, _, _ = model.predictor(current_embed, action)
+            next_embed, _ = model.predictor(current_embed, action)
             decoded_next = decoder(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
