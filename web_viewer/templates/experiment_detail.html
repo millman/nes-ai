@@ -13,13 +13,47 @@
 <div id="detail-plot" class="plot-area mb-3">
     {% if figure %}
     <script>
+                const IMAGE_FOLDER_OPTIONS = [
+                    { value: "vis_fixed_0", label: "vis_fixed_0", prefix: "rollout_", folder: "vis_fixed_0" },
+                    { value: "vis_fixed_1", label: "vis_fixed_1", prefix: "rollout_", folder: "vis_fixed_1" },
+                    { value: "vis_rolling_0", label: "vis_rolling_0", prefix: "rollout_", folder: "vis_rolling_0" },
+                    { value: "vis_rolling_1", label: "vis_rolling_1", prefix: "rollout_", folder: "vis_rolling_1" },
+                    { value: "embeddings", label: "embeddings", prefix: "embeddings_", folder: "embeddings" },
+                    { value: "samples_hard", label: "samples_hard", prefix: "hard_", folder: "samples_hard" },
+                    { value: "vis_self_distance", label: "vis_self_distance", prefix: "self_distance_", folder: "vis_self_distance" },
+                    { value: "vis_delta_z_pca", label: "vis_delta_z_pca", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
+                    { value: "vis_action_alignment", label: "vis_action_alignment", prefix: "action_alignment_", folder: "vis_action_alignment" },
+                    { value: "vis_action_alignment_detail", label: "vis_action_alignment:detail", prefix: "action_alignment_detail_", folder: "vis_action_alignment" },
+                    { value: "vis_cycle_error", label: "vis_cycle_error", prefix: "cycle_error_", folder: "vis_cycle_error" },
+                    { value: "vis_adjacency", label: "vis_adjacency", prefix: "adjacency_", folder: "vis_adjacency" },
+                ].sort((a, b) => a.value.localeCompare(b.value));
+
                 document.addEventListener("DOMContentLoaded", () => {
                     const figure = {{ figure|tojson }};
                     const rolloutSteps = {{ experiment.rollout_steps|tojson }};
+                    const visualizationSteps = {{ visualization_steps|tojson }};
                     const plotEl = document.getElementById("detail-plot");
+                    const folderSelect = document.getElementById("detail-folder-select");
+
+                    // Populate folder selector to mirror comparison options.
+                    if (folderSelect) {
+                        folderSelect.innerHTML = "";
+                        IMAGE_FOLDER_OPTIONS.forEach((opt) => {
+                            const option = document.createElement("option");
+                            option.value = opt.value;
+                            option.textContent = opt.label;
+                            folderSelect.appendChild(option);
+                        });
+                    }
+
+                    // Restore folder from URL if valid.
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const folderParam = urlParams.get("folder");
+                    if (folderParam && IMAGE_FOLDER_OPTIONS.some((opt) => opt.value === folderParam) && folderSelect) {
+                        folderSelect.value = folderParam;
+                    }
 
                     // Parse view state from URL
-                    const urlParams = new URLSearchParams(window.location.search);
                     const xMin = urlParams.get("xmin");
                     const xMax = urlParams.get("xmax");
                     const yMin = urlParams.get("ymin");
@@ -38,7 +72,7 @@
                     }
 
                     Plotly.react(plotEl, figure.data, figure.layout, buildPlotlyConfig(figure.config || {})).then(() => {
-                        attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps);
+                        attachRolloutPreview(plotEl, "{{ experiment.id }}", "detail-rollout-preview", rolloutSteps, visualizationSteps);
 
                         // Save view state to URL on zoom/pan
                         plotEl.on("plotly_relayout", (eventData) => {
@@ -65,27 +99,11 @@
                         });
                     });
                 });
-                function attachRolloutPreview(plotEl, expId, previewId, steps) {
+                function attachRolloutPreview(plotEl, expId, previewId, rolloutSteps, vizSteps) {
                     const preview = document.getElementById(previewId);
                     const folderSelect = document.getElementById("detail-folder-select");
                     if (!plotEl || !preview || typeof Plotly === "undefined") {
                         return;
-                    }
-
-                    const IMAGE_FOLDER_OPTIONS = {
-                        "vis_fixed_0": "rollout_",
-                        "vis_fixed_1": "rollout_",
-                        "vis_rolling_0": "rollout_",
-                        "vis_rolling_1": "rollout_",
-                        "embeddings": "embeddings_",
-                        "samples_hard": "hard_",
-                    };
-
-                    // Restore folder from URL
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const folderParam = urlParams.get("folder");
-                    if (folderParam && IMAGE_FOLDER_OPTIONS[folderParam] && folderSelect) {
-                        folderSelect.value = folderParam;
                     }
 
                     // Save folder to URL on change
@@ -97,8 +115,15 @@
                         });
                     }
 
-                    const getFolder = () => folderSelect ? folderSelect.value : "vis_fixed_0";
-                    const getPrefix = () => IMAGE_FOLDER_OPTIONS[getFolder()] || "rollout_";
+                    const getFolder = () => (folderSelect && folderSelect.value) || "vis_fixed_0";
+                    const getPrefix = () => {
+                        const opt = IMAGE_FOLDER_OPTIONS.find((o) => o.value === getFolder());
+                        return opt ? opt.prefix : "rollout_";
+                    };
+                    const getFolderPath = () => {
+                        const opt = IMAGE_FOLDER_OPTIONS.find((o) => o.value === getFolder());
+                        return opt ? opt.folder || opt.value : getFolder();
+                    };
 
                     const ensurePreviewStructure = () => {
                         if (preview.dataset.initialized === "1") {
@@ -132,7 +157,9 @@
                     };
                     const render = (step) => {
                         const target = Math.max(0, Math.round(step));
-                        const matched = nearestStep(target, steps);
+                        const folder = getFolder();
+                        const folderSteps = (vizSteps && vizSteps[folder]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
+                        const matched = nearestStep(target, folderSteps);
                         if (matched === null) {
                             const miss = missingEl();
                             const img = imgEl();
@@ -149,19 +176,19 @@
                             }
                             return;
                         }
-                        const folder = getFolder();
                         const prefix = getPrefix();
+                        const folderPath = getFolderPath();
                         const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
-                        const src = `/assets/${expId}/${folder}/${filename}`;
+                        const src = `/assets/${expId}/${folderPath}/${filename}`;
                         const path = pathEl();
                         const img = imgEl();
                         const miss = missingEl();
                         if (path) {
-                            path.textContent = `${folder}/${filename} (hovered ${target}, showing ${matched})`;
+                            path.textContent = `${folderPath}/${filename} (hovered ${target}, showing ${matched})`;
                         }
                         if (img) {
                             img.src = src;
-                            img.alt = `${folder} ${matched}`;
+                            img.alt = `${folderPath} ${matched}`;
                             img.dataset.step = String(matched);
                             img.classList.remove("d-none");
                             img.onerror = () => {

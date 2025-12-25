@@ -148,6 +148,40 @@ def save_input_batch_visualization(
     Image.fromarray(grid).save(out_path)
 
 
+def save_adjacency_input_visualization(
+    out_path: Path,
+    clean_frames: torch.Tensor,
+    noisy_frames: torch.Tensor,
+    rows: int,
+    max_steps: int | None = None,
+) -> None:
+    """Visualize clean vs. noisy pairs used for adjacency supervision."""
+    if clean_frames.shape != noisy_frames.shape:
+        raise ValueError("Clean and noisy frames must share shape for adjacency visualization.")
+    clean = clean_frames.detach().cpu()
+    noisy = noisy_frames.detach().cpu()
+    batch_size, seq_len = clean.shape[0], clean.shape[1]
+    steps = seq_len if max_steps is None else max(1, min(seq_len, int(max_steps)))
+    num_rows = min(rows, batch_size)
+    if num_rows <= 0 or steps <= 0:
+        return
+    grid_rows: list[np.ndarray] = []
+    for row_idx in range(num_rows):
+        columns: list[np.ndarray] = []
+        for step in range(steps):
+            clean_img = tensor_to_uint8_image(clean[row_idx, step])
+            noisy_img = tensor_to_uint8_image(noisy[row_idx, step])
+            clean_img = _annotate_with_text(clean_img, f"t{step} clean")
+            noisy_img = _annotate_with_text(noisy_img, f"t{step} noisy")
+            columns.append(clean_img)
+            columns.append(noisy_img)
+        row_image = np.concatenate(columns, axis=1)
+        grid_rows.append(row_image)
+    grid = np.concatenate(grid_rows, axis=0)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(grid).save(out_path)
+
+
 def save_rollout_visualization(
     out_path: Path,
     sequence: VisualizationSequenceLike,
@@ -250,6 +284,7 @@ __all__ = [
     "save_embedding_projection",
     "save_temporal_pair_visualization",
     "save_input_batch_visualization",
+    "save_adjacency_input_visualization",
     "save_rollout_visualization",
     "save_rollout_sequence_batch",
 ]

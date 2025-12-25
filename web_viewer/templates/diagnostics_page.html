@@ -237,6 +237,37 @@
         <div class="small text-muted" id="diagnostics-frame-action"></div>
         <div class="small text-muted font-monospace mt-1" id="diagnostics-frame-path"></div>
         <div class="small text-muted" id="diagnostics-frame-dimensions"></div>
+        <div class="mt-3 d-none" id="diagnostics-summary-wrapper">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <h6 class="mb-0">Alignment snapshot</h6>
+                <span class="badge text-bg-light" id="diagnostics-summary-step">Latest</span>
+            </div>
+            <div class="small text-muted" id="diagnostics-summary-caption">
+                Parsed from the latest action_alignment_report and action_alignment_strength outputs.
+            </div>
+            <div class="table-responsive mt-2">
+                <table class="table table-sm table-striped align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col">Action</th>
+                            <th scope="col">Count</th>
+                            <th scope="col">Mean cos</th>
+                            <th scope="col">Pct &gt; thr</th>
+                            <th scope="col">Δ norm (med)</th>
+                            <th scope="col">Δ norm (p90)</th>
+                            <th scope="col">Strength</th>
+                            <th scope="col">Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody id="diagnostics-summary-body">
+                        <tr class="text-muted">
+                            <td colspan="8">No alignment summary available.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="small text-muted mt-1" id="diagnostics-summary-links"></div>
+        </div>
     </div>
 </div>
 {% else %}
@@ -252,6 +283,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const steps = {{ steps | tojson }};
     const diagnostics = {{ diagnostics_map | tojson }};
     const frameMap = {{ frame_map | tojson }};
+    const diagSummary = {{ diagnostics_summary | tojson if diagnostics_summary is not none else 'null' }};
     const frameSteps = Object.keys(frameMap || {}).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
     const stepLabel = document.getElementById("diagnostics-step-label");
     const lossPlot = document.getElementById("diagnostics-loss-plot");
@@ -304,6 +336,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const framePath = document.getElementById("diagnostics-frame-path");
     const frameAction = document.getElementById("diagnostics-frame-action");
     const frameDimensions = document.getElementById("diagnostics-frame-dimensions");
+    const summaryWrapper = document.getElementById("diagnostics-summary-wrapper");
+    const summaryBody = document.getElementById("diagnostics-summary-body");
+    const summaryStep = document.getElementById("diagnostics-summary-step");
+    const summaryLinks = document.getElementById("diagnostics-summary-links");
+    const summaryCaption = document.getElementById("diagnostics-summary-caption");
     let hasHover = false;
     let currentFrames = [];
     let lossPinned = false;
@@ -374,6 +411,62 @@ document.addEventListener("DOMContentLoaded", () => {
         updateFrameForIndex(newVal);
     }
 
+    function formatNumber(value, decimals = 3, multiplier = 1) {
+        if (value === null || value === undefined) return "—";
+        const num = Number(value);
+        if (!Number.isFinite(num)) return "—";
+        return (num * multiplier).toFixed(decimals);
+    }
+
+    function renderAlignmentSummary(summary) {
+        if (!summaryWrapper) return;
+        if (!summary || !Array.isArray(summary.rows) || summary.rows.length === 0) {
+            summaryWrapper.classList.add("d-none");
+            return;
+        }
+        summaryWrapper.classList.remove("d-none");
+        if (summaryStep) {
+            summaryStep.textContent = summary.step !== null && summary.step !== undefined ? `Step ${summary.step}` : "Latest";
+        }
+        if (summaryBody) {
+            summaryBody.innerHTML = "";
+            const rows = summary.rows.slice(0, 12);
+            rows.forEach((row) => {
+                const tr = document.createElement("tr");
+                const notes = [row.note, row.strength_note].filter((n) => n && n.trim());
+                const cells = [
+                    row.label || `Action ${row.action_id}`,
+                    row.count ?? "—",
+                    formatNumber(row.mean, 3),
+                    `${formatNumber(row.pct_high, 1, 100)}%`,
+                    formatNumber(row.delta_norm_median, 4),
+                    formatNumber(row.delta_norm_p90, 4),
+                    formatNumber(row.strength_ratio ?? row.mean_dir_norm, 3),
+                    notes.length ? notes.join("; ") : "",
+                ];
+                cells.forEach((value) => {
+                    const td = document.createElement("td");
+                    td.textContent = value === undefined ? "—" : value;
+                    tr.appendChild(td);
+                });
+                summaryBody.appendChild(tr);
+            });
+        }
+        if (summaryLinks) {
+            const links = [];
+            if (summary.report_url) {
+                links.push(`<a href="${summary.report_url}" target="_blank" rel="noreferrer">Report</a>`);
+            }
+            if (summary.strength_url && summary.strength_url !== summary.report_url) {
+                links.push(`<a href="${summary.strength_url}" target="_blank" rel="noreferrer">Strength</a>`);
+            }
+            summaryLinks.innerHTML = links.length ? `Sources: ${links.join(" · ")}` : "";
+        }
+        if (summaryCaption) {
+            summaryCaption.textContent = "Parsed from the latest action_alignment_report and action_alignment_strength outputs.";
+        }
+    }
+
     function nearestStep(target) {
         if (!steps.length) return null;
         let best = steps[0];
@@ -413,6 +506,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
         populateCsvLinks(step);
         updateFrameSlider(step);
+        renderAlignmentSummary(diagSummary);
     }
 
     function renderLossPlot() {
@@ -483,6 +577,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (initialStep !== null) {
         updateForStep(initialStep);
+    } else {
+        renderAlignmentSummary(diagSummary);
     }
 
     if (toggleBtn && topGrid) {

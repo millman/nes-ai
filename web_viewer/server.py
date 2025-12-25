@@ -34,6 +34,7 @@ from .experiments import (
     write_title,
     _diagnostics_exists,
     _collect_visualization_steps,
+    extract_alignment_summary,
 )
 from .plots import build_overlay
 
@@ -223,11 +224,16 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def experiment_detail(exp_id: str):
         experiment = _get_experiment_or_404(exp_id)
         figure = _build_single_experiment_figure(experiment)
+        viz_steps = _collect_visualization_steps(experiment.path)
+        if experiment.rollout_steps:
+            viz_steps.setdefault("vis_fixed_0", experiment.rollout_steps)
+            viz_steps.setdefault("__fallback", experiment.rollout_steps)
         return render_template(
             "experiment_detail.html",
             experiment=experiment,
             cfg=cfg,
             figure=figure,
+            visualization_steps=viz_steps,
             active_nav="detail",
             active_experiment_id=experiment.id,
             first_experiment_id=experiment.id,
@@ -446,9 +452,29 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                         "action": action_label or "",
                         "action_id": "" if action_id is None else str(action_id),
                     }
-                )
+                    )
             if entries:
                 frame_map[step] = entries
+
+        alignment_summary_raw = extract_alignment_summary(selected)
+
+        def _maybe_url(path: Optional[Path]) -> Optional[str]:
+            if path is None:
+                return None
+            try:
+                rel = path.relative_to(selected.path)
+            except ValueError:
+                return None
+            return url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+
+        alignment_summary = None
+        if alignment_summary_raw:
+            alignment_summary = {
+                "step": alignment_summary_raw.get("step"),
+                "rows": alignment_summary_raw.get("rows", []),
+                "report_url": _maybe_url(alignment_summary_raw.get("report_path")),
+                "strength_url": _maybe_url(alignment_summary_raw.get("strength_path")),
+            }
 
         _log_timing(
             "diagnostics.build_maps",
@@ -466,6 +492,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             diagnostics_csv_map=diagnostics_csv_map,
             frame_map=frame_map,
             figure=figure,
+            diagnostics_summary=alignment_summary,
             cfg=cfg,
             active_nav="diagnostics",
             active_experiment_id=selected.id,

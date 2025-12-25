@@ -44,6 +44,7 @@ from jepa_world_model.vis import (
     describe_action_tensor,
     save_embedding_projection,
     save_input_batch_visualization,
+    save_adjacency_input_visualization,
     save_rollout_sequence_batch,
     save_temporal_pair_visualization,
     tensor_to_uint8_image,
@@ -271,6 +272,9 @@ class LossWeights:
     rollout: float = 0.0
     consistency: float = 0.0
     ema_consistency: float = 0.0
+    adj0: float = 0.0
+    adj1: float = 0.0
+    adj2: float = 0.0
 
 @dataclass
 class LossEMAConfig:
@@ -348,6 +352,16 @@ class NormalizeLossesConfig:
 
 
 @dataclass
+class AdjacencyConfig:
+    temp_score: float = 0.1
+    sinkhorn_iters: int = 7
+    sinkhorn_eps: float = 1e-3
+    mask_self_edges: bool = False
+    topk_candidates: int = 0
+    sigma_aug: float = 0.05
+
+
+@dataclass
 class DiagnosticsConfig:
     enabled: bool = True
     sample_sequences: int = 128
@@ -390,6 +404,7 @@ class TrainConfig:
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
 
     # Specific losses
+    adjacency: AdjacencyConfig = field(default_factory=AdjacencyConfig)
     ema: LossEMAConfig = field(default_factory=LossEMAConfig)
     rollout: LossRolloutConfig = field(default_factory=LossRolloutConfig)
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
@@ -468,19 +483,19 @@ class JEPAWorldModel(nn.Module):
 
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Standard one-step JEPA loss plus action logits from the predictor."""
     embeddings = outputs["embeddings"]
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
         logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
         delta = embeddings.new_zeros(embeddings[:, :-1].shape)
-        return zero, logits, delta
+        return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape)
     prev_embed = embeddings[:, :-1]
     prev_actions = actions[:, :-1]
     preds, delta_pred, action_logits = model.predictor(prev_embed, prev_actions)
     target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(preds, target), action_logits, delta_pred
+    return JEPA_LOSS(preds, target), action_logits, delta_pred, preds
 
 
 def delta_prediction_loss(
@@ -708,6 +723,14 @@ def multi_scale_hardness_loss_box(
     return total
 
 
+def gaussian_augment(x: torch.Tensor, sigma: float, clip_min: float = 0.0, clip_max: float = 1.0) -> torch.Tensor:
+    """Additive Gaussian noise augmentation clamped to a valid pixel range."""
+    if sigma <= 0:
+        return x
+    noise = torch.randn_like(x) * sigma
+    return (x + noise).clamp(clip_min, clip_max)
+
+
 def patch_recon_loss(
     recon: torch.Tensor, target: torch.Tensor, patch_sizes: Sequence[int]
 ) -> torch.Tensor:
@@ -817,6 +840,65 @@ def update_ema_model(source: JEPAWorldModel, target: JEPAWorldModel, momentum: f
             tgt_param.data.mul_(momentum).add_(src_param.data, alpha=1.0 - momentum)
 
 
+def _mask_topk_with_diagonal(scores: torch.Tensor, topk: int) -> torch.Tensor:
+    """Keep top-k scores per row while always retaining the diagonal entry."""
+    if topk <= 0 or topk >= scores.shape[1]:
+        return scores
+    keep = torch.zeros_like(scores, dtype=torch.bool)
+    vals, idx = torch.topk(scores, k=topk, dim=1)
+    keep.scatter_(1, idx, True)
+    diag = torch.arange(scores.shape[0], device=scores.device)
+    keep[diag, diag] = True
+    masked = scores.masked_fill(~keep, float("-inf"))
+    return masked
+
+
+def _sinkhorn_transport(kernel: torch.Tensor, iters: int, eps: float) -> torch.Tensor:
+    """Compute doubly-stochastic matrix via Sinkhorn-Knopp in value domain."""
+    if kernel.ndim != 2:
+        raise ValueError("Sinkhorn kernel must be 2D.")
+    u = torch.ones(kernel.shape[0], device=kernel.device, dtype=kernel.dtype)
+    v = torch.ones(kernel.shape[1], device=kernel.device, dtype=kernel.dtype)
+    for _ in range(max(iters, 0)):
+        Kv = torch.matmul(kernel, v)
+        u = 1.0 / (Kv + eps)
+        KTu = torch.matmul(kernel.t(), u)
+        v = 1.0 / (KTu + eps)
+    return u[:, None] * kernel * v[None, :]
+
+
+def _transport_from_scores(
+    queries: torch.Tensor,
+    candidates: torch.Tensor,
+    temp_score: float,
+    mask_self_edges: bool,
+    topk_candidates: int,
+    sinkhorn_iters: int,
+    sinkhorn_eps: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if queries.shape[1] != candidates.shape[1]:
+        raise ValueError("Query and candidate dimensions must match for adjacency scoring.")
+    if temp_score <= 0:
+        raise ValueError("temp_score must be positive for adjacency scoring.")
+    # Avoid torch.cdist to stay compatible with MPS backward (cdist backward is unsupported there).
+    q_norm = (queries * queries).sum(dim=1, keepdim=True)
+    c_norm = (candidates * candidates).sum(dim=1, keepdim=True)
+    # dist^2 = ||q||^2 + ||c||^2 - 2 q·c
+    dist_sq = q_norm + c_norm.t() - 2.0 * queries @ candidates.t()
+    dist_sq = dist_sq.clamp_min(0.0)
+    scores = -dist_sq / temp_score
+    if mask_self_edges:
+        scores = scores.clone()
+        scores.fill_diagonal_(float("-inf"))
+    scores = _mask_topk_with_diagonal(scores, topk_candidates)
+    row_max = torch.max(scores, dim=1, keepdim=True).values
+    scores = scores - row_max
+    kernel = torch.exp(scores)
+    kernel = torch.where(torch.isfinite(kernel), kernel, torch.zeros_like(kernel))
+    transport = _sinkhorn_transport(kernel, sinkhorn_iters, sinkhorn_eps)
+    return transport, scores
+
+
 # ------------------------------------------------------------
 # Training loop utilities
 # ------------------------------------------------------------
@@ -924,7 +1006,7 @@ def _compute_losses_and_metrics(
     if need_recon:
         recon = decoder(outputs["embeddings"])
 
-    loss_jepa_raw, action_logits, delta_pred = jepa_loss(model, outputs, actions)
+    loss_jepa_raw, action_logits, delta_pred, z_hat_next = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
     loss_delta_raw, delta_pred_norm, delta_target_norm = delta_prediction_loss(delta_pred, outputs["embeddings"])
     loss_delta = loss_delta_raw if weights.delta > 0 else images.new_tensor(0.0)
@@ -986,6 +1068,65 @@ def _compute_losses_and_metrics(
     else:
         loss_recon_patch = images.new_tensor(0.0)
 
+    use_adjacency = (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0)
+    loss_adj0 = images.new_tensor(0.0)
+    loss_adj1 = images.new_tensor(0.0)
+    loss_adj2 = images.new_tensor(0.0)
+    adj_entropy = images.new_tensor(0.0)
+    adj_hit = images.new_tensor(0.0)
+    adj2_hit = images.new_tensor(0.0)
+    if use_adjacency and outputs["embeddings"].shape[1] >= 2:
+        sigma = max(cfg.adjacency.sigma_aug, 0.0)
+        noisy_images = gaussian_augment(images, sigma)
+        noisy_outputs = model.encode_sequence(noisy_images)
+        z = outputs["embeddings"]
+        z_noisy = noisy_outputs["embeddings"]
+        # 0-step invariance between clean and noisy frames (excluding final frame to match queries).
+        if weights.adj0 > 0:
+            loss_adj0 = F.mse_loss(F.normalize(z[:, :-1], dim=-1), F.normalize(z_noisy[:, :-1], dim=-1))
+        # 1-step adjacency using predicted next vs noisy next targets.
+        z_next_noisy = z_noisy[:, 1:]
+        preds_flat = z_hat_next.reshape(-1, z_hat_next.shape[-1])
+        cand_flat = z_next_noisy.reshape(-1, z_next_noisy.shape[-1]).detach()
+        transport, scores = _transport_from_scores(
+            F.normalize(preds_flat, dim=-1),
+            F.normalize(cand_flat, dim=-1),
+            temp_score=cfg.adjacency.temp_score,
+            mask_self_edges=cfg.adjacency.mask_self_edges,
+            topk_candidates=cfg.adjacency.topk_candidates,
+            sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
+            sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
+        )
+        diag_idx = torch.arange(transport.shape[0], device=transport.device)
+        if weights.adj1 > 0:
+            loss_adj1 = -torch.log(transport[diag_idx, diag_idx] + cfg.normalize_losses.epsilon).mean()
+        with torch.no_grad():
+            row_entropy = -(transport * torch.log(transport + cfg.normalize_losses.epsilon)).sum(dim=1)
+            adj_entropy = row_entropy.mean()
+            adj_hit = (transport.argmax(dim=1) == diag_idx).float().mean()
+        # 2-hop composition: predict from predicted next using a_{t+1} toward x_{t+2}.
+        if weights.adj2 > 0 and actions.shape[1] >= 3:
+            actions_two = actions[:, 1:-1]
+            if actions_two.numel() > 0 and z_hat_next.shape[1] >= 2 and z_noisy.shape[1] >= 3:
+                second_queries, _, _ = model.predictor(z_hat_next[:, :-1], actions_two)
+                second_targets = z_noisy[:, 2:]
+                q2_flat = second_queries.reshape(-1, second_queries.shape[-1])
+                cand2_flat = second_targets.reshape(-1, second_targets.shape[-1]).detach()
+                transport2, _ = _transport_from_scores(
+                    F.normalize(q2_flat, dim=-1),
+                    F.normalize(cand2_flat, dim=-1),
+                    temp_score=cfg.adjacency.temp_score,
+                    mask_self_edges=cfg.adjacency.mask_self_edges,
+                    topk_candidates=cfg.adjacency.topk_candidates,
+                    sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
+                    sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
+                )
+                if transport2.numel() > 0:
+                    diag2 = torch.arange(transport2.shape[0], device=transport2.device)
+                    loss_adj2 = -torch.log(transport2[diag2, diag2] + cfg.normalize_losses.epsilon).mean()
+                    with torch.no_grad():
+                        adj2_hit = (transport2.argmax(dim=1) == diag2).float().mean()
+
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
             return loss_tensor
@@ -1014,6 +1155,9 @@ def _compute_losses_and_metrics(
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
         + weights.recon_patch * _scaled("loss_recon_patch", loss_recon_patch)
+        + weights.adj0 * _scaled("loss_adj0", loss_adj0)
+        + weights.adj1 * _scaled("loss_adj1", loss_adj1)
+        + weights.adj2 * _scaled("loss_adj2", loss_adj2)
     )
 
     world_grad_norm = 0.0
@@ -1061,6 +1205,12 @@ def _compute_losses_and_metrics(
         "loss_world": world_loss.item(),
         "action_accuracy_bit": action_accuracy_bit.item(),
         "action_accuracy_all": action_accuracy_all.item(),
+        "loss_adj0": loss_adj0.item(),
+        "loss_adj1": loss_adj1.item(),
+        "loss_adj2": loss_adj2.item(),
+        "adj_entropy": adj_entropy.item(),
+        "adj_hit": adj_hit.item(),
+        "adj2_hit": adj2_hit.item(),
     }
     if for_training:
         metrics["grad_world"] = world_grad_norm
@@ -1233,6 +1383,16 @@ def log_metrics(
         filtered.pop("loss_recon_multi_box", None)
     if weights.recon_patch <= 0:
         filtered.pop("loss_recon_patch", None)
+    if weights.adj0 <= 0:
+        filtered.pop("loss_adj0", None)
+    if weights.adj1 <= 0:
+        filtered.pop("loss_adj1", None)
+    if weights.adj2 <= 0:
+        filtered.pop("loss_adj2", None)
+        filtered.pop("adj2_hit", None)
+    if weights.adj1 <= 0 and weights.adj2 <= 0:
+        filtered.pop("adj_hit", None)
+        filtered.pop("adj_entropy", None)
     # Always show val loss if present
     if "loss_val_world" in metrics:
         filtered["loss_val_world"] = metrics["loss_val_world"]
@@ -1284,6 +1444,12 @@ LOSS_COLUMNS = [
     "loss_delta",
     "delta_pred_norm",
     "delta_target_norm",
+    "loss_adj0",
+    "loss_adj1",
+    "loss_adj2",
+    "adj_hit",
+    "adj2_hit",
+    "adj_entropy",
     "action_accuracy_bit",
     "action_accuracy_all",
     "grad_world",
@@ -1319,6 +1485,12 @@ class LossHistory:
     action_acc_all: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
+    adj0: List[float] = field(default_factory=list)
+    adj1: List[float] = field(default_factory=list)
+    adj2: List[float] = field(default_factory=list)
+    adj_hit: List[float] = field(default_factory=list)
+    adj2_hit: List[float] = field(default_factory=list)
+    adj_entropy: List[float] = field(default_factory=list)
 
     def append(self, step: float, elapsed: float, cumulative_flops: float, metrics: Dict[str, float]) -> None:
         self.steps.append(step)
@@ -1343,6 +1515,12 @@ class LossHistory:
         self.delta.append(metrics["loss_delta"])
         self.delta_pred_norm.append(metrics["delta_pred_norm"])
         self.delta_target_norm.append(metrics["delta_target_norm"])
+        self.adj0.append(metrics.get("loss_adj0", 0.0))
+        self.adj1.append(metrics.get("loss_adj1", 0.0))
+        self.adj2.append(metrics.get("loss_adj2", 0.0))
+        self.adj_hit.append(metrics.get("adj_hit", 0.0))
+        self.adj2_hit.append(metrics.get("adj2_hit", 0.0))
+        self.adj_entropy.append(metrics.get("adj_entropy", 0.0))
         self.action_acc_bit.append(metrics.get("action_accuracy_bit", 0.0))
         self.action_acc_all.append(metrics.get("action_accuracy_all", 0.0))
         self.grad_world.append(metrics["grad_world"])
@@ -1382,6 +1560,12 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.delta,
             history.delta_pred_norm,
             history.delta_target_norm,
+            history.adj0,
+            history.adj1,
+            history.adj2,
+            history.adj_hit,
+            history.adj2_hit,
+            history.adj_entropy,
             history.action_acc_bit,
             history.action_acc_all,
             history.grad_world,
@@ -3419,6 +3603,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_alignment_dir = run_dir / "vis_action_alignment"
     diagnostics_cycle_dir = run_dir / "vis_cycle_error"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
+    adjacency_vis_dir = run_dir / "vis_adjacency"
     samples_hard_dir = run_dir / "samples_hard"
     samples_hard_val_dir = run_dir / "samples_hard_val"
     inputs_vis_dir = run_dir / "vis_inputs"
@@ -3436,6 +3621,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
+    adjacency_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_dir.mkdir(parents=True, exist_ok=True)
@@ -3832,6 +4018,16 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         self_distance_dir,
                         vis_self_distance_dir,
                         global_step,
+                    )
+                if (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0):
+                    sigma_adj = max(cfg.adjacency.sigma_aug, 0.0)
+                    noisy_batch = gaussian_augment(rolling_batch_cpu[0], sigma_adj)
+                    save_adjacency_input_visualization(
+                        adjacency_vis_dir / f"adjacency_{global_step:07d}.png",
+                        rolling_batch_cpu[0],
+                        noisy_batch,
+                        rows=cfg.vis.rows,
+                        max_steps=cfg.vis.columns,
                     )
                 if cfg.diagnostics.enabled:
                     diag_frames = diagnostics_batch_cpu[0] if diagnostics_batch_cpu is not None else rolling_batch_cpu[0]

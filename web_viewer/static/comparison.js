@@ -25,6 +25,7 @@ const IMAGE_FOLDER_OPTIONS = [
     folder: "vis_action_alignment",
   },
   { value: "vis_cycle_error", label: "vis_cycle_error", prefix: "cycle_error_", folder: "vis_cycle_error" },
+  { value: "vis_adjacency", label: "vis_adjacency", prefix: "adjacency_", folder: "vis_adjacency" },
 ].sort((a, b) => a.value.localeCompare(b.value));
 
 function getImageOption(folderValue) {
