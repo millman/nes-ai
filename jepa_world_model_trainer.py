@@ -65,28 +65,33 @@ LegacyVisualizationDecoder = ConvVisualizationDecoder
 
 
 class PredictorNetwork(nn.Module):
-    def __init__(self, embedding_dim: int, hidden_dim: int, action_dim: int, film_layers: int) -> None:
+    def __init__(self, embedding_dim: int, hidden_dim: int, action_dim: int, film_layers: int, state_dim: int) -> None:
         super().__init__()
-        self.in_proj = nn.Linear(embedding_dim + action_dim, hidden_dim)
+        self.in_proj = nn.Linear(embedding_dim + action_dim + state_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
+        self.h_out = nn.Linear(hidden_dim, state_dim)
         self.activation = nn.SiLU(inplace=True)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
-        self.film_layers = film_layers
+        self.state_dim = state_dim
         self.delta_scale = 1.0
         self.use_delta_squash = False
 
-    def forward(self, embeddings: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if embeddings.shape[:-1] != actions.shape[:-1]:
-            raise ValueError("Embeddings and actions must share leading dimensions for predictor conditioning.")
+    def forward(
+        self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not (embeddings.shape[:-1] == actions.shape[:-1] == hidden_state.shape[:-1]):
+            raise ValueError("Embeddings, hidden state, and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
         emb_flat = embeddings.reshape(-1, embeddings.shape[-1])
         act_flat = actions.reshape(-1, actions.shape[-1])
-        hidden = self.activation(self.in_proj(torch.cat([emb_flat, act_flat], dim=-1)))
+        h_flat = hidden_state.reshape(-1, hidden_state.shape[-1])
+        hidden = self.activation(self.in_proj(torch.cat([emb_flat, h_flat, act_flat], dim=-1)))
         hidden = self.activation(self.hidden_proj(hidden))
         raw_delta = self.out_proj(hidden)
+        h_next = self.h_out(hidden)
         if self.use_delta_squash:
             delta = torch.tanh(raw_delta) * self.delta_scale
         else:
@@ -95,6 +100,7 @@ class PredictorNetwork(nn.Module):
         return (
             pred.view(*original_shape, pred.shape[-1]),
             delta.view(*original_shape, delta.shape[-1]),
+            h_next.view(*original_shape, h_next.shape[-1]),
         )
 
     def shape_info(self) -> Dict[str, Any]:
@@ -103,8 +109,53 @@ class PredictorNetwork(nn.Module):
             "latent_dim": self.embedding_dim,
             "hidden_dim": self.hidden_dim,
             "action_dim": self.action_dim,
-            "conditioning": "concat",
+            "state_dim": self.state_dim,
+            "conditioning": "concat(z,h,action)",
         }
+
+
+class HiddenToZProjector(nn.Module):
+    """Project hidden state to an image-anchored embedding prediction."""
+
+    def __init__(self, h_dim: int, z_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(h_dim),
+            nn.Linear(h_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, z_dim),
+        )
+        self.h_dim = h_dim
+        self.z_dim = z_dim
+        self.hidden_dim = hidden_dim
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        original_shape = h.shape[:-1]
+        h_flat = h.reshape(-1, h.shape[-1])
+        z_hat = self.net(h_flat)
+        return z_hat.view(*original_shape, z_hat.shape[-1])
+
+
+class ZToHiddenProjector(nn.Module):
+    """Project encoded embedding to hidden state space."""
+
+    def __init__(self, z_dim: int, h_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(z_dim),
+            nn.Linear(z_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, h_dim),
+        )
+        self.z_dim = z_dim
+        self.h_dim = h_dim
+        self.hidden_dim = hidden_dim
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        original_shape = z.shape[:-1]
+        z_flat = z.reshape(-1, z.shape[-1])
+        h_hat = self.net(z_flat)
+        return h_hat.view(*original_shape, h_hat.shape[-1])
 
 
 class ActionDeltaHead(nn.Module):
@@ -219,23 +270,22 @@ def _suggest_encoder_schedule(embedding_dim: int, num_layers: int) -> str:
 
 @dataclass
 class ModelConfig:
-    """Dimensional flow (bottlenecks marked with *):
+    """Dimensional flow:
 
         image (image_size^2·in_channels)
-            └─ Encoder(encoder_schedule → pool → encoder_schedule[-1]*)
+            └─ Encoder(encoder_schedule → pool → z_dim = encoder_schedule[-1])
             ▼
-        encoder_schedule[-1]*  ─────────────┐
-                        ├─ FiLM(action_dim) → Predictor(hidden_dim*) → encoder_schedule[-1]
-        action_dim ──────┘
+        z_t ────────────────────────────────┐
+                        ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, h_{t+1}
+        h_t (state_dim) ─────────────────────┘
             │
-            └→ VisualizationDecoder(decoder_schedule → image_size^2·in_channels)
+            └→ Decoder(decoder_schedule → image reconstruction from z)
 
-    • image_size controls the spatial resolution feeding the encoder.
-    • encoder_schedule defines the encoder conv layer widths; encoder_schedule[-1] is the embedding dim.
-    • decoder_schedule defines the decoder conv layer widths (defaults to encoder_schedule if not set).
-    • action_dim defines the controller space that modulates the predictor through FiLM layers.
-    • hidden_dim is the predictor's internal width.
-    • image_size must be divisible by 2**len(encoder_schedule) for the encoder.
+    Notes:
+    • image_size must be divisible by 2**len(encoder_schedule) and 2**len(decoder_schedule) (if provided).
+    • encoder_schedule[-1] defines embedding_dim (z_dim); state_dim defines h dimensionality.
+    • hidden_dim is the predictor’s internal width; action_dim is the controller space size.
+    • decoder_schedule defaults to encoder_schedule if not set.
     """
 
     in_channels: int = 3
@@ -245,6 +295,7 @@ class ModelConfig:
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
     action_dim: int = 8
     predictor_film_layers: int = 2
+    state_dim: int = 256
 
     @property
     def embedding_dim(self) -> int:
@@ -274,19 +325,51 @@ class ModelConfig:
 
 @dataclass
 class LossWeights:
+    """
+    Loss weight semantics (who gets supervised and where gradients flow):
+    - loss_jepa (latent transition):
+        * What: predictor takes [z_t, h_t, action_t] -> z_hat_{t+1}; MSE vs detached z_{t+1}.
+        * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
+        * Purpose: advance the observable latent consistent with the next encoded frame.
+    - loss_h_pred (hidden transition):
+        * What: predictor also outputs h_hat_{t+1}; compared to z_to_h(z_{t+1}) (detached).
+        * Grads: into the predictor’s h head (and inputs if attached); does not push the detached target path.
+        * Purpose: align hidden state with what the next frame’s embedding implies in h-space.
+    - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
+    - loss_z2h: z->hidden projection; h_hat_from_z vs h targets (detached); shapes encoder/predictor inputs toward hidden targets without moving the targets.
+    Other losses (recon, rollout, etc.) behave as before.
+    """
+    # Latent transition supervision: ẑ_{t+1} (from predictor) vs detached z_{t+1}; shapes encoder+predictor via z_t.
     jepa: float = 1.0
     sigreg: float = 0.01
+
+    # Image/pixel reconstruction
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
     recon_multi_box: float = 0.3
-    action_recon: float = 1.0
     delta: float = 0.0
+
+    # Action controller input reconstruction
+    action_recon: float = 1.0
+
+    # Hidden transition supervision: ĥ_{t+1} (from predictor) vs z_to_h(z_{t+1}) detached; shapes hidden head/dynamics, not the encoder target path.
+    h_pred: float = 1.0
+    # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
+    h2z: float = 1.0
+    # Project z→hidden: ĥ_from_z vs h (detached); shapes encoder/predictor inputs toward hidden targets without moving the targets.
+    z2h: float = 1.0
+
     rollout: float = 0.0
+
     consistency: float = 0.0
     ema_consistency: float = 0.0
+
+    # Adjacency: adj0 enforces invariance between clean/noisy z at same timestep.
     adj0: float = 0.0
+    # Adjacency: adj1 aligns predicted next z with noisy next targets via transport.
     adj1: float = 0.0
+    # Adjacency: adj2 enforces two-hop composition using predicted z_{t+1} and actions_{t+1} toward z_{t+2}.
     adj2: float = 0.0
 
 @dataclass
@@ -475,6 +558,18 @@ class JEPAWorldModel(nn.Module):
             cfg.hidden_dim,
             cfg.action_dim,
             cfg.predictor_film_layers,
+            cfg.state_dim,
+        )
+        self.state_dim = cfg.state_dim
+        self.h_to_z = HiddenToZProjector(
+            cfg.state_dim,
+            self.embedding_dim,
+            cfg.hidden_dim,
+        )
+        self.z_to_h = ZToHiddenProjector(
+            self.embedding_dim,
+            cfg.state_dim,
+            cfg.hidden_dim,
         )
         self.action_delta_head = ActionDeltaHead(
             self.embedding_dim,
@@ -499,23 +594,86 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
+def _predictor_rollout(
+    model: JEPAWorldModel, embeddings: torch.Tensor, actions: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Roll predictor across sequence to produce z_hat, delta, and h states."""
+    b, t, _ = embeddings.shape
+    if t < 2:
+        zero = embeddings.new_tensor(0.0)
+        return (
+            zero,
+            zero,
+            zero,
+            embeddings.new_zeros((b, t, model.state_dim)),
+        )
+    preds = []
+    deltas = []
+    h_preds = []
+    h_states = [embeddings.new_zeros(b, model.state_dim, device=embeddings.device)]
+    for step in range(t - 1):
+        z_t = embeddings[:, step]
+        h_t = h_states[-1]
+        act_t = actions[:, step]
+        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
+        preds.append(pred)
+        deltas.append(delta)
+        h_preds.append(h_next)
+        h_states.append(h_next)
+    return (
+        torch.stack(preds, dim=1),
+        torch.stack(deltas, dim=1),
+        torch.stack(h_preds, dim=1),
+        torch.stack(h_states, dim=1),
+    )
+
+
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Standard one-step JEPA loss plus action logits from latent deltas (leak-free)."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """JEPA loss plus action logits, using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
+    preds, delta_pred, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
         logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
         delta = embeddings.new_zeros(embeddings[:, :-1].shape)
-        return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape)
-    prev_embed = embeddings[:, :-1]
-    prev_actions = actions[:, :-1]
-    preds, delta_pred = model.predictor(prev_embed, prev_actions)
+        return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
     delta_true = embeddings[:, 1:] - embeddings[:, :-1]
     action_logits = model.action_delta_head(delta_true)
-    return JEPA_LOSS(preds, target), action_logits, delta_pred, preds
+    return JEPA_LOSS(preds, target), action_logits, delta_pred, preds, h_preds, h_states
+
+
+def _rollout_hidden_states(
+    model: JEPAWorldModel, z_seq: torch.Tensor, actions: torch.Tensor
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    """
+    Roll forward hidden states with the state updater.
+
+    Returns:
+        h_states: [h0, h1, ..., h_{T-1}] (length = T) where h0 is zeros.
+        h_preds: predicted h_{t+1} for t in [0, T-2] (length = T-1).
+        h_targets: projected targets from z_{t+1} (detached) aligned with h_preds (length = T-1).
+    """
+    b, t, _ = z_seq.shape
+    h0 = z_seq.new_zeros(b, model.state_dim)
+    h_states: List[torch.Tensor] = [h0]
+    h_preds: List[torch.Tensor] = []
+    h_targets: List[torch.Tensor] = []
+    if t < 2:
+        return h_states, h_preds, h_targets
+    for step in range(t - 1):
+        h_t = h_states[-1]
+        z_t = z_seq[:, step]
+        act_t = actions[:, step]
+        h_next = model.state_updater(h_t, z_t, act_t)
+        h_preds.append(h_next)
+        h_states.append(h_next)
+        z_next = z_seq[:, step + 1]
+        h_target = model.z_to_h(z_next).detach()
+        h_targets.append(h_target)
+    return h_states, h_preds, h_targets
 
 
 def delta_prediction_loss(
@@ -1151,7 +1309,7 @@ def _compute_losses_and_metrics(
     if need_recon:
         recon = decoder(outputs["embeddings"])
 
-    loss_jepa_raw, action_logits, delta_pred, z_hat_next = jepa_loss(model, outputs, actions)
+    loss_jepa_raw, action_logits, delta_pred, z_hat_next, h_preds, h_states = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
     loss_delta_raw, delta_pred_norm, delta_target_norm = delta_prediction_loss(delta_pred, outputs["embeddings"])
     loss_delta = loss_delta_raw if weights.delta > 0 else images.new_tensor(0.0)
@@ -1182,8 +1340,9 @@ def _compute_losses_and_metrics(
         if weights.consistency > 0
         else images.new_tensor(0.0)
     )
+    combined_latent = torch.cat([outputs["embeddings"], h_states], dim=-1)
     loss_sigreg = (
-        sigreg_loss(outputs["embeddings"], cfg.sigreg.projections)
+        sigreg_loss(combined_latent, cfg.sigreg.projections)
         if weights.sigreg > 0
         else images.new_tensor(0.0)
     )
@@ -1192,6 +1351,26 @@ def _compute_losses_and_metrics(
         with torch.no_grad():
             ema_outputs = ema_model.encode_sequence(images)
         loss_ema_consistency = ema_latent_consistency_loss(outputs["embeddings"], ema_outputs["embeddings"])
+
+    # Hidden-state dynamics and cross-projection losses
+    loss_h_pred = images.new_tensor(0.0)
+    loss_h2z = images.new_tensor(0.0)
+    loss_z2h = images.new_tensor(0.0)
+    need_hidden = (weights.h_pred > 0) or (weights.h2z > 0) or (weights.z2h > 0)
+    if need_hidden:
+        seq_len = outputs["embeddings"].shape[1]
+        if weights.h_pred > 0 and h_preds.numel() > 0:
+            h_target_stack = model.z_to_h(outputs["embeddings"][:, 1:]).detach()
+            loss_h_pred = F.mse_loss(h_preds, h_target_stack)
+        if weights.h2z > 0 and h_states.numel() > 0 and seq_len > 0:
+            # Align h_states[:, 1:] with z[:, 1:] (h1 comes from z0/a0)
+            h_stack = h_states[:, 1:]
+            z_hat_from_h = model.h_to_z(h_stack)
+            loss_h2z = F.mse_loss(z_hat_from_h, outputs["embeddings"][:, 1:].detach())
+        if weights.z2h > 0 and h_states.numel() > 0 and seq_len > 0:
+            h_target_stack = h_states[:, 1:].detach()
+            h_hat_from_z = model.z_to_h(outputs["embeddings"][:, 1:])
+            loss_z2h = F.mse_loss(h_hat_from_z, h_target_stack)
 
     if weights.recon > 0 and recon is not None:
         loss_recon = RECON_LOSS(recon, images)
@@ -1247,6 +1426,9 @@ def _compute_losses_and_metrics(
         + weights.consistency * _scaled("loss_consistency", loss_consistency)
         + weights.ema_consistency * _scaled("loss_ema_consistency", loss_ema_consistency)
         + weights.action_recon * _scaled("loss_action", loss_action)
+        + weights.h_pred * _scaled("loss_h_pred", loss_h_pred)
+        + weights.h2z * _scaled("loss_h2z", loss_h2z)
+        + weights.z2h * _scaled("loss_z2h", loss_z2h)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
@@ -1295,6 +1477,9 @@ def _compute_losses_and_metrics(
         "loss_recon_multi_box": loss_recon_multi_box.item(),
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_action": loss_action.item(),
+        "loss_h_pred": loss_h_pred.item(),
+        "loss_h2z": loss_h2z.item(),
+        "loss_z2h": loss_z2h.item(),
         "loss_delta": loss_delta.item(),
         "delta_pred_norm": delta_pred_norm.item(),
         "delta_target_norm": delta_target_norm.item(),
@@ -1502,6 +1687,12 @@ def log_metrics(
         filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
+    if weights.h_pred <= 0:
+        filtered.pop("loss_h_pred", None)
+    if weights.h2z <= 0:
+        filtered.pop("loss_h2z", None)
+    if weights.z2h <= 0:
+        filtered.pop("loss_z2h", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1537,6 +1728,9 @@ LOSS_COLUMNS = [
     "loss_recon_multi_box",
     "loss_recon_patch",
     "loss_action",
+    "loss_h_pred",
+    "loss_h2z",
+    "loss_z2h",
     "loss_delta",
     "delta_pred_norm",
     "delta_target_norm",
@@ -1574,6 +1768,9 @@ class LossHistory:
     recon_multi_box: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
+    h_pred: List[float] = field(default_factory=list)
+    h2z: List[float] = field(default_factory=list)
+    z2h: List[float] = field(default_factory=list)
     delta: List[float] = field(default_factory=list)
     delta_pred_norm: List[float] = field(default_factory=list)
     delta_target_norm: List[float] = field(default_factory=list)
@@ -1608,6 +1805,9 @@ class LossHistory:
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.action.append(metrics["loss_action"])
+        self.h_pred.append(metrics["loss_h_pred"])
+        self.h2z.append(metrics["loss_h2z"])
+        self.z2h.append(metrics["loss_z2h"])
         self.delta.append(metrics["loss_delta"])
         self.delta_pred_norm.append(metrics["delta_pred_norm"])
         self.delta_target_norm.append(metrics["delta_target_norm"])
@@ -1653,6 +1853,9 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.recon_multi_box,
             history.recon_patch,
             history.action,
+            history.h_pred,
+            history.h2z,
+            history.z2h,
             history.delta,
             history.delta_pred_norm,
             history.delta_target_norm,
@@ -3631,12 +3834,13 @@ def _render_visualization_batch(
         rollout_frames: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
         gradient_maps: List[Optional[np.ndarray]] = [None for _ in range(max_window)]
         current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
+        current_hidden = current_embed.new_zeros(1, model.state_dim)
         prev_pred_frame = decoded_frames[idx, start_idx].detach()
         current_frame = prev_pred_frame
         for step in range(1, max_window):
             action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
             prev_embed = current_embed
-            next_embed, _ = model.predictor(current_embed, action)
+            next_embed, _, next_hidden = model.predictor(current_embed, current_hidden, action)
             decoded_next = decoder(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
@@ -3657,6 +3861,7 @@ def _render_visualization_batch(
                 )
             prev_pred_frame = current_frame.detach()
             current_embed = next_embed
+            current_hidden = next_hidden
         labels = _extract_frame_labels(frame_paths, int(idx.item()), start_idx, max_window)
         sequences.append(
             VisualizationSequence(
