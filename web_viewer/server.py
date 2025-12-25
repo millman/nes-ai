@@ -467,6 +467,14 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 return None
             return url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
 
+        def _maybe_rel(path: Optional[Path]) -> Optional[str]:
+            if path is None:
+                return None
+            try:
+                return str(path.relative_to(selected.path))
+            except ValueError:
+                return path.name
+
         alignment_summary = None
         if alignment_summary_raw:
             alignment_summary = {
@@ -474,6 +482,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 "rows": alignment_summary_raw.get("rows", []),
                 "report_url": _maybe_url(alignment_summary_raw.get("report_path")),
                 "strength_url": _maybe_url(alignment_summary_raw.get("strength_path")),
+                "report_name": _maybe_rel(alignment_summary_raw.get("report_path")),
+                "strength_name": _maybe_rel(alignment_summary_raw.get("strength_path")),
             }
 
         _log_timing(

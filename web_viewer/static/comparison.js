@@ -116,6 +116,7 @@ function renderComparison(payload) {
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
   const previewMap = collectPreviewMap(grid);
+  refreshPreviewImages(grid, availableStepsByExp);
   const figure = payload.figure;
   if (figure) {
     // Store original x-axis data for toggling
@@ -282,6 +283,7 @@ function buildExperimentGrid(experiments) {
     }
     selector.appendChild(option);
   });
+  selector.value = currentImageFolder;
 
   selector.addEventListener("change", (e) => {
     currentImageFolder = e.target.value;

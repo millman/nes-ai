@@ -311,7 +311,6 @@ document.addEventListener("DOMContentLoaded", () => {
                     setImage(priorImg, priorLabel, priorPath, `prior: t=${Math.max(0, step - 1)}`);
                     setImage(currentImg, currentLabel, framePath, headerText);
                 }
-                updateSelfDistanceImage(step);
             });
         };
 
@@ -560,7 +559,7 @@ document.addEventListener("DOMContentLoaded", () => {
             diagLossPin.addEventListener("click", () => {
                 setLossPinned(!diagLossPinned);
             });
-            setLossPinned(false);
+            setLossPinned(true);
         }
     });
 </script>

@@ -49,8 +49,12 @@
                     // Restore folder from URL if valid.
                     const urlParams = new URLSearchParams(window.location.search);
                     const folderParam = urlParams.get("folder");
-                    if (folderParam && IMAGE_FOLDER_OPTIONS.some((opt) => opt.value === folderParam) && folderSelect) {
-                        folderSelect.value = folderParam;
+                    if (folderSelect) {
+                        if (folderParam && IMAGE_FOLDER_OPTIONS.some((opt) => opt.value === folderParam)) {
+                            folderSelect.value = folderParam;
+                        } else {
+                            folderSelect.value = "vis_fixed_0";
+                        }
                     }
 
                     // Parse view state from URL
@@ -102,6 +106,7 @@
                 function attachRolloutPreview(plotEl, expId, previewId, rolloutSteps, vizSteps) {
                     const preview = document.getElementById(previewId);
                     const folderSelect = document.getElementById("detail-folder-select");
+                    const pathDisplay = document.querySelector(".rollout-path");
                     if (!plotEl || !preview || typeof Plotly === "undefined") {
                         return;
                     }
@@ -112,6 +117,7 @@
                             const url = new URL(window.location.href);
                             url.searchParams.set("folder", folderSelect.value);
                             window.history.replaceState({}, "", url.toString());
+                            renderLatest();
                         });
                     }
 
@@ -136,7 +142,7 @@
                         preview.dataset.initialized = "1";
                     };
                     ensurePreviewStructure();
-                    const pathEl = () => preview.querySelector(".rollout-path");
+                    const pathEl = () => pathDisplay;
                     const imgEl = () => preview.querySelector(".rollout-img");
                     const missingEl = () => preview.querySelector(".rollout-missing");
                     const nearestStep = (target, list) => {
@@ -215,6 +221,26 @@
                         }
                         render(point.x);
                     });
+                    const renderLatest = () => {
+                        const folder = getFolder();
+                        const stepsForFolder =
+                            (vizSteps && vizSteps[folder]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
+                        const lastStep = Array.isArray(stepsForFolder) && stepsForFolder.length
+                            ? stepsForFolder[stepsForFolder.length - 1]
+                            : null;
+                        if (lastStep !== null) {
+                            render(lastStep);
+                            return;
+                        }
+                        const allX = Array.isArray(plotEl.data)
+                            ? plotEl.data.flatMap((trace) => Array.isArray(trace.x) ? trace.x : []).filter((v) => v !== null && v !== undefined)
+                            : [];
+                        if (allX.length) {
+                            const latest = Math.max(...allX.map((v) => Number(v) || 0));
+                            render(latest);
+                        }
+                    };
+                    renderLatest();
                 }
     </script>
     {% else %}

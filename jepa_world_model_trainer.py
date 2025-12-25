@@ -24,6 +24,7 @@ import tomli_w
 import tyro
 from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 from datetime import datetime
 from time import perf_counter
 
@@ -2535,6 +2536,7 @@ def _save_delta_z_pca_plot(
     delta_proj: np.ndarray,
     z_proj_flat: np.ndarray,
     action_ids: np.ndarray,
+    action_dim: int,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
@@ -2545,42 +2547,63 @@ def _save_delta_z_pca_plot(
     axes[0, 0].set_ylabel("explained variance")
 
     if delta_proj.shape[1] >= 2:
+        unique_actions = sorted({int(a) for a in np.asarray(action_ids).reshape(-1)})
+        action_to_index = {aid: idx for idx, aid in enumerate(unique_actions)}
+        color_indices = (
+            np.array([action_to_index.get(int(a), 0) for a in np.asarray(action_ids).reshape(-1)], dtype=np.float32)
+            if unique_actions
+            else np.asarray(action_ids, dtype=np.float32)
+        )
+        palette = plt.get_cmap("tab20").colors
+        color_count = max(1, min(len(palette), len(unique_actions) if unique_actions else 1))
+        color_list = list(palette[:color_count])
+        cmap = mcolors.ListedColormap(color_list)
+        bounds = np.arange(color_count + 1) - 0.5
+        color_indices_mapped = (
+            np.mod(color_indices, color_count) if color_count else color_indices
+        )
+        norm = mcolors.BoundaryNorm(bounds, cmap.N)
         scatter = axes[0, 1].scatter(
             delta_proj[:, 0],
             delta_proj[:, 1],
-            c=action_ids,
-            cmap="tab20",
+            c=color_indices_mapped,
+            cmap=cmap,
+            norm=norm,
             s=8,
             alpha=0.7,
         )
         axes[0, 1].set_xlabel("PC1 (delta)")
         axes[0, 1].set_ylabel("PC2 (delta)")
-        cbar = fig.colorbar(scatter, ax=axes[0, 1], fraction=0.046, pad=0.04)
-        cbar.set_label("action id")
+        cbar = fig.colorbar(scatter, ax=axes[0, 1], fraction=0.046, pad=0.04, boundaries=bounds)
+        ticks = list(range(color_count))
+        cbar.set_ticks(ticks)
+        tick_labels = [_decode_action_id(aid, action_dim) for aid in unique_actions[:color_count]] if unique_actions else ["NOOP"]
+        cbar.set_ticklabels(tick_labels)
+        cbar.set_label("action")
     else:
         axes[0, 1].plot(delta_proj[:, 0], np.zeros_like(delta_proj[:, 0]), ".", alpha=0.6)
         axes[0, 1].set_xlabel("PC1 (delta)")
         axes[0, 1].set_ylabel("density")
     axes[0, 1].set_title("Delta projections")
 
+    cumulative = np.cumsum(variance_ratio)
+    axes[1, 0].plot(np.arange(len(cumulative)), cumulative, marker="o", color="tab:green")
+    axes[1, 0].set_ylim(0, 1.05)
+    axes[1, 0].set_xlabel("component")
+    axes[1, 0].set_ylabel("cumulative variance")
+    axes[1, 0].set_title("Cumulative explained variance")
+
     if z_proj_flat.shape[1] >= 2:
         t = np.linspace(0, 1, num=z_proj_flat.shape[0])
-        sc2 = axes[1, 0].scatter(z_proj_flat[:, 0], z_proj_flat[:, 1], c=t, cmap="viridis", s=6, alpha=0.6)
-        axes[1, 0].set_xlabel("PC1 (z)")
-        axes[1, 0].set_ylabel("PC2 (z)")
-        fig.colorbar(sc2, ax=axes[1, 0], fraction=0.046, pad=0.04, label="time (normalized)")
+        sc2 = axes[1, 1].scatter(z_proj_flat[:, 0], z_proj_flat[:, 1], c=t, cmap="viridis", s=6, alpha=0.6)
+        axes[1, 1].set_xlabel("PC1 (z)")
+        axes[1, 1].set_ylabel("PC2 (z)")
+        fig.colorbar(sc2, ax=axes[1, 1], fraction=0.046, pad=0.04, label="time (normalized)")
     else:
-        axes[1, 0].plot(z_proj_flat[:, 0], np.zeros_like(z_proj_flat[:, 0]), ".", alpha=0.6)
-        axes[1, 0].set_xlabel("PC1 (z)")
-        axes[1, 0].set_ylabel("density")
-    axes[1, 0].set_title("Latent projections")
-
-    cumulative = np.cumsum(variance_ratio)
-    axes[1, 1].plot(np.arange(len(cumulative)), cumulative, marker="o", color="tab:green")
-    axes[1, 1].set_ylim(0, 1.05)
-    axes[1, 1].set_xlabel("component")
-    axes[1, 1].set_ylabel("cumulative variance")
-    axes[1, 1].set_title("Cumulative explained variance")
+        axes[1, 1].plot(z_proj_flat[:, 0], np.zeros_like(z_proj_flat[:, 0]), ".", alpha=0.6)
+        axes[1, 1].set_xlabel("PC1 (z)")
+        axes[1, 1].set_ylabel("density")
+    axes[1, 1].set_title("Latent projections")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
@@ -2827,6 +2850,7 @@ def _save_action_alignment_detail_plot(
 
     overall_cos_raw = debug_data.get("overall_cos")
     overall_norms_raw = debug_data.get("overall_norms")
+    per_action_cos: Dict[int, np.ndarray] = debug_data.get("per_action_cos") or {}
     pairwise_raw = debug_data.get("pairwise")
     overall_cos = np.asarray([] if overall_cos_raw is None else overall_cos_raw, dtype=np.float32)
     overall_norms = np.asarray([] if overall_norms_raw is None else overall_norms_raw, dtype=np.float32)
@@ -2834,28 +2858,86 @@ def _save_action_alignment_detail_plot(
     actions_sorted: List[int] = list(debug_data.get("actions_sorted") or [])
     per_action_norms: Dict[int, np.ndarray] = debug_data.get("per_action_norms") or {}
 
-    # (0,0): histogram of cosines aggregated across actions
+    # (0,0): per-action cosine strip plot (mirrors cosine alignment view)
     ax0 = axes[0, 0]
-    if overall_cos.size:
-        bins = np.linspace(-1.0, 1.0, 41)
-        ax0.hist(overall_cos, bins=bins, color="tab:blue", alpha=0.8)
-        ax0.axvline(0.0, color="black", linestyle="--", linewidth=1)
-        ax0.axvline(cfg.cosine_high_threshold, color="tab:green", linestyle="--", linewidth=1, label="high threshold")
-        ax0.set_title("Cosine vs. per-action mean (all samples)")
-        ax0.set_xlabel("cosine alignment")
-        ax0.set_ylabel("count")
-        ax0.legend(loc="upper left")
+    if actions_sorted and any(per_action_cos.get(aid) is not None for aid in actions_sorted):
+        x = np.arange(len(actions_sorted))
+        rng = np.random.default_rng(0)
+        for idx, aid in enumerate(actions_sorted):
+            cos_vals = per_action_cos.get(aid)
+            if cos_vals is None or cos_vals.size == 0:
+                continue
+            jitter = rng.uniform(-0.2, 0.2, size=cos_vals.shape[0])
+            ax0.scatter(
+                np.full_like(cos_vals, x[idx], dtype=np.float32) + jitter,
+                cos_vals,
+                s=14,
+                alpha=0.35,
+                color="tab:blue",
+                edgecolors="none",
+            )
+            mean_val = float(np.mean(cos_vals))
+            ax0.plot([x[idx] - 0.25, x[idx] + 0.25], [mean_val, mean_val], color="tab:red", linewidth=2, alpha=0.9)
+            ax0.text(x[idx], 1.02, f"n={cos_vals.shape[0]}", ha="center", va="bottom", fontsize=7)
+        ax0.axhline(cfg.cosine_high_threshold, color="gray", linestyle="--", linewidth=1, alpha=0.8)
+        ax0.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.8)
+        ax0.set_ylabel("cosine alignment")
+        ax0.set_ylim(-1.05, 1.05)
+        ax0.set_xticks(x)
+        ax0.set_xticklabels([_decode_action_id(aid, action_dim) for aid in actions_sorted], rotation=35, ha="right", fontsize=9)
+        ax0.set_title("Cosine alignment (per-action strip)")
     else:
         ax0.text(0.5, 0.5, "No valid cosine samples.", ha="center", va="center")
         ax0.axis("off")
 
     # (0,1): scatter of cosine vs delta norm
     ax1 = axes[0, 1]
-    if overall_cos.size and overall_norms.size:
-        ax1.scatter(overall_norms, overall_cos, s=8, alpha=0.35, color="tab:purple", edgecolors="none")
+    if actions_sorted and per_action_norms:
+        scatter_x = np.asarray([], dtype=np.float32)
+        xs: List[np.ndarray] = []
+        ys: List[np.ndarray] = []
+        color_ids: List[np.ndarray] = []
+        color_actions = sorted(actions_sorted)
+        palette = plt.get_cmap("tab20").colors
+        color_count = max(1, min(len(palette), len(color_actions)))
+        cmap = mcolors.ListedColormap(list(palette[:color_count]))
+        bounds = np.arange(color_count + 1) - 0.5
+        norm = mcolors.BoundaryNorm(bounds, color_count)
+        color_map = {aid: (idx % color_count) for idx, aid in enumerate(color_actions)}
+        for idx, aid in enumerate(actions_sorted):
+            norms = per_action_norms.get(aid)
+            cos_vals = per_action_cos.get(aid)
+            if norms is None or cos_vals is None or norms.size == 0 or cos_vals.size == 0:
+                continue
+            count = min(norms.shape[0], cos_vals.shape[0])
+            xs.append(norms[:count])
+            ys.append(cos_vals[:count])
+            color_ids.append(np.full(count, color_map.get(aid, idx), dtype=np.float32))
+        if xs and ys and color_ids:
+            scatter_x = np.concatenate(xs)
+            scatter_y = np.concatenate(ys)
+            scatter_c = np.concatenate(color_ids)
+            sc = ax1.scatter(
+                scatter_x,
+                scatter_y,
+                c=scatter_c,
+                cmap=cmap,
+                norm=norm,
+                s=8,
+                alpha=0.35,
+                edgecolors="none",
+            )
+            cbar = fig.colorbar(sc, ax=ax1, fraction=0.046, pad=0.04, boundaries=bounds)
+            ticks = list(range(color_count))
+            cbar.set_ticks(ticks)
+            tick_labels = [_decode_action_id(aid, action_dim) for aid in color_actions[:color_count]]
+            cbar.set_ticklabels(tick_labels)
+            cbar.set_label("action")
+        else:
+            scatter_x = np.asarray([], dtype=np.float32)
         ax1.axhline(0.0, color="black", linestyle="--", linewidth=1)
         ax1.axhline(cfg.cosine_high_threshold, color="tab:green", linestyle="--", linewidth=1)
-        if np.all(overall_norms > 0):
+        if scatter_x.size and np.all(scatter_x > 0):
             ax1.set_xscale("log")
         ax1.set_xlabel("delta norm")
         ax1.set_ylabel("cosine alignment")
@@ -3524,6 +3606,7 @@ def _save_diagnostics_outputs(
         motion["delta_proj"],
         motion["z_proj_flat"],
         motion["action_ids"],
+        motion["action_dim"],
     )
     _save_variance_spectrum_plot(delta_dir / f"delta_z_variance_spectrum_{global_step:07d}.png", motion["variance_ratio"])
     _write_variance_report(delta_dir, global_step, motion["variance_ratio"])

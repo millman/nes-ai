@@ -237,37 +237,39 @@
         <div class="small text-muted" id="diagnostics-frame-action"></div>
         <div class="small text-muted font-monospace mt-1" id="diagnostics-frame-path"></div>
         <div class="small text-muted" id="diagnostics-frame-dimensions"></div>
-        <div class="mt-3 d-none" id="diagnostics-summary-wrapper">
-            <div class="d-flex justify-content-between align-items-center mb-1">
-                <h6 class="mb-0">Alignment snapshot</h6>
-                <span class="badge text-bg-light" id="diagnostics-summary-step">Latest</span>
-            </div>
-            <div class="small text-muted" id="diagnostics-summary-caption">
-                Parsed from the latest action_alignment_report and action_alignment_strength outputs.
-            </div>
-            <div class="table-responsive mt-2">
-                <table class="table table-sm table-striped align-middle mb-0">
-                    <thead>
-                        <tr>
-                            <th scope="col">Action</th>
-                            <th scope="col">Count</th>
-                            <th scope="col">Mean cos</th>
-                            <th scope="col">Pct &gt; thr</th>
-                            <th scope="col">Δ norm (med)</th>
-                            <th scope="col">Δ norm (p90)</th>
-                            <th scope="col">Strength</th>
-                            <th scope="col">Notes</th>
-                        </tr>
-                    </thead>
-                    <tbody id="diagnostics-summary-body">
-                        <tr class="text-muted">
-                            <td colspan="8">No alignment summary available.</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-            <div class="small text-muted mt-1" id="diagnostics-summary-links"></div>
+    </div>
+</div>
+<div class="card mt-3 d-none" id="diagnostics-summary-wrapper">
+    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span>Alignment snapshot</span>
+        <span class="badge text-bg-light" id="diagnostics-summary-step">Latest</span>
+    </div>
+    <div class="card-body">
+        <div class="small text-muted" id="diagnostics-summary-caption">
+            Parsed from the latest action_alignment_report and action_alignment_strength outputs.
         </div>
+        <div class="table-responsive mt-2">
+            <table class="table table-sm table-striped align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th scope="col">Action</th>
+                        <th scope="col">Count</th>
+                        <th scope="col">Mean cos</th>
+                        <th scope="col">Pct &gt; thr</th>
+                        <th scope="col">Δ norm (med)</th>
+                        <th scope="col">Δ norm (p90)</th>
+                        <th scope="col">Strength</th>
+                        <th scope="col">Notes</th>
+                    </tr>
+                </thead>
+                <tbody id="diagnostics-summary-body">
+                    <tr class="text-muted">
+                        <td colspan="8">No alignment summary available.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="small text-muted mt-1" id="diagnostics-summary-links"></div>
     </div>
 </div>
 {% else %}
@@ -455,12 +457,24 @@ document.addEventListener("DOMContentLoaded", () => {
         if (summaryLinks) {
             const links = [];
             if (summary.report_url) {
-                links.push(`<a href="${summary.report_url}" target="_blank" rel="noreferrer">Report</a>`);
+                const label = summary.report_name || "Report";
+                links.push(`<a href="${summary.report_url}" target="_blank" rel="noreferrer">${label}</a>`);
             }
             if (summary.strength_url && summary.strength_url !== summary.report_url) {
-                links.push(`<a href="${summary.strength_url}" target="_blank" rel="noreferrer">Strength</a>`);
+                const label = summary.strength_name || "Strength";
+                links.push(`<a href="${summary.strength_url}" target="_blank" rel="noreferrer">${label}</a>`);
             }
-            summaryLinks.innerHTML = links.length ? `Sources: ${links.join(" · ")}` : "";
+            const extras = [];
+            if (!summary.report_url && summary.report_name) {
+                extras.push(summary.report_name);
+            }
+            if (!summary.strength_url && summary.strength_name) {
+                extras.push(summary.strength_name);
+            }
+            const extraText = extras.length ? extras.join(" · ") : "";
+            const linkText = links.length ? links.join(" · ") : "";
+            const combined = [linkText, extraText].filter(Boolean).join(" · ");
+            summaryLinks.innerHTML = combined ? `Sources: ${combined}` : "";
         }
         if (summaryCaption) {
             summaryCaption.textContent = "Parsed from the latest action_alignment_report and action_alignment_strength outputs.";
@@ -543,7 +557,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // Ensure initial state is rendered.
-    setLossPinned(false);
+    setLossPinned(true);
 
     if (frameSlider) {
         frameSlider.addEventListener("input", (ev) => {
