@@ -185,8 +185,22 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     @app.route("/comparison")
     def comparison():
         index_rows = build_experiment_index(cfg.output_dir)
-        experiments = []
-        for row in index_rows:
+        row_by_id = {row.id: row for row in index_rows}
+
+        raw_ids = request.args.getlist("ids")
+        if not raw_ids:
+            ids_param = request.args.get("ids", "")
+            raw_ids = ids_param.split(",") if ids_param else []
+
+        selected_ids = [exp_id for exp_id in raw_ids if exp_id and exp_id in row_by_id]
+        if len(selected_ids) < 2 and len(index_rows) >= 2:
+            selected_ids = [row.id for row in sorted(index_rows, key=lambda r: r.last_modified or datetime.min, reverse=True)[:2]]
+
+        experiments: List[Experiment] = []
+        for exp_id in selected_ids:
+            row = row_by_id.get(exp_id)
+            if not row:
+                continue
             exp = load_experiment(
                 row.path,
                 include_self_distance=False,
@@ -197,19 +211,16 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             if exp is not None:
                 experiments.append(exp)
 
-        raw_ids = request.args.getlist("ids")
-        if not raw_ids:
-            ids_param = request.args.get("ids", "")
-            raw_ids = ids_param.split(",") if ids_param else []
-        selected_ids = [exp_id for exp_id in raw_ids if exp_id and (cfg.output_dir / exp_id).is_dir()]
-        if len(selected_ids) < 2 and len(experiments) >= 2:
-            selected_ids = [exp.id for exp in experiments[:2]]
-        selected_map = {exp.id: exp for exp in experiments if exp.id in selected_ids}
-        selected_ids = sorted(
-            selected_ids,
-            key=lambda eid: selected_map[eid].last_modified or datetime.min,
-            reverse=True,
-        )
+        selected_map = {exp.id: exp for exp in experiments}
+        selected_ids = [
+            eid
+            for eid in sorted(
+                selected_ids,
+                key=lambda eid: row_by_id.get(eid).last_modified or datetime.min if row_by_id.get(eid) else datetime.min,
+                reverse=True,
+            )
+            if eid in selected_map
+        ]
         return render_template(
             "comparison.html",
             experiments=experiments,
@@ -217,7 +228,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             selected_ids=selected_ids,
             selected_map=selected_map,
             active_nav="comparison",
-            first_experiment_id=experiments[0].id if experiments else None,
+            first_experiment_id=selected_ids[0] if selected_ids else (index_rows[0].id if index_rows else None),
         )
 
     @app.route("/experiments/<exp_id>")
@@ -272,7 +283,21 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if not isinstance(exp_ids, list) or len(exp_ids) < 2:
             abort(400, "Provide at least two experiment ids.")
         # Preserve the requested order (matches the title row and dataset ids on the page).
-        experiments = [_get_experiment_or_404(exp_id) for exp_id in exp_ids]
+        experiments = []
+        for exp_id in exp_ids:
+            exp_path = cfg.output_dir / exp_id
+            if not exp_path.is_dir():
+                abort(404, f"Experiment {exp_id} not found.")
+            exp = load_experiment(
+                exp_path,
+                include_self_distance=False,
+                include_diagnostics_images=False,
+                include_diagnostics_frames=False,
+                include_last_modified=False,
+            )
+            if exp is None:
+                abort(404, f"Experiment {exp_id} not found.")
+            experiments.append(exp)
         overlay_data = _build_overlay_data(experiments)
         comparison_rows = _build_comparison_rows(experiments)
         return jsonify(

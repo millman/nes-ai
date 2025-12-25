@@ -76,6 +76,20 @@ function nearestStepAtOrBelow(target, list) {
   return best;
 }
 
+function computeInitialPreviewStep(stepsMap, folderValue) {
+  const maxStepsPerExp = Object.entries(stepsMap || {}).map(([expId, map]) => {
+    const steps = getStepsForFolder(stepsMap, expId, folderValue);
+    if (!Array.isArray(steps) || !steps.length) {
+      return null;
+    }
+    return steps[steps.length - 1];
+  }).filter((v) => v !== null && v !== undefined);
+  if (!maxStepsPerExp.length) {
+    return null;
+  }
+  return Math.min(...maxStepsPerExp);
+}
+
 function renderPreviewsAtStep(step, previews, stepsMap) {
   const targetStep = step !== null && step !== undefined ? Math.max(0, Math.round(step)) : null;
   const folderValue = currentImageFolder;
@@ -192,7 +206,7 @@ function renderComparison(payload) {
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
   const previewMap = collectPreviewMap(grid);
-  lastPreviewStep = null;
+  lastPreviewStep = computeInitialPreviewStep(availableStepsByExp, currentImageFolder);
   renderPreviewsAtStep(lastPreviewStep, previewMap, availableStepsByExp);
   refreshPreviewImages(grid, availableStepsByExp);
   const figure = payload.figure;
@@ -371,6 +385,9 @@ function buildExperimentGrid(experiments) {
     window.history.replaceState({}, "", url.toString());
     // Refresh rollout previews for the newly selected folder
     const previews = collectPreviewMap(container);
+    if (lastPreviewStep === null || lastPreviewStep === undefined) {
+      lastPreviewStep = computeInitialPreviewStep(availableStepsByExp, currentImageFolder);
+    }
     renderPreviewsAtStep(lastPreviewStep, previews, availableStepsByExp);
   });
 
