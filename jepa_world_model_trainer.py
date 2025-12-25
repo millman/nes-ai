@@ -67,13 +67,10 @@ LegacyVisualizationDecoder = ConvVisualizationDecoder
 class PredictorNetwork(nn.Module):
     def __init__(self, embedding_dim: int, hidden_dim: int, action_dim: int, film_layers: int) -> None:
         super().__init__()
-        self.in_proj = nn.Linear(embedding_dim, hidden_dim)
+        self.in_proj = nn.Linear(embedding_dim + action_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.activation = nn.SiLU(inplace=True)
-        self.action_embed = ActionEmbedding(action_dim, hidden_dim)
-        self.action_embed_dim = hidden_dim
-        self.film = ActionFiLM(hidden_dim, hidden_dim, film_layers)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
@@ -86,11 +83,9 @@ class PredictorNetwork(nn.Module):
             raise ValueError("Embeddings and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
         emb_flat = embeddings.reshape(-1, embeddings.shape[-1])
-        act_embed = self.action_embed(actions).reshape(-1, self.action_embed_dim)
-        hidden = self.activation(self.in_proj(emb_flat))
-        hidden = self.film(hidden, act_embed)
+        act_flat = actions.reshape(-1, actions.shape[-1])
+        hidden = self.activation(self.in_proj(torch.cat([emb_flat, act_flat], dim=-1)))
         hidden = self.activation(self.hidden_proj(hidden))
-        hidden = self.film(hidden, act_embed)
         raw_delta = self.out_proj(hidden)
         if self.use_delta_squash:
             delta = torch.tanh(raw_delta) * self.delta_scale
@@ -108,7 +103,7 @@ class PredictorNetwork(nn.Module):
             "latent_dim": self.embedding_dim,
             "hidden_dim": self.hidden_dim,
             "action_dim": self.action_dim,
-            "film_layers": self.film_layers,
+            "conditioning": "concat",
         }
 
 
@@ -2000,9 +1995,16 @@ def format_shape_summary(
     lines.append(f"  AdaptiveAvgPool → 1×1×{latent_dim} (latent)")
     lines.append("")
     lines.append("Predictor:")
+    conditioning = predictor_info.get("conditioning")
+    film_layers = predictor_info.get("film_layers")
+    cond_text = (
+        f"conditioning={conditioning}"
+        if conditioning is not None
+        else f"FiLM layers={film_layers}" if film_layers is not None else "conditioning=unknown"
+    )
     lines.append(
         f"  latent {predictor_info['latent_dim']} → hidden {predictor_info['hidden_dim']} "
-        f"(action_dim={predictor_info['action_dim']}, FiLM layers={predictor_info['film_layers']})"
+        f"(action_dim={predictor_info['action_dim']}, {cond_text})"
     )
     lines.append("")
     lines.append("Decoder:")
