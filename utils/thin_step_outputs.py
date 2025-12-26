@@ -15,7 +15,7 @@ import argparse
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Matches both step_00010 and ep01_step00010 style filenames.
 STEP_REGEX = re.compile(r"step_?(\d+)")
@@ -49,6 +49,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional offset to align keeps (step %% keep == offset). "
             "Use when numbering does not start at 0."
+        ),
+    )
+    parser.add_argument(
+        "--keep-before",
+        type=int,
+        default=1000,
+        help=(
+            "Never delete files with step numbers below this threshold. "
+            "Use alongside --keep-every to preserve early steps."
         ),
     )
     parser.add_argument(
@@ -94,7 +103,10 @@ def collect_candidates(
 
 
 def filter_files(
-    files: Iterable[Path], keep_every: int, offset: int
+    files: Iterable[Path],
+    keep_every: int,
+    offset: int,
+    keep_before: Optional[int] = None,
 ) -> Tuple[List[Path], List[Path]]:
     keep: List[Path] = []
     remove: List[Path] = []
@@ -103,6 +115,9 @@ def filter_files(
         if not match:
             continue
         step = int(match.group(1))
+        if keep_before is not None and step < keep_before:
+            keep.append(path)
+            continue
         if step % keep_every == offset % keep_every:
             keep.append(path)
         else:
@@ -114,6 +129,8 @@ def main() -> None:
     args = parse_args()
     if args.keep_every <= 0:
         raise SystemExit("--keep-every must be a positive integer")
+    if args.keep_before is not None and args.keep_before < 0:
+        raise SystemExit("--keep-before must be non-negative if provided")
 
     candidates = collect_candidates(args.paths, args.glob)
     total_dirs = len(candidates)
@@ -121,7 +138,9 @@ def main() -> None:
     total_keep = 0
 
     for directory, files in sorted(candidates.items(), key=lambda item: str(item[0])):
-        keep, remove = filter_files(files, args.keep_every, args.offset)
+        keep, remove = filter_files(
+            files, args.keep_every, args.offset, args.keep_before
+        )
         total_keep += len(keep)
         total_remove += len(remove)
         if not remove:
