@@ -15,11 +15,25 @@ import argparse
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
-# Matches both step_00010 and ep01_step00010 style filenames.
-STEP_REGEX = re.compile(r"step_?(\d+)")
-DEFAULT_GLOBS = ["step_*.png", "*_step*.png", "*step*.png"]
+# Regex patterns to find png/csv files with step-like or trailing numeric identifiers.
+DEFAULT_PATTERNS = [
+    # Trailing numbers, e.g.:
+    #   step_00010.png
+    #   losses_step_00010.csv
+    #   rollout_0005700.png
+    r"^.*_\d+\.(?:png|csv)$",
+
+    # Trailing numbers, with word attached.
+    # step000010.png
+    # ep01_step000010.png
+    r"^_?.+\d+\.(?:png|csv)$",
+]
+DEFAULT_PATTERN_REGEX: List[Pattern[str]] = [re.compile(p) for p in DEFAULT_PATTERNS]
+DEFAULT_KEEP_BEFORE = 1000
+DEFAULT_KEEP_SCHEDULE_SPEC = "1000:100,10000:1000"
+KeepSchedule = List[Tuple[int, int]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,13 +48,16 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         type=Path,
         default=[Path(".")],
-        help="Root directories to scan (defaults to current directory).",
+        help="Root directories to scan (default: %(default)s).",
     )
     parser.add_argument(
         "--keep-every",
         type=int,
-        required=True,
-        help="Keep only steps divisible by this interval (e.g., 100 keeps step_00100).",
+        default=None,
+        help=(
+            "Keep only steps divisible by this interval (e.g., 100 keeps step_00100) "
+            "(default: %(default)s)."
+        ),
     )
     parser.add_argument(
         "--offset",
@@ -48,43 +65,121 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "Optional offset to align keeps (step %% keep == offset). "
-            "Use when numbering does not start at 0."
+            "Use when numbering does not start at 0. "
+            "(default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--keep-schedule",
+        action="append",
+        default=None,
+        help=(
+            "Tiered keep intervals defined as start:interval pairs. "
+            "Example: --keep-schedule \"1000:200,10000:1000\" keeps all steps below "
+            "1000, then every 200 until 10000, and every 1000 thereafter. "
+            "Cannot be combined with --keep-every. "
+            "Defaults to 1000:1000,10000:1000 when neither keep option is given. "
+            "(default: %(default)s)."
         ),
     )
     parser.add_argument(
         "--keep-before",
         type=int,
-        default=1000,
+        default=DEFAULT_KEEP_BEFORE,
         help=(
             "Never delete files with step numbers below this threshold. "
-            "Use alongside --keep-every to preserve early steps."
+            "Use alongside --keep-every or --keep-schedule to preserve early steps. "
+            "(default: %(default)s)."
         ),
-    )
-    parser.add_argument(
-        "--glob",
-        action="append",
-        default=DEFAULT_GLOBS.copy(),
-        help=(
-            "Glob pattern to match files (relative to each path). "
-            "May be supplied multiple times. Defaults to step_*.png, *_step*.png, "
-            "and *step*.png (covers epXX_stepNNNN and losses_step_NNNNN files)."
-        ),
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show which files would be removed without deleting anything.",
     )
     parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Suppress per-file output; still prints summary.",
+        help="Suppress per-file output; still prints summary. "
+        "(default: %(default)s).",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help=(
+            "Print per-file actions. By default only directory-level summaries are shown. "
+            "(default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--DELETE",
+        dest="delete",
+        action="store_true",
+        default=False,
+        help=(
+            "Actually delete files. By default, the script only lists files it would "
+            "remove. (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--summary-depth",
+        type=int,
+        default=2,
+        help=(
+            "Maximum directory depth to display in the summary tree "
+            "(0 disables output, 1 shows immediate children, etc.). "
+            "(default: %(default)s)."
+        ),
     )
     return parser.parse_args()
 
 
+def parse_keep_schedule(raw: Optional[Sequence[str]]) -> Optional[KeepSchedule]:
+    if not raw:
+        return None
+
+    entries: KeepSchedule = []
+    for item in raw:
+        pieces = [part.strip() for part in item.split(",") if part.strip()]
+        for piece in pieces:
+            if ":" not in piece:
+                raise SystemExit(
+                    f"Invalid keep schedule entry '{piece}'. Use start:interval."
+                )
+            start_s, interval_s = (token.strip() for token in piece.split(":", 1))
+            try:
+                start = int(start_s)
+                interval = int(interval_s)
+            except ValueError:
+                raise SystemExit(
+                    f"Invalid keep schedule entry '{piece}'. start and interval must be integers."
+                )
+            if start < 0:
+                raise SystemExit("Keep schedule start values must be non-negative.")
+            if interval <= 0:
+                raise SystemExit("Keep schedule intervals must be positive.")
+            entries.append((start, interval))
+
+    entries.sort(key=lambda pair: pair[0])
+    seen_starts = set()
+    for start, _ in entries:
+        if start in seen_starts:
+            raise SystemExit(
+                f"Duplicate keep schedule start value {start} is not allowed."
+            )
+        seen_starts.add(start)
+    return entries
+
+
+def extract_step_number(name: str) -> Optional[int]:
+    """Extract the final numeric chunk in a filename (prefer trailing before extension)."""
+    match = re.search(r"(\d+)(?=\.[^.]+$)", name)
+    if match:
+        return int(match.group(1))
+    digits = re.findall(r"\d+", name)
+    if digits:
+        return int(digits[-1])
+    return None
+
+
 def collect_candidates(
-    roots: Sequence[Path], patterns: Sequence[str]
+    roots: Sequence[Path], patterns: Sequence[Pattern[str]]
 ) -> Dict[Path, List[Path]]:
     per_dir: Dict[Path, List[Path]] = defaultdict(list)
     seen: set[Path] = set()
@@ -93,10 +188,11 @@ def collect_candidates(
         root = root.expanduser().resolve()
         if not root.exists():
             continue
-        for pattern in patterns:
-            for path in root.rglob(pattern):
-                if path in seen or not path.is_file():
-                    continue
+        for path in root.rglob("*"):
+            if path in seen or not path.is_file():
+                continue
+            name = path.name
+            if any(regex.search(name) for regex in patterns):
                 seen.add(path)
                 per_dir[path.parent].append(path)
     return per_dir
@@ -104,62 +200,161 @@ def collect_candidates(
 
 def filter_files(
     files: Iterable[Path],
-    keep_every: int,
+    keep_every: Optional[int],
     offset: int,
     keep_before: Optional[int] = None,
+    keep_schedule: Optional[KeepSchedule] = None,
 ) -> Tuple[List[Path], List[Path]]:
     keep: List[Path] = []
     remove: List[Path] = []
+
+    def choose_interval(step: int) -> int:
+        if keep_schedule:
+            # Default to keeping everything before the first schedule start.
+            interval = 1
+            for start, scheduled_interval in keep_schedule:
+                if step < start:
+                    break
+                interval = scheduled_interval
+            return interval
+        assert keep_every is not None
+        return keep_every
+
     for path in files:
-        match = STEP_REGEX.search(path.name)
-        if not match:
+        step = extract_step_number(path.name)
+        if step is None:
             continue
-        step = int(match.group(1))
         if keep_before is not None and step < keep_before:
             keep.append(path)
             continue
-        if step % keep_every == offset % keep_every:
+        interval = choose_interval(step)
+        if step % interval == offset % interval:
             keep.append(path)
         else:
             remove.append(path)
     return keep, remove
 
 
+def summarize_tree(
+    stats: Dict[Path, Tuple[int, int, int, int]], max_depth: int
+) -> None:
+    """Render a tree of directories with before/after counts."""
+
+    def rel_parts(path: Path) -> Sequence[str]:
+        try:
+            rel = path.relative_to(Path.cwd())
+        except ValueError:
+            return path.parts
+        return rel.parts or (".",)
+
+    tree: Dict = {"children": {}, "stats": None, "agg": None}
+    for path, counts in stats.items():
+        parts = rel_parts(path)
+        node = tree
+        for part in parts:
+            node = node.setdefault("children", {}).setdefault(
+                part, {"children": {}, "stats": None, "agg": None}
+            )
+        node["stats"] = counts
+
+    def aggregate(node: Dict) -> Tuple[int, int, int, int]:
+        before = after = removed = kept = 0
+        if node.get("stats"):
+            b, a, r, k = node["stats"]
+            before += b
+            after += a
+            removed += r
+            kept += k
+        for child in node.get("children", {}).values():
+            cb, ca, cr, ck = aggregate(child)
+            before += cb
+            after += ca
+            removed += cr
+            kept += ck
+        node["agg"] = (before, after, removed, kept)
+        return node["agg"]
+
+    aggregate(tree)
+
+    def render(node: Dict, prefix: str, level: int) -> None:
+        children = sorted(node.get("children", {}).items(), key=lambda item: item[0])
+        for idx, (name, child) in enumerate(children):
+            is_last = idx == len(children) - 1
+            connector = "└─ " if is_last else "├─ "
+            stats = child.get("agg")
+            summary = ""
+            if stats:
+                before, after, removed, kept = stats
+                if removed > 0:
+                    pct = 100.0 if before == 0 else (after / before) * 100
+                    summary = f" ({before} -> {after}, {pct:.1f}% remaining)"
+            print(f"{prefix}{connector}{name}{summary}")
+            if level + 1 < max_depth:
+                render(child, prefix + ("   " if is_last else "│  "), level + 1)
+
+    print("Directory summary (tree):")
+    render(tree, "", 0)
+
+
 def main() -> None:
     args = parse_args()
-    if args.keep_every <= 0:
+    delete_mode = args.delete
+    patterns = DEFAULT_PATTERN_REGEX
+    keep_schedule = parse_keep_schedule(args.keep_schedule)
+    if keep_schedule and args.keep_every is not None:
+        raise SystemExit("Use either --keep-every or --keep-schedule, not both.")
+    if not keep_schedule and args.keep_every is None:
+        keep_schedule = parse_keep_schedule([DEFAULT_KEEP_SCHEDULE_SPEC])
+    if args.keep_every is not None and args.keep_every <= 0:
         raise SystemExit("--keep-every must be a positive integer")
     if args.keep_before is not None and args.keep_before < 0:
         raise SystemExit("--keep-before must be non-negative if provided")
+    if args.summary_depth < 0:
+        raise SystemExit("--summary-depth must be non-negative")
 
-    candidates = collect_candidates(args.paths, args.glob)
+    candidates = collect_candidates(args.paths, patterns)
     total_dirs = len(candidates)
     total_remove = 0
     total_keep = 0
+    per_dir_stats: Dict[Path, Tuple[int, int, int, int]] = {}
 
     for directory, files in sorted(candidates.items(), key=lambda item: str(item[0])):
         keep, remove = filter_files(
-            files, args.keep_every, args.offset, args.keep_before
+            files, args.keep_every, args.offset, args.keep_before, keep_schedule
+        )
+        before_count = len(files)
+        removed_count = len(remove)
+        kept_count = len(keep)
+        after_count = before_count - removed_count
+        per_dir_stats[directory] = (
+            before_count,
+            after_count,
+            removed_count,
+            kept_count,
         )
         total_keep += len(keep)
         total_remove += len(remove)
         if not remove:
             continue
-        if not args.quiet:
+        if args.verbose and not args.quiet:
             print(f"{directory}: removing {len(remove)} files, keeping {len(keep)}")
-        for path in remove:
-            if args.dry_run:
-                if not args.quiet:
+        for path in sorted(remove):
+            if not delete_mode:
+                if args.verbose and not args.quiet:
                     print(f"  DRY RUN: would remove {path}")
             else:
                 path.unlink(missing_ok=True)
-                if not args.quiet:
+                if args.verbose and not args.quiet:
                     print(f"  removed {path}")
 
     print(
         f"Processed {total_dirs} directories | kept {total_keep} files | "
-        f"{'would remove' if args.dry_run else 'removed'} {total_remove} files"
+        f"{'removed' if delete_mode else 'would remove'} {total_remove} files"
     )
+    if per_dir_stats and args.summary_depth > 0:
+        summarize_tree(per_dir_stats, args.summary_depth)
+    if not delete_mode:
+        print("No files were deleted. Re-run with --DELETE to apply removals.")
 
 
 if __name__ == "__main__":
