@@ -2,6 +2,7 @@ let hasRenderedPlot = false;
 let currentImageFolder = "vis_fixed_0";
 let currentXAxisMode = "steps";
 let lastPreviewStep = null;
+let pendingInitialPreviewStep = null;
 
 // Store original data for x-axis toggling
 let originalSteps = [];
@@ -206,8 +207,8 @@ function renderComparison(payload) {
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
   const previewMap = collectPreviewMap(grid);
-  lastPreviewStep = computeInitialPreviewStep(availableStepsByExp, currentImageFolder);
-  renderPreviewsAtStep(lastPreviewStep, previewMap, availableStepsByExp);
+  pendingInitialPreviewStep = computeInitialPreviewStep(availableStepsByExp, currentImageFolder);
+  lastPreviewStep = null;
   refreshPreviewImages(grid, availableStepsByExp);
   const figure = payload.figure;
   if (figure) {
@@ -303,6 +304,10 @@ function renderComparison(payload) {
     const config = buildPlotlyConfig(figure.config);
     Plotly.react(plot, figure.data, figure.layout, config).then(() => {
       applyXAxisMode(currentXAxisMode, { updateUrl: false });
+      if (lastPreviewStep === null && pendingInitialPreviewStep !== null) {
+        lastPreviewStep = pendingInitialPreviewStep;
+        renderPreviewsAtStep(lastPreviewStep, previewMap, availableStepsByExp);
+      }
 
       // X-axis toggle handler
       if (xAxisSelect) {

@@ -113,6 +113,7 @@
             <div class="card-body d-flex flex-column align-items-center">
                 <img id="self-distance-first-img" class="img-fluid rounded border d-none" alt="First frame preview">
                 <div class="text-muted small mt-2" id="self-distance-first-label"></div>
+                <div class="text-muted small" id="self-distance-first-action"></div>
             </div>
         </div>
     </div>
@@ -122,6 +123,7 @@
             <div class="card-body d-flex flex-column align-items-center">
                 <img id="self-distance-prior-img" class="img-fluid rounded border d-none" alt="Prior frame preview">
                 <div class="text-muted small mt-2" id="self-distance-prior-label"></div>
+                <div class="text-muted small" id="self-distance-prior-action"></div>
             </div>
         </div>
     </div>
@@ -131,6 +133,7 @@
             <div class="card-body d-flex flex-column align-items-center">
                 <img id="self-distance-current-img" class="img-fluid rounded border d-none" alt="Current frame preview">
                 <div class="text-muted small mt-2" id="self-distance-current-label"></div>
+                <div class="text-muted small" id="self-distance-current-action"></div>
             </div>
         </div>
     </div>
@@ -199,6 +202,9 @@ document.addEventListener("DOMContentLoaded", () => {
         const firstLabel = document.getElementById("self-distance-first-label");
         const priorLabel = document.getElementById("self-distance-prior-label");
         const currentLabel = document.getElementById("self-distance-current-label");
+        const firstAction = document.getElementById("self-distance-first-action");
+        const priorAction = document.getElementById("self-distance-prior-action");
+        const currentAction = document.getElementById("self-distance-current-action");
         const frameRow = document.getElementById("self-distance-frame-row");
         const stepImg = document.getElementById("self-distance-step-img");
         const stepPath = document.getElementById("self-distance-step-path");
@@ -209,17 +215,21 @@ document.addEventListener("DOMContentLoaded", () => {
         let diagLossPinned = false;
 
         const assetPath = (rel) => `/assets/{{ experiment.id }}/${rel.replace(/^\/+/, "")}`;
-        const setImage = (imgEl, labelEl, relPath, labelText) => {
+        const setImage = (imgEl, labelEl, actionEl, relPath, labelText, actionText) => {
             if (!imgEl || !labelEl) return;
             if (!relPath) {
                 imgEl.classList.add("d-none");
                 labelEl.textContent = "";
+                if (actionEl) actionEl.textContent = "Action: (not available)";
                 return;
             }
             imgEl.src = assetPath(relPath);
             imgEl.alt = labelText || relPath;
             imgEl.classList.remove("d-none");
             labelEl.textContent = labelText || relPath;
+            if (actionEl) {
+                actionEl.textContent = actionText ? `Action: ${actionText}` : "Action: (not available)";
+            }
         };
 
         const updateFrameVisibility = (showPrior) => {
@@ -291,25 +301,27 @@ document.addEventListener("DOMContentLoaded", () => {
                 const priorPath = payload[4];
                 const frameLabelText = payload[5] || `t=${step}`;
                 const headerText = `${trajectory} • t=${step}`;
+                const actionText = payload[6] || "";
 
                 if (mode === "first") {
                     updateFrameVisibility(false);
-                    setImage(firstImg, firstLabel, firstPath, `first: ${frameLabelText}`);
-                    setImage(currentImg, currentLabel, framePath, headerText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                     if (priorImg && priorLabel) {
                         priorImg.classList.add("d-none");
                         priorLabel.textContent = "";
+                        if (priorAction) priorAction.textContent = "";
                     }
                 } else if (mode === "prior") {
                     updateFrameVisibility(true);
-                    setImage(firstImg, firstLabel, firstPath, `first: ${frameLabelText}`);
-                    setImage(priorImg, priorLabel, priorPath, `prior: t=${Math.max(0, step - 1)}`);
-                    setImage(currentImg, currentLabel, framePath, headerText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                 } else {
                     updateFrameVisibility(true);
-                    setImage(firstImg, firstLabel, firstPath, `first: ${frameLabelText}`);
-                    setImage(priorImg, priorLabel, priorPath, `prior: t=${Math.max(0, step - 1)}`);
-                    setImage(currentImg, currentLabel, framePath, headerText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                 }
             });
         };
@@ -336,6 +348,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 r.first_frame_path,
                 r.prior_frame_path,
                 r.frame_label,
+                r.action_label || "",
             ]);
 
             const layoutBase = {
@@ -515,9 +528,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 buildPlots(rows);
                 if (rows.length) {
                     const firstRow = rows[0];
-                    setImage(firstImg, firstLabel, firstRow.first_frame_path, `first: ${firstRow.frame_label || "t=0"}`);
-                    setImage(priorImg, priorLabel, firstRow.prior_frame_path, "prior: t=0");
-                    setImage(currentImg, currentLabel, firstRow.frame_path, `t=${firstRow.timestep}`);
+                    setImage(firstImg, firstLabel, firstAction, firstRow.first_frame_path, `first: ${firstRow.frame_label || "t=0"}`, firstRow.action_label || "");
+                    setImage(priorImg, priorLabel, priorAction, firstRow.prior_frame_path, "prior: t=0", firstRow.action_label || "");
+                    setImage(currentImg, currentLabel, currentAction, firstRow.frame_path, `t=${firstRow.timestep}`, firstRow.action_label || "");
                     updateFrameVisibility(true);
                 }
             },

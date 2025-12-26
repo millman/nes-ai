@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from datetime import datetime
 from time import perf_counter
+import warnings
 
 try:
     from pytorch_optimizer import SOAP
@@ -531,6 +532,9 @@ class SelfDistanceInputs:
     frame_paths: List[Path]  # relative to run directory
     frame_labels: List[str]
     trajectory_label: str
+    actions: np.ndarray  # [T, action_dim]
+    action_labels: List[str]
+    action_dim: int
 
 
 @dataclass
@@ -1517,6 +1521,23 @@ def collate_batch(
     return obs_tensor, act_tensor, path_batch, idx_tensor
 
 
+def _load_actions_for_trajectory(traj_dir: Path, expected_length: Optional[int] = None) -> np.ndarray:
+    """Load actions.npz for a trajectory and ensure alignment."""
+    actions_path = Path(traj_dir) / "actions.npz"
+    if not actions_path.is_file():
+        raise FileNotFoundError(f"Missing actions.npz for {traj_dir}")
+    with np.load(actions_path) as data:
+        action_arr = data["actions"] if "actions" in data else data[list(data.files)[0]]
+    if action_arr.ndim == 1:
+        action_arr = action_arr[:, None]
+    action_arr = action_arr.astype(np.float32, copy=False)
+    if expected_length is not None and action_arr.shape[0] != expected_length:
+        raise ValueError(
+            f"Action count {action_arr.shape[0]} does not match frame count {expected_length} in {traj_dir}"
+        )
+    return action_arr
+
+
 class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[str], int]]):
     """Load contiguous frame/action sequences from recorded trajectories."""
 
@@ -1544,17 +1565,13 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
         self.samples: List[Tuple[List[Path], np.ndarray, int]] = []
         self.action_dim: Optional[int] = None
         for traj_name, frame_paths in items:
-            actions_path = (self.root / traj_name) / "actions.npz"
-            if not actions_path.is_file():
-                raise FileNotFoundError(f"Missing actions.npz for {traj_name}")
-            with np.load(actions_path) as data:
-                action_arr = data["actions"] if "actions" in data else data[list(data.files)[0]]
-            if action_arr.ndim == 1:
-                action_arr = action_arr[:, None]
-            assert action_arr.shape[0] == len(frame_paths), (
-                f"Action count {action_arr.shape[0]} does not match frame count {len(frame_paths)} in {traj_name}"
-            )
-            action_arr = action_arr.astype(np.float32, copy=False)
+            if len(frame_paths) < self.seq_len:
+                warnings.warn(
+                    f"Skipping trajectory {traj_name} shorter than seq_len {self.seq_len}",
+                    RuntimeWarning,
+                )
+                continue
+            action_arr = _load_actions_for_trajectory(self.root / traj_name, expected_length=len(frame_paths))
             if self.action_dim is None:
                 self.action_dim = action_arr.shape[1]
             elif self.action_dim != action_arr.shape[1]:
@@ -3694,6 +3711,10 @@ def _prepare_self_distance_inputs(
         labels.append(short_traj_state_label(str(src)))
     if not frames:
         return None
+    actions = _load_actions_for_trajectory(data_root / chosen, expected_length=len(frames))
+    action_dim = actions.shape[1]
+    action_ids = _compress_actions_to_ids(actions)
+    action_labels = [_decode_action_id(int(aid), action_dim) for aid in action_ids]
     stacked = torch.stack(frames, dim=0).unsqueeze(0)
     traj_label = f"{data_root.name}/{chosen}" if data_root.name else chosen
     return SelfDistanceInputs(
@@ -3701,6 +3722,9 @@ def _prepare_self_distance_inputs(
         frame_paths=rel_paths,
         frame_labels=labels,
         trajectory_label=traj_label,
+        actions=actions,
+        action_labels=action_labels,
+        action_dim=action_dim,
     )
 
 
@@ -3762,6 +3786,8 @@ def _write_self_distance_outputs(
         "first_frame_path",
         "prior_frame_path",
         "frame_label",
+        "action_id",
+        "action_label",
     ]
     first_frame = traj_inputs.frame_paths[0].as_posix()
     with csv_path.open("w", newline="") as handle:
@@ -3769,6 +3795,10 @@ def _write_self_distance_outputs(
         writer.writeheader()
         for idx, step in enumerate(steps):
             prior_idx = max(0, idx - 1)
+            action_id = int(_compress_actions_to_ids(traj_inputs.actions[idx : idx + 1])[0])
+            action_label = traj_inputs.action_labels[idx] if idx < len(traj_inputs.action_labels) else _decode_action_id(
+                action_id, traj_inputs.action_dim
+            )
             writer.writerow(
                 {
                     "trajectory": traj_inputs.trajectory_label,
@@ -3782,6 +3812,8 @@ def _write_self_distance_outputs(
                     "first_frame_path": first_frame,
                     "prior_frame_path": traj_inputs.frame_paths[prior_idx].as_posix(),
                     "frame_label": traj_inputs.frame_labels[idx] if idx < len(traj_inputs.frame_labels) else f"t={step}",
+                    "action_id": action_id,
+                    "action_label": action_label,
                 }
             )
     plot_dir.mkdir(parents=True, exist_ok=True)
