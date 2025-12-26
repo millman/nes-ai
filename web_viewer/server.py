@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
+import csv
 from pathlib import Path
 from typing import Dict, List, Optional
 from math import ceil
@@ -33,6 +34,7 @@ from .experiments import (
     write_tags,
     write_title,
     _diagnostics_exists,
+    _graph_diagnostics_exists,
     _collect_visualization_steps,
     extract_alignment_summary,
 )
@@ -96,6 +98,24 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         field_text = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
         app.logger.info("profile:%s %.1fms %s", label, elapsed_ms, field_text)
 
+    def _parse_graph_history_csv(path: Path) -> List[Dict[str, float]]:
+        rows: List[Dict[str, float]] = []
+        try:
+            with path.open("r", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    parsed: Dict[str, float] = {}
+                    for key, value in row.items():
+                        try:
+                            parsed[key] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                    rows.append(parsed)
+        except (OSError, csv.Error):
+            return []
+        rows.sort(key=lambda r: r.get("step", float("inf")))
+        return rows
+
     def _load_all() -> List[Experiment]:
         return list_experiments(cfg.output_dir)
 
@@ -141,6 +161,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 include_self_distance=False,
                 include_diagnostics_images=False,
                 include_diagnostics_frames=False,
+                include_graph_diagnostics=False,
                 include_last_modified=False,
             )
             if exp is not None:
@@ -206,6 +227,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 include_self_distance=False,
                 include_diagnostics_images=False,
                 include_diagnostics_frames=False,
+                include_graph_diagnostics=False,
                 include_last_modified=False,
             )
             if exp is not None:
@@ -293,6 +315,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 include_self_distance=False,
                 include_diagnostics_images=False,
                 include_diagnostics_frames=False,
+                include_graph_diagnostics=False,
                 include_last_modified=False,
             )
             if exp is None:
@@ -352,6 +375,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg.output_dir / selected_id,
             include_diagnostics_images=False,
             include_diagnostics_frames=False,
+            include_graph_diagnostics=False,
         )
         if selected is None or selected.self_distance_csv is None:
             abort(404, "Experiment not found for self-distance.")
@@ -399,10 +423,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "diagnostics_page.html",
-                experiments=[],
-                experiment=None,
-                diagnostics_map={},
+            "diagnostics_page.html",
+            experiments=[],
+            experiment=None,
+            diagnostics_map={},
                 diagnostics_csv_map={},
                 frame_map={},
                 cfg=cfg,
@@ -411,7 +435,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 first_experiment_id=None,
             )
 
-        selected = load_experiment(cfg.output_dir / selected_id)
+        selected = load_experiment(cfg.output_dir / selected_id, include_graph_diagnostics=False)
         if selected is None:
             abort(404, "Experiment not found for diagnostics.")
 
@@ -530,6 +554,133 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             diagnostics_summary=alignment_summary,
             cfg=cfg,
             active_nav="diagnostics",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
+    @app.route("/graph_diagnostics", defaults={"exp_id": None})
+    @app.route("/graph_diagnostics/<exp_id>")
+    def graph_diagnostics(exp_id: Optional[str]):
+        route_start = time.perf_counter()
+        requested = exp_id or request.args.get("id")
+
+        def _latest_graph_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                if _graph_diagnostics_exists(row.path):
+                    return row.id
+            return None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_graph_id()
+
+        if selected_id is None:
+            return render_template(
+                "graph_diagnostics_page.html",
+                experiments=[],
+                experiment=None,
+                graph_map={},
+                graph_steps=[],
+                history=[],
+                history_url=None,
+                history_plot_url=None,
+                cfg=cfg,
+                active_nav="graph_diagnostics",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_self_distance=False,
+            include_diagnostics_images=False,
+            include_diagnostics_frames=False,
+            include_graph_diagnostics=True,
+        )
+        if selected is None:
+            abort(404, "Experiment not found for graph diagnostics.")
+
+        figure = _build_single_experiment_figure(selected)
+
+        graph_map: Dict[str, Dict[int, str]] = {}
+        for name, paths in selected.graph_diagnostics_images.items():
+            per_step: Dict[int, str] = {}
+            for path in paths:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                try:
+                    rel = path.relative_to(selected.path)
+                except ValueError:
+                    continue
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                graph_map[name] = per_step
+
+        graph_steps = selected.graph_diagnostics_steps
+        history_rows: List[Dict[str, float]] = []
+        history_url: Optional[str] = None
+        history_plot_url: Optional[str] = None
+        history_files = selected.graph_diagnostics_csvs.get("metrics_history", [])
+        if history_files:
+            latest_hist = history_files[-1]
+            history_rows = _parse_graph_history_csv(latest_hist)
+            try:
+                rel = latest_hist.relative_to(selected.path)
+                history_url = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            except ValueError:
+                history_url = None
+        history_images = selected.graph_diagnostics_images.get("metrics_history", [])
+        latest_history_images = selected.graph_diagnostics_images.get("metrics_history_latest", [])
+        plot_path: Optional[Path] = None
+        if latest_history_images:
+            plot_path = latest_history_images[-1]
+        elif history_images:
+            plot_path = history_images[-1]
+        if plot_path is not None:
+            try:
+                rel = plot_path.relative_to(selected.path)
+                history_plot_url = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            except ValueError:
+                history_plot_url = None
+        if not graph_steps and history_rows:
+            graph_steps = [int(row.get("step", 0)) for row in history_rows if "step" in row]
+
+        _log_timing(
+            "graph_diagnostics.total",
+            route_start,
+            selected=selected.id,
+            images=sum(len(v) for v in graph_map.values()),
+            steps=len(graph_steps),
+            history=len(history_rows),
+        )
+        return render_template(
+            "graph_diagnostics_page.html",
+            experiments=[],
+            experiment=selected,
+            graph_map=graph_map,
+            graph_steps=graph_steps,
+            history=history_rows,
+            history_url=history_url,
+            history_plot_url=history_plot_url,
+            figure=figure,
+            cfg=cfg,
+            active_nav="graph_diagnostics",
             active_experiment_id=selected.id,
             first_experiment_id=selected.id,
         )

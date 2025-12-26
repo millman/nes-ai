@@ -56,6 +56,15 @@
                         <span class="nav-link disabled text-secondary">Diagnostics</span>
                         {% endif %}
                     </li>
+                    <li class="nav-item">
+                        {% if active_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'graph_diagnostics' else '' }}" href="{{ url_for('graph_diagnostics', exp_id=active_experiment_id) }}">Graph Diagnostics</a>
+                        {% elif first_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'graph_diagnostics' else '' }}" href="{{ url_for('graph_diagnostics', exp_id=first_experiment_id) }}">Graph Diagnostics</a>
+                        {% else %}
+                        <span class="nav-link disabled text-secondary">Graph Diagnostics</span>
+                        {% endif %}
+                    </li>
                 </ul>
             </div>
         </div>

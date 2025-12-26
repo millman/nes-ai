@@ -112,6 +112,9 @@ class Experiment:
     diagnostics_steps: List[int]
     diagnostics_csvs: Dict[str, List[Path]]
     diagnostics_frames: Dict[int, List[Tuple[Path, str, str, Optional[int]]]]
+    graph_diagnostics_images: Dict[str, List[Path]]
+    graph_diagnostics_steps: List[int]
+    graph_diagnostics_csvs: Dict[str, List[Path]]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -139,7 +142,7 @@ def list_experiments(output_dir: Path) -> List[Experiment]:
     if not output_dir.exists():
         return experiments
     for subdir in sorted(p for p in output_dir.iterdir() if p.is_dir()):
-        exp = load_experiment(subdir)
+        exp = load_experiment(subdir, include_graph_diagnostics=False)
         if exp is not None:
             experiments.append(exp)
     experiments.sort(key=lambda e: e.name, reverse=True)
@@ -163,6 +166,7 @@ def load_experiment(
     include_self_distance: bool = True,
     include_diagnostics_images: bool = True,
     include_diagnostics_frames: bool = True,
+    include_graph_diagnostics: bool = True,
     include_last_modified: bool = True,
 ) -> Optional[Experiment]:
     if not path.is_dir():
@@ -209,6 +213,15 @@ def load_experiment(
     else:
         diagnostics_steps = [0] if _diagnostics_exists(path) else []
     diagnostics_frames = _collect_diagnostics_frames(path) if include_diagnostics_frames else {}
+    graph_diagnostics_images: Dict[str, List[Path]] = {}
+    graph_diagnostics_steps: List[int] = []
+    graph_diagnostics_csvs: Dict[str, List[Path]] = {}
+    if include_graph_diagnostics:
+        graph_diagnostics_images = _collect_graph_diagnostics_images(path)
+        graph_diagnostics_steps = _collect_graph_diagnostics_steps(graph_diagnostics_images)
+        graph_diagnostics_csvs = _collect_graph_diagnostics_csvs(path)
+    else:
+        graph_diagnostics_steps = [0] if _graph_diagnostics_exists(path) else []
     _profile(
         "load_experiment.diagnostics",
         section_start,
@@ -218,6 +231,10 @@ def load_experiment(
         csvs=sum(len(v) for v in diagnostics_csvs.values()),
         frames=sum(len(v) for v in diagnostics_frames.values()),
         include_frames=include_diagnostics_frames,
+        graph_images=sum(len(v) for v in graph_diagnostics_images.values()),
+        graph_steps=len(graph_diagnostics_steps),
+        graph_csvs=sum(len(v) for v in graph_diagnostics_csvs.values()),
+        include_graph=include_graph_diagnostics,
         include_images=include_diagnostics_images,
     )
     section_start = time.perf_counter()
@@ -288,6 +305,9 @@ def load_experiment(
         diagnostics_steps=diagnostics_steps,
         diagnostics_csvs=diagnostics_csvs,
         diagnostics_frames=diagnostics_frames,
+        graph_diagnostics_images=graph_diagnostics_images,
+        graph_diagnostics_steps=graph_diagnostics_steps,
+        graph_diagnostics_csvs=graph_diagnostics_csvs,
     )
 
 
@@ -883,6 +903,66 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str, s
             continue
     _profile("diagnostics.frames", start_time, root, csv_files=csv_count, frames=frame_count)
     return frame_map
+
+
+def _collect_graph_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
+    folder = root / "graph_diagnostics"
+    if not folder.exists():
+        return {}
+    specs = [
+        ("rank1_cdf", "rank1_cdf_*.png"),
+        ("rank2_cdf", "rank2_cdf_*.png"),
+        ("neff_violin", "neff_violin_*.png"),
+        ("in_degree_hist", "in_degree_hist_*.png"),
+        ("edge_consistency", "edge_consistency_*.png"),
+        ("metrics_history", "metrics_history_*.png"),
+    ]
+    images: Dict[str, List[Path]] = {}
+    for name, pattern in specs:
+        files = sorted(folder.glob(pattern))
+        if files:
+            images[name] = files
+    latest = folder / "metrics_history_latest.png"
+    if latest.exists():
+        images.setdefault("metrics_history_latest", []).append(latest)
+    return images
+
+
+def _collect_graph_diagnostics_steps(graph_images: Dict[str, List[Path]]) -> List[int]:
+    steps: set[int] = set()
+    for paths in graph_images.values():
+        for path in paths:
+            stem = path.stem
+            suffix = stem.split("_")[-1] if "_" in stem else stem
+            try:
+                steps.add(int(suffix))
+            except ValueError:
+                continue
+    return sorted(steps)
+
+
+def _collect_graph_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
+    folder = root / "graph_diagnostics"
+    if not folder.exists():
+        return {}
+    csvs: Dict[str, List[Path]] = {}
+    metrics_csvs = sorted(folder.glob("metrics_history*.csv"))
+    if metrics_csvs:
+        csvs["metrics_history"] = metrics_csvs
+    return csvs
+
+
+def _graph_diagnostics_exists(root: Path) -> bool:
+    folder = root / "graph_diagnostics"
+    if not folder.exists():
+        return False
+    try:
+        for pattern in ("*.png", "*.csv"):
+            for _ in folder.glob(pattern):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def _get_max_step(csv_path: Path) -> Optional[int]:

@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+
+{% set steps = graph_steps if graph_steps is defined and graph_steps else [] %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<style>
+.graph-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+}
+.graph-card-img {
+    width: 100%;
+    height: auto;
+    border: 1px solid #e9ecef;
+    border-radius: 0.5rem;
+    background: #f8f9fa;
+}
+.graph-summary-table td {
+    padding: 0.2rem 0.4rem;
+}
+.graph-loss-wrapper {
+    position: relative;
+}
+.graph-loss-plot {
+    height: 220px;
+}
+.graph-card-img {
+    cursor: pointer;
+}
+.graph-info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3949ab;
+    font-size: 12px;
+    border: 1px solid #c5cae9;
+    cursor: pointer;
+}
+</style>
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        {% if experiment %}
+        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
+        {% else %}
+        <h3 class="mb-1">Graph Diagnostics</h3>
+        <div class="text-muted small">No experiments with graph diagnostics outputs.</div>
+        {% endif %}
+    </div>
+    {% if history_url %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ history_url }}" target="_blank" rel="noreferrer">Download history CSV</a>
+    {% endif %}
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No graph diagnostics found.</div>
+{% else %}
+<div class="card mb-3 graph-loss-wrapper">
+    <div class="card-header py-2 d-flex align-items-center gap-2">
+        <strong>Training metrics</strong>
+        <span class="text-muted small">hover to scrub steps</span>
+        <span class="ms-auto text-muted small">Step: <span id="graph-step-label">{{ steps[-1] if steps else '—' }}</span></span>
+    </div>
+    <div class="card-body">
+        <div id="graph-loss-plot" class="graph-loss-plot"></div>
+    </div>
+</div>
+
+<div class="graph-grid mb-3">
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>1-step rank CDF</span>
+            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Good: curve near top-left, high hit@K. Watch for flat/slow curves (poor 1-step retrieval).">i</span>
+        </div>
+        <div class="card-body">
+            <img id="graph-rank1-img" class="graph-card-img d-none" alt="Rank1 CDF">
+            <div class="text-muted small" id="graph-rank1-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>2-hop rank CDF</span>
+            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Compare to 1-step: big drop means poor composability; similar curves mean paths compose.">i</span>
+        </div>
+        <div class="card-body">
+            <img id="graph-rank2-img" class="graph-card-img d-none" alt="Rank2 CDF">
+            <div class="text-muted small" id="graph-rank2-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Neighborhood size</span>
+            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Expect Neff2 moderately above Neff1. Huge Neff2 or very wide spread flags diffusion/shortcuts; tiny values mean overly sharp edges.">i</span>
+        </div>
+        <div class="card-body">
+            <img id="graph-neff-img" class="graph-card-img d-none" alt="Neighborhood size violin">
+            <div class="text-muted small" id="graph-neff-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>In-degree / hubness</span>
+            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Healthy graphs have balanced degrees; very high max/top-1% indicates hub collapse.">i</span>
+        </div>
+        <div class="card-body">
+            <img id="graph-indegree-img" class="graph-card-img d-none" alt="In-degree histogram">
+            <div class="text-muted small" id="graph-indegree-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Edge consistency</span>
+            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error ||zhat - zT||² for sampled top-K edges. Lower is better; long tails or multimodal bumps hint at implausible edges.">i</span>
+        </div>
+        <div class="card-body">
+            <img id="graph-edge-img" class="graph-card-img d-none" alt="Edge consistency histogram">
+            <div class="text-muted small" id="graph-edge-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>History</span>
+            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Look for stable or improving hit@K, moderate Neff growth, low long-gap, steady mutual, bounded max in-degree.">i</span>
+        </div>
+        <div class="card-body">
+            {% if history_plot_url %}
+            <img id="graph-history-img" class="graph-card-img" src="{{ history_plot_url }}" alt="Metrics history">
+            {% else %}
+            <div class="text-muted fst-italic">History plot not available.</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header py-2">Metrics at selected step</div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle graph-summary-table mb-0">
+                <tbody>
+                    <tr><th scope="row">hit1@K</th><td id="graph-hit1">—</td></tr>
+                    <tr><th scope="row">hit2@K</th><td id="graph-hit2">—</td></tr>
+                    <tr><th scope="row">median Neff1</th><td id="graph-neff1">—</td></tr>
+                    <tr><th scope="row">median Neff2</th><td id="graph-neff2">—</td></tr>
+                    <tr><th scope="row">Neff2/Neff1</th><td id="graph-neff-ratio">—</td></tr>
+                    <tr><th scope="row">long-gap rate</th><td id="graph-long-gap">—</td></tr>
+                    <tr><th scope="row">mutual kNN rate</th><td id="graph-mutual">—</td></tr>
+                    <tr><th scope="row">max in-degree</th><td id="graph-max-in">—</td></tr>
+                    <tr><th scope="row">top 1% mean in-degree</th><td id="graph-top-in">—</td></tr>
+                    <tr><th scope="row">sample size</th><td id="graph-samples">—</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const steps = {{ steps | tojson }};
+    const graphMap = {{ graph_map | tojson }};
+    const history = {{ history | tojson }};
+    const figure = {{ figure | tojson if figure else 'null' }};
+    const stepLabel = document.getElementById("graph-step-label");
+    const lossPlot = document.getElementById("graph-loss-plot");
+    const targets = {
+        rank1_cdf: {img: document.getElementById("graph-rank1-img"), caption: document.getElementById("graph-rank1-caption"), label: "rank1 CDF"},
+        rank2_cdf: {img: document.getElementById("graph-rank2-img"), caption: document.getElementById("graph-rank2-caption"), label: "rank2 CDF"},
+        neff_violin: {img: document.getElementById("graph-neff-img"), caption: document.getElementById("graph-neff-caption"), label: "Neff"},
+        in_degree_hist: {img: document.getElementById("graph-indegree-img"), caption: document.getElementById("graph-indegree-caption"), label: "in-degree"},
+        edge_consistency: {img: document.getElementById("graph-edge-img"), caption: document.getElementById("graph-edge-caption"), label: "edge consistency"},
+    };
+    const summaryTargets = {
+        hit1_at_k: document.getElementById("graph-hit1"),
+        hit2_at_k: document.getElementById("graph-hit2"),
+        median_neff1: document.getElementById("graph-neff1"),
+        median_neff2: document.getElementById("graph-neff2"),
+        neff_ratio: document.getElementById("graph-neff-ratio"),
+        long_gap_rate: document.getElementById("graph-long-gap"),
+        mutual_rate: document.getElementById("graph-mutual"),
+        max_in_degree: document.getElementById("graph-max-in"),
+        top1pct_mean_in_degree: document.getElementById("graph-top-in"),
+        sample_size: document.getElementById("graph-samples"),
+    };
+
+    function nearestStep(value) {
+        if (!steps.length) return null;
+        let best = steps[0];
+        let bestDiff = Math.abs(value - best);
+        for (let i = 1; i < steps.length; i++) {
+            const diff = Math.abs(value - steps[i]);
+            if (diff < bestDiff) {
+                best = steps[i];
+                bestDiff = diff;
+            }
+        }
+        return best;
+    }
+
+    function resolveUrl(key, step) {
+        const perDiag = graphMap[key] || {};
+        return perDiag[step] || perDiag[String(step)] || null;
+    }
+
+    function formatNumber(value, decimals = 3, multiplier = 1) {
+        if (value === null || value === undefined) return "—";
+        const num = Number(value) * multiplier;
+        if (!Number.isFinite(num)) return "—";
+        return num.toFixed(decimals);
+    }
+
+    function findHistory(step) {
+        if (!history.length) return null;
+        let best = history[0];
+        let bestDiff = Math.abs((history[0].step ?? 0) - step);
+        for (let i = 1; i < history.length; i++) {
+            const candidate = history[i];
+            const diff = Math.abs((candidate.step ?? 0) - step);
+            if (diff < bestDiff) {
+                best = candidate;
+                bestDiff = diff;
+            }
+        }
+        return best;
+    }
+
+    function updateImages(step) {
+        Object.entries(targets).forEach(([key, refs]) => {
+            if (!refs.img || !refs.caption) return;
+            const url = resolveUrl(key, step);
+            if (url) {
+                refs.img.src = url;
+                refs.img.classList.remove("d-none");
+                refs.caption.textContent = `Step ${step}`;
+            } else {
+                refs.img.classList.add("d-none");
+                refs.caption.textContent = `Missing image for step ${step}`;
+            }
+        });
+    }
+
+    function updateSummary(step) {
+        const entry = findHistory(step);
+        Object.entries(summaryTargets).forEach(([key, el]) => {
+            if (!el) return;
+            const val = entry ? entry[key] : null;
+            const pctKeys = new Set(["hit1_at_k", "hit2_at_k", "long_gap_rate", "mutual_rate"]);
+            const intKeys = new Set(["sample_size"]);
+            const decimals = intKeys.has(key) ? 0 : (pctKeys.has(key) ? 3 : 4);
+            const multiplier = pctKeys.has(key) ? 100 : 1;
+            const suffix = pctKeys.has(key) ? "%" : "";
+            const text = formatNumber(val, decimals, multiplier);
+            el.textContent = text === "—" ? "—" : `${text}${suffix}`;
+        });
+    }
+
+    function updateForStep(step) {
+        if (stepLabel) stepLabel.textContent = step ?? "—";
+        updateImages(step);
+        updateSummary(step);
+    }
+
+    function renderLossPlot() {
+        if (!lossPlot || typeof Plotly === "undefined") return;
+        if (!figure || !figure.data || !figure.layout) {
+            if (steps.length) {
+                updateForStep(steps[steps.length - 1]);
+            }
+            return;
+        }
+        const layout = {
+            ...figure.layout,
+            height: 220,
+            margin: { ...(figure.layout?.margin || {}), t: 30, b: 50, l: 50, r: 10 },
+        };
+        const config = buildPlotlyConfig(figure.config || {});
+        Plotly.react(lossPlot, figure.data, layout, config).then(() => {
+            lossPlot.on("plotly_hover", (event) => {
+                const point = event?.points?.[0];
+                if (!point || typeof point.x === "undefined") return;
+                const nearest = nearestStep(point.x);
+                if (nearest !== null) {
+                    updateForStep(nearest);
+                }
+            });
+        });
+    }
+
+    if (steps.length) {
+        updateForStep(steps[steps.length - 1]);
+    } else {
+        updateSummary(0);
+    }
+    renderLossPlot();
+
+    // Enable Bootstrap tooltips for info icons.
+    const tooltipTriggerList = Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.forEach((el) => {
+        try {
+            new bootstrap.Tooltip(el);
+        } catch (e) {
+            // ignore init failure
+        }
+    });
+
+});
+</script>
+{% endblock %}
