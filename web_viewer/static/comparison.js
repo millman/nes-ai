@@ -28,6 +28,12 @@ const IMAGE_FOLDER_OPTIONS = [
   },
   { value: "vis_cycle_error", label: "vis_cycle_error", prefix: "cycle_error_", folder: "vis_cycle_error" },
   { value: "vis_adjacency", label: "vis_adjacency", prefix: "adjacency_", folder: "vis_adjacency" },
+  { value: "graph_rank1_cdf", label: "graph_rank1_cdf", prefix: "rank1_cdf_", folder: "graph_diagnostics" },
+  { value: "graph_rank2_cdf", label: "graph_rank2_cdf", prefix: "rank2_cdf_", folder: "graph_diagnostics" },
+  { value: "graph_neff_violin", label: "graph_neff_violin", prefix: "neff_violin_", folder: "graph_diagnostics" },
+  { value: "graph_in_degree_hist", label: "graph_in_degree_hist", prefix: "in_degree_hist_", folder: "graph_diagnostics" },
+  { value: "graph_edge_consistency", label: "graph_edge_consistency", prefix: "edge_consistency_", folder: "graph_diagnostics" },
+  { value: "graph_metrics_history", label: "graph_metrics_history", prefix: "metrics_history_", folder: "graph_diagnostics" },
 ].sort((a, b) => a.value.localeCompare(b.value));
 
 function getImageOption(folderValue) {
@@ -494,15 +500,15 @@ function buildInfoCell(exp, index) {
   const container = document.createElement("div");
 
   const form = document.createElement("form");
-  form.className = "title-form mb-2";
+  form.className = "title-form inline-field-form inline-field-group mb-2";
   form.dataset.expId = exp.id;
 
   const group = document.createElement("div");
-  group.className = "input-group input-group-sm title-input-group";
+  group.className = "input-group input-group-sm title-input-group inline-field-group w-100";
 
   const input = document.createElement("input");
   input.type = "text";
-  input.className = "form-control form-control-sm exp-title-input";
+  input.className = "form-control form-control-sm exp-title-input inline-field";
   const titleValue = exp.title && exp.title !== "Untitled" ? exp.title : "";
   input.placeholder = titleValue || "Untitled";
   if (titleValue) {
@@ -518,11 +524,11 @@ function buildInfoCell(exp, index) {
   form.appendChild(status);
 
   const tagsForm = document.createElement("form");
-  tagsForm.className = "tags-form mb-2";
+  tagsForm.className = "tags-form inline-field-form inline-field-group mb-2";
   tagsForm.dataset.expId = exp.id;
 
   const tagsGroup = document.createElement("div");
-  tagsGroup.className = "input-group input-group-sm tags-input-group flex-nowrap w-auto";
+  tagsGroup.className = "input-group input-group-sm tags-input-group inline-field-group w-100";
 
   const tagsLabel = document.createElement("span");
   tagsLabel.className = "input-group-text";
@@ -530,13 +536,11 @@ function buildInfoCell(exp, index) {
 
   const tagsInput = document.createElement("input");
   tagsInput.type = "text";
-  tagsInput.className = "form-control form-control-sm exp-tags-input";
+  tagsInput.className = "form-control form-control-sm exp-tags-input inline-field";
   const tagsValue = exp.tags || "";
   if (tagsValue) {
     tagsInput.value = tagsValue;
   }
-  tagsInput.style.flex = "0 0 auto";
-  tagsInput.style.width = "auto";
 
   const tagsStatus = document.createElement("span");
   tagsStatus.className = "tags-status small text-muted";

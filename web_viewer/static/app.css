@@ -116,22 +116,32 @@
     opacity: 1;
 }
 
+.inline-field-form {
+    margin: 0;
+    width: 100%;
+}
+
+.inline-field-group,
+.inline-field {
+    width: 100%;
+}
+
+.inline-field {
+    padding: 0;
+    border: 0;
+    background-color: transparent;
+    box-shadow: none;
+    height: auto;
+    min-height: 0;
+    line-height: 1;
+}
+
 .title-form {
-    margin-bottom: 0.25rem;
+    margin: 0;
 }
 
-.title-form .exp-title-input {
-    background-color: transparent;
-    border-color: transparent;
-    box-shadow: none;
-    cursor: pointer;
-    padding-left: 0;
-}
-
+.title-form .exp-title-input,
 .tags-form .exp-tags-input {
-    background-color: transparent;
-    border-color: transparent;
-    box-shadow: none;
     cursor: pointer;
 }
 

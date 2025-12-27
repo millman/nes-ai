@@ -3,18 +3,13 @@
 {% block extra_head %}
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>
 <style>
-  .dashboard-title-cell {
-    min-width: 240px;
-    width: 100%;
-  }
-  .dashboard-model-diff-cell {
-    min-width: 180px;
-    width: 1%;
+  .dashboard-dataset-value {
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 0.8125rem;
   }
   .dashboard-model-diff-content {
-    max-height: 160px;
-    overflow: auto;
-    white-space: nowrap;
+    display: inline-flex;
+    flex-wrap: wrap;
     font-family: var(--bs-font-monospace, monospace);
     font-size: 0.8125rem;
   }
@@ -28,20 +23,6 @@
     text-decoration: underline dotted;
     text-underline-offset: 2px;
   }
-  .dashboard-dataset {
-    max-width: 260px;
-  }
-  .dashboard-dataset-value {
-    max-width: 260px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-family: var(--bs-font-monospace, monospace);
-    font-size: 0.8125rem;
-  }
-  .dashboard-folder {
-    white-space: nowrap;
-  }
   .dashboard-params,
   .dashboard-steps {
     font-size: 0.8125rem;
@@ -50,9 +31,114 @@
   .dashboard-params span {
     font-size: 0.8125rem;
   }
+  .cell-scroll {
+    display: contents;
+  }
   .tooltip-nowrap .tooltip-inner {
     white-space: nowrap;
     max-width: none;
+  }
+  .runs-grid {
+    display: grid;
+    grid-template-columns:
+      max-content
+      minmax(16ch, 1fr)
+      max-content
+      minmax(16ch, 2fr)
+      minmax(24ch, 4fr)
+      minmax(16ch, 2fr)
+      minmax(max-content, 2fr)
+      max-content
+      max-content
+      max-content
+      max-content
+      max-content;
+    column-gap: 0;
+    row-gap: 0;
+    overflow-x: auto;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    align-items: stretch;
+  }
+  .runs-row {
+    display: contents;
+  }
+  .cell {
+    padding: 2px 6px;
+    border-bottom: 1px solid #eee;
+    font-size: 14px;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+  .cell.row-hover {
+    background: #f8f9fa;
+  }
+  .header {
+    font-weight: 600;
+    border-bottom: 2px solid #ddd;
+    position: sticky;
+    top: 0;
+    background: #fff;
+    z-index: 1;
+  }
+  .nowrap {
+    white-space: nowrap;
+  }
+  .wrap {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .inline-field-group,
+  .inline-field {
+    width: 100%;
+  }
+  .modeldiff {
+    overflow: auto;
+  }
+  .title,
+  .dataset {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .tags {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .actions .btn {
+    padding: 0.1rem 0.2rem;
+    font-size: 0.75rem;
+    line-height: 1;
+    transition: none;
+  }
+  .actions {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .actions .action-icon {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+  }
+  .metadata .d-flex {
+    align-items: flex-end;
+  }
+  .inline-field {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    height: auto;
+    min-height: 0;
+    line-height: 1;
+  }
+  .inline-field-form {
+    margin: 0;
+    width: 100%;
+  }
+  .modeldiff .dashboard-model-diff-content {
+    display: block;
   }
 </style>
 {% endblock %}
@@ -100,83 +186,81 @@
         </div>
     </div>
 </div>
-    <div class="table-responsive">
-        <table class="table table-sm table-hover">
-            <thead class="table-light">
-            <tr>
-                <th>Select</th>
-                <th class="text-nowrap" style="width: 1%;">Tags</th>
-                <th class="text-nowrap" style="width: 1%;">Notes</th>
-                <th class="dashboard-title-cell">Title</th>
-                <th class="text-nowrap dashboard-model-diff-cell" style="width: 1%;">Model diff</th>
-                <th class="text-nowrap dashboard-dataset" style="width: 1%;">Dataset</th>
-                <th class="dashboard-folder">Folder</th>
-                <th class="text-nowrap" style="width: 1%;">Metadata</th>
-                <th class="text-nowrap" style="width: 1%;">Parameters</th>
-                <th class="text-nowrap" style="width: 1%;">Last Modified</th>
-                <th class="text-nowrap" style="width: 1%;">Steps</th>
-                <th class="text-nowrap" style="width: 1%;">Actions</th>
-            </tr>
-            </thead>
-            <tbody>
-            {% for exp in experiments %}
-            {% set title_text = exp.title if exp.title != "Untitled" else "" %}
-            {% set tags_text = exp.tags if exp.tags else "" %}
-            <tr class="align-middle" data-exp-id="{{ exp.id }}">
-                <td>
-                    <input class="form-check-input" type="checkbox" name="ids" value="{{ exp.id }}">
-                </td>
-                <td class="text-nowrap" style="width: 1%;">
-                    <form class="tags-form" data-exp-id="{{ exp.id }}">
-                        <div class="input-group input-group-sm tags-input-group flex-nowrap w-auto">
+    <div class="runs-grid" role="table" aria-label="Runs">
+        <div class="cell header" role="columnheader">Select</div>
+        <div class="cell header" role="columnheader">Tags</div>
+        <div class="cell header" role="columnheader">Notes</div>
+        <div class="cell header" role="columnheader">Title</div>
+        <div class="cell header" role="columnheader">Model diff</div>
+        <div class="cell header" role="columnheader">Dataset</div>
+        <div class="cell header" role="columnheader">Folder</div>
+        <div class="cell header" role="columnheader">Metadata</div>
+        <div class="cell header" role="columnheader">Parameters</div>
+        <div class="cell header" role="columnheader">Last Modified</div>
+        <div class="cell header" role="columnheader">Steps</div>
+        <div class="cell header" role="columnheader">Actions</div>
+        {% for exp in experiments %}
+        {% set title_text = exp.title if exp.title != "Untitled" else "" %}
+        {% set tags_text = exp.tags if exp.tags else "" %}
+        <div class="runs-row" role="row" data-exp-id="{{ exp.id }}">
+            <div class="cell select" role="cell" data-exp-id="{{ exp.id }}">
+                <input class="form-check-input" type="checkbox" name="ids" value="{{ exp.id }}">
+            </div>
+            <div class="cell tags nowrap" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">
+                    <form class="tags-form inline-field-form inline-field-group" data-exp-id="{{ exp.id }}">
+                        <div class="input-group input-group-sm tags-input-group inline-field-group w-100">
                             <input
                                 type="text"
-                                class="form-control form-control-sm exp-tags-input"
+                                class="form-control form-control-sm exp-tags-input inline-field"
                                 value="{{ tags_text }}"
+                                size="{{ tags_text|length if tags_text else 1 }}"
                                 aria-label="Experiment tags"
-                                style="flex: 0 0 auto; width: auto;"
                                 readonly
                             >
                         </div>
                         <span class="tags-status small text-muted" aria-live="polite"></span>
                     </form>
-                </td>
-                <td class="text-nowrap" style="width: 1%;">
-                    {% set notes_value = exp.notes_text if exp.notes_text else "" %}
-                    <button
-                        type="button"
-                        class="btn btn-link p-0 notes-icon-btn"
-                        data-exp-id="{{ exp.id }}"
-                        data-notes="{{ notes_value }}"
+                </div>
+            </div>
+            <div class="cell notes" role="cell" data-exp-id="{{ exp.id }}">
+                {% set notes_value = exp.notes_text if exp.notes_text else "" %}
+                <button
+                    type="button"
+                    class="btn btn-link p-0 notes-icon-btn"
+                    data-exp-id="{{ exp.id }}"
+                    data-notes="{{ notes_value }}"
+                >
+                    <span class="visually-hidden">Notes</span>
+                    <svg
+                        class="notes-icon {{ 'has-notes' if notes_value.strip() else 'no-notes' }}"
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="16"
+                        height="16"
+                        viewBox="0 0 16 16"
+                        fill="currentColor"
+                        aria-hidden="true"
                     >
-                        <span class="visually-hidden">Notes</span>
-                        <svg
-                            class="notes-icon {{ 'has-notes' if notes_value.strip() else 'no-notes' }}"
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="16"
-                            height="16"
-                            viewBox="0 0 16 16"
-                            fill="currentColor"
-                            aria-hidden="true"
-                        >
-                            {% if notes_value.strip() %}
-                            <!-- bi-file-text-fill -->
-                            <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1"/>
-                            {% else %}
-                            <!-- bi-file-text -->
-                            <path d="M5 4a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1zm-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1zm0 2a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1z"/>
-                            <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
-                            {% endif %}
-                        </svg>
-                    </button>
-                </td>
-                <td class="dashboard-title-cell">
-                    <form class="title-form" data-exp-id="{{ exp.id }}">
-                        <div class="input-group input-group-sm title-input-group">
+                        {% if notes_value.strip() %}
+                        <!-- bi-file-text-fill -->
+                        <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1"/>
+                        {% else %}
+                        <!-- bi-file-text -->
+                        <path d="M5 4a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1zm-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1zm0 2a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1z"/>
+                        <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
+                        {% endif %}
+                    </svg>
+                </button>
+            </div>
+            <div class="cell title nowrap" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">
+                    <form class="title-form inline-field-form inline-field-group" data-exp-id="{{ exp.id }}">
+                        <div class="input-group input-group-sm title-input-group inline-field-group w-100">
                             <input
                                 type="text"
-                                class="form-control form-control-sm exp-title-input"
+                                class="form-control form-control-sm exp-title-input inline-field"
                                 value="{{ title_text }}"
+                                size="{{ title_text|length if title_text else 1 }}"
                                 placeholder="Untitled"
                                 aria-label="Experiment title"
                                 readonly
@@ -184,27 +268,31 @@
                         </div>
                         <span class="title-status small text-muted" aria-live="polite"></span>
                     </form>
-                </td>
-                <td class="small dashboard-model-diff-cell">
-                    {% set diff_missing = exp.model_diff_text and exp.model_diff_text.startswith('model_diff.txt missing') %}
-                    {% if diff_missing %}
-                    <span class="text-muted fst-italic small">missing diff</span>
-                    {% elif exp.model_diff_items %}
-                    <div class="dashboard-model-diff-content small d-flex flex-wrap align-items-center gap-2">
-                        {% for display, full, shortened in exp.model_diff_items %}
-                        <span
-                            class="text-nowrap dashboard-model-diff-chip{% if shortened %} dashboard-model-diff-short{% endif %}"
-                            {% if shortened %}title="{{ full }}"{% endif %}
-                        >{{ display }}</span>
-                        {% endfor %}
-                    </div>
-                    {% elif exp.model_diff_text and exp.model_diff_text != '—' %}
-                    <span class="dashboard-model-diff-content small d-inline-block">{{ exp.model_diff_text }}</span>
-                    {% else %}
-                    <span class="text-muted">—</span>
-                    {% endif %}
-                </td>
-                <td class="small text-nowrap dashboard-dataset">
+                </div>
+            </div>
+            <div class="cell modeldiff wrap small" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">
+                {% set diff_missing = exp.model_diff_text and exp.model_diff_text.startswith('model_diff.txt missing') %}
+                {% if diff_missing %}
+                <span class="text-muted fst-italic small">missing diff</span>
+                {% elif exp.model_diff_items %}
+                <div class="dashboard-model-diff-content small d-flex align-items-center gap-2">
+                    {% for display, full, shortened in exp.model_diff_items %}
+                    <span
+                        class="text-nowrap dashboard-model-diff-chip{% if shortened %} dashboard-model-diff-short{% endif %}"
+                        {% if shortened %}title="{{ full }}"{% endif %}
+                    >{{ display }}</span>
+                    {% endfor %}
+                </div>
+                {% elif exp.model_diff_text and exp.model_diff_text != '—' %}
+                <span class="dashboard-model-diff-content small d-inline-block">{{ exp.model_diff_text }}</span>
+                {% else %}
+                <span class="text-muted">—</span>
+                {% endif %}
+                </div>
+            </div>
+            <div class="cell dataset nowrap small" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">
                     {% if exp.data_root %}
                     {% set is_prefixed = exp.data_root.startswith('data.') %}
                     {% set display_root = exp.data_root[5:] if is_prefixed else exp.data_root %}
@@ -217,9 +305,13 @@
                     {% else %}
                     <span class="text-muted">—</span>
                     {% endif %}
-                </td>
-                <td class="small dashboard-folder">{{ exp.name }}</td>
-                <td class="small text-nowrap" style="width: 1%;">
+                </div>
+            </div>
+            <div class="cell folder nowrap small" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">{{ exp.name }}</div>
+            </div>
+            <div class="cell metadata small" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">
                     <div class="d-flex align-items-center gap-2">
                         <button
                             type="button"
@@ -264,35 +356,95 @@
                             </svg>
                         </button>
                     </div>
-                </td>
-                <td class="small font-monospace format-params text-nowrap dashboard-params" style="width: 1%;" data-value="{{ exp.total_params if exp.total_params is not none else '' }}">—</td>
-                <td class="small text-nowrap" style="width: 1%;">{{ exp.last_modified | format_last_modified }}</td>
-                <td class="small text-nowrap dashboard-steps" style="width: 1%;">
-                    {% if exp.max_step is not none %}
-                    <span class="d-inline-block text-end font-monospace" style="min-width: 6ch;">{{ "{:,}".format(exp.max_step) }}</span>
-                    {% else %}
-                    <span class="text-muted">—</span>
-                    {% endif %}
-                </td>
-                <td class="small text-nowrap" style="width: 1%;">
+                </div>
+            </div>
+            <div class="cell params small font-monospace format-params" role="cell" data-exp-id="{{ exp.id }}" data-value="{{ exp.total_params if exp.total_params is not none else '' }}">
+                <div class="cell-scroll">—</div>
+            </div>
+            <div class="cell modified nowrap small" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">{{ exp.last_modified | format_last_modified }}</div>
+            </div>
+            <div class="cell steps small" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">
+                {% if exp.max_step is not none %}
+                <span class="d-inline-block text-end font-monospace" style="min-width: 6ch;">{{ "{:,}".format(exp.max_step) }}</span>
+                {% else %}
+                <span class="text-muted">—</span>
+                {% endif %}
+                </div>
+            </div>
+            <div class="cell actions nowrap small" role="cell" data-exp-id="{{ exp.id }}">
+                <div class="cell-scroll">
                     <div class="d-flex gap-2">
-                        <a href="{{ url_for('experiment_detail', exp_id=exp.id) }}" class="btn btn-outline-secondary btn-sm">Detail view</a>
+                            <a
+                                href="{{ url_for('experiment_detail', exp_id=exp.id) }}"
+                                class="btn btn-outline-primary btn-sm"
+                                aria-label="Detail"
+                                title="Detail"
+                            >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M8 4.5c-2.8 0-5.2 1.7-6.5 3.5C2.8 9.8 5.2 11.5 8 11.5s5.2-1.7 6.5-3.5C13.2 6.2 10.8 4.5 8 4.5m0 6c-1.4 0-2.5-1.1-2.5-2.5S6.6 5.5 8 5.5 10.5 6.6 10.5 8 9.4 10.5 8 10.5m0-4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3"/>
+                            </svg>
+                        </a>
                         {% if exp.self_distance_csv %}
-                        <a href="{{ url_for('self_distance', exp_id=exp.id) }}" class="btn btn-outline-primary btn-sm">Self-distance</a>
+                            <a
+                                href="{{ url_for('self_distance', exp_id=exp.id) }}"
+                                class="btn btn-outline-primary btn-sm"
+                                aria-label="Self-distance"
+                                title="Self-distance"
+                            >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M2 2h1v12H2zm11 0h1v12h-1zM5 10.5l3-5 3 5H5z"/>
+                            </svg>
+                        </a>
                         {% else %}
-                        <button class="btn btn-outline-secondary btn-sm" disabled title="self_distance.csv missing">Self-distance</button>
+                            <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance" title="self_distance.csv missing">
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M2 2h1v12H2zm11 0h1v12h-1zM5 10.5l3-5 3 5H5z"/>
+                            </svg>
+                        </button>
                         {% endif %}
                         {% if exp.diagnostics_steps %}
-                        <a href="{{ url_for('diagnostics', exp_id=exp.id) }}" class="btn btn-outline-primary btn-sm">Diagnostics</a>
+                            <a
+                                href="{{ url_for('diagnostics', exp_id=exp.id) }}"
+                                class="btn btn-outline-primary btn-sm"
+                                aria-label="Diagnostics"
+                                title="Diagnostics"
+                            >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M1 13h14v1H1zm2-2h2V6H3zm4 0h2V3H7zm4 0h2V8h-2z"/>
+                            </svg>
+                        </a>
                         {% else %}
-                        <button class="btn btn-outline-secondary btn-sm" disabled title="diagnostics outputs missing">Diagnostics</button>
+                            <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics" title="diagnostics outputs missing">
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M1 13h14v1H1zm2-2h2V6H3zm4 0h2V3H7zm4 0h2V8h-2z"/>
+                            </svg>
+                        </button>
+                        {% endif %}
+                        {% if exp.graph_diagnostics_steps %}
+                            <a
+                                href="{{ url_for('graph_diagnostics', exp_id=exp.id) }}"
+                                class="btn btn-outline-primary btn-sm"
+                                aria-label="Graph Diagnostics"
+                                title="Graph Diagnostics"
+                            >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M3 3h3v3H3zm7 0h3v3h-3zM3 10h3v3H3zm7 0h3v3h-3zM6 4h4v1H6zm-2 4h8v1H4zm2 3h4v1H6z"/>
+                            </svg>
+                        </a>
+                        {% else %}
+                            <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics" title="graph_diagnostics outputs missing">
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M3 3h3v3H3zm7 0h3v3h-3zM3 10h3v3H3zm7 0h3v3h-3zM6 4h4v1H6zm-2 4h8v1H4zm2 3h4v1H6z"/>
+                            </svg>
+                        </button>
                         {% endif %}
                     </div>
-                </td>
-            </tr>
-            {% endfor %}
-            </tbody>
-        </table>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
     </div>
 {% block extra_scripts %}
 {{ super() }}
@@ -317,6 +469,22 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   };
 
+  const initActionTooltips = () => {
+    const actionTargets = document.querySelectorAll(".actions .btn[title]:not([disabled])");
+    actionTargets.forEach((el) => {
+      if (!window.bootstrap || !el.title) return;
+      const existing = bootstrap.Tooltip.getInstance(el);
+      if (existing) existing.dispose();
+      new bootstrap.Tooltip(el, {
+        trigger: "hover focus",
+        placement: "top",
+        container: "body",
+        delay: { show: 0, hide: 0 },
+        animation: false,
+      });
+    });
+  };
+
   const STORAGE_KEY = "dashboard_selected_experiments";
   const experiments = [
     {% for exp in experiments %}
@@ -332,7 +500,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const previewContainer = document.getElementById("preview-container");
   const checkboxes = Array.from(document.querySelectorAll("input[name='ids']"));
   const checkboxById = new Map(checkboxes.map((checkbox) => [checkbox.value, checkbox]));
-  const tableRows = Array.from(document.querySelectorAll("tbody tr[data-exp-id]"));
+  const runsGrid = document.querySelector(".runs-grid");
+  const dataCells = Array.from(document.querySelectorAll(".runs-grid .cell[data-exp-id]"));
 
   let selectionOrder = [];
   let selectionSet = new Set();
@@ -498,6 +667,14 @@ document.addEventListener("DOMContentLoaded", () => {
     renderPreview();
   }
 
+  function setRowHover(expId, isActive) {
+    dataCells.forEach((cell) => {
+      if (cell.dataset.expId === expId) {
+        cell.classList.toggle("row-hover", isActive);
+      }
+    });
+  }
+
   // Restore selections from URL first, then localStorage as fallback
   const urlParams = new URLSearchParams(window.location.search);
   const urlIds = urlParams.getAll("ids");
@@ -538,27 +715,46 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  tableRows.forEach((row) => {
-    const expId = row.dataset.expId;
-    row.addEventListener("mouseenter", () => {
+  dataCells.forEach((cell) => {
+    const expId = cell.dataset.expId;
+    cell.addEventListener("mouseenter", () => {
       hoverExpId = expId;
       highlightedSelectedId = selectionSet.has(expId) ? expId : null;
+      setRowHover(expId, true);
       renderPreview();
     });
-    row.addEventListener("mouseleave", () => {
+    cell.addEventListener("mouseleave", (event) => {
+      const relatedCell = event.relatedTarget ? event.relatedTarget.closest(".cell[data-exp-id]") : null;
+      if (relatedCell && relatedCell.dataset.expId === expId) {
+        return;
+      }
+      setRowHover(expId, false);
       clearHover(expId);
     });
-    row.addEventListener("focusin", () => {
+  });
+
+  if (runsGrid) {
+    runsGrid.addEventListener("focusin", (event) => {
+      const cell = event.target.closest(".cell[data-exp-id]");
+      if (!cell) return;
+      const expId = cell.dataset.expId;
       hoverExpId = expId;
       highlightedSelectedId = selectionSet.has(expId) ? expId : null;
+      setRowHover(expId, true);
       renderPreview();
     });
-    row.addEventListener("focusout", (event) => {
-      if (!row.contains(event.relatedTarget)) {
-        clearHover(expId);
+    runsGrid.addEventListener("focusout", (event) => {
+      const cell = event.target.closest(".cell[data-exp-id]");
+      if (!cell) return;
+      const expId = cell.dataset.expId;
+      const relatedCell = event.relatedTarget ? event.relatedTarget.closest(".cell[data-exp-id]") : null;
+      if (relatedCell && relatedCell.dataset.expId === expId) {
+        return;
       }
+      setRowHover(expId, false);
+      clearHover(expId);
     });
-  });
+  }
 
   // Compare button handler
   const button = document.getElementById("dashboard-compare");
@@ -570,6 +766,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   initFastTooltips();
+  initActionTooltips();
 });
 </script>
 {% endblock %}

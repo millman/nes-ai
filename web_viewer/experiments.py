@@ -686,6 +686,12 @@ VIS_STEP_SPECS = [
     ("vis_action_alignment_detail", "vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_cycle_error", "vis_cycle_error", "cycle_error_*.png", "cycle_error_"),
     ("vis_adjacency", "vis_adjacency", "adjacency_*.png", "adjacency_"),
+    ("graph_rank1_cdf", "graph_diagnostics", "rank1_cdf_*.png", "rank1_cdf_"),
+    ("graph_rank2_cdf", "graph_diagnostics", "rank2_cdf_*.png", "rank2_cdf_"),
+    ("graph_neff_violin", "graph_diagnostics", "neff_violin_*.png", "neff_violin_"),
+    ("graph_in_degree_hist", "graph_diagnostics", "in_degree_hist_*.png", "in_degree_hist_"),
+    ("graph_edge_consistency", "graph_diagnostics", "edge_consistency_*.png", "edge_consistency_"),
+    ("graph_metrics_history", "graph_diagnostics", "metrics_history_*.png", "metrics_history_"),
 ]
 
 
