@@ -43,6 +43,27 @@ def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
     return torch.cat([actions, prev], dim=-1)
 
 
+def _rollout_hidden_states(
+    model: "JEPAWorldModel",
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+) -> torch.Tensor:
+    """Roll hidden states forward with the predictor to build h_t for each step."""
+    b, t, _ = embeddings.shape
+    h_states = embeddings.new_zeros((b, t, model.state_dim))
+    if t < 2:
+        return h_states
+    paired_actions = _pair_actions(actions)
+    h_t = embeddings.new_zeros((b, model.state_dim))
+    for step in range(t - 1):
+        z_t = embeddings[:, step]
+        act_t = paired_actions[:, step]
+        _, _, h_next = model.predictor(z_t, h_t, act_t)
+        h_states[:, step + 1] = h_next
+        h_t = h_next
+    return h_states
+
+
 def _mask_topk_with_diagonal(scores: torch.Tensor, topk: int) -> torch.Tensor:
     """Keep top-k scores per row while always retaining the diagonal entry."""
     if topk <= 0 or topk >= scores.shape[1]:
@@ -192,28 +213,32 @@ def adjacency_losses(
     if not use_adjacency or embeddings.shape[1] < 2:
         return loss_adj0, loss_adj1, loss_adj2, adj_entropy, adj_hit, adj2_hit
 
+    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
+    warmup = max(min(warmup_frames, embeddings.shape[1] - 1), 0)
     plan_embeddings = embeddings.detach() if cfg.detach_encoder else embeddings
-    h_plan = model.z_to_h(plan_embeddings)
+    h_plan_full = _rollout_hidden_states(model, plan_embeddings, actions)
+    plan_embeddings = plan_embeddings[:, warmup:]
+    h_plan = h_plan_full[:, warmup:]
     states = model.state_head(h_plan)
 
     loss_adj0 = zero
-    if weights.adj0 > 0:
+    if weights.adj0 > 0 and states.shape[1] > 1:
         sigma = max(cfg.sigma_aug, 0.0)
         noisy_images = gaussian_augment(images, sigma)
         noisy_outputs = model.encode_sequence(noisy_images)
         z_noisy = noisy_outputs["embeddings"]
         if cfg.detach_encoder:
             z_noisy = z_noisy.detach()
-        h_noisy = model.z_to_h(z_noisy)
-        states_noisy = model.state_head(h_noisy)
+        h_noisy_full = _rollout_hidden_states(model, z_noisy, actions)
+        states_noisy = model.state_head(h_noisy_full[:, warmup:])
         loss_adj0 = adjacency_loss_adj0(states, states_noisy, weights, cfg)
 
     state_dim = states.shape[-1]
     state_preds = states.new_zeros((states.shape[0], max(states.shape[1] - 1, 0), state_dim))
     z_pred1: Optional[torch.Tensor] = None
     h_pred1: Optional[torch.Tensor] = None
-    paired_actions = _pair_actions(actions)
-    if (weights.adj1 > 0 or weights.adj2 > 0) and actions.shape[1] >= 2:
+    paired_actions = _pair_actions(actions)[:, warmup:]
+    if (weights.adj1 > 0 or weights.adj2 > 0) and states.shape[1] >= 2:
         z_pred1, _, h_pred1 = model.predictor(
             plan_embeddings[:, :-1],
             h_plan[:, :-1],
@@ -231,7 +256,7 @@ def adjacency_losses(
 
     if weights.adj2 > 0:
         state_preds2: Optional[torch.Tensor] = None
-        if z_pred1 is not None and h_pred1 is not None and actions.shape[1] >= 3 and z_pred1.shape[1] >= 2:
+        if z_pred1 is not None and h_pred1 is not None and states.shape[1] >= 3 and z_pred1.shape[1] >= 2:
             _, _, h_pred2 = model.predictor(
                 z_pred1[:, :-1],
                 h_pred1[:, :-1],

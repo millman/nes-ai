@@ -181,28 +181,6 @@ class HiddenToZProjector(nn.Module):
         return z_hat.view(*original_shape, z_hat.shape[-1])
 
 
-class ZToHiddenProjector(nn.Module):
-    """Project encoded embedding to hidden state space."""
-
-    def __init__(self, z_dim: int, h_dim: int, hidden_dim: int) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(z_dim),
-            nn.Linear(z_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, h_dim),
-        )
-        self.z_dim = z_dim
-        self.h_dim = h_dim
-        self.hidden_dim = hidden_dim
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        original_shape = z.shape[:-1]
-        z_flat = z.reshape(-1, z.shape[-1])
-        h_hat = self.net(z_flat)
-        return h_hat.view(*original_shape, h_hat.shape[-1])
-
-
 class ActionDeltaHead(nn.Module):
     """Predict controller actions from latent deltas to avoid action-conditioning leakage."""
 
@@ -344,6 +322,7 @@ class ModelConfig:
     state_dim: int = 256
     state_embed_dim: Optional[int] = None
     state_embed_unit_norm: bool = True
+    state_warmup_frames: int = 8
 
     @property
     def embedding_dim(self) -> int:
@@ -381,12 +360,7 @@ class LossWeights:
         * What: predictor takes [z_t, h_t, action_t] -> z_hat_{t+1}; MSE vs detached z_{t+1}.
         * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
         * Purpose: advance the observable latent consistent with the next encoded frame.
-    - loss_h_pred (hidden transition):
-        * What: predictor also outputs h_hat_{t+1}; compared to z_to_h(z_{t+1}) (detached).
-        * Grads: into the predictor’s h head (and inputs if attached); does not push the detached target path.
-        * Purpose: align hidden state with what the next frame’s embedding implies in h-space.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
-    - loss_z2h: z->hidden projection; h_hat_from_z vs h targets (detached); shapes encoder/predictor inputs toward hidden targets without moving the targets.
     Other losses (recon, rollout, etc.) behave as before.
     """
     # Latent transition supervision: ẑ_{t+1} (from predictor) vs detached z_{t+1}; shapes encoder+predictor via z_t.
@@ -403,12 +377,8 @@ class LossWeights:
     # Action controller input reconstruction
     action_recon: float = 1.0
 
-    # Hidden transition supervision: ĥ_{t+1} (from predictor) vs z_to_h(z_{t+1}) detached; shapes hidden head/dynamics, not the encoder target path.
-    h_pred: float = 1.0
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
-    # Project z→hidden: ĥ_from_z vs h (detached); shapes encoder/predictor inputs toward hidden targets without moving the targets.
-    z2h: float = 1.0
 
     rollout: float = 0.0
 
@@ -521,7 +491,7 @@ class GraphDiagnosticsConfig:
     block_size: int = 256
     normalize_latents: bool = True
     use_predictor_scores: bool = True
-    use_ema_targets: bool = True
+    use_ema_targets: bool = False
     mask_self_edges: bool = True
     include_edge_consistency: bool = True
     edge_consistency_samples: int = 1024
@@ -635,11 +605,6 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
         )
-        self.z_to_h = ZToHiddenProjector(
-            self.embedding_dim,
-            cfg.state_dim,
-            cfg.hidden_dim,
-        )
         self.action_delta_head = ActionDeltaHead(
             self.embedding_dim,
             cfg.hidden_dim,
@@ -726,37 +691,6 @@ def jepa_loss(
     return JEPA_LOSS(preds, target), action_logits, delta_pred, preds, h_preds, h_states
 
 
-def _rollout_hidden_states(
-    model: JEPAWorldModel, z_seq: torch.Tensor, actions: torch.Tensor
-) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
-    """
-    Roll forward hidden states with the state updater.
-
-    Returns:
-        h_states: [h0, h1, ..., h_{T-1}] (length = T) where h0 is zeros.
-        h_preds: predicted h_{t+1} for t in [0, T-2] (length = T-1).
-        h_targets: projected targets from z_{t+1} (detached) aligned with h_preds (length = T-1).
-    """
-    b, t, _ = z_seq.shape
-    h0 = z_seq.new_zeros(b, model.state_dim)
-    h_states: List[torch.Tensor] = [h0]
-    h_preds: List[torch.Tensor] = []
-    h_targets: List[torch.Tensor] = []
-    if t < 2:
-        return h_states, h_preds, h_targets
-    for step in range(t - 1):
-        h_t = h_states[-1]
-        z_t = z_seq[:, step]
-        act_t = actions[:, step]
-        h_next = model.state_updater(h_t, z_t, act_t)
-        h_preds.append(h_next)
-        h_states.append(h_next)
-        z_next = z_seq[:, step + 1]
-        h_target = model.z_to_h(z_next).detach()
-        h_targets.append(h_target)
-    return h_states, h_preds, h_targets
-
-
 def delta_prediction_loss(
     delta_pred: torch.Tensor, embeddings: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -775,7 +709,9 @@ def rollout_loss(
     model: JEPAWorldModel,
     embeddings: torch.Tensor,
     actions: torch.Tensor,
+    h_states: torch.Tensor,
     rollout_horizon: int,
+    warmup_frames: int,
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
         return embeddings.new_tensor(0.0)
@@ -784,18 +720,20 @@ def rollout_loss(
         return embeddings.new_tensor(0.0)
     total = embeddings.new_tensor(0.0)
     steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
     paired_actions = _pair_actions(actions)
-    for start in range(t - 1):
+    for start in range(warmup, t - 1):
         current = embeddings[:, start]
         max_h = min(rollout_horizon, t - start - 1)
+        h_current = h_states[:, start]
         for offset in range(max_h):
             act = paired_actions[:, start + offset]
-            h_current = model.z_to_h(current)
-            pred, _, _ = model.predictor(current, h_current, act)
+            pred, _, h_next = model.predictor(current, h_current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
             current = pred
+            h_current = h_next
     return total / steps if steps > 0 else embeddings.new_tensor(0.0)
 
 
@@ -1063,8 +1001,16 @@ def _compute_losses_and_metrics(
             action_accuracy_bit = images.new_tensor(0.0)
             action_accuracy_all = images.new_tensor(0.0)
 
+    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
     loss_rollout = (
-        rollout_loss(model, outputs["embeddings"], actions, cfg.rollout.horizon)
+        rollout_loss(
+            model,
+            outputs["embeddings"],
+            actions,
+            h_states,
+            cfg.rollout.horizon,
+            warmup_frames,
+        )
         if weights.rollout > 0
         else images.new_tensor(0.0)
     )
@@ -1086,24 +1032,16 @@ def _compute_losses_and_metrics(
         loss_ema_consistency = ema_latent_consistency_loss(outputs["embeddings"], ema_outputs["embeddings"])
 
     # Hidden-state dynamics and cross-projection losses
-    loss_h_pred = images.new_tensor(0.0)
     loss_h2z = images.new_tensor(0.0)
-    loss_z2h = images.new_tensor(0.0)
-    need_hidden = (weights.h_pred > 0) or (weights.h2z > 0) or (weights.z2h > 0)
+    need_hidden = weights.h2z > 0
     if need_hidden:
         seq_len = outputs["embeddings"].shape[1]
-        if weights.h_pred > 0 and h_preds.numel() > 0:
-            h_target_stack = model.z_to_h(outputs["embeddings"][:, 1:]).detach()
-            loss_h_pred = F.mse_loss(h_preds, h_target_stack)
         if weights.h2z > 0 and h_states.numel() > 0 and seq_len > 0:
-            # Align h_states[:, 1:] with z[:, 1:] (h1 comes from z0/a0)
-            h_stack = h_states[:, 1:]
-            z_hat_from_h = model.h_to_z(h_stack)
-            loss_h2z = F.mse_loss(z_hat_from_h, outputs["embeddings"][:, 1:].detach())
-        if weights.z2h > 0 and h_states.numel() > 0 and seq_len > 0:
-            h_target_stack = h_states[:, 1:].detach()
-            h_hat_from_z = model.z_to_h(outputs["embeddings"][:, 1:])
-            loss_z2h = F.mse_loss(h_hat_from_z, h_target_stack)
+            start = max(min(warmup_frames, seq_len - 1), 0)
+            if seq_len - start > 0:
+                h_stack = h_states[:, start:]
+                z_hat_from_h = model.h_to_z(h_stack)
+                loss_h2z = F.mse_loss(z_hat_from_h, outputs["embeddings"][:, start:].detach())
 
     if weights.recon > 0 and recon is not None:
         loss_recon = RECON_LOSS(recon, images)
@@ -1158,9 +1096,7 @@ def _compute_losses_and_metrics(
         + weights.consistency * _scaled("loss_consistency", loss_consistency)
         + weights.ema_consistency * _scaled("loss_ema_consistency", loss_ema_consistency)
         + weights.action_recon * _scaled("loss_action", loss_action)
-        + weights.h_pred * _scaled("loss_h_pred", loss_h_pred)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
-        + weights.z2h * _scaled("loss_z2h", loss_z2h)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
@@ -1209,9 +1145,7 @@ def _compute_losses_and_metrics(
         "loss_recon_multi_box": loss_recon_multi_box.item(),
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_action": loss_action.item(),
-        "loss_h_pred": loss_h_pred.item(),
         "loss_h2z": loss_h2z.item(),
-        "loss_z2h": loss_z2h.item(),
         "loss_delta": loss_delta.item(),
         "delta_pred_norm": delta_pred_norm.item(),
         "delta_target_norm": delta_target_norm.item(),
@@ -1432,12 +1366,8 @@ def log_metrics(
         filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
-    if weights.h_pred <= 0:
-        filtered.pop("loss_h_pred", None)
     if weights.h2z <= 0:
         filtered.pop("loss_h2z", None)
-    if weights.z2h <= 0:
-        filtered.pop("loss_z2h", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1473,9 +1403,7 @@ LOSS_COLUMNS = [
     "loss_recon_multi_box",
     "loss_recon_patch",
     "loss_action",
-    "loss_h_pred",
     "loss_h2z",
-    "loss_z2h",
     "loss_delta",
     "delta_pred_norm",
     "delta_target_norm",
@@ -1513,9 +1441,7 @@ class LossHistory:
     recon_multi_box: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
-    h_pred: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
-    z2h: List[float] = field(default_factory=list)
     delta: List[float] = field(default_factory=list)
     delta_pred_norm: List[float] = field(default_factory=list)
     delta_target_norm: List[float] = field(default_factory=list)
@@ -1550,9 +1476,7 @@ class LossHistory:
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.action.append(metrics["loss_action"])
-        self.h_pred.append(metrics["loss_h_pred"])
         self.h2z.append(metrics["loss_h2z"])
-        self.z2h.append(metrics["loss_z2h"])
         self.delta.append(metrics["loss_delta"])
         self.delta_pred_norm.append(metrics["delta_pred_norm"])
         self.delta_target_norm.append(metrics["delta_target_norm"])
@@ -1598,9 +1522,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.recon_multi_box,
             history.recon_patch,
             history.action,
-            history.h_pred,
             history.h2z,
-            history.z2h,
             history.delta,
             history.delta_pred_norm,
             history.delta_target_norm,
@@ -3704,6 +3626,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     )
                 if self_distance_inputs is not None:
                     hist_frames = rolling_batch_cpu[0] if rolling_batch_cpu is not None else None
+                    hist_actions = rolling_batch_cpu[1] if rolling_batch_cpu is not None else None
                     write_state_embedding_outputs(
                         model,
                         self_distance_inputs,
@@ -3712,6 +3635,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         vis_state_embedding_dir,
                         global_step,
                         hist_frames_cpu=hist_frames,
+                        hist_actions_cpu=hist_actions,
                     )
                 if (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0):
                     sigma_adj = max(cfg.adjacency.sigma_aug, 0.0)

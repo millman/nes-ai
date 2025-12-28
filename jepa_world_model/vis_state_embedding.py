@@ -13,6 +13,38 @@ import torch
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
 
 
+def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
+    """Concatenate current and prior actions for predictor conditioning."""
+    if actions.ndim != 3:
+        raise ValueError("Actions must have shape [B, T, action_dim].")
+    if actions.shape[1] == 0:
+        return actions.new_zeros((actions.shape[0], 0, actions.shape[2] * 2))
+    zeros = actions.new_zeros((actions.shape[0], 1, actions.shape[2]))
+    prev = torch.cat([zeros, actions[:, :-1]], dim=1)
+    return torch.cat([actions, prev], dim=-1)
+
+
+def _rollout_hidden_states(
+    model,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+) -> torch.Tensor:
+    """Roll hidden states forward with the predictor to build h_t for each step."""
+    b, t, _ = embeddings.shape
+    h_states = embeddings.new_zeros((b, t, model.state_dim))
+    if t < 2:
+        return h_states
+    paired_actions = _pair_actions(actions)
+    h_t = embeddings.new_zeros((b, model.state_dim))
+    for step in range(t - 1):
+        z_t = embeddings[:, step]
+        act_t = paired_actions[:, step]
+        _, _, h_next = model.predictor(z_t, h_t, act_t)
+        h_states[:, step + 1] = h_next
+        h_t = h_next
+    return h_states
+
+
 def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     denom = torch.norm(a, dim=-1) * torch.norm(b, dim=-1)
     denom = torch.clamp(denom, min=1e-8)
@@ -22,7 +54,12 @@ def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def write_state_embedding_csv(
     csv_path: Path,
-    traj_inputs,
+    trajectory_label: str,
+    frame_paths: List[Path],
+    frame_labels: List[str],
+    actions: np.ndarray,
+    action_labels: List[str],
+    action_dim: int,
     steps: List[int],
     dist_first_np,
     dist_prior_np,
@@ -45,32 +82,34 @@ def write_state_embedding_csv(
         "action_id",
         "action_label",
     ]
-    first_frame = traj_inputs.frame_paths[0].as_posix()
+    if not frame_paths:
+        return
+    first_frame = frame_paths[0].as_posix()
     with csv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for idx, step in enumerate(steps):
             prior_idx = max(0, idx - 1)
-            action_id = int(compress_actions_to_ids(traj_inputs.actions[idx : idx + 1])[0])
+            action_id = int(compress_actions_to_ids(actions[idx : idx + 1])[0])
             action_label = (
-                traj_inputs.action_labels[idx]
-                if idx < len(traj_inputs.action_labels)
-                else decode_action_id(action_id, traj_inputs.action_dim)
+                action_labels[idx]
+                if idx < len(action_labels)
+                else decode_action_id(action_id, action_dim)
             )
             writer.writerow(
                 {
-                    "trajectory": traj_inputs.trajectory_label,
-                    "trajectory_label": traj_inputs.trajectory_label,
+                    "trajectory": trajectory_label,
+                    "trajectory_label": trajectory_label,
                     "timestep": step,
                     "distance_to_first": float(dist_first_np[idx]),
                     "distance_to_prior": float(dist_prior_np[idx]),
                     "cosine_distance_to_first": float(dist_first_cos_np[idx]),
                     "cosine_distance_to_prior": float(dist_prior_cos_np[idx]),
-                    "frame_path": traj_inputs.frame_paths[idx].as_posix(),
+                    "frame_path": frame_paths[idx].as_posix(),
                     "first_frame_path": first_frame,
-                    "prior_frame_path": traj_inputs.frame_paths[prior_idx].as_posix(),
-                    "frame_label": traj_inputs.frame_labels[idx]
-                    if idx < len(traj_inputs.frame_labels)
+                    "prior_frame_path": frame_paths[prior_idx].as_posix(),
+                    "frame_label": frame_labels[idx]
+                    if idx < len(frame_labels)
                     else f"t={step}",
                     "action_id": action_id,
                     "action_label": action_label,
@@ -163,14 +202,22 @@ def write_state_embedding_outputs(
     plot_dir: Path,
     global_step: int,
     hist_frames_cpu: Optional[torch.Tensor] = None,
+    hist_actions_cpu: Optional[torch.Tensor] = None,
 ) -> None:
     if traj_inputs.frames.shape[1] < 2:
         return
     frames = traj_inputs.frames.to(device)
     with torch.no_grad():
-        embeddings = model.encode_sequence(frames)["embeddings"][0]
-        h = model.z_to_h(embeddings)
-        s = model.state_head(h)
+        embeddings = model.encode_sequence(frames)["embeddings"]
+        actions = torch.from_numpy(traj_inputs.actions).to(device).unsqueeze(0)
+        h_states = _rollout_hidden_states(model, embeddings, actions)
+        s = model.state_head(h_states)[0]
+
+    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
+    warmup = max(min(warmup_frames, s.shape[0] - 1), 0)
+    s = s[warmup:]
+    if s.shape[0] < 1:
+        return
 
     dist_to_first = torch.norm(s - s[0:1], dim=-1)
     dist_to_first_cos = _cosine_distance(s, s[0:1])
@@ -190,15 +237,24 @@ def write_state_embedding_outputs(
         ],
         dim=0,
     )
-    steps = list(range(dist_to_first.shape[0]))
+    steps = list(range(warmup, warmup + dist_to_first.shape[0]))
     dist_first_np = dist_to_first.detach().cpu().numpy()
     dist_prior_np = dist_to_prior.detach().cpu().numpy()
     dist_first_cos_np = dist_to_first_cos.detach().cpu().numpy()
     dist_prior_cos_np = dist_to_prior_cos.detach().cpu().numpy()
     csv_path = csv_dir / f"state_embedding_{global_step:06d}.csv"
+    frame_paths = traj_inputs.frame_paths[warmup:]
+    frame_labels = traj_inputs.frame_labels[warmup:]
+    actions_np = traj_inputs.actions[warmup:]
+    action_labels = traj_inputs.action_labels[warmup:]
     write_state_embedding_csv(
         csv_path,
-        traj_inputs,
+        traj_inputs.trajectory_label,
+        frame_paths,
+        frame_labels,
+        actions_np,
+        action_labels,
+        traj_inputs.action_dim,
         steps,
         dist_first_np,
         dist_prior_np,
@@ -219,11 +275,18 @@ def write_state_embedding_outputs(
     hist_frames = hist_frames_cpu if hist_frames_cpu is not None else traj_inputs.frames
     if hist_frames.ndim != 5 or hist_frames.shape[1] < 1:
         return
+    if hist_actions_cpu is None:
+        return
     hist_frames = hist_frames.to(device)
     with torch.no_grad():
         hist_embeddings = model.encode_sequence(hist_frames)["embeddings"]
-        hist_h = model.z_to_h(hist_embeddings)
-        hist_s = model.state_head(hist_h)
+        hist_actions = hist_actions_cpu.to(device)
+        hist_h_states = _rollout_hidden_states(model, hist_embeddings, hist_actions)
+        hist_s = model.state_head(hist_h_states)
+    hist_warmup = max(min(warmup_frames, hist_s.shape[1] - 1), 0)
+    hist_s = hist_s[:, hist_warmup:]
+    if hist_s.shape[1] < 1:
+        return
     hist_flat = hist_s.reshape(-1, hist_s.shape[-1])
     hist_norm = torch.norm(hist_flat, dim=-1).detach().cpu().numpy()
     write_state_embedding_histogram(plot_dir, hist_norm, global_step)
