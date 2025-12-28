@@ -1147,21 +1147,27 @@ def adjacency_loss_adj1(
 def adjacency_loss_adj2(
     model: JEPAWorldModel,
     z_hat_next: torch.Tensor,
-    z_noisy: torch.Tensor,
+    h_states: torch.Tensor,
+    target_embeddings: torch.Tensor,
     actions: torch.Tensor,
     weights: LossWeights,
     cfg: TrainConfig,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     zero = z_hat_next.new_tensor(0.0)
-    if weights.adj2 <= 0 or actions.shape[1] < 3 or z_hat_next.shape[1] < 2 or z_noisy.shape[1] < 3:
+    if (
+        weights.adj2 <= 0
+        or actions.shape[1] < 3
+        or z_hat_next.shape[1] < 2
+        or target_embeddings.shape[1] < 3
+        or h_states.shape[1] < 2
+    ):
         return zero, zero
     actions_two = actions[:, 1:-1]
     if actions_two.numel() == 0:
         return zero, zero
-    batch_size, time_len, latent_dim = z_hat_next.shape
-    hidden_state = z_hat_next.new_zeros(batch_size, time_len, model.state_dim)
-    second_queries, _, _ = model.predictor(z_hat_next[:, :-1], hidden_state[:, :-1], actions_two)
-    second_targets = z_noisy[:, 2:]
+    second_hidden = h_states[:, 1:-1]
+    second_queries, _, _ = model.predictor(z_hat_next[:, :-1], second_hidden, actions_two)
+    second_targets = target_embeddings[:, 2:]
     q2_flat = second_queries.reshape(-1, second_queries.shape[-1])
     cand2_flat = second_targets.reshape(-1, second_targets.shape[-1]).detach()
     transport2, _ = _transport_from_scores(
@@ -1188,6 +1194,7 @@ def adjacency_losses(
     actions: torch.Tensor,
     images: torch.Tensor,
     z_hat_next: torch.Tensor,
+    h_states: torch.Tensor,
     weights: LossWeights,
     cfg: TrainConfig,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1220,7 +1227,8 @@ def adjacency_losses(
     loss_adj2, adj2_hit = adjacency_loss_adj2(
         model,
         z_hat_next,
-        z_noisy,
+        h_states,
+        embeddings,
         actions,
         weights,
         cfg,
@@ -1425,6 +1433,7 @@ def _compute_losses_and_metrics(
         actions=actions,
         images=images,
         z_hat_next=z_hat_next,
+        h_states=h_states,
         weights=weights,
         cfg=cfg,
     )
