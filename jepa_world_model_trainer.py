@@ -37,10 +37,10 @@ else:
     _soap_import_error = None
 
 from recon.data import list_trajectories, load_frame_as_tensor, short_traj_state_label
-from nes_controller import CONTROLLER_STATE_DESC
 from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
 from jepa_world_model.loss import FocalL1Loss, HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
+from jepa_world_model.loss_adjacency import AdjacencyConfig, adjacency_losses, gaussian_augment
 from jepa_world_model.metadata import write_run_metadata, write_git_metadata
 from jepa_world_model.vis import (
     describe_action_tensor,
@@ -51,6 +51,10 @@ from jepa_world_model.vis import (
     save_temporal_pair_visualization,
     tensor_to_uint8_image,
 )
+from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
+from jepa_world_model.vis_action_alignment import save_action_alignment_detail_plot, save_action_alignment_plot
+from jepa_world_model.vis_graph_diagnostics import save_graph_diagnostics
+from jepa_world_model.vis_self_distance import write_self_distance_outputs
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
 
 
@@ -65,25 +69,60 @@ LegacyEncoder = ConvEncoder
 LegacyVisualizationDecoder = ConvVisualizationDecoder
 
 
+class StateEmbeddingProjector(nn.Module):
+    """Project hidden state to a planning/state embedding."""
+
+    def __init__(self, h_dim: int, s_dim: int, hidden_dim: int, unit_norm: bool) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(h_dim),
+            nn.Linear(h_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, s_dim),
+        )
+        self.h_dim = h_dim
+        self.s_dim = s_dim
+        self.hidden_dim = hidden_dim
+        self.unit_norm = unit_norm
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        original_shape = h.shape[:-1]
+        h_flat = h.reshape(-1, h.shape[-1])
+        s = self.net(h_flat)
+        if self.unit_norm:
+            s = F.normalize(s, dim=-1)
+        return s.view(*original_shape, s.shape[-1])
+
 
 class PredictorNetwork(nn.Module):
-    def __init__(self, embedding_dim: int, hidden_dim: int, action_dim: int, film_layers: int, state_dim: int) -> None:
+    def __init__(
+        self,
+        embedding_dim: int,
+        hidden_dim: int,
+        action_dim: int,
+        film_layers: int,
+        state_dim: int,
+        state_embed_dim: int,
+        state_embed_unit_norm: bool,
+    ) -> None:
         super().__init__()
         self.in_proj = nn.Linear(embedding_dim + action_dim + state_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
+        self.state_head = StateEmbeddingProjector(state_dim, state_embed_dim, hidden_dim, state_embed_unit_norm)
         self.activation = nn.SiLU(inplace=True)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.state_dim = state_dim
+        self.state_embed_dim = state_embed_dim
         self.delta_scale = 1.0
         self.use_delta_squash = False
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if not (embeddings.shape[:-1] == actions.shape[:-1] == hidden_state.shape[:-1]):
             raise ValueError("Embeddings, hidden state, and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -99,10 +138,13 @@ class PredictorNetwork(nn.Module):
         else:
             delta = raw_delta * self.delta_scale
         pred = emb_flat + delta
+        h_next = h_next.view(*original_shape, h_next.shape[-1])
+        s_pred = self.state_head(h_next)
         return (
             pred.view(*original_shape, pred.shape[-1]),
             delta.view(*original_shape, delta.shape[-1]),
-            h_next.view(*original_shape, h_next.shape[-1]),
+            h_next,
+            s_pred,
         )
 
     def shape_info(self) -> Dict[str, Any]:
@@ -112,6 +154,7 @@ class PredictorNetwork(nn.Module):
             "hidden_dim": self.hidden_dim,
             "action_dim": self.action_dim,
             "state_dim": self.state_dim,
+            "state_embed_dim": self.state_embed_dim,
             "conditioning": "concat(z,h,action)",
         }
 
@@ -278,9 +321,10 @@ class ModelConfig:
             └─ Encoder(encoder_schedule → pool → z_dim = encoder_schedule[-1])
             ▼
         z_t ────────────────────────────────┐
-                        ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, h_{t+1}
+                        ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}, ŝ_{t+1}
         h_t (state_dim) ─────────────────────┘
             │
+            ├→ StateHead(h_t) → s_t (planning embedding)
             └→ Decoder(decoder_schedule → image reconstruction from z)
 
     Notes:
@@ -298,6 +342,8 @@ class ModelConfig:
     action_dim: int = 8
     predictor_film_layers: int = 2
     state_dim: int = 256
+    state_embed_dim: Optional[int] = None
+    state_embed_unit_norm: bool = True
 
     @property
     def embedding_dim(self) -> int:
@@ -323,6 +369,8 @@ class ModelConfig:
                 raise ValueError(
                     f"image_size={self.image_size} must be divisible by 2**len(decoder_schedule)={decoder_stride}."
                 )
+        if self.state_embed_dim is None:
+            self.state_embed_dim = self.state_dim
 
 
 @dataclass
@@ -367,11 +415,11 @@ class LossWeights:
     consistency: float = 0.0
     ema_consistency: float = 0.0
 
-    # Adjacency: adj0 enforces invariance between clean/noisy z at same timestep.
+    # Adjacency: adj0 enforces invariance between clean/noisy state embeddings (s) at same timestep.
     adj0: float = 0.0
-    # Adjacency: adj1 aligns predicted next z with noisy next targets via transport.
+    # Adjacency: adj1 aligns predicted next s with next targets via transport.
     adj1: float = 0.0
-    # Adjacency: adj2 enforces two-hop composition using predicted z_{t+1} and actions_{t+1} toward z_{t+2}.
+    # Adjacency: adj2 enforces two-hop composition in s-space toward s_{t+2}.
     adj2: float = 0.0
 
 @dataclass
@@ -447,16 +495,6 @@ class DebugVisualization:
 class NormalizeLossesConfig:
     decay: float = 0.99
     epsilon: float = 1e-4
-
-
-@dataclass
-class AdjacencyConfig:
-    temp_score: float = 0.1
-    sinkhorn_iters: int = 7
-    sinkhorn_eps: float = 1e-3
-    mask_self_edges: bool = False
-    topk_candidates: int = 0
-    sigma_aug: float = 0.05
 
 
 @dataclass
@@ -581,9 +619,11 @@ class JEPAWorldModel(nn.Module):
         self.predictor = PredictorNetwork(
             self.embedding_dim,
             cfg.hidden_dim,
-            cfg.action_dim,
+            cfg.action_dim * 2,
             cfg.predictor_film_layers,
             cfg.state_dim,
+            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            cfg.state_embed_unit_norm,
         )
         self.state_dim = cfg.state_dim
         self.h_to_z = HiddenToZProjector(
@@ -619,6 +659,17 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
+def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
+    """Concatenate current and prior actions for predictor conditioning."""
+    if actions.ndim != 3:
+        raise ValueError("Actions must have shape [B, T, action_dim].")
+    if actions.shape[1] == 0:
+        return actions.new_zeros((actions.shape[0], 0, actions.shape[2] * 2))
+    zeros = actions.new_zeros((actions.shape[0], 1, actions.shape[2]))
+    prev = torch.cat([zeros, actions[:, :-1]], dim=1)
+    return torch.cat([actions, prev], dim=-1)
+
+
 def _predictor_rollout(
     model: JEPAWorldModel, embeddings: torch.Tensor, actions: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -636,11 +687,12 @@ def _predictor_rollout(
     deltas = []
     h_preds = []
     h_states = [embeddings.new_zeros(b, model.state_dim, device=embeddings.device)]
+    paired_actions = _pair_actions(actions)
     for step in range(t - 1):
         z_t = embeddings[:, step]
         h_t = h_states[-1]
-        act_t = actions[:, step]
-        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
+        act_t = paired_actions[:, step]
+        pred, delta, h_next, _ = model.predictor(z_t, h_t, act_t)
         preds.append(pred)
         deltas.append(delta)
         h_preds.append(h_next)
@@ -728,12 +780,14 @@ def rollout_loss(
         return embeddings.new_tensor(0.0)
     total = embeddings.new_tensor(0.0)
     steps = 0
+    paired_actions = _pair_actions(actions)
     for start in range(t - 1):
         current = embeddings[:, start]
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
-            act = actions[:, start + offset]
-            pred, _ = model.predictor(current, act)
+            act = paired_actions[:, start + offset]
+            h_current = model.z_to_h(current)
+            pred, _, _, _ = model.predictor(current, h_current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
@@ -926,14 +980,6 @@ def multi_scale_hardness_loss_box(
     return total
 
 
-def gaussian_augment(x: torch.Tensor, sigma: float, clip_min: float = 0.0, clip_max: float = 1.0) -> torch.Tensor:
-    """Additive Gaussian noise augmentation clamped to a valid pixel range."""
-    if sigma <= 0:
-        return x
-    noise = torch.randn_like(x) * sigma
-    return (x + noise).clamp(clip_min, clip_max)
-
-
 def patch_recon_loss(
     recon: torch.Tensor, target: torch.Tensor, patch_sizes: Sequence[int]
 ) -> torch.Tensor:
@@ -1041,202 +1087,6 @@ def update_ema_model(source: JEPAWorldModel, target: JEPAWorldModel, momentum: f
     with torch.no_grad():
         for tgt_param, src_param in zip(target.parameters(), source.parameters()):
             tgt_param.data.mul_(momentum).add_(src_param.data, alpha=1.0 - momentum)
-
-
-def _mask_topk_with_diagonal(scores: torch.Tensor, topk: int) -> torch.Tensor:
-    """Keep top-k scores per row while always retaining the diagonal entry."""
-    if topk <= 0 or topk >= scores.shape[1]:
-        return scores
-    keep = torch.zeros_like(scores, dtype=torch.bool)
-    vals, idx = torch.topk(scores, k=topk, dim=1)
-    keep.scatter_(1, idx, True)
-    diag = torch.arange(scores.shape[0], device=scores.device)
-    keep[diag, diag] = True
-    masked = scores.masked_fill(~keep, float("-inf"))
-    return masked
-
-
-def _sinkhorn_transport(kernel: torch.Tensor, iters: int, eps: float) -> torch.Tensor:
-    """Compute doubly-stochastic matrix via Sinkhorn-Knopp in value domain."""
-    if kernel.ndim != 2:
-        raise ValueError("Sinkhorn kernel must be 2D.")
-    u = torch.ones(kernel.shape[0], device=kernel.device, dtype=kernel.dtype)
-    v = torch.ones(kernel.shape[1], device=kernel.device, dtype=kernel.dtype)
-    for _ in range(max(iters, 0)):
-        Kv = torch.matmul(kernel, v)
-        u = 1.0 / (Kv + eps)
-        KTu = torch.matmul(kernel.t(), u)
-        v = 1.0 / (KTu + eps)
-    return u[:, None] * kernel * v[None, :]
-
-
-def _transport_from_scores(
-    queries: torch.Tensor,
-    candidates: torch.Tensor,
-    temp_score: float,
-    mask_self_edges: bool,
-    topk_candidates: int,
-    sinkhorn_iters: int,
-    sinkhorn_eps: float,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if queries.shape[1] != candidates.shape[1]:
-        raise ValueError("Query and candidate dimensions must match for adjacency scoring.")
-    if temp_score <= 0:
-        raise ValueError("temp_score must be positive for adjacency scoring.")
-    # Avoid torch.cdist to stay compatible with MPS backward (cdist backward is unsupported there).
-    q_norm = (queries * queries).sum(dim=1, keepdim=True)
-    c_norm = (candidates * candidates).sum(dim=1, keepdim=True)
-    # dist^2 = ||q||^2 + ||c||^2 - 2 q·c
-    dist_sq = q_norm + c_norm.t() - 2.0 * queries @ candidates.t()
-    dist_sq = dist_sq.clamp_min(0.0)
-    scores = -dist_sq / temp_score
-    if mask_self_edges:
-        scores = scores.clone()
-        scores.fill_diagonal_(float("-inf"))
-    scores = _mask_topk_with_diagonal(scores, topk_candidates)
-    row_max = torch.max(scores, dim=1, keepdim=True).values
-    scores = scores - row_max
-    kernel = torch.exp(scores)
-    kernel = torch.where(torch.isfinite(kernel), kernel, torch.zeros_like(kernel))
-    transport = _sinkhorn_transport(kernel, sinkhorn_iters, sinkhorn_eps)
-    return transport, scores
-
-
-def adjacency_loss_adj0(
-    embeddings: torch.Tensor,
-    z_noisy: torch.Tensor,
-    weights: LossWeights,
-    cfg: TrainConfig,
-) -> torch.Tensor:
-    if weights.adj0 <= 0 or embeddings.shape[1] < 2:
-        return embeddings.new_tensor(0.0)
-    return F.mse_loss(F.normalize(embeddings[:, :-1], dim=-1), F.normalize(z_noisy[:, :-1], dim=-1))
-
-
-def adjacency_loss_adj1(
-    embeddings: torch.Tensor,
-    z_noisy: torch.Tensor,
-    z_hat_next: torch.Tensor,
-    weights: LossWeights,
-    cfg: TrainConfig,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    zero = embeddings.new_tensor(0.0)
-    if weights.adj1 <= 0 or embeddings.shape[1] < 2:
-        return zero, zero, zero
-    z_next_noisy = z_noisy[:, 1:]
-    preds_flat = z_hat_next.reshape(-1, z_hat_next.shape[-1])
-    cand_flat = z_next_noisy.reshape(-1, z_next_noisy.shape[-1]).detach()
-    transport, _ = _transport_from_scores(
-        F.normalize(preds_flat, dim=-1),
-        F.normalize(cand_flat, dim=-1),
-        temp_score=cfg.adjacency.temp_score,
-        mask_self_edges=cfg.adjacency.mask_self_edges,
-        topk_candidates=cfg.adjacency.topk_candidates,
-        sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
-        sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
-    )
-    diag_idx = torch.arange(transport.shape[0], device=transport.device)
-    loss_adj1 = -torch.log(transport[diag_idx, diag_idx] + cfg.normalize_losses.epsilon).mean()
-    with torch.no_grad():
-        row_entropy = -(transport * torch.log(transport + cfg.normalize_losses.epsilon)).sum(dim=1)
-        adj_entropy = row_entropy.mean()
-        adj_hit = (transport.argmax(dim=1) == diag_idx).float().mean()
-    return loss_adj1, adj_entropy, adj_hit
-
-
-def adjacency_loss_adj2(
-    model: JEPAWorldModel,
-    z_hat_next: torch.Tensor,
-    h_states: torch.Tensor,
-    target_embeddings: torch.Tensor,
-    actions: torch.Tensor,
-    weights: LossWeights,
-    cfg: TrainConfig,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    zero = z_hat_next.new_tensor(0.0)
-    if (
-        weights.adj2 <= 0
-        or actions.shape[1] < 3
-        or z_hat_next.shape[1] < 2
-        or target_embeddings.shape[1] < 3
-        or h_states.shape[1] < 2
-    ):
-        return zero, zero
-    actions_two = actions[:, 1:-1]
-    if actions_two.numel() == 0:
-        return zero, zero
-    second_hidden = h_states[:, 1:-1]
-    second_queries, _, _ = model.predictor(z_hat_next[:, :-1], second_hidden, actions_two)
-    second_targets = target_embeddings[:, 2:]
-    q2_flat = second_queries.reshape(-1, second_queries.shape[-1])
-    cand2_flat = second_targets.reshape(-1, second_targets.shape[-1]).detach()
-    transport2, _ = _transport_from_scores(
-        F.normalize(q2_flat, dim=-1),
-        F.normalize(cand2_flat, dim=-1),
-        temp_score=cfg.adjacency.temp_score,
-        mask_self_edges=cfg.adjacency.mask_self_edges,
-        topk_candidates=cfg.adjacency.topk_candidates,
-        sinkhorn_iters=cfg.adjacency.sinkhorn_iters,
-        sinkhorn_eps=cfg.adjacency.sinkhorn_eps,
-    )
-    if transport2.numel() == 0:
-        return zero, zero
-    diag2 = torch.arange(transport2.shape[0], device=transport2.device)
-    loss_adj2 = -torch.log(transport2[diag2, diag2] + cfg.normalize_losses.epsilon).mean()
-    with torch.no_grad():
-        adj2_hit = (transport2.argmax(dim=1) == diag2).float().mean()
-    return loss_adj2, adj2_hit
-
-
-def adjacency_losses(
-    model: JEPAWorldModel,
-    embeddings: torch.Tensor,
-    actions: torch.Tensor,
-    images: torch.Tensor,
-    z_hat_next: torch.Tensor,
-    h_states: torch.Tensor,
-    weights: LossWeights,
-    cfg: TrainConfig,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute adjacency-related losses and metrics."""
-    zero = embeddings.new_tensor(0.0)
-    loss_adj0 = zero
-    loss_adj1 = zero
-    loss_adj2 = zero
-    adj_entropy = zero
-    adj_hit = zero
-    adj2_hit = zero
-
-    use_adjacency = (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0)
-    if not use_adjacency or embeddings.shape[1] < 2:
-        return loss_adj0, loss_adj1, loss_adj2, adj_entropy, adj_hit, adj2_hit
-
-    sigma = max(cfg.adjacency.sigma_aug, 0.0)
-    noisy_images = gaussian_augment(images, sigma)
-    noisy_outputs = model.encode_sequence(noisy_images)
-    z_noisy = noisy_outputs["embeddings"]
-
-    loss_adj0 = adjacency_loss_adj0(embeddings, z_noisy, weights, cfg)
-    loss_adj1, adj_entropy, adj_hit = adjacency_loss_adj1(
-        embeddings,
-        z_noisy,
-        z_hat_next,
-        weights,
-        cfg,
-    )
-    loss_adj2, adj2_hit = adjacency_loss_adj2(
-        model,
-        z_hat_next,
-        h_states,
-        embeddings,
-        actions,
-        weights,
-        cfg,
-    )
-
-    return loss_adj0, loss_adj1, loss_adj2, adj_entropy, adj_hit, adj2_hit
-
-
 # ------------------------------------------------------------
 # Training loop utilities
 # ------------------------------------------------------------
@@ -1432,10 +1282,8 @@ def _compute_losses_and_metrics(
         embeddings=outputs["embeddings"],
         actions=actions,
         images=images,
-        z_hat_next=z_hat_next,
-        h_states=h_states,
         weights=weights,
-        cfg=cfg,
+        cfg=cfg.adjacency,
     )
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
@@ -2208,7 +2056,7 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     predictor_flops = 0
     emb_dim = cfg.embedding_dim
     hidden_dim = cfg.hidden_dim
-    action_dim = cfg.action_dim
+    action_dim = cfg.action_dim * 2
 
     # in_proj: emb_dim -> hidden_dim
     predictor_flops += _linear_flops(emb_dim, hidden_dim)
@@ -2479,22 +2327,6 @@ def _build_embedding_batch(
     return (embed_batch[0].clone(), embed_batch[1].clone(), paths)
 
 
-def _compress_actions_to_ids(actions: np.ndarray) -> np.ndarray:
-    """Convert multi-hot controller vectors to integer action ids."""
-    if actions.ndim < 2:
-        raise ValueError("Expected at least 2D actions array for compression.")
-    flat = actions.reshape(-1, actions.shape[-1])
-    binary = (flat > 0.5).astype(np.int64)
-    weights = (1 << np.arange(binary.shape[1], dtype=np.int64))
-    return (binary * weights).sum(axis=1)
-
-
-def _decode_action_id(action_id: int, action_dim: int) -> str:
-    names = CONTROLLER_STATE_DESC[:action_dim]
-    parts = [names[idx] for idx in range(len(names)) if action_id & (1 << idx)]
-    return "+".join(parts) if parts else "NOOP"
-
-
 def _build_inverse_action_map(action_dim: int, observed_ids: Iterable[int]) -> Dict[int, int]:
     """Approximate inverse mapping by swapping up/down and left/right bits."""
     weights = (1 << np.arange(action_dim, dtype=np.int64))
@@ -2550,7 +2382,7 @@ def _compute_motion_subspace(
     if delta_z.shape[0] < 2:
         return None
     actions_flat = np.concatenate(action_vecs, axis=0)
-    action_ids = _compress_actions_to_ids(actions_flat)
+    action_ids = compress_actions_to_ids(actions_flat)
     delta_mean = delta_z.mean(axis=0, keepdims=True)
     delta_centered = delta_z - delta_mean
     components, variance_ratio = _compute_pca(delta_centered)
@@ -2625,7 +2457,7 @@ def _save_delta_z_pca_plot(
         cbar = fig.colorbar(scatter, ax=axes[0, 1], fraction=0.046, pad=0.04, boundaries=bounds)
         ticks = list(range(color_count))
         cbar.set_ticks(ticks)
-        tick_labels = [_decode_action_id(aid, action_dim) for aid in unique_actions[:color_count]] if unique_actions else ["NOOP"]
+        tick_labels = [decode_action_id(aid, action_dim) for aid in unique_actions[:color_count]] if unique_actions else ["NOOP"]
         cbar.set_ticklabels(tick_labels)
         cbar.set_label("action")
     else:
@@ -2825,229 +2657,6 @@ def _build_action_alignment_debug(
     }
 
 
-def _save_action_alignment_plot(
-    out_path: Path,
-    stats: List[Dict[str, Any]],
-    cfg: DiagnosticsConfig,
-    action_dim: int,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if not stats:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.text(0.5, 0.5, "No actions met alignment criteria.", ha="center", va="center")
-        ax.axis("off")
-        fig.tight_layout()
-        fig.savefig(out_path, dpi=200, bbox_inches="tight")
-        plt.close(fig)
-        return
-    labels = [_decode_action_id(s["action_id"], action_dim) for s in stats]
-    counts = [s["count"] for s in stats]
-
-    x = np.arange(len(stats))
-    fig, ax = plt.subplots(figsize=(10, 6))
-    rng = np.random.default_rng(0)
-    for idx, stat in enumerate(stats):
-        cos_values = stat.get("cosines")
-        cos = np.asarray([] if cos_values is None else cos_values, dtype=np.float32)
-        if cos.size == 0:
-            continue
-        jitter = rng.uniform(-0.2, 0.2, size=cos.shape[0])
-        ax.scatter(
-            np.full_like(cos, x[idx], dtype=np.float32) + jitter,
-            cos,
-            s=18,
-            alpha=0.35,
-            color="tab:blue",
-            edgecolors="none",
-        )
-        ax.plot(
-            [x[idx] - 0.25, x[idx] + 0.25],
-            [stat["mean"], stat["mean"]],
-            color="tab:red",
-            linewidth=2,
-            alpha=0.9,
-        )
-        ax.text(
-            x[idx],
-            1.02,
-            f"n={stat['count']}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
-
-    ax.axhline(cfg.cosine_high_threshold, color="gray", linestyle="--", linewidth=1, alpha=0.8)
-    ax.set_ylabel("cosine alignment")
-    ax.set_ylim(-1.05, 1.05)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
-    ax.set_title("Action-conditioned cosine alignment (strip plot)")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _save_action_alignment_detail_plot(
-    out_path: Path,
-    debug_data: Dict[str, Any],
-    cfg: DiagnosticsConfig,
-    action_dim: int,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
-
-    overall_cos_raw = debug_data.get("overall_cos")
-    overall_norms_raw = debug_data.get("overall_norms")
-    per_action_cos: Dict[int, np.ndarray] = debug_data.get("per_action_cos") or {}
-    pairwise_raw = debug_data.get("pairwise")
-    overall_cos = np.asarray([] if overall_cos_raw is None else overall_cos_raw, dtype=np.float32)
-    overall_norms = np.asarray([] if overall_norms_raw is None else overall_norms_raw, dtype=np.float32)
-    pairwise = np.asarray([] if pairwise_raw is None else pairwise_raw, dtype=np.float32)
-    actions_sorted: List[int] = list(debug_data.get("actions_sorted") or [])
-    per_action_norms: Dict[int, np.ndarray] = debug_data.get("per_action_norms") or {}
-
-    # (0,0): per-action cosine strip plot (mirrors cosine alignment view)
-    ax0 = axes[0, 0]
-    if actions_sorted and any(per_action_cos.get(aid) is not None for aid in actions_sorted):
-        actions_sorted = sorted(actions_sorted)
-        x = np.arange(len(actions_sorted))
-        rng = np.random.default_rng(0)
-        for idx, aid in enumerate(actions_sorted):
-            cos_vals = per_action_cos.get(aid)
-            if cos_vals is None or cos_vals.size == 0:
-                continue
-            jitter = rng.uniform(-0.2, 0.2, size=cos_vals.shape[0])
-            ax0.scatter(
-                np.full_like(cos_vals, x[idx], dtype=np.float32) + jitter,
-                cos_vals,
-                s=14,
-                alpha=0.35,
-                color="tab:blue",
-                edgecolors="none",
-            )
-            mean_val = float(np.mean(cos_vals))
-            ax0.plot([x[idx] - 0.25, x[idx] + 0.25], [mean_val, mean_val], color="tab:red", linewidth=2, alpha=0.9)
-            ax0.text(x[idx], 1.02, f"n={cos_vals.shape[0]}", ha="center", va="bottom", fontsize=7)
-        ax0.axhline(cfg.cosine_high_threshold, color="gray", linestyle="--", linewidth=1, alpha=0.8)
-        ax0.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.8)
-        ax0.set_ylabel("cosine alignment")
-        ax0.set_ylim(-1.05, 1.05)
-        ax0.set_xticks(x)
-        ax0.set_xticklabels([_decode_action_id(aid, action_dim) for aid in actions_sorted], rotation=35, ha="right", fontsize=9)
-        ax0.set_title("Cosine alignment (per-action strip)")
-    else:
-        ax0.text(0.5, 0.5, "No valid cosine samples.", ha="center", va="center")
-        ax0.axis("off")
-
-    # (0,1): scatter of cosine vs delta norm
-    ax1 = axes[0, 1]
-    if actions_sorted and per_action_norms:
-        scatter_x = np.asarray([], dtype=np.float32)
-        xs: List[np.ndarray] = []
-        ys: List[np.ndarray] = []
-        color_ids: List[np.ndarray] = []
-        color_actions = sorted(actions_sorted)
-        palette = plt.get_cmap("tab20").colors
-        color_count = max(1, min(len(palette), len(color_actions)))
-        cmap = mcolors.ListedColormap(list(palette[:color_count]))
-        bounds = np.arange(color_count + 1) - 0.5
-        norm = mcolors.BoundaryNorm(bounds, color_count)
-        color_map = {aid: (idx % color_count) for idx, aid in enumerate(color_actions)}
-        for idx, aid in enumerate(actions_sorted):
-            norms = per_action_norms.get(aid)
-            cos_vals = per_action_cos.get(aid)
-            if norms is None or cos_vals is None or norms.size == 0 or cos_vals.size == 0:
-                continue
-            count = min(norms.shape[0], cos_vals.shape[0])
-            xs.append(norms[:count])
-            ys.append(cos_vals[:count])
-            color_ids.append(np.full(count, color_map.get(aid, idx), dtype=np.float32))
-        if xs and ys and color_ids:
-            scatter_x = np.concatenate(xs)
-            scatter_y = np.concatenate(ys)
-            scatter_c = np.concatenate(color_ids)
-            sc = ax1.scatter(
-                scatter_x,
-                scatter_y,
-                c=scatter_c,
-                cmap=cmap,
-                norm=norm,
-                s=8,
-                alpha=0.35,
-                edgecolors="none",
-            )
-            cbar = fig.colorbar(sc, ax=ax1, fraction=0.046, pad=0.04, boundaries=bounds)
-            ticks = list(range(color_count))
-            cbar.set_ticks(ticks)
-            tick_labels = [_decode_action_id(aid, action_dim) for aid in color_actions[:color_count]]
-            cbar.set_ticklabels(tick_labels)
-            cbar.set_label("action")
-        else:
-            scatter_x = np.asarray([], dtype=np.float32)
-        ax1.axhline(0.0, color="black", linestyle="--", linewidth=1)
-        ax1.axhline(cfg.cosine_high_threshold, color="tab:green", linestyle="--", linewidth=1)
-        if scatter_x.size and np.all(scatter_x > 0):
-            ax1.set_xscale("log")
-        ax1.set_xlabel("delta norm")
-        ax1.set_ylabel("cosine alignment")
-        ax1.set_title("Alignment vs. delta magnitude")
-    else:
-        ax1.text(0.5, 0.5, "Insufficient samples for cosine/norm scatter.", ha="center", va="center")
-        ax1.axis("off")
-
-    # (1,0): per-action delta norm strip plot
-    ax2 = axes[1, 0]
-    if actions_sorted and any(per_action_norms.get(aid) is not None for aid in actions_sorted):
-        x = np.arange(len(actions_sorted))
-        rng = np.random.default_rng(0)
-        medians: List[float] = []
-        for idx, aid in enumerate(actions_sorted):
-            norms = per_action_norms.get(aid)
-            if norms is None or norms.size == 0:
-                continue
-            jitter = rng.uniform(-0.2, 0.2, size=norms.shape[0])
-            ax2.scatter(
-                np.full_like(norms, x[idx], dtype=np.float32) + jitter,
-                norms,
-                s=10,
-                alpha=0.35,
-                color="tab:blue",
-                edgecolors="none",
-            )
-            med = float(np.median(norms))
-            medians.append(med)
-            ax2.plot([x[idx] - 0.25, x[idx] + 0.25], [med, med], color="tab:red", linewidth=2, alpha=0.9)
-            ax2.text(x[idx], med, f"n={norms.shape[0]}", ha="center", va="bottom", fontsize=7)
-        if medians and all(m > 0 for m in medians):
-            ax2.set_yscale("log")
-        ax2.set_xticks(x)
-        ax2.set_xticklabels([_decode_action_id(aid, action_dim) for aid in actions_sorted], rotation=35, ha="right", fontsize=9)
-        ax2.set_ylabel("delta norm")
-        ax2.set_title("Delta norm by action (scatter/median)")
-    else:
-        ax2.text(0.5, 0.5, "No usable per-action norms.", ha="center", va="center")
-        ax2.axis("off")
-
-    # (1,1): pairwise similarity heatmap of mean directions
-    ax3 = axes[1, 1]
-    if pairwise.size and actions_sorted:
-        im = ax3.imshow(pairwise, vmin=-1.0, vmax=1.0, cmap="coolwarm")
-        labels = [_decode_action_id(aid, action_dim) for aid in actions_sorted]
-        ax3.set_xticks(np.arange(len(actions_sorted)))
-        ax3.set_yticks(np.arange(len(actions_sorted)))
-        ax3.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-        ax3.set_yticklabels(labels, fontsize=8)
-        ax3.set_title("Mean direction similarity (cosine)")
-        fig.colorbar(im, ax=ax3, fraction=0.046, pad=0.04, label="cosine")
-    else:
-        ax3.text(0.5, 0.5, "Mean direction similarity unavailable.", ha="center", va="center")
-        ax3.axis("off")
-
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
 def _compute_cycle_errors(
     z_proj_sequences: List[np.ndarray],
     actions_seq: np.ndarray,
@@ -3061,7 +2670,7 @@ def _compute_cycle_errors(
     # First, gather observed forward-then-inverse cycles from the data.
     for seq_idx, z_seq in enumerate(z_proj_sequences):
         seq_actions = actions_seq[seq_idx]
-        action_ids = _compress_actions_to_ids(seq_actions)
+        action_ids = compress_actions_to_ids(seq_actions)
         if len(action_ids) < 3:
             continue
         for t in range(len(action_ids) - 2):
@@ -3094,7 +2703,7 @@ def _compute_cycle_errors(
         # to the starting state, so the ideal round-trip error is near zero.
         for seq_idx, z_seq in enumerate(z_proj_sequences):
             seq_actions = actions_seq[seq_idx]
-            action_ids = _compress_actions_to_ids(seq_actions)
+            action_ids = compress_actions_to_ids(seq_actions)
             max_t = min(len(action_ids), z_seq.shape[0] - 1)
             for t in range(max_t):
                 a = int(action_ids[t])
@@ -3124,7 +2733,7 @@ def _save_cycle_error_plot(
 
     if per_action:
         actions_sorted = sorted(per_action.items(), key=lambda kv: len(kv[1]), reverse=True)
-        labels = [_decode_action_id(aid, action_dim) for aid, _ in actions_sorted]
+        labels = [decode_action_id(aid, action_dim) for aid, _ in actions_sorted]
         x = np.arange(len(actions_sorted))
         rng = np.random.default_rng(0)
         for idx, (aid, vals) in enumerate(actions_sorted):
@@ -3185,7 +2794,7 @@ def _write_action_alignment_report(
                 mean_vecs[int(stat["action_id"])] = stat["mean_dir"]
         for stat in stats:
             aid = int(stat["action_id"])
-            label = _decode_action_id(aid, action_dim)
+            label = decode_action_id(aid, action_dim)
             inv_align = ""
             inv_id = inverse_map.get(aid)
             if inv_id is not None:
@@ -3247,7 +2856,7 @@ def _write_action_alignment_strength(
             elif strength < 0.15:
                 note = "moderate mean vs magnitude"
             handle.write(
-                f"{stat.get('action_id')}\t{_decode_action_id(stat.get('action_id', -1), action_dim)}"
+                f"{stat.get('action_id')}\t{decode_action_id(stat.get('action_id', -1), action_dim)}"
                 f"\t{stat.get('count', 0)}\t{stat.get('mean', float('nan')):.4f}"
                 f"\t{stat.get('std', float('nan')):.4f}\t{stat.get('frac_neg', float('nan')):.3f}"
                 f"\t{mean_norm:.4f}\t{delta_med:.4f}\t{strength:.4f}\t{note}\n"
@@ -3307,9 +2916,9 @@ def _write_action_alignment_crosscheck(
             if best_other_id is not None and gap < 0.05:
                 note = "samples align similarly to another action"
             handle.write(
-                f"{aid}\t{_decode_action_id(aid, action_dim)}\t{vecs_unit.shape[0]}"
+                f"{aid}\t{decode_action_id(aid, action_dim)}\t{vecs_unit.shape[0]}"
                 f"\t{self_mean:.4f}\t{best_other_id}"
-                f"\t{_decode_action_id(best_other_id, action_dim) if best_other_id is not None else ''}"
+                f"\t{decode_action_id(best_other_id, action_dim) if best_other_id is not None else ''}"
                 f"\t{best_other_mean:.4f}\t{gap:.4f}\t{note}\n"
             )
 
@@ -3356,7 +2965,7 @@ def _write_diagnostics_csvs(
             writer.writerow(
                 [
                     stat["action_id"],
-                    _decode_action_id(stat["action_id"], motion["action_dim"]),
+                    decode_action_id(stat["action_id"], motion["action_dim"]),
                     stat["count"],
                     stat["mean"],
                     stat["std"],
@@ -3389,7 +2998,7 @@ def _write_diagnostics_csvs(
             writer.writerow(
                 [
                     stat.get("action_id"),
-                    _decode_action_id(stat.get("action_id", -1), motion["action_dim"]),
+                    decode_action_id(stat.get("action_id", -1), motion["action_dim"]),
                     stat.get("count", 0),
                     stat.get("mean", float("nan")),
                     stat.get("median", float("nan")),
@@ -3420,9 +3029,9 @@ def _write_diagnostics_csvs(
                     writer.writerow(
                         [
                             aid,
-                            _decode_action_id(aid, motion["action_dim"]),
+                            decode_action_id(aid, motion["action_dim"]),
                             bid,
-                            _decode_action_id(bid, motion["action_dim"]),
+                            decode_action_id(bid, motion["action_dim"]),
                             float(pairwise[i, j]),
                         ]
                     )
@@ -3454,7 +3063,7 @@ def _write_diagnostics_csvs(
         writer = csv.writer(handle)
         writer.writerow(["action_id", "action_label", "cycle_error"])
         for aid, val in cycle_errors:
-            writer.writerow([aid, _decode_action_id(aid, motion["action_dim"]), val])
+            writer.writerow([aid, decode_action_id(aid, motion["action_dim"]), val])
 
     cycle_summary_csv = cycle_dir / f"cycle_error_summary_{global_step:07d}.csv"
     with cycle_summary_csv.open("w", newline="") as handle:
@@ -3463,7 +3072,7 @@ def _write_diagnostics_csvs(
         for aid, vals in sorted(cycle_per_action.items(), key=lambda kv: len(kv[1]), reverse=True):
             if not vals:
                 continue
-            writer.writerow([aid, _decode_action_id(aid, motion["action_dim"]), len(vals), float(np.mean(vals))])
+            writer.writerow([aid, decode_action_id(aid, motion["action_dim"]), len(vals), float(np.mean(vals))])
 
 
 def _save_diagnostics_frames(
@@ -3530,8 +3139,8 @@ def _save_diagnostics_frames(
             if actions is not None and actions.ndim >= 2 and orig_idx < actions.shape[0]:
                 try:
                     action_vec = actions[orig_idx, 0].detach().cpu().numpy()
-                    action_id = int(_compress_actions_to_ids(action_vec[None, ...])[0])
-                    action_label = _decode_action_id(action_id, actions.shape[-1])
+                    action_id = int(compress_actions_to_ids(action_vec[None, ...])[0])
+                    action_label = decode_action_id(action_id, actions.shape[-1])
                 except Exception:
                     action_id = None
                     action_label = ""
@@ -3549,8 +3158,8 @@ def _save_diagnostics_frames(
             if actions is not None and actions.ndim >= 2 and orig_idx < actions.shape[0]:
                 try:
                     action_vec = actions[orig_idx, 0].detach().cpu().numpy()
-                    action_id = int(_compress_actions_to_ids(action_vec[None, ...])[0])
-                    action_label = _decode_action_id(action_id, actions.shape[-1])
+                    action_id = int(compress_actions_to_ids(action_vec[None, ...])[0])
+                    action_label = decode_action_id(action_id, actions.shape[-1])
                 except Exception:
                     action_id = None
                     action_label = ""
@@ -3580,7 +3189,7 @@ def _write_alignment_debug_csv(
     """Log per-frame checksums and action context to spot indexing issues."""
     out_dir.mkdir(parents=True, exist_ok=True)
     bsz, seq_len = frames.shape[0], frames.shape[1]
-    action_ids = _compress_actions_to_ids(actions.cpu().numpy().reshape(-1, actions.shape[-1])).reshape(bsz, seq_len)
+    action_ids = compress_actions_to_ids(actions.cpu().numpy().reshape(-1, actions.shape[-1])).reshape(bsz, seq_len)
     csv_path = out_dir / f"alignment_debug_{global_step:07d}.csv"
     with csv_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
@@ -3617,9 +3226,9 @@ def _write_alignment_debug_csv(
                         std,
                         int(same_prev),
                         "" if action_to_this_id is None else int(action_to_this_id),
-                        "" if action_to_this_id is None else _decode_action_id(int(action_to_this_id), actions.shape[-1]),
+                        "" if action_to_this_id is None else decode_action_id(int(action_to_this_id), actions.shape[-1]),
                         "" if action_from_this_id is None else int(action_from_this_id),
-                        "" if action_from_this_id is None else _decode_action_id(int(action_from_this_id), actions.shape[-1]),
+                        "" if action_from_this_id is None else decode_action_id(int(action_from_this_id), actions.shape[-1]),
                         frame_path,
                     ]
                 )
@@ -3646,7 +3255,7 @@ def _save_diagnostics_outputs(
         return
     inverse_map = _build_inverse_action_map(
         motion["action_dim"],
-        np.unique(_compress_actions_to_ids(motion["actions_seq"].reshape(-1, motion["actions_seq"].shape[-1]))),
+        np.unique(compress_actions_to_ids(motion["actions_seq"].reshape(-1, motion["actions_seq"].shape[-1]))),
     )
     delta_path = delta_dir / f"delta_z_pca_{global_step:07d}.png"
     _save_delta_z_pca_plot(
@@ -3670,11 +3279,16 @@ def _save_diagnostics_outputs(
     )
     alignment_debug = _build_action_alignment_debug(alignment_stats_full, motion["delta_proj"], motion["action_ids"])
     alignment_stats_for_plot = alignment_stats_full[: cfg.max_actions_to_plot]
-    _save_action_alignment_plot(alignment_path, alignment_stats_for_plot, cfg, motion["action_dim"])
-    _save_action_alignment_detail_plot(
+    save_action_alignment_plot(
+        alignment_path,
+        alignment_stats_for_plot,
+        cfg.cosine_high_threshold,
+        motion["action_dim"],
+    )
+    save_action_alignment_detail_plot(
         alignment_dir / f"action_alignment_detail_{global_step:07d}.png",
         alignment_debug,
-        cfg,
+        cfg.cosine_high_threshold,
         motion["action_dim"],
     )
     _write_action_alignment_report(alignment_dir, global_step, alignment_stats_full, motion["action_dim"], inverse_map)
@@ -3711,377 +3325,6 @@ def _save_diagnostics_outputs(
     _save_diagnostics_frames(frames_cpu, paths, actions_cpu, frames_dir, global_step)
 
 
-def _flatten_graph_diag_indices(batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    batch_size, seq_len = batch.shape[:2]
-    total = batch_size * seq_len
-    next_index = torch.full((total,), -1, dtype=torch.long, device=batch.device)
-    next2_index = torch.full_like(next_index, -1)
-    chunk_ids = torch.arange(batch_size, device=batch.device).unsqueeze(1).expand(batch_size, seq_len).reshape(-1)
-    for b in range(batch_size):
-        base = b * seq_len
-        next_index[base : base + seq_len - 1] = torch.arange(base + 1, base + seq_len, device=batch.device)
-        if seq_len >= 3:
-            next2_index[base : base + seq_len - 2] = torch.arange(base + 2, base + seq_len, device=batch.device)
-    return next_index, next2_index, chunk_ids
-
-
-def _build_graph_transition_matrix(
-    queries: torch.Tensor,
-    candidates: torch.Tensor,
-    cfg: GraphDiagnosticsConfig,
-) -> torch.Tensor:
-    if queries.shape[1] != candidates.shape[1]:
-        raise ValueError("Query and candidate dimensions must match for graph diagnostics.")
-    temp = max(cfg.temp, 1e-8)
-    num_queries = queries.shape[0]
-    num_candidates = candidates.shape[0]
-    block = max(1, min(cfg.block_size, num_queries))
-    probs = queries.new_zeros((num_queries, num_candidates))
-    cand_norm = (candidates * candidates).sum(dim=1)
-    for start in range(0, num_queries, block):
-        end = min(start + block, num_queries)
-        q = queries[start:end]
-        row_ids = torch.arange(start, end, device=queries.device)
-        if 0 < cfg.top_m_candidates < num_candidates:
-            topk = min(cfg.top_m_candidates, num_candidates)
-            cos = F.normalize(q, dim=-1) @ F.normalize(candidates, dim=-1).t()
-            _, top_idx = torch.topk(cos, k=topk, dim=1)
-            cand_sel = candidates[top_idx]
-            cand_norm_sel = cand_sel.pow(2).sum(dim=2)
-            q_norm = q.pow(2).sum(dim=1, keepdim=True)
-            dist_sq = q_norm + cand_norm_sel - 2.0 * torch.einsum("bkd,bd->bk", cand_sel, q)
-            scores = -dist_sq / temp
-            if cfg.mask_self_edges:
-                self_mask = top_idx == row_ids[:, None]
-                scores = scores.masked_fill(self_mask, float("-inf"))
-            scores = scores - scores.max(dim=1, keepdim=True).values
-            probs_sel = torch.softmax(scores, dim=1)
-            probs[start:end].scatter_(1, top_idx, probs_sel)
-        else:
-            q_norm = q.pow(2).sum(dim=1, keepdim=True)
-            dist_sq = q_norm + cand_norm[None, :] - 2.0 * q @ candidates.t()
-            dist_sq = dist_sq.clamp_min(0.0)
-            scores = -dist_sq / temp
-            if cfg.mask_self_edges:
-                rel_rows = torch.arange(end - start, device=queries.device)
-                scores[rel_rows, row_ids] = float("-inf")
-            scores = scores - scores.max(dim=1, keepdim=True).values
-            probs[start:end] = torch.softmax(scores, dim=1)
-    probs = torch.where(torch.isfinite(probs), probs, torch.zeros_like(probs))
-    row_sums = probs.sum(dim=1, keepdim=True)
-    zero_rows = row_sums.squeeze(1) <= 0
-    if torch.any(zero_rows):
-        probs[zero_rows] = 1.0 / float(num_candidates)
-    return probs
-
-
-def _graph_rank_stats(probs: torch.Tensor, targets: torch.Tensor) -> np.ndarray:
-    valid = targets >= 0
-    if not torch.any(valid):
-        return np.asarray([], dtype=np.float32)
-    rows = probs[valid]
-    tgt = targets[valid]
-    row_indices = torch.arange(rows.shape[0], device=probs.device)
-    target_probs = rows[row_indices, tgt]
-    ranks = (rows > target_probs[:, None]).sum(dim=1) + 1
-    return ranks.detach().cpu().numpy().astype(np.int64, copy=False)
-
-
-def _graph_effective_neighborhood(probs: torch.Tensor, eps: float) -> torch.Tensor:
-    probs_clamped = torch.clamp(probs, min=eps)
-    entropy = -(probs_clamped * torch.log(probs_clamped)).sum(dim=1)
-    return torch.exp(entropy)
-
-
-def _graph_history_path(out_dir: Path) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir / "metrics_history.csv"
-
-
-def _load_graph_history(path: Path) -> List[Dict[str, float]]:
-    if not path.exists():
-        return []
-    rows: List[Dict[str, float]] = []
-    try:
-        with path.open("r", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                parsed = {}
-                for key, value in row.items():
-                    try:
-                        parsed[key] = float(value)
-                    except (TypeError, ValueError):
-                        continue
-                rows.append(parsed)
-    except (OSError, csv.Error):
-        return []
-    rows.sort(key=lambda r: r.get("step", float("inf")))
-    return rows
-
-
-def _write_graph_history(path: Path, metrics: Dict[str, float]) -> List[Dict[str, float]]:
-    history = _load_graph_history(path)
-    history = [row for row in history if row.get("step") != metrics.get("step")]
-    history.append(metrics)
-    history.sort(key=lambda r: r.get("step", float("inf")))
-    headers = [
-        "step",
-        "hit1_at_k",
-        "hit2_at_k",
-        "median_neff1",
-        "median_neff2",
-        "neff_ratio",
-        "long_gap_rate",
-        "mutual_rate",
-        "max_in_degree",
-        "top1pct_mean_in_degree",
-        "sample_size",
-    ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=headers)
-        writer.writeheader()
-        for row in history:
-            writer.writerow({key: row.get(key, "") for key in headers})
-    return history
-
-
-def _plot_rank_cdf(out_path: Path, ranks: np.ndarray, k: int, title: str) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    if ranks.size == 0:
-        ax.text(0.5, 0.5, "No valid transitions.", ha="center", va="center")
-    else:
-        ranks_sorted = np.sort(ranks)
-        y = np.arange(1, len(ranks_sorted) + 1) / len(ranks_sorted)
-        ax.plot(ranks_sorted, y, label="CDF", color="tab:blue")
-        if k > 0:
-            ax.axvline(k, color="tab:orange", linestyle="--", label=f"K={k}")
-        ax.set_xscale("log")
-        ax.set_xlabel("Rank")
-        ax.set_ylabel("Fraction ≤ rank")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-    ax.set_title(title)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_neff_violin(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(6, 4))
-    data = [neff1, neff2]
-    labels = ["Neff1", "Neff2"]
-    if all(arr.size == 0 for arr in data):
-        ax.text(0.5, 0.5, "No neighborhood stats available.", ha="center", va="center")
-    else:
-        ax.violinplot(data, showmeans=True, showextrema=True)
-        for idx, arr in enumerate(data):
-            if arr.size == 0:
-                continue
-            ax.scatter(
-                np.full_like(arr, idx + 1, dtype=np.float32),
-                arr,
-                s=8,
-                alpha=0.15,
-                color="tab:blue" if idx == 0 else "tab:green",
-            )
-        ax.set_xticks([1, 2])
-        ax.set_xticklabels(labels)
-        ax.set_ylabel("Effective neighborhood size")
-        ax.set_yscale("log")
-        ax.grid(True, alpha=0.3)
-    ax.set_title("Neighborhood size (exp entropy)")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_in_degree_hist(out_path: Path, in_degree: np.ndarray) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    if in_degree.size == 0:
-        ax.text(0.5, 0.5, "No edges to compute in-degree.", ha="center", va="center")
-    else:
-        bins = min(50, max(5, int(np.sqrt(in_degree.size))))
-        ax.hist(in_degree, bins=bins, color="tab:purple", alpha=0.8)
-        ax.set_xlabel("In-degree (top-K graph)")
-        ax.set_ylabel("Count")
-        ax.grid(True, alpha=0.3)
-    ax.set_title("Hubness / in-degree distribution")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_graph_history(out_path: Path, history: List[Dict[str, float]], k: int) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-    if not history:
-        for ax in axes:
-            ax.text(0.5, 0.5, "History unavailable.", ha="center", va="center")
-            ax.axis("off")
-    else:
-        steps = [row.get("step", float("nan")) for row in history]
-        hit1 = [row.get("hit1_at_k", float("nan")) for row in history]
-        hit2 = [row.get("hit2_at_k", float("nan")) for row in history]
-        median_neff1 = [row.get("median_neff1", float("nan")) for row in history]
-        median_neff2 = [row.get("median_neff2", float("nan")) for row in history]
-        ratio = [row.get("neff_ratio", float("nan")) for row in history]
-        long_gap = [row.get("long_gap_rate", float("nan")) for row in history]
-        mutual = [row.get("mutual_rate", float("nan")) for row in history]
-        max_in = [row.get("max_in_degree", float("nan")) for row in history]
-
-        axes[0].plot(steps, hit1, marker="o", label=f"hit1@{k}", color="tab:blue")
-        axes[0].plot(steps, hit2, marker="o", label=f"hit2@{k}", color="tab:orange")
-        axes[0].set_ylabel("Hit rate")
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-
-        axes[1].plot(steps, median_neff1, marker="o", label="median Neff1", color="tab:green")
-        axes[1].plot(steps, median_neff2, marker="o", label="median Neff2", color="tab:red")
-        axes[1].plot(steps, ratio, marker="o", label="Neff2/Neff1", color="tab:purple")
-        axes[1].set_ylabel("Neighborhood size")
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-
-        axes[2].plot(steps, long_gap, marker="o", label="long-gap rate", color="tab:brown")
-        axes[2].plot(steps, mutual, marker="o", label="mutual kNN rate", color="tab:cyan")
-        axes[2].plot(steps, max_in, marker="o", label="max in-degree", color="tab:gray")
-        axes[2].set_xlabel("Step")
-        axes[2].set_ylabel("Graph health")
-        axes[2].legend()
-        axes[2].grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _save_graph_diagnostics(
-    model: JEPAWorldModel,
-    ema_model: Optional[JEPAWorldModel],
-    frames_cpu: torch.Tensor,
-    actions_cpu: torch.Tensor,
-    device: torch.device,
-    cfg: GraphDiagnosticsConfig,
-    out_dir: Path,
-    global_step: int,
-) -> None:
-    if frames_cpu.ndim != 5:
-        raise ValueError("Graph diagnostics requires frames shaped [B, T, C, H, W].")
-    if frames_cpu.shape[1] < 3:
-        return
-    with torch.no_grad():
-        frames = frames_cpu.to(device)
-        actions = actions_cpu.to(device)
-        embeddings = model.encode_sequence(frames)["embeddings"]
-        targets = embeddings
-        if cfg.use_ema_targets and ema_model is not None:
-            targets = ema_model.encode_sequence(frames)["embeddings"]
-        preds, _, _, _ = _predictor_rollout(model, embeddings, actions)
-
-    batch_size, seq_len, latent_dim = embeddings.shape
-    next_index, next2_index, chunk_ids = _flatten_graph_diag_indices(frames)
-
-    z_flat = embeddings.reshape(-1, latent_dim)
-    target_flat = targets.reshape(-1, latent_dim)
-    zhat_full = torch.cat([preds, embeddings[:, -1:, :]], dim=1).reshape(-1, latent_dim)
-
-    if cfg.normalize_latents:
-        z_flat = F.normalize(z_flat, dim=-1)
-        target_flat = F.normalize(target_flat, dim=-1)
-        zhat_full = F.normalize(zhat_full, dim=-1)
-
-    queries = zhat_full if cfg.use_predictor_scores else z_flat
-    probs = _build_graph_transition_matrix(queries, target_flat, cfg)
-    probs2 = probs @ probs
-
-    ranks1 = _graph_rank_stats(probs, next_index)
-    ranks2 = _graph_rank_stats(probs2, next2_index)
-    k = max(1, min(cfg.k_neighbors, probs.shape[1]))
-    hit1_at_k = float((ranks1 <= k).mean()) if ranks1.size else float("nan")
-    hit2_at_k = float((ranks2 <= k).mean()) if ranks2.size else float("nan")
-
-    neff1 = _graph_effective_neighborhood(probs, cfg.eps)
-    neff2 = _graph_effective_neighborhood(probs2, cfg.eps)
-    neff1_np = neff1.detach().cpu().numpy()
-    neff2_np = neff2.detach().cpu().numpy()
-    median_neff1 = float(np.median(neff1_np)) if neff1_np.size else float("nan")
-    median_neff2 = float(np.median(neff2_np)) if neff2_np.size else float("nan")
-    neff_ratio = median_neff2 / median_neff1 if median_neff1 > 0 else float("nan")
-
-    top_vals, top_idx = torch.topk(probs, k=k, dim=1)
-    idx_grid = torch.arange(probs.shape[0], device=probs.device).unsqueeze(1)
-    gaps = (top_idx - idx_grid).abs()
-    if chunk_ids.numel():
-        chunk_ids_dev = chunk_ids.to(probs.device)
-        same_chunk = chunk_ids_dev[top_idx] == chunk_ids_dev.unsqueeze(1)
-        gaps = torch.where(same_chunk, gaps, gaps.new_full(gaps.shape, cfg.long_gap_window + 1))
-    long_gap_rate = float((gaps > cfg.long_gap_window).float().mean()) if k > 0 else float("nan")
-
-    neighbor_mask = torch.zeros_like(probs, dtype=torch.bool)
-    neighbor_mask.scatter_(1, top_idx, True)
-    mutual_counts = (neighbor_mask & neighbor_mask.t()).sum(dim=1)
-    mutual_rate = float((mutual_counts.float() / k).mean()) if k > 0 else float("nan")
-    in_degree = neighbor_mask.sum(dim=0).detach().cpu().numpy()
-    max_in_degree = float(in_degree.max()) if in_degree.size else float("nan")
-    if in_degree.size:
-        top_count = max(1, int(math.ceil(0.01 * in_degree.size)))
-        top_mean = float(np.mean(np.partition(in_degree, -top_count)[-top_count:]))
-    else:
-        top_mean = float("nan")
-
-    edge_errors: Optional[np.ndarray] = None
-    if cfg.include_edge_consistency and k > 0:
-        total_edges = probs.shape[0] * k
-        sample = min(cfg.edge_consistency_samples, total_edges)
-        if sample > 0:
-            perm = torch.randperm(total_edges, device=probs.device)[:sample]
-            rows = perm // k
-            cols = perm % k
-            tgt_cols = top_idx[rows, cols]
-            pred_vec = zhat_full[rows]
-            tgt_vec = target_flat[tgt_cols]
-            edge_errors = ((pred_vec - tgt_vec) ** 2).sum(dim=1).detach().cpu().numpy()
-
-    metrics: Dict[str, float] = {
-        "step": float(global_step),
-        "hit1_at_k": hit1_at_k,
-        "hit2_at_k": hit2_at_k,
-        "median_neff1": median_neff1,
-        "median_neff2": median_neff2,
-        "neff_ratio": neff_ratio,
-        "long_gap_rate": long_gap_rate,
-        "mutual_rate": mutual_rate,
-        "max_in_degree": max_in_degree,
-        "top1pct_mean_in_degree": top_mean,
-        "sample_size": float(probs.shape[0]),
-    }
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _plot_rank_cdf(out_dir / f"rank1_cdf_{global_step:07d}.png", ranks1, k, "1-step rank CDF")
-    _plot_rank_cdf(out_dir / f"rank2_cdf_{global_step:07d}.png", ranks2, k, "2-hop rank CDF")
-    _plot_neff_violin(out_dir / f"neff_violin_{global_step:07d}.png", neff1_np, neff2_np)
-    _plot_in_degree_hist(out_dir / f"in_degree_hist_{global_step:07d}.png", in_degree)
-    if edge_errors is not None:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.hist(edge_errors, bins=30, color="tab:gray", alpha=0.85)
-        ax.set_title("Predictor-edge consistency (||zhat - zT||^2)")
-        ax.set_xlabel("error")
-        ax.set_ylabel("count")
-        fig.tight_layout()
-        fig.savefig(out_dir / f"edge_consistency_{global_step:07d}.png", dpi=200, bbox_inches="tight")
-        plt.close(fig)
-
-    history_path = _graph_history_path(out_dir)
-    history = _write_graph_history(history_path, metrics)
-    history_plot = out_dir / f"metrics_history_{global_step:07d}.png"
-    _plot_graph_history(history_plot, history, k)
-    latest_plot = out_dir / "metrics_history_latest.png"
-    shutil.copy2(history_plot, latest_plot)
-
-
 def _prepare_self_distance_inputs(
     data_root: Path,
     train_trajs: List[str],
@@ -4116,8 +3359,8 @@ def _prepare_self_distance_inputs(
         return None
     actions = _load_actions_for_trajectory(data_root / chosen, expected_length=len(frames))
     action_dim = actions.shape[1]
-    action_ids = _compress_actions_to_ids(actions)
-    action_labels = [_decode_action_id(int(aid), action_dim) for aid in action_ids]
+    action_ids = compress_actions_to_ids(actions)
+    action_labels = [decode_action_id(int(aid), action_dim) for aid in action_ids]
     stacked = torch.stack(frames, dim=0).unsqueeze(0)
     traj_label = f"{data_root.name}/{chosen}" if data_root.name else chosen
     return SelfDistanceInputs(
@@ -4129,152 +3372,6 @@ def _prepare_self_distance_inputs(
         action_labels=action_labels,
         action_dim=action_dim,
     )
-
-
-def _write_self_distance_outputs(
-    model: JEPAWorldModel,
-    traj_inputs: SelfDistanceInputs,
-    device: torch.device,
-    csv_dir: Path,
-    plot_dir: Path,
-    global_step: int,
-) -> None:
-    if traj_inputs.frames.shape[1] < 2:
-        return
-    frames = traj_inputs.frames.to(device)
-    with torch.no_grad():
-        embeddings = model.encode_sequence(frames)["embeddings"][0]
-
-    def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Return 1 - cosine similarity with numeric safeguards."""
-        denom = torch.norm(a, dim=-1) * torch.norm(b, dim=-1)
-        denom = torch.clamp(denom, min=1e-8)
-        cos = (a * b).sum(dim=-1) / denom
-        return 1.0 - cos.clamp(-1.0, 1.0)
-
-    dist_to_first = torch.norm(embeddings - embeddings[0:1], dim=-1)
-    dist_to_first_cos = _cosine_distance(embeddings, embeddings[0:1])
-
-    deltas = embeddings[1:] - embeddings[:-1]
-    dist_to_prior = torch.cat(
-        [
-            dist_to_first.new_zeros(1),
-            torch.norm(deltas, dim=-1),
-        ],
-        dim=0,
-    )
-    dist_to_prior_cos = torch.cat(
-        [
-            dist_to_first_cos.new_zeros(1),
-            _cosine_distance(embeddings[1:], embeddings[:-1]),
-        ],
-        dim=0,
-    )
-    steps = list(range(dist_to_first.shape[0]))
-    dist_first_np = dist_to_first.detach().cpu().numpy()
-    dist_prior_np = dist_to_prior.detach().cpu().numpy()
-    dist_first_cos_np = dist_to_first_cos.detach().cpu().numpy()
-    dist_prior_cos_np = dist_to_prior_cos.detach().cpu().numpy()
-    csv_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = csv_dir / f"self_distance_{global_step:06d}.csv"
-    fieldnames = [
-        "trajectory",
-        "trajectory_label",
-        "timestep",
-        "distance_to_first",
-        "distance_to_prior",
-        "cosine_distance_to_first",
-        "cosine_distance_to_prior",
-        "frame_path",
-        "first_frame_path",
-        "prior_frame_path",
-        "frame_label",
-        "action_id",
-        "action_label",
-    ]
-    first_frame = traj_inputs.frame_paths[0].as_posix()
-    with csv_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for idx, step in enumerate(steps):
-            prior_idx = max(0, idx - 1)
-            action_id = int(_compress_actions_to_ids(traj_inputs.actions[idx : idx + 1])[0])
-            action_label = traj_inputs.action_labels[idx] if idx < len(traj_inputs.action_labels) else _decode_action_id(
-                action_id, traj_inputs.action_dim
-            )
-            writer.writerow(
-                {
-                    "trajectory": traj_inputs.trajectory_label,
-                    "trajectory_label": traj_inputs.trajectory_label,
-                    "timestep": step,
-                    "distance_to_first": float(dist_first_np[idx]),
-                    "distance_to_prior": float(dist_prior_np[idx]),
-                    "cosine_distance_to_first": float(dist_first_cos_np[idx]),
-                    "cosine_distance_to_prior": float(dist_prior_cos_np[idx]),
-                    "frame_path": traj_inputs.frame_paths[idx].as_posix(),
-                    "first_frame_path": first_frame,
-                    "prior_frame_path": traj_inputs.frame_paths[prior_idx].as_posix(),
-                    "frame_label": traj_inputs.frame_labels[idx] if idx < len(traj_inputs.frame_labels) else f"t={step}",
-                    "action_id": action_id,
-                    "action_label": action_label,
-                }
-            )
-    plot_dir.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8.5))
-    axes[0, 0].plot(steps, dist_first_np, marker="o")
-    axes[0, 0].set_title("Distance to first")
-    axes[0, 0].set_xlabel("timestep")
-    axes[0, 0].set_ylabel("||z0 - zt||")
-    axes[0, 1].plot(steps, dist_prior_np, marker="o", color="tab:orange")
-    axes[0, 1].set_title("Distance to prior")
-    axes[0, 1].set_xlabel("timestep")
-    axes[0, 1].set_ylabel("||z(t-1) - zt||")
-    sc0 = axes[0, 2].scatter(dist_first_np, dist_prior_np, c=steps, cmap="viridis", s=20)
-    axes[0, 2].set_title("Distance to first vs prior")
-    axes[0, 2].set_xlabel("||z0 - zt||")
-    axes[0, 2].set_ylabel("||z(t-1) - zt||")
-
-    axes[1, 0].plot(steps, dist_first_cos_np, marker="o", color="tab:green")
-    axes[1, 0].set_title("Cosine distance to first")
-    axes[1, 0].set_xlabel("timestep")
-    axes[1, 0].set_ylabel("1 - cos(z0, zt)")
-    axes[1, 1].plot(steps, dist_prior_cos_np, marker="o", color="tab:red")
-    axes[1, 1].set_title("Cosine distance to prior")
-    axes[1, 1].set_xlabel("timestep")
-    axes[1, 1].set_ylabel("1 - cos(z(t-1), zt)")
-    sc1 = axes[1, 2].scatter(dist_first_cos_np, dist_prior_cos_np, c=steps, cmap="plasma", s=20)
-    axes[1, 2].set_title("Cosine distance to first vs prior")
-    axes[1, 2].set_xlabel("1 - cos(z0, zt)")
-    axes[1, 2].set_ylabel("1 - cos(z(t-1), zt)")
-
-    fig.suptitle(f"Self-distance: {traj_inputs.trajectory_label}", fontsize=12)
-    fig.colorbar(sc0, ax=axes[0, 2], label="timestep")
-    fig.colorbar(sc1, ax=axes[1, 2], label="timestep")
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
-    out_path = plot_dir / f"self_distance_{global_step:07d}.png"
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-    # Save a cosine-only PNG for quick inspection.
-    fig_cos, axes_cos = plt.subplots(1, 3, figsize=(14, 4.2))
-    axes_cos[0].plot(steps, dist_first_cos_np, marker="o", color="tab:green")
-    axes_cos[0].set_title("Cosine distance to first")
-    axes_cos[0].set_xlabel("timestep")
-    axes_cos[0].set_ylabel("1 - cos(z0, zt)")
-    axes_cos[1].plot(steps, dist_prior_cos_np, marker="o", color="tab:red")
-    axes_cos[1].set_title("Cosine distance to prior")
-    axes_cos[1].set_xlabel("timestep")
-    axes_cos[1].set_ylabel("1 - cos(z(t-1), zt)")
-    sc_cos = axes_cos[2].scatter(dist_first_cos_np, dist_prior_cos_np, c=steps, cmap="plasma", s=20)
-    axes_cos[2].set_title("Cosine distance to first vs prior")
-    axes_cos[2].set_xlabel("1 - cos(z0, zt)")
-    axes_cos[2].set_ylabel("1 - cos(z(t-1), zt)")
-    fig_cos.suptitle(f"Self-distance (cosine): {traj_inputs.trajectory_label}", fontsize=12)
-    fig_cos.colorbar(sc_cos, ax=axes_cos[2], label="timestep")
-    fig_cos.tight_layout(rect=[0, 0, 1, 0.93])
-    out_path_cos = plot_dir / f"self_distance_cosine_{global_step:07d}.png"
-    fig_cos.savefig(out_path_cos, dpi=200, bbox_inches="tight")
-    plt.close(fig_cos)
 
 
 def _save_checkpoint(
@@ -4339,6 +3436,7 @@ def _render_visualization_batch(
         base_starts = torch.randint(min_start, max_start + 1, (num_rows,), device=device, generator=rng)
     sequences: List[VisualizationSequence] = []
     debug_lines: List[str] = []
+    paired_actions = _pair_actions(vis_actions)
     for row_offset, idx in enumerate(row_indices):
         start_idx = int(base_starts[row_offset].item()) if base_starts is not None else min_start
         start_idx = max(min_start, min(start_idx, max_start))
@@ -4357,9 +3455,9 @@ def _render_visualization_batch(
         prev_pred_frame = decoded_frames[idx, start_idx].detach()
         current_frame = prev_pred_frame
         for step in range(1, max_window):
-            action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
+            action = paired_actions[idx, start_idx + step - 1].unsqueeze(0)
             prev_embed = current_embed
-            next_embed, _, next_hidden = model.predictor(current_embed, current_hidden, action)
+            next_embed, _, next_hidden, _ = model.predictor(current_embed, current_hidden, action)
             decoded_next = decoder(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
@@ -4873,7 +3971,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         dataset.image_hw,
                     )
                 if self_distance_inputs is not None:
-                    _write_self_distance_outputs(
+                    write_self_distance_outputs(
                         model,
                         self_distance_inputs,
                         device,
@@ -4912,7 +4010,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     graph_frames = graph_diag_batch_cpu[0] if graph_diag_batch_cpu is not None else rolling_batch_cpu[0]
                     graph_actions = graph_diag_batch_cpu[1] if graph_diag_batch_cpu is not None else rolling_batch_cpu[1]
                     try:
-                        _save_graph_diagnostics(
+                        save_graph_diagnostics(
                             model,
                             ema_model,
                             graph_frames,
@@ -4948,7 +4046,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if self_distance_inputs is not None:
         model.eval()
         with torch.no_grad():
-            _write_self_distance_outputs(
+            write_self_distance_outputs(
                 model,
                 self_distance_inputs,
                 device,
