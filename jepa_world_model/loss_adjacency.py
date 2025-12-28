@@ -214,11 +214,12 @@ def adjacency_losses(
     h_pred1: Optional[torch.Tensor] = None
     paired_actions = _pair_actions(actions)
     if (weights.adj1 > 0 or weights.adj2 > 0) and actions.shape[1] >= 2:
-        z_pred1, _, h_pred1, state_preds = model.predictor(
+        z_pred1, _, h_pred1 = model.predictor(
             plan_embeddings[:, :-1],
             h_plan[:, :-1],
             paired_actions[:, :-1],
         )
+        state_preds = model.state_head(h_pred1)
 
     if weights.adj1 > 0:
         loss_adj1, adj_entropy, adj_hit = adjacency_loss_adj1(
@@ -229,14 +230,16 @@ def adjacency_losses(
         )
 
     if weights.adj2 > 0:
+        state_preds2: Optional[torch.Tensor] = None
         if z_pred1 is not None and h_pred1 is not None and actions.shape[1] >= 3 and z_pred1.shape[1] >= 2:
-            _, _, _, state_preds2 = model.predictor(
+            _, _, h_pred2 = model.predictor(
                 z_pred1[:, :-1],
                 h_pred1[:, :-1],
                 paired_actions[:, 1:-1],
             )
-        else:
-            state_preds2 = state_preds.new_zeros((states.shape[0], max(states.shape[1] - 2, 0), state_dim))
+            state_preds2 = model.state_head(h_pred2)
+        if state_preds2 is None:
+            state_preds2 = states.new_zeros((states.shape[0], max(states.shape[1] - 2, 0), state_dim))
         loss_adj2, adj2_hit = adjacency_loss_adj2(
             state_preds2,
             states[:, 2:],

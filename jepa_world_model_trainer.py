@@ -125,7 +125,7 @@ class PredictorNetwork(nn.Module):
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not (embeddings.shape[:-1] == actions.shape[:-1] == hidden_state.shape[:-1]):
             raise ValueError("Embeddings, hidden state, and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -146,7 +146,6 @@ class PredictorNetwork(nn.Module):
             pred.view(*original_shape, pred.shape[-1]),
             delta.view(*original_shape, delta.shape[-1]),
             h_next,
-            None,
         )
 
     def shape_info(self) -> Dict[str, Any]:
@@ -697,7 +696,7 @@ def _predictor_rollout(
         z_t = embeddings[:, step]
         h_t = h_states[-1]
         act_t = paired_actions[:, step]
-        pred, delta, h_next, _ = model.predictor(z_t, h_t, act_t)
+        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
         preds.append(pred)
         deltas.append(delta)
         h_preds.append(h_next)
@@ -792,7 +791,7 @@ def rollout_loss(
         for offset in range(max_h):
             act = paired_actions[:, start + offset]
             h_current = model.z_to_h(current)
-            pred, _, _, _ = model.predictor(current, h_current, act)
+            pred, _, _ = model.predictor(current, h_current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
@@ -3185,7 +3184,7 @@ def _render_visualization_batch(
         for step in range(1, max_window):
             action = paired_actions[idx, start_idx + step - 1].unsqueeze(0)
             prev_embed = current_embed
-            next_embed, _, next_hidden, _ = model.predictor(current_embed, current_hidden, action)
+            next_embed, _, next_hidden = model.predictor(current_embed, current_hidden, action)
             decoded_next = decoder(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             if show_gradients:
