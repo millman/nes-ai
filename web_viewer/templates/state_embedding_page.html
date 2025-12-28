@@ -1,0 +1,615 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<style>
+.state-embedding-plot {
+    height: 300px;
+    min-height: 300px;
+    max-height: 320px;
+}
+
+.plot-pin-wrapper {
+    position: relative;
+}
+
+.plot-pin-plot {
+    height: 220px;
+}
+
+.plot-pin-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
+    padding-bottom: 0.5rem;
+}
+
+.plot-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+
+.plot-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.plot-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+</style>
+
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div>
+        {% if experiment %}
+        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
+        {% else %}
+        <h3 class="mb-1">State embedding</h3>
+        <div class="text-muted small">No experiments with state_embedding.csv</div>
+        {% endif %}
+    </div>
+    {% if experiment %}
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('experiment_detail', exp_id=experiment.id) }}">Open experiment</a>
+    </div>
+    {% endif %}
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No state_embedding.csv found in any experiments.</div>
+{% else %}
+<div class="small text-muted mb-2">
+    Loaded from {{ experiment.state_embedding_csv.name }}{% if experiment.state_embedding_images %}, latest PNG in vis_state_embedding{% endif %}.
+</div>
+<div class="row gy-1 gx-3 mt-3">
+    <div class="col-12 col-lg-4">
+        <div id="state-embedding-first-plot" class="plot-area state-embedding-plot"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="state-embedding-prior-plot" class="plot-area state-embedding-plot"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="state-embedding-scatter-plot" class="plot-area state-embedding-plot"></div>
+    </div>
+</div>
+<div class="row gy-1 gx-3 mt-1">
+    <div class="col-12 col-lg-4">
+        <div id="state-embedding-first-plot-cos" class="plot-area state-embedding-plot"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="state-embedding-prior-plot-cos" class="plot-area state-embedding-plot"></div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div id="state-embedding-scatter-plot-cos" class="plot-area state-embedding-plot"></div>
+    </div>
+</div>
+<div class="row g-3 mt-3" id="state-embedding-frame-row">
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">First frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="state-embedding-first-img" class="img-fluid rounded border d-none" alt="First frame preview">
+                <div class="text-muted small mt-2" id="state-embedding-first-label"></div>
+                <div class="text-muted small" id="state-embedding-first-action"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">Prior frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="state-embedding-prior-img" class="img-fluid rounded border d-none" alt="Prior frame preview">
+                <div class="text-muted small mt-2" id="state-embedding-prior-label"></div>
+                <div class="text-muted small" id="state-embedding-prior-action"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">Current frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="state-embedding-current-img" class="img-fluid rounded border d-none" alt="Current frame preview">
+                <div class="text-muted small mt-2" id="state-embedding-current-label"></div>
+                <div class="text-muted small" id="state-embedding-current-action"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="d-flex align-items-center justify-content-between mb-2 mt-4">
+    <h6 class="mb-0">Training metrics (loss)</h6>
+</div>
+<div class="plot-pin-wrapper mb-3" id="state-embedding-loss-wrapper">
+    <button
+        type="button"
+        class="plot-pin-btn"
+        id="state-embedding-loss-pin"
+        aria-pressed="false"
+        aria-label="Pin training metrics plot"
+        title="Pin training metrics plot"
+    >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+        </svg>
+    </button>
+    <div id="state-embedding-loss-plot" class="plot-pin-plot"></div>
+</div>
+<div class="row g-3 mt-3">
+    <div class="col-12 col-lg-6">
+        <div class="card h-100">
+            <div class="card-header py-2">State embedding image</div>
+            <div class="card-body d-flex flex-column gap-2 align-items-start">
+                <img id="state-embedding-step-img" class="img-fluid rounded border d-none" alt="State embedding step">
+                <div class="text-muted small font-monospace" id="state-embedding-step-path"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-6">
+        <div class="card h-100">
+            <div class="card-header py-2">State embedding norm histogram</div>
+            <div class="card-body d-flex flex-column gap-2 align-items-start">
+                <img id="state-embedding-hist-img" class="img-fluid rounded border d-none" alt="State embedding norm histogram">
+                <div class="text-muted small font-monospace" id="state-embedding-hist-path"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if experiment %}
+<script>
+    document.addEventListener("DOMContentLoaded", () => {
+        if (typeof Plotly === "undefined") {
+            const firstPlot = document.getElementById("state-embedding-first-plot");
+            if (firstPlot) {
+                firstPlot.innerHTML = "<p class='text-danger small'>Plotly failed to load.</p>";
+            }
+            return;
+        }
+        const csvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.state_embedding_csv.relative_to(experiment.path)) }}";
+        const plotConfig = buildPlotlyConfig({});
+        const firstPlot = document.getElementById("state-embedding-first-plot");
+        const priorPlot = document.getElementById("state-embedding-prior-plot");
+        const scatterPlot = document.getElementById("state-embedding-scatter-plot");
+        const firstPlotCos = document.getElementById("state-embedding-first-plot-cos");
+        const priorPlotCos = document.getElementById("state-embedding-prior-plot-cos");
+        const scatterPlotCos = document.getElementById("state-embedding-scatter-plot-cos");
+        const firstImg = document.getElementById("state-embedding-first-img");
+        const priorImg = document.getElementById("state-embedding-prior-img");
+        const currentImg = document.getElementById("state-embedding-current-img");
+        const firstLabel = document.getElementById("state-embedding-first-label");
+        const priorLabel = document.getElementById("state-embedding-prior-label");
+        const currentLabel = document.getElementById("state-embedding-current-label");
+        const firstAction = document.getElementById("state-embedding-first-action");
+        const priorAction = document.getElementById("state-embedding-prior-action");
+        const currentAction = document.getElementById("state-embedding-current-action");
+        const frameRow = document.getElementById("state-embedding-frame-row");
+        const stepImg = document.getElementById("state-embedding-step-img");
+        const stepPath = document.getElementById("state-embedding-step-path");
+        const histImg = document.getElementById("state-embedding-hist-img");
+        const histPath = document.getElementById("state-embedding-hist-path");
+        const diagLossPlot = document.getElementById("state-embedding-loss-plot");
+        const diagLossWrapper = document.getElementById("state-embedding-loss-wrapper");
+        const diagLossPin = document.getElementById("state-embedding-loss-pin");
+        const diagFigure = {{ figure | tojson if figure else 'null' }};
+        let diagLossPinned = false;
+
+        const assetPath = (rel) => `/assets/{{ experiment.id }}/${rel.replace(/^\/+/, "")}`;
+        const setImage = (imgEl, labelEl, actionEl, relPath, labelText, actionText) => {
+            if (!imgEl || !labelEl) return;
+            if (!relPath) {
+                imgEl.classList.add("d-none");
+                labelEl.textContent = "";
+                if (actionEl) actionEl.textContent = "Action: (not available)";
+                return;
+            }
+            imgEl.src = assetPath(relPath);
+            imgEl.alt = labelText || relPath;
+            imgEl.classList.remove("d-none");
+            labelEl.textContent = labelText || relPath;
+            if (actionEl) {
+                actionEl.textContent = actionText ? `Action: ${actionText}` : "Action: (not available)";
+            }
+        };
+
+        const updateFrameVisibility = (showPrior) => {
+            if (!frameRow) return;
+            const priorCol = frameRow.querySelector(".col-md-4:nth-child(2)");
+            if (priorCol) {
+                if (showPrior) {
+                    priorCol.classList.remove("d-none");
+                } else {
+                    priorCol.classList.add("d-none");
+                }
+            }
+        };
+
+        const stateEmbeddingMap = {};
+        {% if experiment.state_embedding_images %}
+        {% for img in experiment.state_embedding_images %}
+        {% if "hist" not in img.stem %}
+        {% set rel_img = img.relative_to(experiment.path) %}
+        {% set stem = img.stem.split('_')|last %}
+        {% set step = stem|int %}
+        stateEmbeddingMap[{{ step }}] = {
+            url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
+            path: "{{ rel_img }}",
+        };
+        {% endif %}
+        {% endfor %}
+        {% endif %}
+        const stateEmbeddingSteps = Object.keys(stateEmbeddingMap)
+            .map((k) => Number(k))
+            .filter((n) => !Number.isNaN(n))
+            .sort((a, b) => a - b);
+
+        const stateEmbeddingHistMap = {};
+        {% if experiment.state_embedding_images %}
+        {% for img in experiment.state_embedding_images %}
+        {% if "hist" in img.stem %}
+        {% set rel_img = img.relative_to(experiment.path) %}
+        {% set stem = img.stem.split('_')|last %}
+        {% set step = stem|int %}
+        stateEmbeddingHistMap[{{ step }}] = {
+            url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
+            path: "{{ rel_img }}",
+        };
+        {% endif %}
+        {% endfor %}
+        {% endif %}
+
+        const nearestStateStep = (step) => {
+            if (!stateEmbeddingSteps.length) return null;
+            let best = stateEmbeddingSteps[0];
+            let bestDiff = Math.abs(step - stateEmbeddingSteps[0]);
+            for (let i = 1; i < stateEmbeddingSteps.length; i++) {
+                const diff = Math.abs(step - stateEmbeddingSteps[i]);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
+                    best = stateEmbeddingSteps[i];
+                }
+            }
+            return best;
+        };
+
+        const updateStateEmbeddingImages = (step) => {
+            if (step === null || step === undefined) return;
+            const nearest = nearestStateStep(step);
+            if (nearest === null) {
+                if (stepImg) stepImg.classList.add("d-none");
+                if (stepPath) stepPath.textContent = "";
+                if (histImg) histImg.classList.add("d-none");
+                if (histPath) histPath.textContent = "";
+                return;
+            }
+            const stateEntry = stateEmbeddingMap[nearest];
+            if (stepImg) {
+                if (stateEntry) {
+                    stepImg.src = stateEntry.url;
+                    stepImg.classList.remove("d-none");
+                    if (stepPath) stepPath.textContent = `${stateEntry.path} (step ${nearest})`;
+                } else {
+                    stepImg.classList.add("d-none");
+                    if (stepPath) stepPath.textContent = "";
+                }
+            }
+            const histEntry = stateEmbeddingHistMap[nearest];
+            if (histImg) {
+                if (histEntry) {
+                    histImg.src = histEntry.url;
+                    histImg.classList.remove("d-none");
+                    if (histPath) histPath.textContent = `${histEntry.path} (step ${nearest})`;
+                } else {
+                    histImg.classList.add("d-none");
+                    if (histPath) histPath.textContent = "";
+                }
+            }
+        };
+
+        const applyStickyLossPlot = (enableSticky) => {
+            if (!diagLossWrapper || !diagLossPin) return;
+            if (enableSticky) {
+                diagLossWrapper.classList.add("sticky-active");
+                diagLossPin.classList.add("active");
+                diagLossPin.setAttribute("aria-pressed", "true");
+            } else {
+                diagLossWrapper.classList.remove("sticky-active");
+                diagLossPin.classList.remove("active");
+                diagLossPin.setAttribute("aria-pressed", "false");
+            }
+        };
+
+        if (diagLossPin) {
+            diagLossPin.addEventListener("click", () => {
+                diagLossPinned = !diagLossPinned;
+                applyStickyLossPlot(diagLossPinned);
+            });
+        }
+
+        const attachHover = (plotEl, mode) => {
+            plotEl.on("plotly_hover", (event) => {
+                const point = event?.points?.[0];
+                if (!point || !point.customdata) return;
+                const payload = point.customdata;
+                const trajectory = payload[0];
+                const step = payload[1];
+                const framePath = payload[2];
+                const firstPath = payload[3];
+                const priorPath = payload[4];
+                const frameLabelText = payload[5] || `t=${step}`;
+                const headerText = `${trajectory} - t=${step}`;
+                const actionText = payload[6] || "";
+
+                if (mode === "first") {
+                    updateFrameVisibility(false);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
+                    if (priorImg && priorLabel) {
+                        priorImg.classList.add("d-none");
+                        priorLabel.textContent = "";
+                        if (priorAction) priorAction.textContent = "";
+                    }
+                } else if (mode === "prior") {
+                    updateFrameVisibility(true);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
+                } else {
+                    updateFrameVisibility(true);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
+                }
+            });
+        };
+
+        const buildPlots = (rows) => {
+            if (!rows.length) {
+                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in state_embedding.csv.</p>";
+                if (priorPlot) priorPlot.innerHTML = "";
+                if (scatterPlot) scatterPlot.innerHTML = "";
+                if (firstPlotCos) firstPlotCos.innerHTML = "";
+                if (priorPlotCos) priorPlotCos.innerHTML = "";
+                if (scatterPlotCos) scatterPlotCos.innerHTML = "";
+                return;
+            }
+            const steps = rows.map(r => Number(r.timestep));
+            const distFirst = rows.map(r => Number(r.distance_to_first));
+            const distPrior = rows.map(r => Number(r.distance_to_prior));
+            const distFirstCos = rows.map(r => Number(r.cosine_distance_to_first ?? r.distance_to_first_cosine ?? 0));
+            const distPriorCos = rows.map(r => Number(r.cosine_distance_to_prior ?? r.distance_to_prior_cosine ?? 0));
+            const custom = rows.map(r => [
+                r.trajectory,
+                Number(r.timestep),
+                r.frame_path,
+                r.first_frame_path,
+                r.prior_frame_path,
+                r.frame_label,
+                r.action_label || "",
+            ]);
+
+            const layoutBase = {
+                margin: { t: 32, r: 16, l: 50, b: 50 },
+                template: "plotly_white",
+                height: 300,
+                title: { font: { size: 12 } },
+                font: { size: 11 },
+            };
+
+            const layoutLineChart = {
+                ...layoutBase,
+                hovermode: "x unified",
+                xaxis: {
+                    title: "timestep",
+                    showspikes: true,
+                    spikemode: "across",
+                    spikethickness: 1,
+                    spikedash: "dot",
+                    spikecolor: "#999",
+                },
+            };
+
+            Plotly.newPlot(
+                firstPlot,
+                [
+                    {
+                        x: steps,
+                        y: distFirst,
+                        mode: "lines+markers",
+                        name: "distance to first",
+                        marker: { size: 4 },
+                        line: { width: 1.5 },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Distance to first state",
+                    yaxis: { title: "||s0 - s_t||" },
+                },
+                plotConfig,
+            ).then(() => attachHover(firstPlot, "first"));
+
+            Plotly.newPlot(
+                priorPlot,
+                [
+                    {
+                        x: steps,
+                        y: distPrior,
+                        mode: "lines+markers",
+                        name: "distance to prior",
+                        marker: { size: 4, color: "orange" },
+                        line: { width: 1.5, color: "orange" },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Distance to prior state",
+                    yaxis: { title: "||s(t-1) - s_t||" },
+                },
+                plotConfig,
+            ).then(() => attachHover(priorPlot, "prior"));
+
+            Plotly.newPlot(
+                scatterPlot,
+                [
+                    {
+                        x: distFirst,
+                        y: distPrior,
+                        mode: "markers",
+                        name: "distance pairs",
+                        marker: {
+                            size: 5,
+                            color: steps,
+                            colorscale: "Viridis",
+                            showscale: true,
+                            colorbar: { title: "timestep" },
+                        },
+                        customdata: custom,
+                        hovertemplate: "dist vs first=%{x:.4f}<br>dist vs prior=%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutBase,
+                    hovermode: "closest",
+                    title: "Distance vs first vs prior",
+                    xaxis: { title: "||s0 - s_t||" },
+                    yaxis: { title: "||s(t-1) - s_t||" },
+                },
+                plotConfig,
+            ).then(() => attachHover(scatterPlot, "scatter"));
+
+            Plotly.newPlot(
+                firstPlotCos,
+                [
+                    {
+                        x: steps,
+                        y: distFirstCos,
+                        mode: "lines+markers",
+                        name: "cosine distance to first",
+                        marker: { size: 4, color: "green" },
+                        line: { width: 1.5, color: "green" },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Cosine distance to first state",
+                    yaxis: { title: "1 - cos(s0, s_t)" },
+                },
+                plotConfig,
+            ).then(() => attachHover(firstPlotCos, "first"));
+
+            Plotly.newPlot(
+                priorPlotCos,
+                [
+                    {
+                        x: steps,
+                        y: distPriorCos,
+                        mode: "lines+markers",
+                        name: "cosine distance to prior",
+                        marker: { size: 4, color: "red" },
+                        line: { width: 1.5, color: "red" },
+                        customdata: custom,
+                        hovertemplate: "%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutLineChart,
+                    title: "Cosine distance to prior state",
+                    yaxis: { title: "1 - cos(s(t-1), s_t)" },
+                },
+                plotConfig,
+            ).then(() => attachHover(priorPlotCos, "prior"));
+
+            Plotly.newPlot(
+                scatterPlotCos,
+                [
+                    {
+                        x: distFirstCos,
+                        y: distPriorCos,
+                        mode: "markers",
+                        name: "cosine distance pairs",
+                        marker: {
+                            size: 5,
+                            color: steps,
+                            colorscale: "Plasma",
+                            showscale: true,
+                            colorbar: { title: "timestep" },
+                        },
+                        customdata: custom,
+                        hovertemplate: "cos dist vs first=%{x:.4f}<br>cos dist vs prior=%{y:.4f}<extra></extra>",
+                    },
+                ],
+                {
+                    ...layoutBase,
+                    hovermode: "closest",
+                    title: "Cosine distance: first vs prior",
+                    xaxis: { title: "1 - cos(s0, s_t)" },
+                    yaxis: { title: "1 - cos(s(t-1), s_t)" },
+                },
+                plotConfig,
+            ).then(() => attachHover(scatterPlotCos, "scatter"));
+        };
+
+        Papa.parse(csvUrl, {
+            download: true,
+            header: true,
+            dynamicTyping: false,
+            skipEmptyLines: true,
+            complete: (results) => {
+                buildPlots(results.data || []);
+            },
+            error: () => {
+                if (firstPlot) firstPlot.innerHTML = "<p class='text-danger small'>Failed to load state embedding CSV.</p>";
+            }
+        });
+
+        if (diagFigure && diagLossPlot) {
+            Plotly.newPlot(diagLossPlot, diagFigure.data, diagFigure.layout, buildPlotlyConfig({displayModeBar: false})).then(() => {
+                diagLossPlot.on("plotly_hover", (eventData) => {
+                    if (!eventData || !eventData.points || !eventData.points.length) return;
+                    const point = eventData.points[0];
+                    const step = Number(point.x);
+                    updateStateEmbeddingImages(step);
+                });
+                diagLossPlot.on("plotly_unhover", () => {
+                    if (stateEmbeddingSteps.length) updateStateEmbeddingImages(stateEmbeddingSteps[stateEmbeddingSteps.length - 1]);
+                });
+                if (stateEmbeddingSteps.length) updateStateEmbeddingImages(stateEmbeddingSteps[stateEmbeddingSteps.length - 1]);
+            });
+        } else if (stateEmbeddingSteps.length) {
+            updateStateEmbeddingImages(stateEmbeddingSteps[stateEmbeddingSteps.length - 1]);
+        }
+    });
+</script>
+{% endif %}
+{% endblock %}

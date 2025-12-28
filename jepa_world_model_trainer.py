@@ -54,7 +54,14 @@ from jepa_world_model.vis import (
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
 from jepa_world_model.vis_action_alignment import save_action_alignment_detail_plot, save_action_alignment_plot
 from jepa_world_model.vis_graph_diagnostics import save_graph_diagnostics
+from jepa_world_model.loss_multi_scale_hardness import (
+    build_feature_pyramid,
+    multi_scale_hardness_loss_box,
+    multi_scale_hardness_loss_gaussian,
+)
 from jepa_world_model.vis_self_distance import write_self_distance_outputs
+from jepa_world_model.vis_state_embedding import write_state_embedding_outputs
+from jepa_world_model.vis_cycle_error import compute_cycle_errors, save_cycle_error_plot
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
 
 
@@ -102,27 +109,23 @@ class PredictorNetwork(nn.Module):
         action_dim: int,
         film_layers: int,
         state_dim: int,
-        state_embed_dim: int,
-        state_embed_unit_norm: bool,
     ) -> None:
         super().__init__()
         self.in_proj = nn.Linear(embedding_dim + action_dim + state_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
-        self.state_head = StateEmbeddingProjector(state_dim, state_embed_dim, hidden_dim, state_embed_unit_norm)
         self.activation = nn.SiLU(inplace=True)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.state_dim = state_dim
-        self.state_embed_dim = state_embed_dim
         self.delta_scale = 1.0
         self.use_delta_squash = False
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         if not (embeddings.shape[:-1] == actions.shape[:-1] == hidden_state.shape[:-1]):
             raise ValueError("Embeddings, hidden state, and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -139,12 +142,11 @@ class PredictorNetwork(nn.Module):
             delta = raw_delta * self.delta_scale
         pred = emb_flat + delta
         h_next = h_next.view(*original_shape, h_next.shape[-1])
-        s_pred = self.state_head(h_next)
         return (
             pred.view(*original_shape, pred.shape[-1]),
             delta.view(*original_shape, delta.shape[-1]),
             h_next,
-            s_pred,
+            None,
         )
 
     def shape_info(self) -> Dict[str, Any]:
@@ -154,7 +156,6 @@ class PredictorNetwork(nn.Module):
             "hidden_dim": self.hidden_dim,
             "action_dim": self.action_dim,
             "state_dim": self.state_dim,
-            "state_embed_dim": self.state_embed_dim,
             "conditioning": "concat(z,h,action)",
         }
 
@@ -622,10 +623,14 @@ class JEPAWorldModel(nn.Module):
             cfg.action_dim * 2,
             cfg.predictor_film_layers,
             cfg.state_dim,
-            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
-            cfg.state_embed_unit_norm,
         )
         self.state_dim = cfg.state_dim
+        self.state_head = StateEmbeddingProjector(
+            cfg.state_dim,
+            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            cfg.hidden_dim,
+            cfg.state_embed_unit_norm,
+        )
         self.h_to_z = HiddenToZProjector(
             cfg.state_dim,
             self.embedding_dim,
@@ -824,162 +829,6 @@ def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
     return SIGREG_LOSS(sorted_proj, sorted_normal)
 
 
-def gaussian_kernel_1d(size: int, sigma: float, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    if size <= 0:
-        raise ValueError("Gaussian kernel size must be positive.")
-    coords = torch.arange(size, device=device, dtype=dtype) - (size - 1) / 2
-    kernel = torch.exp(-0.5 * (coords / max(sigma, 1e-6)) ** 2)
-    kernel = kernel / kernel.sum().clamp_min(1e-6)
-    return kernel
-
-
-def gaussian_blur_separable_2d(x: torch.Tensor, kernel_1d: torch.Tensor, stride: int = 1) -> torch.Tensor:
-    """Apply separable Gaussian blur to a single-channel map."""
-    if stride <= 0:
-        raise ValueError("Gaussian blur stride must be positive.")
-    k = kernel_1d.numel()
-    pad = k // 2
-    vert = F.conv2d(x, kernel_1d.view(1, 1, k, 1), padding=pad, stride=stride)
-    horiz = F.conv2d(vert, kernel_1d.view(1, 1, 1, k), padding=pad, stride=stride)
-    return horiz
-
-
-def box_kernel_2d(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Normalized box filter over an NxN window."""
-    if size <= 0:
-        raise ValueError("Box kernel size must be positive.")
-    kernel = torch.ones((1, 1, size, size), device=device, dtype=dtype)
-    return kernel / kernel.sum().clamp_min(1e-6)
-
-
-def _build_feature_pyramid(
-    pred: torch.Tensor, target: torch.Tensor, num_scales: int
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    preds = [pred]
-    targets = [target]
-    for _ in range(1, num_scales):
-        pred = F.avg_pool2d(pred, kernel_size=2, stride=2)
-        target = F.avg_pool2d(target, kernel_size=2, stride=2)
-        preds.append(pred)
-        targets.append(target)
-    return preds, targets
-
-
-def multi_scale_hardness_loss_gaussian(
-    preds: List[torch.Tensor],
-    targets: List[torch.Tensor],
-    kernel_sizes: Sequence[int],
-    sigmas: Sequence[float],
-    betas: Sequence[float],
-    lambdas: Sequence[float],
-    strides: Sequence[int],
-    max_weight: float = 100.0,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """
-    Compute hardness-weighted loss over multiple scales.
-
-    • kernel_sizes: spatial support per scale (similar to patch size).
-    • sigmas: Gaussian blur stddev per scale (controls how far hardness spreads).
-    • betas: hardness exponents; higher beta emphasizes harder regions.
-    • lambdas: per-scale weights to balance contributions.
-    • strides: blur stride per scale (reduces compute; resampled back to original size if needed).
-    """
-    if max_weight <= 0:
-        raise ValueError("max_weight must be positive.")
-    if not (
-        len(preds)
-        == len(targets)
-        == len(kernel_sizes)
-        == len(sigmas)
-        == len(betas)
-        == len(lambdas)
-        == len(strides)
-    ):
-        raise ValueError("preds, targets, kernel_sizes, sigmas, betas, lambdas, and strides must share length.")
-    if not preds:
-        return torch.tensor(0.0, device="cpu")
-    total = preds[0].new_tensor(0.0)
-    for idx, (p, t) in enumerate(zip(preds, targets)):
-        if p.shape != t.shape:
-            raise ValueError(f"Pred/target shape mismatch at scale {idx}: {p.shape} vs {t.shape}")
-        k = int(kernel_sizes[idx])
-        sigma = float(sigmas[idx])
-        beta = float(betas[idx])
-        lam = float(lambdas[idx])
-        stride = int(strides[idx])
-        if stride <= 0:
-            raise ValueError("Gaussian hardness stride must be positive.")
-        per_pixel = ((p - t) ** 2).mean(dim=1, keepdim=True)
-        per_pixel_detached = per_pixel.detach()
-        g1d = gaussian_kernel_1d(k, sigma, device=per_pixel.device, dtype=per_pixel.dtype)
-        blurred_weight = gaussian_blur_separable_2d(per_pixel_detached, g1d, stride=stride)
-        if blurred_weight.shape[-2:] != per_pixel.shape[-2:]:
-            blurred_weight = F.interpolate(blurred_weight, size=per_pixel.shape[-2:], mode="nearest")
-        weight = (blurred_weight + eps).pow(beta).clamp(max=max_weight)
-        scale_loss = (weight * (per_pixel + eps)).mean()
-        total = total + lam * scale_loss
-    return total
-
-
-def multi_scale_hardness_loss_box(
-    preds: List[torch.Tensor],
-    targets: List[torch.Tensor],
-    kernel_sizes: Sequence[int],
-    betas: Sequence[float],
-    lambdas: Sequence[float],
-    strides: Sequence[int],
-    max_weight: float = 100.0,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """
-    Compute hardness-weighted loss over multiple scales with a convolutional approximation of patch-style hardness.
-    """
-    if max_weight <= 0:
-        raise ValueError("max_weight must be positive.")
-    if not (
-        len(preds)
-        == len(targets)
-        == len(kernel_sizes)
-        == len(betas)
-        == len(lambdas)
-        == len(strides)
-    ):
-        raise ValueError("preds, targets, kernel_sizes, betas, lambdas, and strides must share length.")
-    if not preds:
-        return torch.tensor(0.0, device="cpu")
-    total = preds[0].new_tensor(0.0)
-    for idx, (p, t) in enumerate(zip(preds, targets)):
-        if p.shape != t.shape:
-            raise ValueError(f"Pred/target shape mismatch at scale {idx}: {p.shape} vs {t.shape}")
-        k = int(kernel_sizes[idx])
-        beta = float(betas[idx])
-        lam = float(lambdas[idx])
-        stride = int(strides[idx])
-        if stride <= 0:
-            raise ValueError("Box hardness stride must be positive.")
-        _, _, h, w = p.shape
-        k_eff = min(k, h, w)
-        # Clamp kernel/stride to valid spatial support so deeper pyramid levels still contribute.
-        stride_eff = max(1, min(stride, k_eff))
-        per_pixel_l1 = (p - t).abs().mean(dim=1, keepdim=True)  # Bx1xHxW
-        per_pixel_detached = per_pixel_l1.detach()
-        # Valid pooling (no padding) to avoid border bleed; stride can mimic patch overlap (e.g., k//2).
-        norm = F.avg_pool2d(per_pixel_detached, kernel_size=k_eff, stride=stride_eff, padding=0)
-        coverage = F.avg_pool2d(torch.ones_like(per_pixel_detached), kernel_size=k_eff, stride=stride_eff, padding=0)
-        # Upsample pooled maps back to full resolution for per-pixel weighting.
-        if norm.shape[-2:] != per_pixel_l1.shape[-2:]:
-            norm = F.interpolate(norm, size=per_pixel_l1.shape[-2:], mode="bilinear", align_corners=False)
-            coverage = F.interpolate(coverage, size=per_pixel_l1.shape[-2:], mode="bilinear", align_corners=False)
-        norm = norm.clamp_min(eps)
-        coverage = coverage.clamp_min(eps)
-        weight = (per_pixel_detached / norm).pow(beta).clamp(max=max_weight)
-        weighted_sum = (weight * per_pixel_l1).sum()
-        scale_loss = weighted_sum / coverage.sum()
-        total = total + lam * scale_loss
-    return total
-
-
 def patch_recon_loss(
     recon: torch.Tensor, target: torch.Tensor, patch_sizes: Sequence[int]
 ) -> torch.Tensor:
@@ -1033,7 +882,7 @@ def multi_scale_recon_loss_gauss(
     recon_bt = recon.reshape(-1, *recon.shape[2:])
     target_bt = target.reshape(-1, *target.shape[2:])
     num_scales = len(cfg.kernel_sizes)
-    preds_scales, targets_scales = _build_feature_pyramid(recon_bt, target_bt, num_scales)
+    preds_scales, targets_scales = build_feature_pyramid(recon_bt, target_bt, num_scales)
     loss_raw = multi_scale_hardness_loss_gaussian(
         preds_scales,
         targets_scales,
@@ -1056,7 +905,7 @@ def multi_scale_recon_loss_box(
     recon_bt = recon.reshape(-1, *recon.shape[2:])
     target_bt = target.reshape(-1, *target.shape[2:])
     num_scales = len(cfg.kernel_sizes)
-    preds_scales, targets_scales = _build_feature_pyramid(recon_bt, target_bt, num_scales)
+    preds_scales, targets_scales = build_feature_pyramid(recon_bt, target_bt, num_scales)
     loss_raw = multi_scale_hardness_loss_box(
         preds_scales,
         targets_scales,
@@ -2657,119 +2506,6 @@ def _build_action_alignment_debug(
     }
 
 
-def _compute_cycle_errors(
-    z_proj_sequences: List[np.ndarray],
-    actions_seq: np.ndarray,
-    inverse_map: Dict[int, int],
-    include_synthetic: bool = False,
-) -> Tuple[List[Tuple[int, float]], Dict[int, List[float]]]:
-    errors: List[Tuple[int, float]] = []
-    per_action: Dict[int, List[float]] = defaultdict(list)
-    if actions_seq.shape[0] != len(z_proj_sequences):
-        return errors, per_action
-    # First, gather observed forward-then-inverse cycles from the data.
-    for seq_idx, z_seq in enumerate(z_proj_sequences):
-        seq_actions = actions_seq[seq_idx]
-        action_ids = compress_actions_to_ids(seq_actions)
-        if len(action_ids) < 3:
-            continue
-        for t in range(len(action_ids) - 2):
-            a = int(action_ids[t])
-            b = int(action_ids[t + 1])
-            start_idx: Optional[int] = None
-            end_idx: Optional[int] = None
-            if inverse_map.get(a) == b:
-                start_idx, end_idx = t, t + 2
-                action_for_log = a
-            elif inverse_map.get(b) == a:
-                # Symmetric assumption: inverse moves back along the trajectory.
-                if t - 1 >= 0:
-                    start_idx, end_idx = t - 1, t + 1
-                    action_for_log = b
-                else:
-                    start_idx = end_idx = None
-            else:
-                start_idx = end_idx = None
-            if start_idx is None or end_idx is None:
-                continue
-            if end_idx >= len(z_seq):
-                continue
-            cycle_err = float(np.linalg.norm(z_seq[end_idx] - z_seq[start_idx]))
-            errors.append((action_for_log, cycle_err))
-            per_action[action_for_log].append(cycle_err)
-    if include_synthetic:
-        # Synthesize forward-backward cycles for every observed transition to
-        # increase per-action sample counts. We assume the inverse action returns
-        # to the starting state, so the ideal round-trip error is near zero.
-        for seq_idx, z_seq in enumerate(z_proj_sequences):
-            seq_actions = actions_seq[seq_idx]
-            action_ids = compress_actions_to_ids(seq_actions)
-            max_t = min(len(action_ids), z_seq.shape[0] - 1)
-            for t in range(max_t):
-                a = int(action_ids[t])
-                # Expected end state after inverse step is the start state at t.
-                cycle_err = float(np.linalg.norm(z_seq[t] - z_seq[t]))
-                errors.append((a, cycle_err))
-                per_action[a].append(cycle_err)
-    return errors, per_action
-
-
-def _save_cycle_error_plot(
-    out_path: Path,
-    errors: List[float],
-    per_action: Dict[int, List[float]],
-    action_dim: int,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    if errors:
-        axes[0].hist(errors, bins=20, color="tab:green", alpha=0.8)
-        axes[0].set_title("Cycle error distribution")
-        axes[0].set_xlabel("||z_t - z_{t+2}||")
-        axes[0].set_ylabel("count")
-    else:
-        axes[0].text(0.5, 0.5, "No action+inverse pairs found.", ha="center", va="center")
-        axes[0].axis("off")
-
-    if per_action:
-        actions_sorted = sorted(per_action.items(), key=lambda kv: len(kv[1]), reverse=True)
-        labels = [decode_action_id(aid, action_dim) for aid, _ in actions_sorted]
-        x = np.arange(len(actions_sorted))
-        rng = np.random.default_rng(0)
-        for idx, (aid, vals) in enumerate(actions_sorted):
-            vals_arr = np.asarray(vals, dtype=np.float32)
-            if vals_arr.size == 0:
-                continue
-            jitter = rng.uniform(-0.2, 0.2, size=vals_arr.shape[0])
-            axes[1].scatter(
-                np.full_like(vals_arr, x[idx], dtype=np.float32) + jitter,
-                vals_arr,
-                s=18,
-                alpha=0.35,
-                color="tab:blue",
-                edgecolors="none",
-            )
-            axes[1].plot(
-                [x[idx] - 0.25, x[idx] + 0.25],
-                [vals_arr.mean(), vals_arr.mean()],
-                color="tab:red",
-                linewidth=2,
-                alpha=0.9,
-            )
-            axes[1].text(x[idx], vals_arr.mean(), f"n={len(vals_arr)}", ha="center", va="bottom", fontsize=8)
-        axes[1].set_xticks(x)
-        axes[1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
-        axes[1].set_ylabel("cycle error")
-        axes[1].set_title("Cycle error by action (strip plot)")
-    else:
-        axes[1].text(0.5, 0.5, "No per-action stats available.", ha="center", va="center")
-        axes[1].axis("off")
-
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
 def _write_action_alignment_report(
     alignment_dir: Path,
     global_step: int,
@@ -3137,13 +2873,9 @@ def _save_diagnostics_frames(
             action_id: Optional[int] = None
             action_label = ""
             if actions is not None and actions.ndim >= 2 and orig_idx < actions.shape[0]:
-                try:
-                    action_vec = actions[orig_idx, 0].detach().cpu().numpy()
-                    action_id = int(compress_actions_to_ids(action_vec[None, ...])[0])
-                    action_label = decode_action_id(action_id, actions.shape[-1])
-                except Exception:
-                    action_id = None
-                    action_label = ""
+                action_vec = actions[orig_idx, 0].detach().cpu().numpy()
+                action_id = int(compress_actions_to_ids(action_vec[None, ...])[0])
+                action_label = decode_action_id(action_id, actions.shape[-1])
             records.append((out_idx, img_rel, src, action_id, action_label))
 
     if not records:
@@ -3156,13 +2888,9 @@ def _save_diagnostics_frames(
             action_id: Optional[int] = None
             action_label = ""
             if actions is not None and actions.ndim >= 2 and orig_idx < actions.shape[0]:
-                try:
-                    action_vec = actions[orig_idx, 0].detach().cpu().numpy()
-                    action_id = int(compress_actions_to_ids(action_vec[None, ...])[0])
-                    action_label = decode_action_id(action_id, actions.shape[-1])
-                except Exception:
-                    action_id = None
-                    action_label = ""
+                action_vec = actions[orig_idx, 0].detach().cpu().numpy()
+                action_id = int(compress_actions_to_ids(action_vec[None, ...])[0])
+                action_label = decode_action_id(action_id, actions.shape[-1])
             records.append(
                 (
                     out_idx,
@@ -3302,13 +3030,13 @@ def _save_diagnostics_outputs(
         motion["delta_proj"],
     )
     cycle_path = cycle_dir / f"cycle_error_{global_step:07d}.png"
-    errors, per_action = _compute_cycle_errors(
+    errors, per_action = compute_cycle_errors(
         motion["z_proj_sequences"],
         motion["actions_seq"],
         inverse_map,
         include_synthetic=cfg.synthesize_cycle_samples,
     )
-    _save_cycle_error_plot(cycle_path, [e[1] for e in errors], per_action, motion["action_dim"])
+    save_cycle_error_plot(cycle_path, [e[1] for e in errors], per_action, motion["action_dim"])
     _write_diagnostics_csvs(
         delta_dir,
         alignment_dir,
@@ -3540,6 +3268,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     inputs_vis_dir = run_dir / "vis_inputs"
     pair_vis_dir = run_dir / "vis_pairs"
     vis_self_distance_dir = run_dir / "vis_self_distance"
+    vis_state_embedding_dir = run_dir / "vis_state_embedding"
+    state_embedding_dir = run_dir / "state_embedding"
     self_distance_dir = run_dir / "self_distance"
     checkpoints_dir = run_dir / "checkpoints"
 
@@ -3558,6 +3288,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_dir.mkdir(parents=True, exist_ok=True)
+    vis_state_embedding_dir.mkdir(parents=True, exist_ok=True)
+    state_embedding_dir.mkdir(parents=True, exist_ok=True)
     self_distance_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3619,29 +3351,24 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     graph_diag_dataset: Optional[TrajectorySequenceDataset] = None
     graph_diag_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
     if cfg.graph_diagnostics.enabled:
-        try:
-            graph_seq_len = max(cfg.graph_diagnostics.chunk_len, 3)
-            graph_diag_dataset = TrajectorySequenceDataset(
-                root=cfg.data_root,
-                seq_len=graph_seq_len,
-                image_hw=(model_cfg.image_size, model_cfg.image_size),
-                max_traj=None,
-                included_trajectories=train_trajs,
+        graph_seq_len = max(cfg.graph_diagnostics.chunk_len, 3)
+        graph_diag_dataset = TrajectorySequenceDataset(
+            root=cfg.data_root,
+            seq_len=graph_seq_len,
+            image_hw=(model_cfg.image_size, model_cfg.image_size),
+            max_traj=None,
+            included_trajectories=train_trajs,
+        )
+        graph_action_dim = getattr(graph_diag_dataset, "action_dim", dataset_action_dim)
+        if graph_action_dim != dataset_action_dim:
+            raise AssertionError(
+                f"Graph diagnostics action_dim {graph_action_dim} does not match train action_dim {dataset_action_dim}"
             )
-            graph_action_dim = getattr(graph_diag_dataset, "action_dim", dataset_action_dim)
-            if graph_action_dim != dataset_action_dim:
-                raise AssertionError(
-                    f"Graph diagnostics action_dim {graph_action_dim} does not match train action_dim {dataset_action_dim}"
-                )
-            graph_diag_batch_cpu = _build_embedding_batch(
-                graph_diag_dataset,
-                cfg.graph_diagnostics.sample_chunks,
-                generator=diagnostics_generator,
-            )
-        except Exception as exc:
-            print(f"[graph_diag] Failed to build graph diagnostics batch: {exc}")
-            graph_diag_dataset = None
-            graph_diag_batch_cpu = None
+        graph_diag_batch_cpu = _build_embedding_batch(
+            graph_diag_dataset,
+            cfg.graph_diagnostics.sample_chunks,
+            generator=diagnostics_generator,
+        )
 
     hard_reservoir = (
         HardSampleReservoir(cfg.hard_example.reservoir, rng=hard_reservoir_rng) if cfg.hard_example.reservoir > 0 else None
@@ -3755,14 +3482,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
     diagnostics_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
     if cfg.diagnostics.enabled and cfg.diagnostics.sample_sequences > 0:
-        try:
-            diagnostics_batch_cpu = _build_embedding_batch(
-                dataset,
-                cfg.diagnostics.sample_sequences,
-                generator=diagnostics_generator,
-            )
-        except Exception as exc:
-            print(f"[diagnostics] Failed to build batch: {exc}")
+        diagnostics_batch_cpu = _build_embedding_batch(
+            dataset,
+            cfg.diagnostics.sample_sequences,
+            generator=diagnostics_generator,
+        )
 
     def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
         total_time = sum(totals.values())
@@ -3979,6 +3703,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         vis_self_distance_dir,
                         global_step,
                     )
+                if self_distance_inputs is not None:
+                    hist_frames = rolling_batch_cpu[0] if rolling_batch_cpu is not None else None
+                    write_state_embedding_outputs(
+                        model,
+                        self_distance_inputs,
+                        device,
+                        state_embedding_dir,
+                        vis_state_embedding_dir,
+                        global_step,
+                        hist_frames_cpu=hist_frames,
+                    )
                 if (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0):
                     sigma_adj = max(cfg.adjacency.sigma_aug, 0.0)
                     noisy_batch = gaussian_augment(rolling_batch_cpu[0], sigma_adj)
@@ -4009,19 +3744,16 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 if cfg.graph_diagnostics.enabled:
                     graph_frames = graph_diag_batch_cpu[0] if graph_diag_batch_cpu is not None else rolling_batch_cpu[0]
                     graph_actions = graph_diag_batch_cpu[1] if graph_diag_batch_cpu is not None else rolling_batch_cpu[1]
-                    try:
-                        save_graph_diagnostics(
-                            model,
-                            ema_model,
-                            graph_frames,
-                            graph_actions,
-                            device,
-                            cfg.graph_diagnostics,
-                            graph_diagnostics_dir,
-                            global_step,
-                        )
-                    except Exception as exc:
-                        print(f"[graph_diag] Failed to compute graph diagnostics: {exc}")
+                    save_graph_diagnostics(
+                        model,
+                        ema_model,
+                        graph_frames,
+                        graph_actions,
+                        device,
+                        cfg.graph_diagnostics,
+                        graph_diagnostics_dir,
+                        global_step,
+                    )
 
             # --- Train ---
             model.train()

@@ -221,6 +221,39 @@ def _plot_in_degree_hist(out_path: Path, in_degree: np.ndarray) -> None:
     plt.close(fig)
 
 
+def _plot_edge_consistency_hist(out_path: Path, edge_errors: np.ndarray) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(edge_errors, bins=30, color="tab:gray", alpha=0.85)
+    ax.set_title("Predictor-edge consistency (||zhat - zT||^2)")
+    ax.set_xlabel("error")
+    ax.set_ylabel("count")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _compute_edge_errors(
+    probs: torch.Tensor,
+    top_idx: torch.Tensor,
+    zhat_full: torch.Tensor,
+    target_flat: torch.Tensor,
+    k: int,
+    sample_limit: int,
+) -> Optional[np.ndarray]:
+    total_edges = probs.shape[0] * k
+    sample = min(sample_limit, total_edges)
+    if sample <= 0:
+        return None
+    perm = torch.randperm(total_edges, device=probs.device)[:sample]
+    rows = perm // k
+    cols = perm % k
+    tgt_cols = top_idx[rows, cols]
+    pred_vec = zhat_full[rows]
+    tgt_vec = target_flat[tgt_cols]
+    return ((pred_vec - tgt_vec) ** 2).sum(dim=1).detach().cpu().numpy()
+
+
 def _plot_graph_history(out_path: Path, history: List[Dict[str, float]], k: int) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
@@ -279,6 +312,7 @@ def save_graph_diagnostics(
         raise ValueError("Graph diagnostics requires frames shaped [B, T, C, H, W].")
     if frames_cpu.shape[1] < 3:
         return
+    # Encode sequences and build predictor rollouts.
     with torch.no_grad():
         frames = frames_cpu.to(device)
         actions = actions_cpu.to(device)
@@ -291,6 +325,7 @@ def save_graph_diagnostics(
     batch_size, seq_len, latent_dim = embeddings.shape
     next_index, next2_index, chunk_ids = _flatten_graph_diag_indices(frames)
 
+    # Prepare flattened latent tensors and normalization.
     z_flat = embeddings.reshape(-1, latent_dim)
     target_flat = targets.reshape(-1, latent_dim)
     zhat_full = torch.cat([preds, embeddings[:, -1:, :]], dim=1).reshape(-1, latent_dim)
@@ -300,6 +335,7 @@ def save_graph_diagnostics(
         target_flat = F.normalize(target_flat, dim=-1)
         zhat_full = F.normalize(zhat_full, dim=-1)
 
+    # Build transition matrices and rank-based metrics.
     queries = zhat_full if cfg.use_predictor_scores else z_flat
     probs = _build_graph_transition_matrix(queries, target_flat, cfg)
     probs2 = probs @ probs
@@ -310,6 +346,7 @@ def save_graph_diagnostics(
     hit1_at_k = float((ranks1 <= k).mean()) if ranks1.size else float("nan")
     hit2_at_k = float((ranks2 <= k).mean()) if ranks2.size else float("nan")
 
+    # Neighborhood-size and connectivity diagnostics.
     neff1 = _graph_effective_neighborhood(probs, cfg.eps)
     neff2 = _graph_effective_neighborhood(probs2, cfg.eps)
     neff1_np = neff1.detach().cpu().numpy()
@@ -339,19 +376,19 @@ def save_graph_diagnostics(
     else:
         top_mean = float("nan")
 
+    # Edge-consistency sampling.
     edge_errors: Optional[np.ndarray] = None
     if cfg.include_edge_consistency and k > 0:
-        total_edges = probs.shape[0] * k
-        sample = min(cfg.edge_consistency_samples, total_edges)
-        if sample > 0:
-            perm = torch.randperm(total_edges, device=probs.device)[:sample]
-            rows = perm // k
-            cols = perm % k
-            tgt_cols = top_idx[rows, cols]
-            pred_vec = zhat_full[rows]
-            tgt_vec = target_flat[tgt_cols]
-            edge_errors = ((pred_vec - tgt_vec) ** 2).sum(dim=1).detach().cpu().numpy()
+        edge_errors = _compute_edge_errors(
+            probs,
+            top_idx,
+            zhat_full,
+            target_flat,
+            k,
+            cfg.edge_consistency_samples,
+        )
 
+    # Persist metrics and plots.
     metrics: Dict[str, float] = {
         "step": float(global_step),
         "hit1_at_k": hit1_at_k,
@@ -372,14 +409,7 @@ def save_graph_diagnostics(
     _plot_neff_violin(out_dir / f"neff_violin_{global_step:07d}.png", neff1_np, neff2_np)
     _plot_in_degree_hist(out_dir / f"in_degree_hist_{global_step:07d}.png", in_degree)
     if edge_errors is not None:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.hist(edge_errors, bins=30, color="tab:gray", alpha=0.85)
-        ax.set_title("Predictor-edge consistency (||zhat - zT||^2)")
-        ax.set_xlabel("error")
-        ax.set_ylabel("count")
-        fig.tight_layout()
-        fig.savefig(out_dir / f"edge_consistency_{global_step:07d}.png", dpi=200, bbox_inches="tight")
-        plt.close(fig)
+        _plot_edge_consistency_hist(out_dir / f"edge_consistency_{global_step:07d}.png", edge_errors)
 
     history_path = _graph_history_path(out_dir)
     history = _write_graph_history(history_path, metrics)

@@ -440,6 +440,24 @@
                             </svg>
                         </button>
                         {% endif %}
+                        {% if exp.state_embedding_csv %}
+                            <a
+                                href="{{ url_for('state_embedding', exp_id=exp.id) }}"
+                                class="btn btn-outline-primary btn-sm"
+                                aria-label="State Embedding"
+                                title="State Embedding"
+                            >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M2 3h12v2H2zm0 4h12v2H2zm0 4h12v2H2z"/>
+                            </svg>
+                        </a>
+                        {% else %}
+                            <button class="btn btn-outline-secondary btn-sm" disabled aria-label="State Embedding" title="state embedding outputs missing">
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M2 3h12v2H2zm0 4h12v2H2zm0 4h12v2H2z"/>
+                            </svg>
+                        </button>
+                        {% endif %}
                     </div>
                 </div>
             </div>

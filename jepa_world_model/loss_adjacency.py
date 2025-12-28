@@ -194,7 +194,7 @@ def adjacency_losses(
 
     plan_embeddings = embeddings.detach() if cfg.detach_encoder else embeddings
     h_plan = model.z_to_h(plan_embeddings)
-    states = model.predictor.state_head(h_plan)
+    states = model.state_head(h_plan)
 
     loss_adj0 = zero
     if weights.adj0 > 0:
@@ -205,7 +205,7 @@ def adjacency_losses(
         if cfg.detach_encoder:
             z_noisy = z_noisy.detach()
         h_noisy = model.z_to_h(z_noisy)
-        states_noisy = model.predictor.state_head(h_noisy)
+        states_noisy = model.state_head(h_noisy)
         loss_adj0 = adjacency_loss_adj0(states, states_noisy, weights, cfg)
 
     state_dim = states.shape[-1]

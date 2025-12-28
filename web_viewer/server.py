@@ -393,6 +393,103 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
+    @app.route("/state_embedding", defaults={"exp_id": None})
+    @app.route("/state_embedding/<exp_id>")
+    def state_embedding(exp_id: Optional[str]):
+        requested = exp_id or request.args.get("id")
+
+        def _latest_state_embedding_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                csv_dir = row.path / "state_embedding"
+                if csv_dir.exists() and any(csv_dir.glob("state_embedding_*.csv")):
+                    return row.id
+            return None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                csv_dir = requested_path / "state_embedding"
+                if csv_dir.exists() and any(csv_dir.glob("state_embedding_*.csv")):
+                    selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_state_embedding_id()
+
+        index_rows = build_experiment_index(cfg.output_dir)
+        experiment_ids = [row.id for row in sorted(index_rows, key=lambda r: r.id, reverse=True)]
+
+        if selected_id is None:
+            return render_template(
+                "state_embedding_page.html",
+                experiments=experiment_ids,
+                experiment=None,
+                state_embedding_map={},
+                state_embedding_steps=[],
+                cfg=cfg,
+                active_nav="state_embedding",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_self_distance=False,
+            include_diagnostics_images=False,
+            include_diagnostics_frames=False,
+            include_graph_diagnostics=False,
+        )
+        if selected is None or selected.state_embedding_csv is None:
+            abort(404, "Experiment not found for state embedding diagnostics.")
+
+        figure = _build_single_experiment_figure(selected)
+
+        state_map: Dict[str, Dict[int, str]] = {"state_embedding": {}, "state_embedding_hist": {}}
+        steps: List[int] = []
+        for path in selected.state_embedding_images:
+            stem = path.stem
+            try:
+                rel = path.relative_to(selected.path)
+            except ValueError:
+                continue
+            if stem.startswith("state_embedding_hist_"):
+                key = "state_embedding_hist"
+                prefix = "state_embedding_hist_"
+            elif stem.startswith("state_embedding_"):
+                key = "state_embedding"
+                prefix = "state_embedding_"
+            else:
+                continue
+            suffix = stem[len(prefix) :]
+            try:
+                step = int(suffix)
+            except ValueError:
+                continue
+            state_map[key][step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if key == "state_embedding":
+                steps.append(step)
+        steps = sorted(set(steps))
+
+        return render_template(
+            "state_embedding_page.html",
+            experiments=experiment_ids,
+            experiment=selected,
+            figure=figure,
+            state_embedding_map=state_map,
+            state_embedding_steps=steps,
+            cfg=cfg,
+            active_nav="state_embedding",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
     @app.route("/diagnostics", defaults={"exp_id": None})
     @app.route("/diagnostics/<exp_id>")
     def diagnostics(exp_id: Optional[str]):
@@ -698,6 +795,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 def _build_overlay_data(experiments: List[Experiment]):
     curve_map: Dict[str, LossCurveData] = {}
     trace_ids: Dict[str, str] = {}
+    seen_labels = set()
     for experiment in experiments:
         if experiment.loss_csv is None:
             continue
@@ -712,13 +810,15 @@ def _build_overlay_data(experiments: List[Experiment]):
         if not filtered:
             continue
         label = experiment.title if experiment.title and experiment.title != "Untitled" else experiment.name
-        curve_map[label] = LossCurveData(
+        unique_label = label if label not in seen_labels else f"{label} ({experiment.id})"
+        seen_labels.add(label)
+        curve_map[unique_label] = LossCurveData(
             steps=curves.steps,
             cumulative_flops=curves.cumulative_flops,
             elapsed_seconds=curves.elapsed_seconds,
             series=filtered,
         )
-        trace_ids[label] = experiment.id
+        trace_ids[unique_label] = experiment.id
     return build_overlay(curve_map, trace_ids=trace_ids)
 
 

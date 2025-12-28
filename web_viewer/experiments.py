@@ -108,6 +108,9 @@ class Experiment:
     self_distance_csv: Optional[Path]
     self_distance_images: List[Path]
     self_distance_csvs: List[Path]
+    state_embedding_csv: Optional[Path]
+    state_embedding_images: List[Path]
+    state_embedding_csvs: List[Path]
     diagnostics_images: Dict[str, List[Path]]
     diagnostics_steps: List[int]
     diagnostics_csvs: Dict[str, List[Path]]
@@ -167,6 +170,7 @@ def load_experiment(
     include_diagnostics_images: bool = True,
     include_diagnostics_frames: bool = True,
     include_graph_diagnostics: bool = True,
+    include_state_embedding: bool = True,
     include_last_modified: bool = True,
 ) -> Optional[Experiment]:
     if not path.is_dir():
@@ -199,6 +203,25 @@ def load_experiment(
         csvs=len(self_distance_csvs),
         images=len(self_distance_images),
         included=include_self_distance,
+    )
+    section_start = time.perf_counter()
+
+    state_embedding_images: List[Path] = []
+    state_embedding_csvs: List[Path] = []
+    latest_state_embedding_csv: Optional[Path] = None
+    if include_state_embedding:
+        state_embedding_images = _collect_state_embedding_images(path)
+        state_embedding_csvs = _collect_state_embedding_csvs(path)
+        latest_state_embedding_csv = state_embedding_csvs[-1] if state_embedding_csvs else None
+    else:
+        latest_state_embedding_csv = _quick_state_embedding_csv(path)
+    _profile(
+        "load_experiment.state_embedding",
+        section_start,
+        path,
+        images=len(state_embedding_images),
+        csvs=len(state_embedding_csvs),
+        included=include_state_embedding,
     )
     section_start = time.perf_counter()
 
@@ -301,6 +324,9 @@ def load_experiment(
         self_distance_csv=latest_self_distance_csv,
         self_distance_images=self_distance_images,
         self_distance_csvs=self_distance_csvs,
+        state_embedding_csv=latest_state_embedding_csv,
+        state_embedding_images=state_embedding_images,
+        state_embedding_csvs=state_embedding_csvs,
         diagnostics_images=diagnostics_images,
         diagnostics_steps=diagnostics_steps,
         diagnostics_csvs=diagnostics_csvs,
@@ -681,6 +707,7 @@ VIS_STEP_SPECS = [
     ("embeddings", "embeddings", "embeddings_*.png", "embeddings_"),
     ("samples_hard", "samples_hard", "hard_*.png", "hard_"),
     ("vis_self_distance", "vis_self_distance", "self_distance_*.png", "self_distance_"),
+    ("vis_state_embedding", "vis_state_embedding", "state_embedding_[0-9]*.png", "state_embedding_"),
     ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
     ("vis_action_alignment", "vis_action_alignment", "action_alignment_*.png", "action_alignment_"),
     ("vis_action_alignment_detail", "vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
@@ -735,6 +762,20 @@ def _collect_self_distance_images(root: Path) -> List[Path]:
     return sorted(folder.glob("self_distance_*.png"))
 
 
+def _collect_state_embedding_images(root: Path) -> List[Path]:
+    folder = root / "vis_state_embedding"
+    if not folder.exists():
+        return []
+    return sorted(folder.glob("state_embedding_*.png"))
+
+
+def _collect_state_embedding_csvs(root: Path) -> List[Path]:
+    folder = root / "state_embedding"
+    if not folder.exists():
+        return []
+    return sorted(folder.glob("state_embedding_*.csv"))
+
+
 def _collect_self_distance_csvs(root: Path) -> List[Path]:
     folder = root / "self_distance"
     if not folder.exists():
@@ -778,6 +819,16 @@ def _quick_self_distance_csv(root: Path) -> Optional[Path]:
     if not folder.exists():
         return None
     for path in folder.glob("self_distance_*.csv"):
+        return path
+    return None
+
+
+def _quick_state_embedding_csv(root: Path) -> Optional[Path]:
+    """Cheap existence check for state embedding outputs."""
+    folder = root / "state_embedding"
+    if not folder.exists():
+        return None
+    for path in folder.glob("state_embedding_*.csv"):
         return path
     return None
 
