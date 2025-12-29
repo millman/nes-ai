@@ -118,6 +118,9 @@ class Experiment:
     graph_diagnostics_images: Dict[str, List[Path]]
     graph_diagnostics_steps: List[int]
     graph_diagnostics_csvs: Dict[str, List[Path]]
+    graph_diagnostics_s_images: Dict[str, List[Path]]
+    graph_diagnostics_s_steps: List[int]
+    graph_diagnostics_s_csvs: Dict[str, List[Path]]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -171,6 +174,7 @@ def load_experiment(
     include_diagnostics_frames: bool = True,
     include_graph_diagnostics: bool = True,
     include_state_embedding: bool = True,
+    include_graph_diagnostics_s: Optional[bool] = None,
     include_last_modified: bool = True,
 ) -> Optional[Experiment]:
     if not path.is_dir():
@@ -236,15 +240,25 @@ def load_experiment(
     else:
         diagnostics_steps = [0] if _diagnostics_exists(path) else []
     diagnostics_frames = _collect_diagnostics_frames(path) if include_diagnostics_frames else {}
+    include_graph_diagnostics_s = include_graph_diagnostics if include_graph_diagnostics_s is None else include_graph_diagnostics_s
     graph_diagnostics_images: Dict[str, List[Path]] = {}
     graph_diagnostics_steps: List[int] = []
     graph_diagnostics_csvs: Dict[str, List[Path]] = {}
+    graph_diagnostics_s_images: Dict[str, List[Path]] = {}
+    graph_diagnostics_s_steps: List[int] = []
+    graph_diagnostics_s_csvs: Dict[str, List[Path]] = {}
     if include_graph_diagnostics:
         graph_diagnostics_images = _collect_graph_diagnostics_images(path)
         graph_diagnostics_steps = _collect_graph_diagnostics_steps(graph_diagnostics_images)
         graph_diagnostics_csvs = _collect_graph_diagnostics_csvs(path)
     else:
         graph_diagnostics_steps = [0] if _graph_diagnostics_exists(path) else []
+    if include_graph_diagnostics_s:
+        graph_diagnostics_s_images = _collect_graph_diagnostics_images(path, folder_name="graph_diagnostics_s")
+        graph_diagnostics_s_steps = _collect_graph_diagnostics_steps(graph_diagnostics_s_images)
+        graph_diagnostics_s_csvs = _collect_graph_diagnostics_csvs(path, folder_name="graph_diagnostics_s")
+    else:
+        graph_diagnostics_s_steps = [0] if _graph_diagnostics_exists(path, folder_name="graph_diagnostics_s") else []
     _profile(
         "load_experiment.diagnostics",
         section_start,
@@ -257,6 +271,9 @@ def load_experiment(
         graph_images=sum(len(v) for v in graph_diagnostics_images.values()),
         graph_steps=len(graph_diagnostics_steps),
         graph_csvs=sum(len(v) for v in graph_diagnostics_csvs.values()),
+        graph_s_images=sum(len(v) for v in graph_diagnostics_s_images.values()),
+        graph_s_steps=len(graph_diagnostics_s_steps),
+        graph_s_csvs=sum(len(v) for v in graph_diagnostics_s_csvs.values()),
         include_graph=include_graph_diagnostics,
         include_images=include_diagnostics_images,
     )
@@ -334,6 +351,9 @@ def load_experiment(
         graph_diagnostics_images=graph_diagnostics_images,
         graph_diagnostics_steps=graph_diagnostics_steps,
         graph_diagnostics_csvs=graph_diagnostics_csvs,
+        graph_diagnostics_s_images=graph_diagnostics_s_images,
+        graph_diagnostics_s_steps=graph_diagnostics_s_steps,
+        graph_diagnostics_s_csvs=graph_diagnostics_s_csvs,
     )
 
 
@@ -713,12 +733,18 @@ VIS_STEP_SPECS = [
     ("vis_action_alignment_detail", "vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_cycle_error", "vis_cycle_error", "cycle_error_*.png", "cycle_error_"),
     ("vis_adjacency", "vis_adjacency", "adjacency_*.png", "adjacency_"),
-    ("graph_rank1_cdf", "graph_diagnostics", "rank1_cdf_*.png", "rank1_cdf_"),
-    ("graph_rank2_cdf", "graph_diagnostics", "rank2_cdf_*.png", "rank2_cdf_"),
-    ("graph_neff_violin", "graph_diagnostics", "neff_violin_*.png", "neff_violin_"),
-    ("graph_in_degree_hist", "graph_diagnostics", "in_degree_hist_*.png", "in_degree_hist_"),
-    ("graph_edge_consistency", "graph_diagnostics", "edge_consistency_*.png", "edge_consistency_"),
-    ("graph_metrics_history", "graph_diagnostics", "metrics_history_*.png", "metrics_history_"),
+    ("vis_graph_rank1_cdf", "graph_diagnostics", "rank1_cdf_*.png", "rank1_cdf_"),
+    ("vis_graph_rank2_cdf", "graph_diagnostics", "rank2_cdf_*.png", "rank2_cdf_"),
+    ("vis_graph_neff_violin", "graph_diagnostics", "neff_violin_*.png", "neff_violin_"),
+    ("vis_graph_in_degree_hist", "graph_diagnostics", "in_degree_hist_*.png", "in_degree_hist_"),
+    ("vis_graph_edge_consistency", "graph_diagnostics", "edge_consistency_*.png", "edge_consistency_"),
+    ("vis_graph_metrics_history", "graph_diagnostics", "metrics_history_*.png", "metrics_history_"),
+    ("vis_graph_rank1_cdf_s", "graph_diagnostics_s", "rank1_cdf_*.png", "rank1_cdf_"),
+    ("vis_graph_rank2_cdf_s", "graph_diagnostics_s", "rank2_cdf_*.png", "rank2_cdf_"),
+    ("vis_graph_neff_violin_s", "graph_diagnostics_s", "neff_violin_*.png", "neff_violin_"),
+    ("vis_graph_in_degree_hist_s", "graph_diagnostics_s", "in_degree_hist_*.png", "in_degree_hist_"),
+    ("vis_graph_edge_consistency_s", "graph_diagnostics_s", "edge_consistency_*.png", "edge_consistency_"),
+    ("vis_graph_metrics_history_s", "graph_diagnostics_s", "metrics_history_*.png", "metrics_history_"),
 ]
 
 
@@ -962,8 +988,8 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str, s
     return frame_map
 
 
-def _collect_graph_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
-    folder = root / "graph_diagnostics"
+def _collect_graph_diagnostics_images(root: Path, folder_name: str = "graph_diagnostics") -> Dict[str, List[Path]]:
+    folder = root / folder_name
     if not folder.exists():
         return {}
     specs = [
@@ -998,8 +1024,8 @@ def _collect_graph_diagnostics_steps(graph_images: Dict[str, List[Path]]) -> Lis
     return sorted(steps)
 
 
-def _collect_graph_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
-    folder = root / "graph_diagnostics"
+def _collect_graph_diagnostics_csvs(root: Path, folder_name: str = "graph_diagnostics") -> Dict[str, List[Path]]:
+    folder = root / folder_name
     if not folder.exists():
         return {}
     csvs: Dict[str, List[Path]] = {}
@@ -1009,8 +1035,8 @@ def _collect_graph_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
     return csvs
 
 
-def _graph_diagnostics_exists(root: Path) -> bool:
-    folder = root / "graph_diagnostics"
+def _graph_diagnostics_exists(root: Path, folder_name: str = "graph_diagnostics") -> bool:
+    folder = root / folder_name
     if not folder.exists():
         return False
     try:

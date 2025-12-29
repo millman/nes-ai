@@ -87,7 +87,7 @@ def save_cycle_error_plot(
         axes[0].axis("off")
 
     if per_action:
-        actions_sorted = sorted(per_action.items(), key=lambda kv: len(kv[1]), reverse=True)
+        actions_sorted = sorted(per_action.items(), key=lambda kv: kv[0])
         labels = [decode_action_id(aid, action_dim) for aid, _ in actions_sorted]
         x = np.arange(len(actions_sorted))
         rng = np.random.default_rng(0)

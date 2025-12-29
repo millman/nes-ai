@@ -39,15 +39,18 @@
     grid-row: 1 / span 2;
 }
 
-.diag-self-distance {
+.diag-self-distance,
+.diag-self-distance-s {
     grid-column: 1 / span 2;
 }
 
-.diag-cosine {
+.diag-cosine,
+.diag-cosine-s {
     grid-column: 3 / span 1;
 }
 
-.diag-cycle {
+.diag-cycle,
+.diag-cycle-s {
     grid-column: 4 / span 1;
 }
 
@@ -111,12 +114,15 @@
     }
     .diag-delta,
     .diag-align-detail,
-    .diag-self-distance {
+    .diag-self-distance,
+    .diag-self-distance-s {
         grid-column: 1 / span 2;
         grid-row: auto;
     }
     .diag-cosine,
-    .diag-cycle {
+    .diag-cycle,
+    .diag-cosine-s,
+    .diag-cycle-s {
         grid-column: span 1;
     }
 }
@@ -128,8 +134,11 @@
     .diag-delta,
     .diag-align-detail,
     .diag-self-distance,
+    .diag-self-distance-s,
     .diag-cosine,
-    .diag-cycle {
+    .diag-cycle,
+    .diag-cosine-s,
+    .diag-cycle-s {
         grid-column: 1;
         grid-row: auto;
     }
@@ -201,24 +210,47 @@
 </div>
 <div class="diagnostic-grid-bottom mb-3">
     <div class="card h-100 diag-self-distance">
-        <div class="card-header py-2" id="diagnostics-self-distance-header">Self-distance</div>
+        <div class="card-header py-2" id="diagnostics-self-distance-header">Self-distance (Z)</div>
         <div class="card-body d-flex flex-column gap-2">
             <img id="diagnostics-self-distance-img" class="img-fluid rounded border d-none" alt="Self-distance diagnostic">
             <div class="text-muted small" id="diagnostics-self-distance-caption"></div>
         </div>
     </div>
     <div class="card h-100 diag-cosine">
-        <div class="card-header py-2" id="diagnostics-alignment-header">Cosine alignment</div>
+        <div class="card-header py-2" id="diagnostics-alignment-header">Cosine alignment (Z)</div>
         <div class="card-body d-flex flex-column gap-2">
             <img id="diagnostics-alignment-img" class="img-fluid rounded border d-none" alt="Cosine alignment diagnostic">
             <div class="text-muted small" id="diagnostics-alignment-caption"></div>
         </div>
     </div>
     <div class="card h-100 diag-cycle">
-        <div class="card-header py-2" id="diagnostics-cycle-header">Cycle error</div>
+        <div class="card-header py-2" id="diagnostics-cycle-header">Cycle error (Z)</div>
         <div class="card-body d-flex flex-column gap-2">
             <img id="diagnostics-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error diagnostic">
             <div class="text-muted small" id="diagnostics-cycle-caption"></div>
+        </div>
+    </div>
+</div>
+<div class="diagnostic-grid-bottom mb-3">
+    <div class="card h-100 diag-self-distance-s">
+        <div class="card-header py-2" id="diagnostics-self-distance-s-header">Self-distance (S)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-self-distance-s-img" class="img-fluid rounded border d-none" alt="Self-distance (S) diagnostic">
+            <div class="text-muted small" id="diagnostics-self-distance-s-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100 diag-cosine-s">
+        <div class="card-header py-2" id="diagnostics-alignment-s-header">Cosine alignment (S)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-alignment-s-img" class="img-fluid rounded border d-none" alt="Cosine alignment (S) diagnostic">
+            <div class="text-muted small" id="diagnostics-alignment-s-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100 diag-cycle-s">
+        <div class="card-header py-2" id="diagnostics-cycle-s-header">Cycle error (S)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-cycle-s-img" class="img-fluid rounded border d-none" alt="Cycle error (S) diagnostic">
+            <div class="text-muted small" id="diagnostics-cycle-s-caption"></div>
         </div>
     </div>
 </div>
@@ -306,7 +338,7 @@ document.addEventListener("DOMContentLoaded", () => {
             img: document.getElementById("diagnostics-alignment-img"),
             caption: document.getElementById("diagnostics-alignment-caption"),
             header: document.getElementById("diagnostics-alignment-header"),
-            title: "Cosine alignment",
+            title: "Cosine alignment (Z)",
             label: "vis_action_alignment",
         },
         action_alignment_detail: {
@@ -320,15 +352,36 @@ document.addEventListener("DOMContentLoaded", () => {
             img: document.getElementById("diagnostics-cycle-img"),
             caption: document.getElementById("diagnostics-cycle-caption"),
             header: document.getElementById("diagnostics-cycle-header"),
-            title: "Cycle error",
+            title: "Cycle error (Z)",
             label: "vis_cycle_error",
         },
         self_distance: {
             img: document.getElementById("diagnostics-self-distance-img"),
             caption: document.getElementById("diagnostics-self-distance-caption"),
             header: document.getElementById("diagnostics-self-distance-header"),
-            title: "Self-distance",
+            title: "Self-distance (Z)",
             label: "self_distance",
+        },
+        self_distance_s: {
+            img: document.getElementById("diagnostics-self-distance-s-img"),
+            caption: document.getElementById("diagnostics-self-distance-s-caption"),
+            header: document.getElementById("diagnostics-self-distance-s-header"),
+            title: "Self-distance (S)",
+            label: "self_distance_s",
+        },
+        action_alignment_s: {
+            img: document.getElementById("diagnostics-alignment-s-img"),
+            caption: document.getElementById("diagnostics-alignment-s-caption"),
+            header: document.getElementById("diagnostics-alignment-s-header"),
+            title: "Cosine alignment (S)",
+            label: "vis_action_alignment_s",
+        },
+        cycle_error_s: {
+            img: document.getElementById("diagnostics-cycle-s-img"),
+            caption: document.getElementById("diagnostics-cycle-s-caption"),
+            header: document.getElementById("diagnostics-cycle-s-header"),
+            title: "Cycle error (S)",
+            label: "vis_cycle_error_s",
         },
     };
     const frameSlider = document.getElementById("diagnostics-frame");

@@ -67,7 +67,7 @@
         {% if experiment %}
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
-        <h3 class="mb-1">Self-distance</h3>
+        <h3 class="mb-1">{{ page_title if page_title is defined else "Self-distance" }}</h3>
         <div class="text-muted small">No experiments with self_distance.csv</div>
         {% endif %}
     </div>

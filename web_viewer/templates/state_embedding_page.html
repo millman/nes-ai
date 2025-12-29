@@ -67,7 +67,7 @@
         {% if experiment %}
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
-        <h3 class="mb-1">State embedding</h3>
+        <h3 class="mb-1">{{ page_title if page_title is defined else "State embedding" }}</h3>
         <div class="text-muted small">No experiments with state_embedding.csv</div>
         {% endif %}
     </div>
@@ -217,6 +217,7 @@
         const diagLossPin = document.getElementById("state-embedding-loss-pin");
         const diagFigure = {{ figure | tojson if figure else 'null' }};
         let diagLossPinned = false;
+        let lastHoveredStep = null;
 
         const assetPath = (rel) => `/assets/{{ experiment.id }}/${rel.replace(/^\/+/, "")}`;
         const setImage = (imgEl, labelEl, actionEl, relPath, labelText, actionText) => {
@@ -296,8 +297,11 @@
             return best;
         };
 
-        const updateStateEmbeddingImages = (step) => {
+        const updateStateEmbeddingImages = (step, { updateLastHovered = true } = {}) => {
             if (step === null || step === undefined) return;
+            if (updateLastHovered) {
+                lastHoveredStep = step;
+            }
             const nearest = nearestStateStep(step);
             if (nearest === null) {
                 if (stepImg) stepImg.classList.add("d-none");
@@ -602,7 +606,9 @@
                     updateStateEmbeddingImages(step);
                 });
                 diagLossPlot.on("plotly_unhover", () => {
-                    if (stateEmbeddingSteps.length) updateStateEmbeddingImages(stateEmbeddingSteps[stateEmbeddingSteps.length - 1]);
+                    if (lastHoveredStep !== null) {
+                        updateStateEmbeddingImages(lastHoveredStep, { updateLastHovered: false });
+                    }
                 });
                 if (stateEmbeddingSteps.length) updateStateEmbeddingImages(stateEmbeddingSteps[stateEmbeddingSteps.length - 1]);
             });

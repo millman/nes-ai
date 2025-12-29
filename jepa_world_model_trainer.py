@@ -376,6 +376,8 @@ class LossWeights:
 
     # Action controller input reconstruction
     action_recon: float = 1.0
+    # Action prediction from s-deltas (state embedding).
+    action_s: float = 0.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
@@ -607,6 +609,11 @@ class JEPAWorldModel(nn.Module):
         )
         self.action_delta_head = ActionDeltaHead(
             self.embedding_dim,
+            cfg.hidden_dim,
+            cfg.action_dim,
+        )
+        self.action_delta_head_s = ActionDeltaHead(
+            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
         )
@@ -989,6 +996,12 @@ def _compute_losses_and_metrics(
         loss_action = ACTION_RECON_LOSS(action_logits, prev_actions)
     else:
         loss_action = images.new_tensor(0.0)
+    loss_action_s = images.new_tensor(0.0)
+    if weights.action_s > 0 and prev_actions.numel() > 0:
+        s_states = model.state_head(h_states)
+        s_delta_true = s_states[:, 1:] - s_states[:, :-1]
+        action_logits_s = model.action_delta_head_s(s_delta_true)
+        loss_action_s = ACTION_RECON_LOSS(action_logits_s, prev_actions)
 
     with torch.no_grad():
         if prev_actions.numel() > 0:
@@ -1096,6 +1109,7 @@ def _compute_losses_and_metrics(
         + weights.consistency * _scaled("loss_consistency", loss_consistency)
         + weights.ema_consistency * _scaled("loss_ema_consistency", loss_ema_consistency)
         + weights.action_recon * _scaled("loss_action", loss_action)
+        + weights.action_s * _scaled("loss_action_s", loss_action_s)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
@@ -1145,6 +1159,7 @@ def _compute_losses_and_metrics(
         "loss_recon_multi_box": loss_recon_multi_box.item(),
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_action": loss_action.item(),
+        "loss_action_s": loss_action_s.item(),
         "loss_h2z": loss_h2z.item(),
         "loss_delta": loss_delta.item(),
         "delta_pred_norm": delta_pred_norm.item(),
@@ -1366,6 +1381,8 @@ def log_metrics(
         filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
     if weights.action_recon <= 0:
         filtered.pop("loss_action", None)
+    if weights.action_s <= 0:
+        filtered.pop("loss_action_s", None)
     if weights.h2z <= 0:
         filtered.pop("loss_h2z", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
@@ -1403,6 +1420,7 @@ LOSS_COLUMNS = [
     "loss_recon_multi_box",
     "loss_recon_patch",
     "loss_action",
+    "loss_action_s",
     "loss_h2z",
     "loss_delta",
     "delta_pred_norm",
@@ -1441,6 +1459,7 @@ class LossHistory:
     recon_multi_box: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
     action: List[float] = field(default_factory=list)
+    action_s: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
     delta: List[float] = field(default_factory=list)
     delta_pred_norm: List[float] = field(default_factory=list)
@@ -1476,6 +1495,7 @@ class LossHistory:
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.action.append(metrics["loss_action"])
+        self.action_s.append(metrics["loss_action_s"])
         self.h2z.append(metrics["loss_h2z"])
         self.delta.append(metrics["loss_delta"])
         self.delta_pred_norm.append(metrics["delta_pred_norm"])
@@ -1522,6 +1542,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.recon_multi_box,
             history.recon_patch,
             history.action,
+            history.action_s,
             history.h2z,
             history.delta,
             history.delta_pred_norm,
@@ -1559,7 +1580,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         "rollout": _color(4),
         "consistency": _color(5),
         "action": _color(6),
-        "ema_consistency": _color(7),
+        "action_s": _color(7),
+        "ema_consistency": _color(8),
     }
     plt.plot(history.steps, history.world, label="world", color=color_map["world"])
     if any(val != 0.0 for val in history.val_world):
@@ -1583,6 +1605,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         plt.plot(history.steps, history.ema_consistency, label="ema_consistency", color=color_map["ema_consistency"])
     if any(val != 0.0 for val in history.action):
         plt.plot(history.steps, history.action, label="action_recon", color=color_map["action"])
+    if any(val != 0.0 for val in history.action_s):
+        plt.plot(history.steps, history.action_s, label="action_s", color=color_map["action_s"])
     if any(val != 0.0 for val in history.recon_patch):
         plt.plot(history.steps, history.recon_patch, label="recon_patch", color=_color(8))
     if any(val != 0.0 for val in history.recon_multi_gauss):
@@ -1851,6 +1875,14 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     delta_head_flops += _linear_flops(hidden_dim, action_dim)
     delta_head_total = delta_head_flops * num_predictions
 
+    # --- Action-from-s-delta head (per transition) ---
+    s_dim = cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim
+    s_delta_head_flops = 0
+    s_delta_head_flops += _linear_flops(s_dim, hidden_dim)
+    s_delta_head_flops += _linear_flops(hidden_dim, hidden_dim)
+    s_delta_head_flops += _linear_flops(hidden_dim, action_dim)
+    s_delta_head_total = s_delta_head_flops * num_predictions
+
     # --- Decoder FLOPs (per frame) ---
     decoder_schedule = cfg.decoder_schedule if cfg.decoder_schedule is not None else cfg.encoder_schedule
     num_layers = len(decoder_schedule)
@@ -1881,7 +1913,7 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     decoder_total = decoder_flops * batch_size * seq_len
 
     # --- Total ---
-    forward_total = encoder_total + predictor_total + decoder_total + delta_head_total
+    forward_total = encoder_total + predictor_total + decoder_total + delta_head_total + s_delta_head_total
     backward_total = forward_total * 2  # Backward is roughly 2x forward
     total_per_step = forward_total + backward_total
 
@@ -3183,6 +3215,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_cycle_dir = run_dir / "vis_cycle_error"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
     graph_diagnostics_dir = run_dir / "graph_diagnostics"
+    graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
     adjacency_vis_dir = run_dir / "vis_adjacency"
     samples_hard_dir = run_dir / "samples_hard"
     samples_hard_val_dir = run_dir / "samples_hard_val"
@@ -3205,6 +3238,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        graph_diagnostics_s_dir.mkdir(parents=True, exist_ok=True)
     adjacency_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
@@ -3623,6 +3657,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         self_distance_dir,
                         vis_self_distance_dir,
                         global_step,
+                        embedding_label="z",
+                        title_prefix="Self-distance (Z)",
+                        file_prefix="self_distance",
                     )
                 if self_distance_inputs is not None:
                     hist_frames = rolling_batch_cpu[0] if rolling_batch_cpu is not None else None
@@ -3676,6 +3713,20 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         cfg.graph_diagnostics,
                         graph_diagnostics_dir,
                         global_step,
+                        embedding_kind="z",
+                        history_csv_path=metrics_dir / "graph_diagnostics_z.csv",
+                    )
+                    save_graph_diagnostics(
+                        model,
+                        ema_model,
+                        graph_frames,
+                        graph_actions,
+                        device,
+                        cfg.graph_diagnostics,
+                        graph_diagnostics_s_dir,
+                        global_step,
+                        embedding_kind="s",
+                        history_csv_path=metrics_dir / "graph_diagnostics_s.csv",
                     )
 
             # --- Train ---
@@ -3708,6 +3759,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 self_distance_dir,
                 vis_self_distance_dir,
                 last_step if last_step >= 0 else 0,
+                embedding_label="z",
+                title_prefix="Self-distance (Z)",
+                file_prefix="self_distance",
             )
     if last_step >= 0:
         _save_checkpoint(

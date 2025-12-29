@@ -2,15 +2,14 @@
 """State embedding diagnostics outputs."""
 from __future__ import annotations
 
-import csv
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
+from jepa_world_model.vis_self_distance import write_self_distance_outputs_from_embeddings
 
 
 def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
@@ -43,125 +42,6 @@ def _rollout_hidden_states(
         h_states[:, step + 1] = h_next
         h_t = h_next
     return h_states
-
-
-def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    denom = torch.norm(a, dim=-1) * torch.norm(b, dim=-1)
-    denom = torch.clamp(denom, min=1e-8)
-    cos = (a * b).sum(dim=-1) / denom
-    return 1.0 - cos.clamp(-1.0, 1.0)
-
-
-def write_state_embedding_csv(
-    csv_path: Path,
-    trajectory_label: str,
-    frame_paths: List[Path],
-    frame_labels: List[str],
-    actions: np.ndarray,
-    action_labels: List[str],
-    action_dim: int,
-    steps: List[int],
-    dist_first_np,
-    dist_prior_np,
-    dist_first_cos_np,
-    dist_prior_cos_np,
-) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "trajectory",
-        "trajectory_label",
-        "timestep",
-        "distance_to_first",
-        "distance_to_prior",
-        "cosine_distance_to_first",
-        "cosine_distance_to_prior",
-        "frame_path",
-        "first_frame_path",
-        "prior_frame_path",
-        "frame_label",
-        "action_id",
-        "action_label",
-    ]
-    if not frame_paths:
-        return
-    first_frame = frame_paths[0].as_posix()
-    with csv_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for idx, step in enumerate(steps):
-            prior_idx = max(0, idx - 1)
-            action_id = int(compress_actions_to_ids(actions[idx : idx + 1])[0])
-            action_label = (
-                action_labels[idx]
-                if idx < len(action_labels)
-                else decode_action_id(action_id, action_dim)
-            )
-            writer.writerow(
-                {
-                    "trajectory": trajectory_label,
-                    "trajectory_label": trajectory_label,
-                    "timestep": step,
-                    "distance_to_first": float(dist_first_np[idx]),
-                    "distance_to_prior": float(dist_prior_np[idx]),
-                    "cosine_distance_to_first": float(dist_first_cos_np[idx]),
-                    "cosine_distance_to_prior": float(dist_prior_cos_np[idx]),
-                    "frame_path": frame_paths[idx].as_posix(),
-                    "first_frame_path": first_frame,
-                    "prior_frame_path": frame_paths[prior_idx].as_posix(),
-                    "frame_label": frame_labels[idx]
-                    if idx < len(frame_labels)
-                    else f"t={step}",
-                    "action_id": action_id,
-                    "action_label": action_label,
-                }
-            )
-
-
-def write_state_embedding_plots(
-    plot_dir: Path,
-    trajectory_label: str,
-    steps: List[int],
-    dist_first_np,
-    dist_prior_np,
-    dist_first_cos_np,
-    dist_prior_cos_np,
-    global_step: int,
-) -> None:
-    plot_dir.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8.5))
-    axes[0, 0].plot(steps, dist_first_np, marker="o")
-    axes[0, 0].set_title("Distance to first")
-    axes[0, 0].set_xlabel("timestep")
-    axes[0, 0].set_ylabel("||s0 - s_t||")
-    axes[0, 1].plot(steps, dist_prior_np, marker="o", color="tab:orange")
-    axes[0, 1].set_title("Distance to prior")
-    axes[0, 1].set_xlabel("timestep")
-    axes[0, 1].set_ylabel("||s(t-1) - s_t||")
-    sc0 = axes[0, 2].scatter(dist_first_np, dist_prior_np, c=steps, cmap="viridis", s=20)
-    axes[0, 2].set_title("Distance to first vs prior")
-    axes[0, 2].set_xlabel("||s0 - s_t||")
-    axes[0, 2].set_ylabel("||s(t-1) - s_t||")
-
-    axes[1, 0].plot(steps, dist_first_cos_np, marker="o", color="tab:green")
-    axes[1, 0].set_title("Cosine distance to first")
-    axes[1, 0].set_xlabel("timestep")
-    axes[1, 0].set_ylabel("1 - cos(s0, s_t)")
-    axes[1, 1].plot(steps, dist_prior_cos_np, marker="o", color="tab:red")
-    axes[1, 1].set_title("Cosine distance to prior")
-    axes[1, 1].set_xlabel("timestep")
-    axes[1, 1].set_ylabel("1 - cos(s(t-1), s_t)")
-    sc1 = axes[1, 2].scatter(dist_first_cos_np, dist_prior_cos_np, c=steps, cmap="plasma", s=20)
-    axes[1, 2].set_title("Cosine distance to first vs prior")
-    axes[1, 2].set_xlabel("1 - cos(s0, s_t)")
-    axes[1, 2].set_ylabel("1 - cos(s(t-1), s_t)")
-
-    fig.suptitle(f"State embedding: {trajectory_label}", fontsize=12)
-    fig.colorbar(sc0, ax=axes[0, 2], label="timestep")
-    fig.colorbar(sc1, ax=axes[1, 2], label="timestep")
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
-    out_path = plot_dir / f"state_embedding_{global_step:07d}.png"
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
 
 def write_state_embedding_histogram(
@@ -219,57 +99,16 @@ def write_state_embedding_outputs(
     if s.shape[0] < 1:
         return
 
-    dist_to_first = torch.norm(s - s[0:1], dim=-1)
-    dist_to_first_cos = _cosine_distance(s, s[0:1])
-
-    deltas = s[1:] - s[:-1]
-    dist_to_prior = torch.cat(
-        [
-            dist_to_first.new_zeros(1),
-            torch.norm(deltas, dim=-1),
-        ],
-        dim=0,
-    )
-    dist_to_prior_cos = torch.cat(
-        [
-            dist_to_first_cos.new_zeros(1),
-            _cosine_distance(s[1:], s[:-1]),
-        ],
-        dim=0,
-    )
-    steps = list(range(warmup, warmup + dist_to_first.shape[0]))
-    dist_first_np = dist_to_first.detach().cpu().numpy()
-    dist_prior_np = dist_to_prior.detach().cpu().numpy()
-    dist_first_cos_np = dist_to_first_cos.detach().cpu().numpy()
-    dist_prior_cos_np = dist_to_prior_cos.detach().cpu().numpy()
-    csv_path = csv_dir / f"state_embedding_{global_step:06d}.csv"
-    frame_paths = traj_inputs.frame_paths[warmup:]
-    frame_labels = traj_inputs.frame_labels[warmup:]
-    actions_np = traj_inputs.actions[warmup:]
-    action_labels = traj_inputs.action_labels[warmup:]
-    write_state_embedding_csv(
-        csv_path,
-        traj_inputs.trajectory_label,
-        frame_paths,
-        frame_labels,
-        actions_np,
-        action_labels,
-        traj_inputs.action_dim,
-        steps,
-        dist_first_np,
-        dist_prior_np,
-        dist_first_cos_np,
-        dist_prior_cos_np,
-    )
-    write_state_embedding_plots(
+    write_self_distance_outputs_from_embeddings(
+        s,
+        traj_inputs,
+        csv_dir,
         plot_dir,
-        traj_inputs.trajectory_label,
-        steps,
-        dist_first_np,
-        dist_prior_np,
-        dist_first_cos_np,
-        dist_prior_cos_np,
         global_step,
+        embedding_label="s",
+        title_prefix="Self-distance (S)",
+        file_prefix="state_embedding",
+        start_index=warmup,
     )
 
     hist_frames = hist_frames_cpu if hist_frames_cpu is not None else traj_inputs.frames

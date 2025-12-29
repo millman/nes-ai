@@ -221,11 +221,15 @@ def _plot_in_degree_hist(out_path: Path, in_degree: np.ndarray) -> None:
     plt.close(fig)
 
 
-def _plot_edge_consistency_hist(out_path: Path, edge_errors: np.ndarray) -> None:
+def _plot_edge_consistency_hist(
+    out_path: Path,
+    edge_errors: np.ndarray,
+    embedding_label: str,
+) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(edge_errors, bins=30, color="tab:gray", alpha=0.85)
-    ax.set_title("Predictor-edge consistency (||zhat - zT||^2)")
+    ax.set_title(f"Predictor-edge consistency (||{embedding_label}hat - {embedding_label}T||^2)")
     ax.set_xlabel("error")
     ax.set_ylabel("count")
     fig.tight_layout()
@@ -306,6 +310,8 @@ def save_graph_diagnostics(
     cfg: GraphDiagnosticsConfig,
     out_dir: Path,
     global_step: int,
+    embedding_kind: str = "z",
+    history_csv_path: Optional[Path] = None,
 ) -> None:
     from jepa_world_model_trainer import _predictor_rollout
     if frames_cpu.ndim != 5:
@@ -317,18 +323,34 @@ def save_graph_diagnostics(
         frames = frames_cpu.to(device)
         actions = actions_cpu.to(device)
         embeddings = model.encode_sequence(frames)["embeddings"]
-        targets = embeddings
+        preds, _, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
+        ema_embeddings: Optional[torch.Tensor] = None
+        ema_h_states: Optional[torch.Tensor] = None
         if cfg.use_ema_targets and ema_model is not None:
-            targets = ema_model.encode_sequence(frames)["embeddings"]
-        preds, _, _, _ = _predictor_rollout(model, embeddings, actions)
+            ema_embeddings = ema_model.encode_sequence(frames)["embeddings"]
+            if embedding_kind == "s":
+                _, _, _, ema_h_states = _predictor_rollout(ema_model, ema_embeddings, actions)
 
     batch_size, seq_len, latent_dim = embeddings.shape
     next_index, next2_index, chunk_ids = _flatten_graph_diag_indices(frames)
 
     # Prepare flattened latent tensors and normalization.
-    z_flat = embeddings.reshape(-1, latent_dim)
-    target_flat = targets.reshape(-1, latent_dim)
-    zhat_full = torch.cat([preds, embeddings[:, -1:, :]], dim=1).reshape(-1, latent_dim)
+    embedding_label = embedding_kind
+    if embedding_kind == "s":
+        s_targets = model.state_head(h_states)
+        s_hat_full = torch.cat([model.state_head(h_preds), model.state_head(h_states[:, -1:, :])], dim=1)
+        if cfg.use_ema_targets and ema_model is not None and ema_h_states is not None:
+            targets = ema_model.state_head(ema_h_states)
+        else:
+            targets = s_targets
+        z_flat = s_targets.reshape(-1, s_targets.shape[-1])
+        target_flat = targets.reshape(-1, targets.shape[-1])
+        zhat_full = s_hat_full.reshape(-1, s_hat_full.shape[-1])
+    else:
+        targets = ema_embeddings if cfg.use_ema_targets and ema_embeddings is not None else embeddings
+        z_flat = embeddings.reshape(-1, latent_dim)
+        target_flat = targets.reshape(-1, latent_dim)
+        zhat_full = torch.cat([preds, embeddings[:, -1:, :]], dim=1).reshape(-1, latent_dim)
 
     if cfg.normalize_latents:
         z_flat = F.normalize(z_flat, dim=-1)
@@ -409,10 +431,17 @@ def save_graph_diagnostics(
     _plot_neff_violin(out_dir / f"neff_violin_{global_step:07d}.png", neff1_np, neff2_np)
     _plot_in_degree_hist(out_dir / f"in_degree_hist_{global_step:07d}.png", in_degree)
     if edge_errors is not None:
-        _plot_edge_consistency_hist(out_dir / f"edge_consistency_{global_step:07d}.png", edge_errors)
+        _plot_edge_consistency_hist(
+            out_dir / f"edge_consistency_{global_step:07d}.png",
+            edge_errors,
+            embedding_label=embedding_label,
+        )
 
     history_path = _graph_history_path(out_dir)
     history = _write_graph_history(history_path, metrics)
+    if history_csv_path is not None:
+        history_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(history_path, history_csv_path)
     history_plot = out_dir / f"metrics_history_{global_step:07d}.png"
     _plot_graph_history(history_plot, history, k)
     latest_plot = out_dir / "metrics_history_latest.png"
