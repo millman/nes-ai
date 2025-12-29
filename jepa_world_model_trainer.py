@@ -516,7 +516,7 @@ class TrainConfig:
 
     # Dataset & batching
     max_trajectories: Optional[int] = None
-    seq_len: int = 8
+    seq_len: int = 16
     batch_size: int = 8
 
     # Optimization
@@ -575,6 +575,30 @@ class VisualizationSequence:
     reconstructions: torch.Tensor
     labels: List[str]
     actions: List[str] = field(default_factory=list)
+
+
+def _assert_adjacency_requirements(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights) -> None:
+    warmup_frames = max(getattr(model_cfg, "state_warmup_frames", 0), 0)
+    warmup = max(min(warmup_frames, cfg.seq_len - 1), 0)
+    remaining = cfg.seq_len - warmup
+    if weights.adj0 > 0 and remaining < 2:
+        raise AssertionError(
+            "adj0 requires at least 2 frames after warmup, "
+            f"got seq_len={cfg.seq_len} with state_warmup_frames={warmup_frames} "
+            f"(remaining={remaining})."
+        )
+    if weights.adj1 > 0 and remaining < 2:
+        raise AssertionError(
+            "adj1 requires at least 2 frames after warmup, "
+            f"got seq_len={cfg.seq_len} with state_warmup_frames={warmup_frames} "
+            f"(remaining={remaining})."
+        )
+    if weights.adj2 > 0 and remaining < 3:
+        raise AssertionError(
+            "adj2 requires at least 3 frames after warmup, "
+            f"got seq_len={cfg.seq_len} with state_warmup_frames={warmup_frames} "
+            f"(remaining={remaining})."
+        )
 
 
 class JEPAWorldModel(nn.Module):
@@ -3203,6 +3227,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     vis_selection_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     training_vis_generator = torch.Generator()
     training_vis_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+
+    _assert_adjacency_requirements(cfg, model_cfg, weights)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp

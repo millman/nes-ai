@@ -256,7 +256,9 @@
 }
 
 #comparison-grid .rollout-preview img {
-    width: 60em;
+    width: 100%;
+    height: auto;
+    display: block;
 }
 
 #comparison-grid .row {

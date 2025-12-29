@@ -106,7 +106,10 @@
     overflow-x: auto;
     overflow-y: hidden;
   }
-  .actions .btn {
+  .actions .btn,
+  .dashboard-flag-toggle,
+  .dashboard-archive-toggle,
+  #dashboard-archive-selected {
     padding: 0.1rem 0.2rem;
     font-size: 0.75rem;
     line-height: 1;
@@ -116,7 +119,7 @@
     padding-top: 0;
     padding-bottom: 0;
   }
-  .actions .action-icon {
+  .action-icon {
     display: inline-block;
     width: 14px;
     height: 14px;
@@ -140,53 +143,25 @@
   .modeldiff .dashboard-model-diff-content {
     display: block;
   }
+  .runs-grid.starred {
+    border-color: #f3d08b;
+    background: #fffaf0;
+  }
+  .dashboard-flag-toggle.is-active {
+    color: #d39e00;
+  }
+  .dashboard-archive-toggle.is-active {
+    color: #6c757d;
+  }
+  .runs-row[data-archived="true"] .cell {
+    opacity: 0.7;
+  }
 </style>
 {% endblock %}
 
-{% block body %}
-{% if experiments %}
-<div id="selected-preview" class="mb-4">
-    <div
-        class="d-flex gap-3 align-items-stretch flex-nowrap w-100"
-        id="preview-container"
-        style="height: 260px; overflow-x: auto;"
-    ></div>
-</div>
 
-<div class="mb-3">
-    <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
-        <button type="button" id="dashboard-compare" class="btn btn-primary">Compare selected</button>
-        <div class="d-flex align-items-center gap-3 flex-wrap justify-content-end flex-grow-1">
-            <div class="d-flex align-items-center gap-2 flex-wrap">
-                <span class="small text-muted">Page</span>
-                <div class="d-flex align-items-center gap-1 flex-wrap">
-                    {% for page_num in range(1, total_pages + 1) %}
-                    {% set page_url = url_for('dashboard', page=page_num, page_size=page_size) %}
-                    <a
-                        class="btn btn-link btn-sm px-2 py-1 dashboard-page-link {% if page_num == current_page %}fw-semibold text-decoration-underline{% endif %}"
-                        href="{{ page_url }}"
-                    >{{ page_num }}</a>
-                    {% endfor %}
-                </div>
-            </div>
-            <form class="d-flex align-items-center gap-2 flex-wrap" method="get" action="{{ url_for('dashboard') }}">
-                <input type="hidden" name="page" value="1">
-                <label class="form-label mb-0 small text-muted" for="page_size">Rows/page</label>
-                <input
-                    type="number"
-                    class="form-control form-control-sm"
-                    id="page_size"
-                    name="page_size"
-                    value="{{ page_size }}"
-                    min="1"
-                    style="width: 110px;"
-                >
-                <button type="submit" class="btn btn-outline-secondary btn-sm">Apply</button>
-            </form>
-        </div>
-    </div>
-</div>
-    <div class="runs-grid" role="table" aria-label="Runs">
+{% macro render_runs_grid(grid_experiments, grid_class) %}
+    <div class="runs-grid {{ grid_class }}" data-grid="{{ grid_class }}" role="table" aria-label="Runs">
         <div class="cell header" role="columnheader">Select</div>
         <div class="cell header" role="columnheader">Tags</div>
         <div class="cell header" role="columnheader">Notes</div>
@@ -199,12 +174,39 @@
         <div class="cell header" role="columnheader">Last Modified</div>
         <div class="cell header" role="columnheader">Steps</div>
         <div class="cell header" role="columnheader">Actions</div>
-        {% for exp in experiments %}
+        {% for exp in grid_experiments %}
         {% set title_text = exp.title if exp.title != "Untitled" else "" %}
         {% set tags_text = exp.tags if exp.tags else "" %}
-        <div class="runs-row" role="row" data-exp-id="{{ exp.id }}">
+        <div class="runs-row" role="row" data-exp-id="{{ exp.id }}" data-starred="{{ 'true' if exp.starred else 'false' }}" data-archived="{{ 'true' if exp.archived else 'false' }}">
             <div class="cell select" role="cell" data-exp-id="{{ exp.id }}">
-                <input class="form-check-input" type="checkbox" name="ids" value="{{ exp.id }}">
+                <div class="d-flex align-items-center gap-2">
+                    <input class="form-check-input" type="checkbox" name="ids" value="{{ exp.id }}">
+                    <button
+                        type="button"
+                        class="btn btn-outline-secondary btn-sm dashboard-flag-toggle{% if exp.starred %} is-active{% endif %}"
+                        data-exp-id="{{ exp.id }}"
+                        data-starred="{{ 'true' if exp.starred else 'false' }}"
+                        title="{{ 'Unstar' if exp.starred else 'Star' }}"
+                        aria-label="{{ 'Unstar' if exp.starred else 'Star' }}"
+                    >
+                    <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        <path d="M8 0l2.47 4.99 5.5.8-3.99 3.89.94 5.49L8 12.9l-4.92 2.58.94-5.49L0 5.79l5.53-.8z"/>
+                    </svg>
+                    </button>
+                    <button
+                        type="button"
+                        class="btn btn-outline-secondary btn-sm dashboard-archive-toggle{% if exp.archived %} is-active{% endif %}"
+                        data-exp-id="{{ exp.id }}"
+                        data-archived="{{ 'true' if exp.archived else 'false' }}"
+                        title="{{ 'Unarchive' if exp.archived else 'Archive' }}"
+                        aria-label="{{ 'Unarchive' if exp.archived else 'Archive' }}"
+                    >
+                    <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        <path d="M12.643 1.5H3.357L2.5 3h11z"/>
+                        <path d="M13.5 4H2.5a.5.5 0 0 0-.5.5v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-7a.5.5 0 0 0-.5-.5M8 6.5a.5.5 0 0 1 .5.5v2H7.5V7a.5.5 0 0 1 .5-.5"/>
+                    </svg>
+                    </button>
+                </div>
             </div>
             <div class="cell tags nowrap" role="cell" data-exp-id="{{ exp.id }}">
                 <div class="cell-scroll">
@@ -268,6 +270,9 @@
                         </div>
                         <span class="title-status small text-muted" aria-live="polite"></span>
                     </form>
+                    {% if exp.archived %}
+                    <span class="badge bg-secondary ms-2">Archived</span>
+                    {% endif %}
                 </div>
             </div>
             <div class="cell modeldiff wrap small" role="cell" data-exp-id="{{ exp.id }}">
@@ -330,7 +335,7 @@
                                 fill="currentColor"
                                 aria-hidden="true"
                             >
-                                <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1z"/>
+                                <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1z"/>
                                 <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
                             </svg>
                         </button>
@@ -351,7 +356,7 @@
                                 fill="currentColor"
                                 aria-hidden="true"
                             >
-                                <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 0 0 1H5a.5.5 0 0 0 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1z"/>
+                                <path d="M12 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M5 4h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5M5 8h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1m0 2h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1z"/>
                                 <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1"/>
                             </svg>
                         </button>
@@ -482,6 +487,76 @@
         </div>
         {% endfor %}
     </div>
+{% endmacro %}
+
+{% block body %}
+{% if experiments or starred_experiments %}
+<div id="selected-preview" class="mb-4">
+    <div
+        class="d-flex gap-3 align-items-stretch flex-nowrap w-100"
+        id="preview-container"
+        style="height: 260px; overflow-x: auto;"
+    ></div>
+</div>
+
+<div class="mb-3">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+            <a id="dashboard-compare" class="btn btn-primary" href="{{ url_for('comparison') }}">Compare selected</a>
+            <button type="button" id="dashboard-archive-selected" class="btn btn-outline-secondary btn-sm" title="Archive Selected" aria-label="Archive Selected">
+                <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <path d="M12.643 1.5H3.357L2.5 3h11z"/>
+                    <path d="M13.5 4H2.5a.5.5 0 0 0-.5.5v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-7a.5.5 0 0 0-.5-.5M8 6.5a.5.5 0 0 1 .5.5v2H7.5V7a.5.5 0 0 1 .5-.5"/>
+                </svg>
+            </button>
+        </div>
+        <div class="d-flex align-items-center gap-3 flex-wrap justify-content-end flex-grow-1">
+            <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" role="switch" id="dashboard-show-archived" {% if show_archived %}checked{% endif %}>
+                <label class="form-check-label small text-muted" for="dashboard-show-archived">Show Archived ({{ archived_count }})</label>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="small text-muted">Page</span>
+                <div class="d-flex align-items-center gap-1 flex-wrap">
+                    {% for page_num in range(1, total_pages + 1) %}
+                    {% set page_url = url_for('dashboard', page=page_num, page_size=page_size, show_archived='1' if show_archived else None) %}
+                    <a
+                        class="btn btn-link btn-sm px-2 py-1 dashboard-page-link {% if page_num == current_page %}fw-semibold text-decoration-underline{% endif %}"
+                        href="{{ page_url }}"
+                    >{{ page_num }}</a>
+                    {% endfor %}
+                </div>
+            </div>
+            <form class="d-flex align-items-center gap-2 flex-wrap" method="get" action="{{ url_for('dashboard') }}">
+                <input type="hidden" name="page" value="1">
+                {% if show_archived %}
+                <input type="hidden" name="show_archived" value="1">
+                {% endif %}
+                <label class="form-label mb-0 small text-muted" for="page_size">Rows/page</label>
+                <input
+                    type="number"
+                    class="form-control form-control-sm"
+                    id="page_size"
+                    name="page_size"
+                    value="{{ page_size }}"
+                    min="1"
+                    style="width: 110px;"
+                >
+                <button type="submit" class="btn btn-outline-secondary btn-sm">Apply</button>
+            </form>
+        </div>
+    </div>
+</div>
+    {% if starred_experiments %}
+    <div class="mb-4">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+            <div class="text-uppercase small text-muted">Starred</div>
+            <div class="small text-muted">{{ starred_experiments|length }} run{% if starred_experiments|length != 1 %}s{% endif %}</div>
+        </div>
+        {{ render_runs_grid(starred_experiments, "starred") }}
+    </div>
+    {% endif %}
+    {{ render_runs_grid(experiments, "main") }}
 {% block extra_scripts %}
 {{ super() }}
 <script>
@@ -506,7 +581,9 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   const initActionTooltips = () => {
-    const actionTargets = document.querySelectorAll(".actions .btn[title]:not([disabled])");
+    const actionTargets = document.querySelectorAll(
+      ".actions .btn[title]:not([disabled]), .dashboard-flag-toggle[title]:not([disabled]), .dashboard-archive-toggle[title]:not([disabled]), #dashboard-archive-selected[title]:not([disabled])"
+    );
     actionTargets.forEach((el) => {
       if (!window.bootstrap || !el.title) return;
       const existing = bootstrap.Tooltip.getInstance(el);
@@ -523,7 +600,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const STORAGE_KEY = "dashboard_selected_experiments";
   const experiments = [
-    {% for exp in experiments %}
+    {% for exp in dashboard_experiments %}
     {
       id: "{{ exp.id }}",
       name: "{{ exp.name }}",
@@ -534,10 +611,13 @@ document.addEventListener("DOMContentLoaded", () => {
   ];
   const experimentById = Object.fromEntries(experiments.map((exp) => [exp.id, exp]));
   const previewContainer = document.getElementById("preview-container");
+  const compareLink = document.getElementById("dashboard-compare");
   const checkboxes = Array.from(document.querySelectorAll("input[name='ids']"));
   const checkboxById = new Map(checkboxes.map((checkbox) => [checkbox.value, checkbox]));
-  const runsGrid = document.querySelector(".runs-grid");
+  const runsGrids = Array.from(document.querySelectorAll(".runs-grid"));
   const dataCells = Array.from(document.querySelectorAll(".runs-grid .cell[data-exp-id]"));
+  const archiveSelectedButton = document.getElementById("dashboard-archive-selected");
+  const showArchivedToggle = document.getElementById("dashboard-show-archived");
 
   let selectionOrder = [];
   let selectionSet = new Set();
@@ -547,6 +627,32 @@ document.addEventListener("DOMContentLoaded", () => {
   function setSelectionOrder(order) {
     selectionOrder = order.filter((id, index) => order.indexOf(id) === index);
     selectionSet = new Set(selectionOrder);
+  }
+
+  function updateArchiveSelectedState() {
+    if (!archiveSelectedButton) return;
+    archiveSelectedButton.disabled = selectionOrder.length === 0;
+  }
+
+  function updateCompareLink() {
+    if (!compareLink) return;
+    const params = new URLSearchParams();
+    selectionOrder.forEach((id) => params.append("ids", id));
+    const baseUrl = "{{ url_for('comparison') }}";
+    compareLink.href = params.toString() ? `${baseUrl}?${params.toString()}` : baseUrl;
+  }
+
+  function postJson(url, payload) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    }).then((response) => {
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      return response.json();
+    });
   }
 
   function updateUrl(selectedIds) {
@@ -694,6 +800,8 @@ document.addEventListener("DOMContentLoaded", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(selectionOrder));
     updateUrl(selectionOrder);
     renderPreview();
+    updateArchiveSelectedState();
+    updateCompareLink();
   }
 
   function clearHover(expId) {
@@ -738,6 +846,8 @@ document.addEventListener("DOMContentLoaded", () => {
   renderPreview();
   updateUrl(selectionOrder);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(selectionOrder));
+  updateArchiveSelectedState();
+  updateCompareLink();
 
   checkboxes.forEach((checkbox) => {
     checkbox.addEventListener("change", () => {
@@ -750,6 +860,66 @@ document.addEventListener("DOMContentLoaded", () => {
       persistSelection();
     });
   });
+
+  if (showArchivedToggle) {
+    showArchivedToggle.addEventListener("change", () => {
+      const url = new URL(window.location.href);
+      if (showArchivedToggle.checked) {
+        url.searchParams.set("show_archived", "1");
+      } else {
+        url.searchParams.delete("show_archived");
+      }
+      url.searchParams.set("page", "1");
+      window.location = url.toString();
+    });
+  }
+
+  const starButtons = document.querySelectorAll(".dashboard-flag-toggle");
+  starButtons.forEach((buttonEl) => {
+    buttonEl.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const expId = buttonEl.dataset.expId;
+      if (!expId) return;
+      const nextValue = buttonEl.dataset.starred !== "true";
+      buttonEl.disabled = true;
+      postJson(`/experiments/${expId}/starred`, { starred: nextValue })
+        .then(() => window.location.reload())
+        .catch(() => {
+          buttonEl.disabled = false;
+        });
+    });
+  });
+
+  const archiveButtons = document.querySelectorAll(".dashboard-archive-toggle");
+  archiveButtons.forEach((buttonEl) => {
+    buttonEl.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const expId = buttonEl.dataset.expId;
+      if (!expId) return;
+      const nextValue = buttonEl.dataset.archived !== "true";
+      buttonEl.disabled = true;
+      postJson(`/experiments/${expId}/archived`, { archived: nextValue })
+        .then(() => window.location.reload())
+        .catch(() => {
+          buttonEl.disabled = false;
+        });
+    });
+  });
+
+  if (archiveSelectedButton) {
+    archiveSelectedButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (!selectionOrder.length) return;
+      archiveSelectedButton.disabled = true;
+      postJson("/experiments/archive_selected", { ids: selectionOrder, archived: true })
+        .then(() => window.location.reload())
+        .catch(() => {
+          archiveSelectedButton.disabled = false;
+        });
+    });
+  }
 
   dataCells.forEach((cell) => {
     const expId = cell.dataset.expId;
@@ -769,8 +939,8 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  if (runsGrid) {
-    runsGrid.addEventListener("focusin", (event) => {
+  runsGrids.forEach((grid) => {
+    grid.addEventListener("focusin", (event) => {
       const cell = event.target.closest(".cell[data-exp-id]");
       if (!cell) return;
       const expId = cell.dataset.expId;
@@ -779,7 +949,7 @@ document.addEventListener("DOMContentLoaded", () => {
       setRowHover(expId, true);
       renderPreview();
     });
-    runsGrid.addEventListener("focusout", (event) => {
+    grid.addEventListener("focusout", (event) => {
       const cell = event.target.closest(".cell[data-exp-id]");
       if (!cell) return;
       const expId = cell.dataset.expId;
@@ -790,15 +960,6 @@ document.addEventListener("DOMContentLoaded", () => {
       setRowHover(expId, false);
       clearHover(expId);
     });
-  }
-
-  // Compare button handler
-  const button = document.getElementById("dashboard-compare");
-  if (!button) return;
-  button.addEventListener("click", () => {
-    const params = new URLSearchParams();
-    selectionOrder.forEach((id) => params.append("ids", id));
-    window.location = "{{ url_for('comparison') }}" + "?" + params.toString();
   });
 
   initFastTooltips();

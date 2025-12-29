@@ -98,6 +98,8 @@ class Experiment:
     notes_text: str
     title: str
     tags: str
+    starred: bool
+    archived: bool
     loss_image: Optional[Path]
     loss_csv: Optional[Path]
     rollout_steps: List[int]
@@ -133,6 +135,8 @@ class ExperimentIndex:
     id: str
     path: Path
     last_modified: Optional[datetime]
+    starred: bool
+    archived: bool
 
 
 @dataclass
@@ -162,7 +166,17 @@ def build_experiment_index(output_dir: Path) -> List[ExperimentIndex]:
         return index
     for subdir in sorted(p for p in output_dir.iterdir() if p.is_dir()):
         last_modified = _quick_last_modified(subdir)
-        index.append(ExperimentIndex(id=subdir.name, path=subdir, last_modified=last_modified))
+        metadata_custom_path = subdir / "experiment_metadata.txt"
+        _, _, starred, archived = _read_metadata(metadata_custom_path)
+        index.append(
+            ExperimentIndex(
+                id=subdir.name,
+                path=subdir,
+                last_modified=last_modified,
+                starred=starred,
+                archived=archived,
+            )
+        )
     index.sort(key=lambda e: e.id, reverse=True)
     return index
 
@@ -281,7 +295,7 @@ def load_experiment(
 
     notes_path = path / "notes.txt"
     metadata_custom_path = path / "experiment_metadata.txt"
-    title, tags = _read_metadata(metadata_custom_path)
+    title, tags, starred, archived = _read_metadata(metadata_custom_path)
     metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
     metadata_data_root = _extract_data_root_from_metadata(metadata_text) if metadata_text else None
     if metadata_model_diff_path.exists():
@@ -331,6 +345,8 @@ def load_experiment(
         notes_text=notes_text,
         title=title,
         tags=tags,
+        starred=starred,
+        archived=archived,
         loss_image=loss_png if loss_png.exists() else None,
         loss_csv=loss_csv if loss_csv and loss_csv.exists() else None,
         rollout_steps=rollout_steps,
@@ -587,23 +603,25 @@ def _read_or_create_notes(path: Path) -> str:
 
 
 def _read_title(path: Path) -> str:
-    title, _ = _read_metadata(path)
+    title, _, _, _ = _read_metadata(path)
     return title
 
 
-def _read_metadata(path: Path) -> tuple[str, str]:
-    """Read custom metadata (title, tags) with sane defaults."""
+def _read_metadata(path: Path) -> tuple[str, str, bool, bool]:
+    """Read custom metadata (title, tags, starred, archived) with sane defaults."""
     if not path.exists():
-        return "Untitled", ""
+        return "Untitled", "", False, False
     try:
         data = tomli.loads(path.read_text())
     except (tomli.TOMLDecodeError, OSError):
-        return "Untitled", ""
+        return "Untitled", "", False, False
     raw_title = data.get("title")
     raw_tags = data.get("tags")
     title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else "Untitled"
     tags = _normalize_tags(raw_tags)
-    return title, tags
+    starred = _coerce_bool(data.get("starred"))
+    archived = _coerce_bool(data.get("archived"))
+    return title, tags, starred, archived
 
 
 def _normalize_tags(raw_tags) -> str:
@@ -619,17 +637,45 @@ def _normalize_tags(raw_tags) -> str:
     return ""
 
 
-def _write_metadata(path: Path, title: Optional[str] = None, tags: Optional[str] = None) -> None:
-    """Write combined title/tags metadata, preserving existing values."""
-    current_title, current_tags = _read_metadata(path)
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(value, int):
+        return value != 0
+    return False
+
+
+def _write_metadata(
+    path: Path,
+    title: Optional[str] = None,
+    tags: Optional[str] = None,
+    starred: Optional[bool] = None,
+    archived: Optional[bool] = None,
+) -> None:
+    """Write combined metadata, preserving existing values."""
+    current_title, current_tags, current_starred, current_archived = _read_metadata(path)
     next_title = title.strip() if isinstance(title, str) else None
     next_tags = tags.strip() if isinstance(tags, str) else None
+    next_starred = current_starred if starred is None else _coerce_bool(starred)
+    next_archived = current_archived if archived is None else _coerce_bool(archived)
     payload = {
         "title": (next_title if next_title is not None and next_title else current_title or "Untitled"),
         "tags": (next_tags if next_tags is not None else current_tags),
+        "starred": next_starred,
+        "archived": next_archived,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomli_w.dumps(payload))
+
+
+def write_starred(path: Path, starred: bool) -> None:
+    _write_metadata(path, starred=starred)
+
+
+def write_archived(path: Path, archived: bool) -> None:
+    _write_metadata(path, archived=archived)
 
 
 def _extract_data_root_from_metadata(metadata_text: str) -> Optional[str]:

@@ -33,6 +33,8 @@ from .experiments import (
     write_notes,
     write_tags,
     write_title,
+    write_starred,
+    write_archived,
     _diagnostics_exists,
     _graph_diagnostics_exists,
     _collect_visualization_steps,
@@ -130,10 +132,16 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def dashboard():
         route_start = time.perf_counter()
         experiments = []
+        starred_experiments = []
         index_start = time.perf_counter()
         index_rows = build_experiment_index(cfg.output_dir)
         _log_timing("dashboard.index", index_start, rows=len(index_rows))
-        total_items = len(index_rows)
+        show_archived = request.args.get("show_archived", "").lower() in {"1", "true", "yes", "on"}
+        archived_count = sum(1 for row in index_rows if row.archived)
+        visible_rows = index_rows if show_archived else [row for row in index_rows if not row.archived]
+        starred_rows = [row for row in visible_rows if row.starred]
+        unstarred_rows = [row for row in visible_rows if not row.starred]
+        total_items = len(unstarred_rows)
         requested_page = request.args.get("page", type=int)
         requested_page_size = request.args.get("page_size", type=int)
         current_page = 1
@@ -150,7 +158,21 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         start_idx = (current_page - 1) * page_size
         end_idx = start_idx + page_size
-        selected_ids: List[str] = [row.id for row in index_rows[start_idx:end_idx]]
+        selected_ids: List[str] = [row.id for row in unstarred_rows[start_idx:end_idx]]
+
+        for row in starred_rows:
+            exp_start = time.perf_counter()
+            exp = load_experiment(
+                row.path,
+                include_self_distance=False,
+                include_diagnostics_images=False,
+                include_diagnostics_frames=False,
+                include_graph_diagnostics=False,
+                include_last_modified=False,
+            )
+            if exp is not None:
+                starred_experiments.append(exp)
+            _log_timing("dashboard.experiment", exp_start, exp_id=row.id)
 
         load_block_start = time.perf_counter()
         load_times = []
@@ -183,12 +205,16 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         return render_template(
             "dashboard.html",
             experiments=experiments,
+            starred_experiments=starred_experiments,
+            dashboard_experiments=starred_experiments + experiments,
             cfg=cfg,
             total_pages=total_pages,
             current_page=current_page,
             page_size=page_size,
+            show_archived=show_archived,
+            archived_count=archived_count,
             active_nav="dashboard",
-            first_experiment_id=index_rows[0].id if index_rows else None,
+            first_experiment_id=(starred_experiments[0].id if starred_experiments else (unstarred_rows[0].id if unstarred_rows else None)),
         )
 
     @app.route("/grid")
@@ -289,6 +315,47 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         metadata_path = experiment.path / "experiment_metadata.txt"
         write_tags(metadata_path, new_tags)
         return jsonify({"status": "ok"})
+
+    def _parse_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, int):
+            return value != 0
+        return False
+
+    @app.post("/experiments/<exp_id>/starred")
+    def update_starred(exp_id: str):
+        experiment = _get_experiment_or_404(exp_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        starred = _parse_bool(payload.get("starred"))
+        metadata_path = experiment.path / "experiment_metadata.txt"
+        write_starred(metadata_path, starred)
+        return jsonify({"status": "ok", "starred": starred})
+
+    @app.post("/experiments/<exp_id>/archived")
+    def update_archived(exp_id: str):
+        experiment = _get_experiment_or_404(exp_id)
+        payload = request.get_json(force=True, silent=True) or {}
+        archived = _parse_bool(payload.get("archived"))
+        metadata_path = experiment.path / "experiment_metadata.txt"
+        write_archived(metadata_path, archived)
+        return jsonify({"status": "ok", "archived": archived})
+
+    @app.post("/experiments/archive_selected")
+    def archive_selected():
+        payload = request.get_json(force=True, silent=True) or {}
+        exp_ids = payload.get("ids") or []
+        archived = _parse_bool(payload.get("archived", True))
+        if not isinstance(exp_ids, list) or not exp_ids:
+            abort(400, "Provide at least one experiment id.")
+        for exp_id in exp_ids:
+            exp_path = cfg.output_dir / str(exp_id)
+            if not exp_path.is_dir():
+                continue
+            write_archived(exp_path / "experiment_metadata.txt", archived)
+        return jsonify({"status": "ok", "archived": archived, "count": len(exp_ids)})
 
     @app.post("/comparison/data")
     def comparison_data():
