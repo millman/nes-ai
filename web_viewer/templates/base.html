@@ -38,49 +38,55 @@
                         <span class="nav-link disabled text-secondary">Detail</span>
                         {% endif %}
                     </li>
-                    <li class="nav-item">
+                    <li class="nav-item d-none d-lg-block text-white-50">|</li>
+                    <li class="nav-item d-flex align-items-center">
+                        <span class="nav-link px-0 {{ 'active' if current_nav in ['diagnostics', 'diagnostics_s'] else 'disabled text-secondary' }}">Diagnostics</span>
+                        <span class="nav-link px-1"> </span>
                         {% if active_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics', exp_id=active_experiment_id) }}">Diagnostics</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics_z', exp_id=active_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_s' else '' }}" href="{{ url_for('diagnostics_s', exp_id=active_experiment_id) }}">S</a>
                         {% elif first_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics', exp_id=first_experiment_id) }}">Diagnostics</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics_z', exp_id=first_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_s' else '' }}" href="{{ url_for('diagnostics_s', exp_id=first_experiment_id) }}">S</a>
                         {% else %}
-                        <span class="nav-link disabled text-secondary">Diagnostics</span>
+                        <span class="nav-link disabled text-secondary px-1">Z</span>
+                        <span class="nav-link disabled text-secondary px-1">S</span>
                         {% endif %}
                     </li>
-                    <li class="nav-item">
+                    <li class="nav-item d-none d-lg-block text-white-50">|</li>
+                    <li class="nav-item d-flex align-items-center">
+                        <span class="nav-link px-0 {{ 'active' if current_nav in ['self_distance_z', 'self_distance_s', 'self_distance_zvs'] else 'disabled text-secondary' }}">Self-distance</span>
+                        <span class="nav-link px-1"> </span>
                         {% if active_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'self_distance_z' else '' }}" href="{{ url_for('self_distance', exp_id=active_experiment_id) }}">Self-distance (Z)</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'self_distance_z' else '' }}" href="{{ url_for('self_distance_z', exp_id=active_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'self_distance_s' else '' }}" href="{{ url_for('self_distance_s', exp_id=active_experiment_id) }}">S</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'self_distance_zvs' else '' }}" href="{{ url_for('self_distance_zvs', exp_id=active_experiment_id) }}">ZvS</a>
                         {% elif first_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'self_distance_z' else '' }}" href="{{ url_for('self_distance', exp_id=first_experiment_id) }}">Self-distance (Z)</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'self_distance_z' else '' }}" href="{{ url_for('self_distance_z', exp_id=first_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'self_distance_s' else '' }}" href="{{ url_for('self_distance_s', exp_id=first_experiment_id) }}">S</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'self_distance_zvs' else '' }}" href="{{ url_for('self_distance_zvs', exp_id=first_experiment_id) }}">ZvS</a>
                         {% else %}
-                        <span class="nav-link disabled text-secondary">Self-distance (Z)</span>
+                        <span class="nav-link disabled text-secondary px-1">Z</span>
+                        <span class="nav-link disabled text-secondary px-1">S</span>
+                        <span class="nav-link disabled text-secondary px-1">ZvS</span>
                         {% endif %}
                     </li>
-                    <li class="nav-item">
+                    <li class="nav-item d-none d-lg-block text-white-50">|</li>
+                    <li class="nav-item d-flex align-items-center">
+                        <span class="nav-link px-0 {{ 'active' if current_nav in ['graph_diagnostics_z', 'graph_diagnostics_s', 'graph_diagnostics_zvs'] else 'disabled text-secondary' }}">Graph Diagnostics</span>
+                        <span class="nav-link px-1"> </span>
                         {% if active_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'self_distance_s' else '' }}" href="{{ url_for('state_embedding', exp_id=active_experiment_id) }}">Self-distance (S)</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'graph_diagnostics_z' else '' }}" href="{{ url_for('graph_diagnostics_z', exp_id=active_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'graph_diagnostics_s' else '' }}" href="{{ url_for('graph_diagnostics_s', exp_id=active_experiment_id) }}">S</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'graph_diagnostics_zvs' else '' }}" href="{{ url_for('graph_diagnostics_zvs', exp_id=active_experiment_id) }}">ZvS</a>
                         {% elif first_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'self_distance_s' else '' }}" href="{{ url_for('state_embedding', exp_id=first_experiment_id) }}">Self-distance (S)</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'graph_diagnostics_z' else '' }}" href="{{ url_for('graph_diagnostics_z', exp_id=first_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'graph_diagnostics_s' else '' }}" href="{{ url_for('graph_diagnostics_s', exp_id=first_experiment_id) }}">S</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'graph_diagnostics_zvs' else '' }}" href="{{ url_for('graph_diagnostics_zvs', exp_id=first_experiment_id) }}">ZvS</a>
                         {% else %}
-                        <span class="nav-link disabled text-secondary">Self-distance (S)</span>
-                        {% endif %}
-                    </li>
-                    <li class="nav-item">
-                        {% if active_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'graph_diagnostics_z' else '' }}" href="{{ url_for('graph_diagnostics', exp_id=active_experiment_id) }}">Graph Diagnostics (Z)</a>
-                        {% elif first_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'graph_diagnostics_z' else '' }}" href="{{ url_for('graph_diagnostics', exp_id=first_experiment_id) }}">Graph Diagnostics (Z)</a>
-                        {% else %}
-                        <span class="nav-link disabled text-secondary">Graph Diagnostics (Z)</span>
-                        {% endif %}
-                    </li>
-                    <li class="nav-item">
-                        {% if active_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'graph_diagnostics_s' else '' }}" href="{{ url_for('graph_diagnostics_s', exp_id=active_experiment_id) }}">Graph Diagnostics (S)</a>
-                        {% elif first_experiment_id %}
-                        <a class="nav-link {{ 'active' if current_nav == 'graph_diagnostics_s' else '' }}" href="{{ url_for('graph_diagnostics_s', exp_id=first_experiment_id) }}">Graph Diagnostics (S)</a>
-                        {% else %}
-                        <span class="nav-link disabled text-secondary">Graph Diagnostics (S)</span>
+                        <span class="nav-link disabled text-secondary px-1">Z</span>
+                        <span class="nav-link disabled text-secondary px-1">S</span>
+                        <span class="nav-link disabled text-secondary px-1">ZvS</span>
                         {% endif %}
                     </li>
                 </ul>

@@ -456,7 +456,7 @@
                         </a>
                         {% if exp.diagnostics_steps %}
                         <a
-                            href="{{ url_for('diagnostics', exp_id=exp.id) }}"
+                            href="{{ url_for('diagnostics_z', exp_id=exp.id) }}"
                             class="btn btn-outline-primary btn-sm"
                             aria-label="Diagnostics"
                             title="Diagnostics"
@@ -474,7 +474,7 @@
                         {% endif %}
                         {% if exp.self_distance_csv %}
                         <a
-                            href="{{ url_for('self_distance', exp_id=exp.id) }}"
+                            href="{{ url_for('self_distance_z', exp_id=exp.id) }}"
                             class="btn btn-outline-primary btn-sm"
                             aria-label="Self-distance (Z)"
                             title="Self-distance (Z)"
@@ -492,7 +492,7 @@
                         {% endif %}
                         {% if exp.state_embedding_csv %}
                         <a
-                            href="{{ url_for('state_embedding', exp_id=exp.id) }}"
+                            href="{{ url_for('self_distance_s', exp_id=exp.id) }}"
                             class="btn btn-outline-primary btn-sm"
                             aria-label="Self-distance (S)"
                             title="Self-distance (S)"
@@ -510,7 +510,7 @@
                         {% endif %}
                         {% if exp.graph_diagnostics_steps %}
                         <a
-                            href="{{ url_for('graph_diagnostics', exp_id=exp.id) }}"
+                            href="{{ url_for('graph_diagnostics_z', exp_id=exp.id) }}"
                             class="btn btn-outline-primary btn-sm"
                             aria-label="Graph Diagnostics (Z)"
                             title="Graph Diagnostics (Z)"

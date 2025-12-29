@@ -52,7 +52,7 @@ from jepa_world_model.vis import (
     tensor_to_uint8_image,
 )
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
-from jepa_world_model.vis_action_alignment import save_action_alignment_detail_plot, save_action_alignment_plot
+from jepa_world_model.vis_action_alignment import save_action_alignment_detail_plot
 from jepa_world_model.vis_graph_diagnostics import save_graph_diagnostics
 from jepa_world_model.loss_multi_scale_hardness import (
     build_feature_pyramid,
@@ -321,7 +321,7 @@ class ModelConfig:
     predictor_film_layers: int = 2
     state_dim: int = 256
     state_embed_dim: Optional[int] = None
-    state_embed_unit_norm: bool = True
+    state_embed_unit_norm: bool = False
     state_warmup_frames: int = 8
 
     @property
@@ -2196,37 +2196,37 @@ def _compute_motion_subspace(
 ) -> Optional[Dict[str, Any]]:
     if embeddings.shape[1] < 2:
         return None
-    z_np = embeddings.detach().cpu().numpy()
+    embed_np = embeddings.detach().cpu().numpy()
     action_np = actions.detach().cpu().numpy()
-    batch, seq_len, latent_dim = z_np.shape
+    batch, seq_len, latent_dim = embed_np.shape
     delta_list: List[np.ndarray] = []
     action_vecs: List[np.ndarray] = []
     for b in range(batch):
-        delta_list.append(z_np[b, 1:] - z_np[b, :-1])
+        delta_list.append(embed_np[b, 1:] - embed_np[b, :-1])
         action_vecs.append(action_np[b, :-1])
-    delta_z = np.concatenate(delta_list, axis=0)
-    if delta_z.shape[0] < 2:
+    delta_embed = np.concatenate(delta_list, axis=0)
+    if delta_embed.shape[0] < 2:
         return None
     actions_flat = np.concatenate(action_vecs, axis=0)
     action_ids = compress_actions_to_ids(actions_flat)
-    delta_mean = delta_z.mean(axis=0, keepdims=True)
-    delta_centered = delta_z - delta_mean
+    delta_mean = delta_embed.mean(axis=0, keepdims=True)
+    delta_centered = delta_embed - delta_mean
     components, variance_ratio = _compute_pca(delta_centered)
     use_k = max(1, min(top_k, components.shape[0]))
     projection = components[:use_k].T
-    flat_z = z_np.reshape(-1, latent_dim)
-    z_centered = flat_z - flat_z.mean(axis=0, keepdims=True)
+    flat_embed = embed_np.reshape(-1, latent_dim)
+    embed_centered = flat_embed - flat_embed.mean(axis=0, keepdims=True)
     delta_proj = delta_centered @ projection
-    z_proj_flat = z_centered @ projection
-    z_proj_sequences: List[np.ndarray] = []
+    proj_flat = embed_centered @ projection
+    proj_sequences: List[np.ndarray] = []
     offset = 0
     for _ in range(batch):
-        z_proj_sequences.append(z_proj_flat[offset : offset + seq_len])
+        proj_sequences.append(proj_flat[offset : offset + seq_len])
         offset += seq_len
     return {
         "delta_proj": delta_proj,
-        "z_proj_flat": z_proj_flat,
-        "z_proj_sequences": z_proj_sequences,
+        "proj_flat": proj_flat,
+        "proj_sequences": proj_sequences,
         "variance_ratio": variance_ratio,
         "components": components,
         "action_ids": action_ids,
@@ -2236,19 +2236,20 @@ def _compute_motion_subspace(
     }
 
 
-def _save_delta_z_pca_plot(
+def _save_delta_pca_plot(
     out_path: Path,
     variance_ratio: np.ndarray,
     delta_proj: np.ndarray,
-    z_proj_flat: np.ndarray,
+    proj_flat: np.ndarray,
     action_ids: np.ndarray,
     action_dim: int,
+    embedding_label: str,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
     num_var = min(10, variance_ratio.shape[0])
     axes[0, 0].bar(np.arange(num_var), variance_ratio[:num_var], color="tab:blue")
-    axes[0, 0].set_title("Delta PCA variance ratio")
+    axes[0, 0].set_title(f"Delta-{embedding_label} PCA variance ratio")
     axes[0, 0].set_xlabel("component")
     axes[0, 0].set_ylabel("explained variance")
 
@@ -2278,8 +2279,8 @@ def _save_delta_z_pca_plot(
             s=8,
             alpha=0.7,
         )
-        axes[0, 1].set_xlabel("PC1 (delta)")
-        axes[0, 1].set_ylabel("PC2 (delta)")
+        axes[0, 1].set_xlabel(f"PC1 (delta {embedding_label})")
+        axes[0, 1].set_ylabel(f"PC2 (delta {embedding_label})")
         cbar = fig.colorbar(scatter, ax=axes[0, 1], fraction=0.046, pad=0.04, boundaries=bounds)
         ticks = list(range(color_count))
         cbar.set_ticks(ticks)
@@ -2288,9 +2289,9 @@ def _save_delta_z_pca_plot(
         cbar.set_label("action")
     else:
         axes[0, 1].plot(delta_proj[:, 0], np.zeros_like(delta_proj[:, 0]), ".", alpha=0.6)
-        axes[0, 1].set_xlabel("PC1 (delta)")
+        axes[0, 1].set_xlabel(f"PC1 (delta {embedding_label})")
         axes[0, 1].set_ylabel("density")
-    axes[0, 1].set_title("Delta projections")
+    axes[0, 1].set_title(f"Delta-{embedding_label} projections")
 
     cumulative = np.cumsum(variance_ratio)
     axes[1, 0].plot(np.arange(len(cumulative)), cumulative, marker="o", color="tab:green")
@@ -2299,17 +2300,17 @@ def _save_delta_z_pca_plot(
     axes[1, 0].set_ylabel("cumulative variance")
     axes[1, 0].set_title("Cumulative explained variance")
 
-    if z_proj_flat.shape[1] >= 2:
-        t = np.linspace(0, 1, num=z_proj_flat.shape[0])
-        sc2 = axes[1, 1].scatter(z_proj_flat[:, 0], z_proj_flat[:, 1], c=t, cmap="viridis", s=6, alpha=0.6)
-        axes[1, 1].set_xlabel("PC1 (z)")
-        axes[1, 1].set_ylabel("PC2 (z)")
+    if proj_flat.shape[1] >= 2:
+        t = np.linspace(0, 1, num=proj_flat.shape[0])
+        sc2 = axes[1, 1].scatter(proj_flat[:, 0], proj_flat[:, 1], c=t, cmap="viridis", s=6, alpha=0.6)
+        axes[1, 1].set_xlabel(f"PC1 ({embedding_label})")
+        axes[1, 1].set_ylabel(f"PC2 ({embedding_label})")
         fig.colorbar(sc2, ax=axes[1, 1], fraction=0.046, pad=0.04, label="time (normalized)")
     else:
-        axes[1, 1].plot(z_proj_flat[:, 0], np.zeros_like(z_proj_flat[:, 0]), ".", alpha=0.6)
-        axes[1, 1].set_xlabel("PC1 (z)")
+        axes[1, 1].plot(proj_flat[:, 0], np.zeros_like(proj_flat[:, 0]), ".", alpha=0.6)
+        axes[1, 1].set_xlabel(f"PC1 ({embedding_label})")
         axes[1, 1].set_ylabel("density")
-    axes[1, 1].set_title("Latent projections")
+    axes[1, 1].set_title(f"Embedding projections ({embedding_label})")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
@@ -2336,9 +2337,9 @@ def _save_variance_spectrum_plot(out_path: Path, variance_ratio: np.ndarray, max
     plt.close(fig)
 
 
-def _write_variance_report(delta_dir: Path, global_step: int, variance_ratio: np.ndarray) -> None:
+def _write_variance_report(delta_dir: Path, global_step: int, variance_ratio: np.ndarray, embedding_label: str) -> None:
     delta_dir.mkdir(parents=True, exist_ok=True)
-    report_path = delta_dir / f"delta_z_pca_report_{global_step:07d}.txt"
+    report_path = delta_dir / f"delta_{embedding_label}_pca_report_{global_step:07d}.txt"
     with report_path.open("w") as handle:
         if variance_ratio.size == 0:
             handle.write("No variance ratios available.\n")
@@ -2647,19 +2648,20 @@ def _write_diagnostics_csvs(
     alignment_debug: Optional[Dict[str, Any]],
     cycle_errors: List[Tuple[int, float]],
     cycle_per_action: Dict[int, List[float]],
+    embedding_label: str,
 ) -> None:
     delta_dir.mkdir(parents=True, exist_ok=True)
     alignment_dir.mkdir(parents=True, exist_ok=True)
     cycle_dir.mkdir(parents=True, exist_ok=True)
 
-    delta_var_csv = delta_dir / f"delta_z_pca_variance_{global_step:07d}.csv"
+    delta_var_csv = delta_dir / f"delta_{embedding_label}_pca_variance_{global_step:07d}.csv"
     with delta_var_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["component", "variance_ratio"])
         for idx, val in enumerate(motion["variance_ratio"][:64]):  # cap rows
             writer.writerow([idx, float(val)])
 
-    delta_samples_csv = delta_dir / f"delta_z_pca_samples_{global_step:07d}.csv"
+    delta_samples_csv = delta_dir / f"delta_{embedding_label}_pca_samples_{global_step:07d}.csv"
     with delta_samples_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["sample_index", "frame_index", "frame_path"])
@@ -2938,42 +2940,31 @@ def _write_alignment_debug_csv(
                     ]
                 )
 
-def _save_diagnostics_outputs(
-    model: JEPAWorldModel,
-    frames_cpu: torch.Tensor,
-    actions_cpu: torch.Tensor,
-    paths: Optional[List[List[str]]],
-    device: torch.device,
+def _save_motion_diagnostics_outputs(
+    motion: Dict[str, Any],
     cfg: DiagnosticsConfig,
     delta_dir: Path,
     alignment_dir: Path,
     cycle_dir: Path,
-    frames_dir: Path,
     global_step: int,
+    embedding_label: str,
+    inverse_map: Dict[int, int],
 ) -> None:
-    if frames_cpu.shape[0] == 0 or frames_cpu.shape[1] < 2:
-        return
-    with torch.no_grad():
-        embeddings = model.encode_sequence(frames_cpu.to(device))["embeddings"]
-    motion = _compute_motion_subspace(embeddings, actions_cpu, cfg.top_k_components, paths)
-    if motion is None:
-        return
-    inverse_map = _build_inverse_action_map(
-        motion["action_dim"],
-        np.unique(compress_actions_to_ids(motion["actions_seq"].reshape(-1, motion["actions_seq"].shape[-1]))),
-    )
-    delta_path = delta_dir / f"delta_z_pca_{global_step:07d}.png"
-    _save_delta_z_pca_plot(
+    delta_path = delta_dir / f"delta_{embedding_label}_pca_{global_step:07d}.png"
+    _save_delta_pca_plot(
         delta_path,
         motion["variance_ratio"],
         motion["delta_proj"],
-        motion["z_proj_flat"],
+        motion["proj_flat"],
         motion["action_ids"],
         motion["action_dim"],
+        embedding_label,
     )
-    _save_variance_spectrum_plot(delta_dir / f"delta_z_variance_spectrum_{global_step:07d}.png", motion["variance_ratio"])
-    _write_variance_report(delta_dir, global_step, motion["variance_ratio"])
-    alignment_path = alignment_dir / f"action_alignment_{global_step:07d}.png"
+    _save_variance_spectrum_plot(
+        delta_dir / f"delta_{embedding_label}_variance_spectrum_{global_step:07d}.png",
+        motion["variance_ratio"],
+    )
+    _write_variance_report(delta_dir, global_step, motion["variance_ratio"], embedding_label)
     alignment_stats_full = _compute_action_alignment_stats(
         motion["delta_proj"],
         motion["action_ids"],
@@ -2983,13 +2974,6 @@ def _save_diagnostics_outputs(
         include_norm_stats=True,
     )
     alignment_debug = _build_action_alignment_debug(alignment_stats_full, motion["delta_proj"], motion["action_ids"])
-    alignment_stats_for_plot = alignment_stats_full[: cfg.max_actions_to_plot]
-    save_action_alignment_plot(
-        alignment_path,
-        alignment_stats_for_plot,
-        cfg.cosine_high_threshold,
-        motion["action_dim"],
-    )
     save_action_alignment_detail_plot(
         alignment_dir / f"action_alignment_detail_{global_step:07d}.png",
         alignment_debug,
@@ -3008,7 +2992,7 @@ def _save_diagnostics_outputs(
     )
     cycle_path = cycle_dir / f"cycle_error_{global_step:07d}.png"
     errors, per_action = compute_cycle_errors(
-        motion["z_proj_sequences"],
+        motion["proj_sequences"],
         motion["actions_seq"],
         inverse_map,
         include_synthetic=cfg.synthesize_cycle_samples,
@@ -3025,7 +3009,67 @@ def _save_diagnostics_outputs(
         alignment_debug,
         errors,
         per_action,
+        embedding_label,
     )
+
+
+def _save_diagnostics_outputs(
+    model: JEPAWorldModel,
+    frames_cpu: torch.Tensor,
+    actions_cpu: torch.Tensor,
+    paths: Optional[List[List[str]]],
+    device: torch.device,
+    cfg: DiagnosticsConfig,
+    delta_dir: Path,
+    alignment_dir: Path,
+    cycle_dir: Path,
+    frames_dir: Path,
+    global_step: int,
+    delta_s_dir: Optional[Path] = None,
+    alignment_s_dir: Optional[Path] = None,
+    cycle_s_dir: Optional[Path] = None,
+) -> None:
+    if frames_cpu.shape[0] == 0 or frames_cpu.shape[1] < 2:
+        return
+    with torch.no_grad():
+        frames = frames_cpu.to(device)
+        actions = actions_cpu.to(device)
+        embeddings = model.encode_sequence(frames)["embeddings"]
+    motion = _compute_motion_subspace(embeddings, actions_cpu, cfg.top_k_components, paths)
+    if motion is None:
+        return
+    inverse_map = _build_inverse_action_map(
+        motion["action_dim"],
+        np.unique(compress_actions_to_ids(motion["actions_seq"].reshape(-1, motion["actions_seq"].shape[-1]))),
+    )
+    _save_motion_diagnostics_outputs(
+        motion,
+        cfg,
+        delta_dir,
+        alignment_dir,
+        cycle_dir,
+        global_step,
+        "z",
+        inverse_map,
+    )
+
+    if delta_s_dir is not None and alignment_s_dir is not None and cycle_s_dir is not None:
+        with torch.no_grad():
+            _, _, _, h_states = _predictor_rollout(model, embeddings, actions)
+            s_embeddings = model.state_head(h_states)
+        motion_s = _compute_motion_subspace(s_embeddings, actions_cpu, cfg.top_k_components, paths)
+        if motion_s is not None:
+            _save_motion_diagnostics_outputs(
+                motion_s,
+                cfg,
+                delta_s_dir,
+                alignment_s_dir,
+                cycle_s_dir,
+                global_step,
+                "s",
+                inverse_map,
+            )
+
     _write_alignment_debug_csv(frames_cpu, actions_cpu, paths, frames_dir, global_step)
     _save_diagnostics_frames(frames_cpu, paths, actions_cpu, frames_dir, global_step)
 
@@ -3237,10 +3281,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_vis_dir = run_dir / "vis_rolling"
     embeddings_vis_dir = run_dir / "embeddings"
     diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
+    diagnostics_delta_s_dir = run_dir / "vis_delta_s_pca"
     diagnostics_alignment_dir = run_dir / "vis_action_alignment"
+    diagnostics_alignment_s_dir = run_dir / "vis_action_alignment_s"
     diagnostics_cycle_dir = run_dir / "vis_cycle_error"
+    diagnostics_cycle_s_dir = run_dir / "vis_cycle_error_s"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
-    graph_diagnostics_dir = run_dir / "graph_diagnostics"
+    graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
     adjacency_vis_dir = run_dir / "vis_adjacency"
     samples_hard_dir = run_dir / "samples_hard"
@@ -3260,8 +3307,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
     if cfg.diagnostics.enabled:
         diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_delta_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_cycle_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -3729,6 +3779,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         diagnostics_cycle_dir,
                         diagnostics_frames_dir,
                         global_step,
+                        delta_s_dir=diagnostics_delta_s_dir,
+                        alignment_s_dir=diagnostics_alignment_s_dir,
+                        cycle_s_dir=diagnostics_cycle_s_dir,
                     )
                 if cfg.graph_diagnostics.enabled:
                     graph_frames = graph_diag_batch_cpu[0] if graph_diag_batch_cpu is not None else rolling_batch_cpu[0]

@@ -117,6 +117,9 @@ class Experiment:
     diagnostics_steps: List[int]
     diagnostics_csvs: Dict[str, List[Path]]
     diagnostics_frames: Dict[int, List[Tuple[Path, str, str, Optional[int]]]]
+    diagnostics_s_images: Dict[str, List[Path]]
+    diagnostics_s_steps: List[int]
+    diagnostics_s_csvs: Dict[str, List[Path]]
     graph_diagnostics_images: Dict[str, List[Path]]
     graph_diagnostics_steps: List[int]
     graph_diagnostics_csvs: Dict[str, List[Path]]
@@ -186,6 +189,7 @@ def load_experiment(
     include_self_distance: bool = True,
     include_diagnostics_images: bool = True,
     include_diagnostics_frames: bool = True,
+    include_diagnostics_s: bool = False,
     include_graph_diagnostics: bool = True,
     include_state_embedding: bool = True,
     include_graph_diagnostics_s: Optional[bool] = None,
@@ -254,6 +258,14 @@ def load_experiment(
     else:
         diagnostics_steps = [0] if _diagnostics_exists(path) else []
     diagnostics_frames = _collect_diagnostics_frames(path) if include_diagnostics_frames else {}
+
+    diagnostics_s_images: Dict[str, List[Path]] = {}
+    diagnostics_s_steps: List[int] = []
+    diagnostics_s_csvs: Dict[str, List[Path]] = {}
+    if include_diagnostics_s:
+        diagnostics_s_images = _collect_diagnostics_images_s(path)
+        diagnostics_s_steps = _collect_diagnostics_steps(diagnostics_s_images)
+        diagnostics_s_csvs = _collect_diagnostics_csvs_s(path)
     include_graph_diagnostics_s = include_graph_diagnostics if include_graph_diagnostics_s is None else include_graph_diagnostics_s
     graph_diagnostics_images: Dict[str, List[Path]] = {}
     graph_diagnostics_steps: List[int] = []
@@ -364,6 +376,9 @@ def load_experiment(
         diagnostics_steps=diagnostics_steps,
         diagnostics_csvs=diagnostics_csvs,
         diagnostics_frames=diagnostics_frames,
+        diagnostics_s_images=diagnostics_s_images,
+        diagnostics_s_steps=diagnostics_s_steps,
+        diagnostics_s_csvs=diagnostics_s_csvs,
         graph_diagnostics_images=graph_diagnostics_images,
         graph_diagnostics_steps=graph_diagnostics_steps,
         graph_diagnostics_csvs=graph_diagnostics_csvs,
@@ -784,16 +799,18 @@ VIS_STEP_SPECS = [
     ("vis_self_distance_z", "vis_self_distance_z", "self_distance_z_*.png", "self_distance_z_"),
     ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),
     ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
-    ("vis_action_alignment", "vis_action_alignment", "action_alignment_*.png", "action_alignment_"),
+    ("vis_delta_s_pca", "vis_delta_s_pca", "delta_s_pca_*.png", "delta_s_pca_"),
     ("vis_action_alignment_detail", "vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_action_alignment_detail_s", "vis_action_alignment_s", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_cycle_error", "vis_cycle_error", "cycle_error_*.png", "cycle_error_"),
+    ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
     ("vis_adjacency", "vis_adjacency", "adjacency_*.png", "adjacency_"),
-    ("vis_graph_rank1_cdf", "graph_diagnostics", "rank1_cdf_*.png", "rank1_cdf_"),
-    ("vis_graph_rank2_cdf", "graph_diagnostics", "rank2_cdf_*.png", "rank2_cdf_"),
-    ("vis_graph_neff_violin", "graph_diagnostics", "neff_violin_*.png", "neff_violin_"),
-    ("vis_graph_in_degree_hist", "graph_diagnostics", "in_degree_hist_*.png", "in_degree_hist_"),
-    ("vis_graph_edge_consistency", "graph_diagnostics", "edge_consistency_*.png", "edge_consistency_"),
-    ("vis_graph_metrics_history", "graph_diagnostics", "metrics_history_*.png", "metrics_history_"),
+    ("vis_graph_rank1_cdf_z", "graph_diagnostics_z", "rank1_cdf_*.png", "rank1_cdf_"),
+    ("vis_graph_rank2_cdf_z", "graph_diagnostics_z", "rank2_cdf_*.png", "rank2_cdf_"),
+    ("vis_graph_neff_violin_z", "graph_diagnostics_z", "neff_violin_*.png", "neff_violin_"),
+    ("vis_graph_in_degree_hist_z", "graph_diagnostics_z", "in_degree_hist_*.png", "in_degree_hist_"),
+    ("vis_graph_edge_consistency_z", "graph_diagnostics_z", "edge_consistency_*.png", "edge_consistency_"),
+    ("vis_graph_metrics_history_z", "graph_diagnostics_z", "metrics_history_*.png", "metrics_history_"),
     ("vis_graph_rank1_cdf_s", "graph_diagnostics_s", "rank1_cdf_*.png", "rank1_cdf_"),
     ("vis_graph_rank2_cdf_s", "graph_diagnostics_s", "rank2_cdf_*.png", "rank2_cdf_"),
     ("vis_graph_neff_violin_s", "graph_diagnostics_s", "neff_violin_*.png", "neff_violin_"),
@@ -853,6 +870,26 @@ def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
                     steps.add(step)
             if steps:
                 step_map["vis_self_distance_s"] = sorted(steps)
+    legacy_graph = root / "graph_diagnostics"
+    if legacy_graph.exists():
+        legacy_specs = [
+            ("vis_graph_rank1_cdf_z", "rank1_cdf_", "rank1_cdf_*.png"),
+            ("vis_graph_rank2_cdf_z", "rank2_cdf_", "rank2_cdf_*.png"),
+            ("vis_graph_neff_violin_z", "neff_violin_", "neff_violin_*.png"),
+            ("vis_graph_in_degree_hist_z", "in_degree_hist_", "in_degree_hist_*.png"),
+            ("vis_graph_edge_consistency_z", "edge_consistency_", "edge_consistency_*.png"),
+            ("vis_graph_metrics_history_z", "metrics_history_", "metrics_history_*.png"),
+        ]
+        for key, prefix, pattern in legacy_specs:
+            if key in step_map:
+                continue
+            steps = set()
+            for png in legacy_graph.glob(pattern):
+                step = _parse_step_from_stem(png.stem, prefix)
+                if step is not None:
+                    steps.add(step)
+            if steps:
+                step_map[key] = sorted(steps)
     return step_map
 
 
@@ -968,9 +1005,24 @@ def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
     diag_specs = [
         ("delta_z_pca", root / "vis_delta_z_pca", "delta_z_pca_*.png"),
         ("variance_spectrum", root / "vis_delta_z_pca", "delta_z_variance_spectrum_*.png"),
-        ("action_alignment", root / "vis_action_alignment", "action_alignment_[0-9]*.png"),
         ("action_alignment_detail", root / "vis_action_alignment", "action_alignment_detail_*.png"),
         ("cycle_error", root / "vis_cycle_error", "*.png"),
+    ]
+    images: Dict[str, List[Path]] = {}
+    for name, folder, pattern in diag_specs:
+        if folder.exists():
+            imgs = sorted(folder.glob(pattern))
+            if imgs:
+                images[name] = imgs
+    return images
+
+
+def _collect_diagnostics_images_s(root: Path) -> Dict[str, List[Path]]:
+    diag_specs = [
+        ("delta_s_pca", root / "vis_delta_s_pca", "delta_s_pca_*.png"),
+        ("variance_spectrum_s", root / "vis_delta_s_pca", "delta_s_variance_spectrum_*.png"),
+        ("action_alignment_detail_s", root / "vis_action_alignment_s", "action_alignment_detail_*.png"),
+        ("cycle_error_s", root / "vis_cycle_error_s", "*.png"),
     ]
     images: Dict[str, List[Path]] = {}
     for name, folder, pattern in diag_specs:
@@ -991,6 +1043,26 @@ def _diagnostics_exists(root: Path) -> bool:
         (root / "vis_cycle_error", "*.png"),
         (root / "vis_cycle_error", "*.csv"),
         (root / "vis_diagnostics_frames", "*.csv"),
+    ]
+    for folder, pattern in diag_dirs:
+        if not folder.exists():
+            continue
+        try:
+            for _ in folder.glob(pattern):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _diagnostics_s_exists(root: Path) -> bool:
+    diag_dirs = [
+        (root / "vis_delta_s_pca", "*.png"),
+        (root / "vis_delta_s_pca", "*.csv"),
+        (root / "vis_action_alignment_s", "*.png"),
+        (root / "vis_action_alignment_s", "*.csv"),
+        (root / "vis_cycle_error_s", "*.png"),
+        (root / "vis_cycle_error_s", "*.csv"),
     ]
     for folder, pattern in diag_dirs:
         if not folder.exists():
@@ -1025,6 +1097,21 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
         "action_alignment": root / "vis_action_alignment",
         "cycle_error": root / "vis_cycle_error",
         "frame_alignment": root / "vis_diagnostics_frames",
+    }
+    csvs: Dict[str, List[Path]] = {}
+    for name, folder in diag_dirs.items():
+        if folder.exists():
+            files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
+            if files:
+                csvs[name] = files
+    return csvs
+
+
+def _collect_diagnostics_csvs_s(root: Path) -> Dict[str, List[Path]]:
+    diag_dirs = {
+        "delta_s_pca": root / "vis_delta_s_pca",
+        "action_alignment_s": root / "vis_action_alignment_s",
+        "cycle_error_s": root / "vis_cycle_error_s",
     }
     csvs: Dict[str, List[Path]] = {}
     for name, folder in diag_dirs.items():
@@ -1093,9 +1180,22 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str, s
     return frame_map
 
 
-def _collect_graph_diagnostics_images(root: Path, folder_name: str = "graph_diagnostics") -> Dict[str, List[Path]]:
+def _resolve_graph_diagnostics_folder(root: Path, folder_name: str) -> Optional[Path]:
+    if folder_name == "graph_diagnostics_z":
+        preferred = root / "graph_diagnostics_z"
+        legacy = root / "graph_diagnostics"
+        if preferred.exists():
+            return preferred
+        if legacy.exists():
+            return legacy
+        return None
     folder = root / folder_name
-    if not folder.exists():
+    return folder if folder.exists() else None
+
+
+def _collect_graph_diagnostics_images(root: Path, folder_name: str = "graph_diagnostics_z") -> Dict[str, List[Path]]:
+    folder = _resolve_graph_diagnostics_folder(root, folder_name)
+    if folder is None:
         return {}
     specs = [
         ("rank1_cdf", "rank1_cdf_*.png"),
@@ -1129,9 +1229,9 @@ def _collect_graph_diagnostics_steps(graph_images: Dict[str, List[Path]]) -> Lis
     return sorted(steps)
 
 
-def _collect_graph_diagnostics_csvs(root: Path, folder_name: str = "graph_diagnostics") -> Dict[str, List[Path]]:
-    folder = root / folder_name
-    if not folder.exists():
+def _collect_graph_diagnostics_csvs(root: Path, folder_name: str = "graph_diagnostics_z") -> Dict[str, List[Path]]:
+    folder = _resolve_graph_diagnostics_folder(root, folder_name)
+    if folder is None:
         return {}
     csvs: Dict[str, List[Path]] = {}
     metrics_csvs = sorted(folder.glob("metrics_history*.csv"))
@@ -1140,9 +1240,9 @@ def _collect_graph_diagnostics_csvs(root: Path, folder_name: str = "graph_diagno
     return csvs
 
 
-def _graph_diagnostics_exists(root: Path, folder_name: str = "graph_diagnostics") -> bool:
-    folder = root / folder_name
-    if not folder.exists():
+def _graph_diagnostics_exists(root: Path, folder_name: str = "graph_diagnostics_z") -> bool:
+    folder = _resolve_graph_diagnostics_folder(root, folder_name)
+    if folder is None:
         return False
     try:
         for pattern in ("*.png", "*.csv"):
@@ -1176,14 +1276,17 @@ def _get_max_step(csv_path: Path) -> Optional[int]:
 
 
 def _get_last_modified(path: Path) -> Optional[datetime]:
-    """Get the most recent modification time of any file in the directory tree."""
+    """Get the most recent modification time for files under metrics/."""
     if not path.is_dir():
+        return None
+    metrics_dir = path / "metrics"
+    if not metrics_dir.is_dir():
         return None
     start_time = time.perf_counter()
     latest_mtime: Optional[float] = None
     files_scanned = 0
     try:
-        for item in path.rglob("*"):
+        for item in metrics_dir.rglob("*"):
             if item.is_file():
                 try:
                     mtime = item.stat().st_mtime
@@ -1195,16 +1298,22 @@ def _get_last_modified(path: Path) -> Optional[datetime]:
     except OSError:
         return None
     if latest_mtime is None:
-        return None
-    _profile("last_modified.rglob", start_time, path, files=files_scanned)
+        try:
+            return datetime.fromtimestamp(metrics_dir.stat().st_mtime)
+        except OSError:
+            return None
+    _profile("last_modified.rglob", start_time, metrics_dir, files=files_scanned)
     return datetime.fromtimestamp(latest_mtime)
 
 
 def _quick_last_modified(path: Path) -> Optional[datetime]:
-    """Fast last-modified using depth-1 files and dirs."""
+    """Fast last-modified using depth-1 files under metrics/."""
+    metrics_dir = path / "metrics"
+    if not metrics_dir.is_dir():
+        return None
     latest_mtime: Optional[float] = None
     try:
-        for child in path.iterdir():
+        for child in metrics_dir.iterdir():
             try:
                 mtime = child.stat().st_mtime
                 if latest_mtime is None or mtime > latest_mtime:
@@ -1215,7 +1324,7 @@ def _quick_last_modified(path: Path) -> Optional[datetime]:
         return None
     if latest_mtime is None:
         try:
-            return datetime.fromtimestamp(path.stat().st_mtime)
+            return datetime.fromtimestamp(metrics_dir.stat().st_mtime)
         except OSError:
             return None
     return datetime.fromtimestamp(latest_mtime)

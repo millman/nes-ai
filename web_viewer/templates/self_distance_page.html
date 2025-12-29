@@ -174,7 +174,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (select) {
         select.addEventListener("change", () => {
             const id = select.value;
-            window.location.href = "{{ url_for('self_distance') }}/" + encodeURIComponent(id);
+            window.location.href = "{{ url_for('self_distance_z') }}/" + encodeURIComponent(id);
         });
     }
 });

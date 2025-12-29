@@ -1,0 +1,438 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<style>
+.self-distance-plot {
+    height: 300px;
+    min-height: 300px;
+    max-height: 320px;
+}
+
+.plot-pin-wrapper {
+    position: relative;
+}
+
+.plot-pin-plot {
+    height: 220px;
+}
+
+.plot-pin-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
+    padding-bottom: 0.5rem;
+}
+
+.plot-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+
+.plot-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.plot-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+</style>
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div>
+        {% if experiment %}
+        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
+        {% else %}
+        <h3 class="mb-1">Self-distance (Z vs S)</h3>
+        <div class="text-muted small">No experiments with self-distance (Z vs S) outputs.</div>
+        {% endif %}
+    </div>
+    {% if experiment %}
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('experiment_detail', exp_id=experiment.id) }}">Open experiment</a>
+    </div>
+    {% endif %}
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No matching self-distance outputs found.</div>
+{% else %}
+<div class="small text-muted mb-2">
+    Loaded from {{ experiment.self_distance_csv.name }} and {{ experiment.state_embedding_csv.name }}.
+</div>
+<div class="row gy-1 gx-3 mt-3">
+    <div class="col-12 col-lg-6">
+        <div id="self-distance-z-first-cos" class="plot-area self-distance-plot"></div>
+    </div>
+    <div class="col-12 col-lg-6">
+        <div id="self-distance-z-prior-cos" class="plot-area self-distance-plot"></div>
+    </div>
+</div>
+<div class="row gy-1 gx-3 mt-1">
+    <div class="col-12 col-lg-6">
+        <div id="self-distance-s-first-cos" class="plot-area self-distance-plot"></div>
+    </div>
+    <div class="col-12 col-lg-6">
+        <div id="self-distance-s-prior-cos" class="plot-area self-distance-plot"></div>
+    </div>
+</div>
+<div class="row g-3 mt-3" id="self-distance-frame-row">
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">First frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="self-distance-first-img" class="img-fluid rounded border d-none" alt="First frame preview">
+                <div class="text-muted small mt-2" id="self-distance-first-label"></div>
+                <div class="text-muted small" id="self-distance-first-action"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">Prior frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="self-distance-prior-img" class="img-fluid rounded border d-none" alt="Prior frame preview">
+                <div class="text-muted small mt-2" id="self-distance-prior-label"></div>
+                <div class="text-muted small" id="self-distance-prior-action"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card h-100">
+            <div class="card-header py-2">Current frame</div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <img id="self-distance-current-img" class="img-fluid rounded border d-none" alt="Current frame preview">
+                <div class="text-muted small mt-2" id="self-distance-current-label"></div>
+                <div class="text-muted small" id="self-distance-current-action"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="d-flex align-items-center justify-content-between mb-2 mt-4">
+    <h6 class="mb-0">Training metrics (loss)</h6>
+</div>
+<div class="plot-pin-wrapper mb-3" id="self-distance-loss-wrapper">
+    <button
+        type="button"
+        class="plot-pin-btn"
+        id="self-distance-loss-pin"
+        aria-pressed="false"
+        aria-label="Pin training metrics plot"
+        title="Pin training metrics plot"
+    >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+        </svg>
+    </button>
+    <div id="self-distance-loss-plot" class="plot-pin-plot"></div>
+</div>
+<div class="row g-3 mt-3">
+    <div class="col-12 col-lg-6">
+        <div class="card h-100">
+            <div class="card-header py-2">Self-distance image (Z)</div>
+            <div class="card-body d-flex flex-column gap-2 align-items-start">
+                <img id="self-distance-step-img-z" class="img-fluid rounded border d-none" alt="Self-distance Z step">
+                <div class="text-muted small font-monospace" id="self-distance-step-path-z"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-6">
+        <div class="card h-100">
+            <div class="card-header py-2">Self-distance image (S)</div>
+            <div class="card-body d-flex flex-column gap-2 align-items-start">
+                <img id="self-distance-step-img-s" class="img-fluid rounded border d-none" alt="Self-distance S step">
+                <div class="text-muted small font-monospace" id="self-distance-step-path-s"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if experiment %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    if (typeof Plotly === "undefined") {
+        const firstPlot = document.getElementById("self-distance-z-first-cos");
+        if (firstPlot) {
+            firstPlot.innerHTML = "<p class='text-danger small'>Plotly failed to load.</p>";
+        }
+        return;
+    }
+    const zCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.self_distance_csv.relative_to(experiment.path)) }}";
+    const sCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.state_embedding_csv.relative_to(experiment.path)) }}";
+    const plotConfig = buildPlotlyConfig({});
+    const zFirstPlot = document.getElementById("self-distance-z-first-cos");
+    const zPriorPlot = document.getElementById("self-distance-z-prior-cos");
+    const sFirstPlot = document.getElementById("self-distance-s-first-cos");
+    const sPriorPlot = document.getElementById("self-distance-s-prior-cos");
+    const firstImg = document.getElementById("self-distance-first-img");
+    const priorImg = document.getElementById("self-distance-prior-img");
+    const currentImg = document.getElementById("self-distance-current-img");
+    const firstLabel = document.getElementById("self-distance-first-label");
+    const priorLabel = document.getElementById("self-distance-prior-label");
+    const currentLabel = document.getElementById("self-distance-current-label");
+    const firstAction = document.getElementById("self-distance-first-action");
+    const priorAction = document.getElementById("self-distance-prior-action");
+    const currentAction = document.getElementById("self-distance-current-action");
+    const stepImgZ = document.getElementById("self-distance-step-img-z");
+    const stepPathZ = document.getElementById("self-distance-step-path-z");
+    const stepImgS = document.getElementById("self-distance-step-img-s");
+    const stepPathS = document.getElementById("self-distance-step-path-s");
+    const diagLossPlot = document.getElementById("self-distance-loss-plot");
+    const diagLossWrapper = document.getElementById("self-distance-loss-wrapper");
+    const diagLossPin = document.getElementById("self-distance-loss-pin");
+    const diagFigure = {{ figure | tojson if figure else 'null' }};
+    let diagLossPinned = false;
+
+    const assetPath = (rel) => `/assets/{{ experiment.id }}/${rel.replace(/^\/+/, "")}`;
+    const setImage = (imgEl, labelEl, actionEl, relPath, labelText, actionText) => {
+        if (!imgEl || !labelEl) return;
+        if (!relPath) {
+            imgEl.classList.add("d-none");
+            labelEl.textContent = "";
+            if (actionEl) actionEl.textContent = "Action: (not available)";
+            return;
+        }
+        imgEl.src = assetPath(relPath);
+        imgEl.alt = labelText || relPath;
+        imgEl.classList.remove("d-none");
+        labelEl.textContent = labelText || relPath;
+        if (actionEl) {
+            actionEl.textContent = actionText ? `Action: ${actionText}` : "Action: (not available)";
+        }
+    };
+
+    const selfDistanceMapZ = {};
+    {% if experiment.self_distance_images %}
+    {% for img in experiment.self_distance_images %}
+    {% if "cosine" not in img.stem %}
+    {% set rel_img = img.relative_to(experiment.path) %}
+    {% set stem = img.stem.split('_')|last %}
+    {% set step = stem|int %}
+    selfDistanceMapZ[{{ step }}] = {
+        url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
+        path: "{{ rel_img }}",
+    };
+    {% endif %}
+    {% endfor %}
+    {% endif %}
+    const selfDistanceStepsZ = Object.keys(selfDistanceMapZ).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+
+    const selfDistanceMapS = {};
+    {% if experiment.state_embedding_images %}
+    {% for img in experiment.state_embedding_images %}
+    {% if "hist" not in img.stem and "cosine" not in img.stem %}
+    {% set rel_img = img.relative_to(experiment.path) %}
+    {% set stem = img.stem.split('_')|last %}
+    {% set step = stem|int %}
+    selfDistanceMapS[{{ step }}] = {
+        url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
+        path: "{{ rel_img }}",
+    };
+    {% endif %}
+    {% endfor %}
+    {% endif %}
+    const selfDistanceStepsS = Object.keys(selfDistanceMapS).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+
+    const nearestSelfStep = (step, steps) => {
+        if (!steps.length) return null;
+        let best = steps[0];
+        let bestDiff = Math.abs(step - steps[0]);
+        for (let i = 1; i < steps.length; i++) {
+            const diff = Math.abs(step - steps[i]);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                best = steps[i];
+            }
+        }
+        return best;
+    };
+
+    const updateSelfDistanceImage = (step, map, steps, imgEl, pathEl, label) => {
+        if (!imgEl || !pathEl) return;
+        const nearest = nearestSelfStep(step, steps);
+        if (nearest === null || !map[nearest]) {
+            imgEl.classList.add("d-none");
+            pathEl.textContent = `No self-distance image (${label}) available.`;
+            return;
+        }
+        const entry = map[nearest];
+        imgEl.src = entry.url;
+        imgEl.alt = `Self-distance ${label} step ${nearest}`;
+        imgEl.classList.remove("d-none");
+        pathEl.textContent = `${entry.path} (step ${nearest})`;
+    };
+
+    const attachHover = (plotEl) => {
+        plotEl.on("plotly_hover", (event) => {
+            const point = event?.points?.[0];
+            if (!point || !point.customdata) return;
+            const payload = point.customdata;
+            const trajectory = payload[0];
+            const step = payload[1];
+            const framePath = payload[2];
+            const firstPath = payload[3];
+            const priorPath = payload[4];
+            const frameLabelText = payload[5] || `t=${step}`;
+            const headerText = `${trajectory} • t=${step}`;
+            const actionText = payload[6] || "";
+
+            setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+            setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+            setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
+            updateSelfDistanceImage(step, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+            updateSelfDistanceImage(step, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
+        });
+    };
+
+    const buildCosinePlots = (rows, firstEl, priorEl, label, axisLabel, titlePrefix, color) => {
+        if (!rows.length) {
+            if (firstEl) firstEl.innerHTML = `<p class='text-muted fst-italic'>No rows in ${label} CSV.</p>`;
+            if (priorEl) priorEl.innerHTML = "";
+            return;
+        }
+        const steps = rows.map(r => Number(r.timestep));
+        const distFirstCos = rows.map(r => Number(r.cosine_distance_to_first ?? r.distance_to_first_cosine ?? 0));
+        const distPriorCos = rows.map(r => Number(r.cosine_distance_to_prior ?? r.distance_to_prior_cosine ?? 0));
+        const custom = rows.map(r => [
+            r.trajectory,
+            Number(r.timestep),
+            r.frame_path,
+            r.first_frame_path,
+            r.prior_frame_path,
+            r.frame_label,
+            r.action_label || "",
+        ]);
+
+        const layoutBase = {
+            margin: { t: 32, r: 16, l: 50, b: 50 },
+            template: "plotly_white",
+            height: 300,
+            title: { font: { size: 12 } },
+            font: { size: 11 },
+        };
+
+        const layoutLineChart = {
+            ...layoutBase,
+            hovermode: "x unified",
+            xaxis: {
+                title: "timestep",
+                showspikes: true,
+                spikemode: "across",
+                spikethickness: 1,
+                spikedash: "dot",
+                spikecolor: "#999",
+            },
+        };
+
+        Plotly.newPlot(
+            firstEl,
+            [
+                {
+                    x: steps,
+                    y: distFirstCos,
+                    mode: "lines+markers",
+                    name: "cosine distance to first",
+                    marker: { size: 4, color },
+                    line: { width: 1.5, color },
+                    customdata: custom,
+                    hovertemplate: "%{y:.4f}<extra></extra>",
+                },
+            ],
+            {
+                ...layoutLineChart,
+                title: `${titlePrefix} Cosine distance to first latent`,
+                yaxis: { title: `1 - cos(${axisLabel}0, ${axisLabel}t)` },
+            },
+            plotConfig,
+        ).then(() => attachHover(firstEl));
+
+        Plotly.newPlot(
+            priorEl,
+            [
+                {
+                    x: steps,
+                    y: distPriorCos,
+                    mode: "lines+markers",
+                    name: "cosine distance to prior",
+                    marker: { size: 4, color },
+                    line: { width: 1.5, color },
+                    customdata: custom,
+                    hovertemplate: "%{y:.4f}<extra></extra>",
+                },
+            ],
+            {
+                ...layoutLineChart,
+                title: `${titlePrefix} Cosine distance to prior latent`,
+                yaxis: { title: `1 - cos(${axisLabel}(t-1), ${axisLabel}t)` },
+            },
+            plotConfig,
+        ).then(() => attachHover(priorEl));
+    };
+
+    const updatePinState = (nextState) => {
+        diagLossPinned = nextState;
+        if (!diagLossWrapper || !diagLossPin) return;
+        diagLossWrapper.classList.toggle("sticky-active", diagLossPinned);
+        diagLossPin.classList.toggle("active", diagLossPinned);
+        diagLossPin.setAttribute("aria-pressed", diagLossPinned ? "true" : "false");
+        diagLossPin.setAttribute("title", diagLossPinned ? "Unpin training metrics plot" : "Pin training metrics plot");
+    };
+
+    if (diagLossPin) {
+        diagLossPin.addEventListener("click", () => {
+            updatePinState(!diagLossPinned);
+        });
+    }
+
+    if (diagFigure && diagLossPlot) {
+        Plotly.react(diagLossPlot, diagFigure.data, diagFigure.layout, buildPlotlyConfig(diagFigure.config || {}));
+    }
+
+    const loadCsv = (url) => new Promise((resolve) => {
+        Papa.parse(url, {
+            download: true,
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: true,
+            complete: (results) => resolve(results.data || []),
+            error: () => resolve([]),
+        });
+    });
+
+    Promise.all([loadCsv(zCsvUrl), loadCsv(sCsvUrl)]).then(([zRows, sRows]) => {
+        buildCosinePlots(zRows, zFirstPlot, zPriorPlot, "self_distance_z.csv", "z", "Z ·", "#3b6fb6");
+        buildCosinePlots(sRows, sFirstPlot, sPriorPlot, "self_distance_s.csv", "s", "S ·", "#6f9b5a");
+        const initialStep = zRows.length ? Number(zRows[zRows.length - 1].timestep) : 0;
+        updateSelfDistanceImage(initialStep, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+        updateSelfDistanceImage(initialStep, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
+    });
+});
+</script>
+{% endif %}
+{% endblock %}

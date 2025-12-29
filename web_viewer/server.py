@@ -13,6 +13,7 @@ from flask import (
     Flask,
     abort,
     jsonify,
+    redirect,
     render_template,
     request,
     send_from_directory,
@@ -36,6 +37,7 @@ from .experiments import (
     write_starred,
     write_archived,
     _diagnostics_exists,
+    _diagnostics_s_exists,
     _graph_diagnostics_exists,
     _collect_visualization_steps,
     extract_alignment_summary,
@@ -129,6 +131,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         return experiment
 
     @app.route("/")
+    def index():
+        return redirect(url_for("dashboard"))
+
+    @app.route("/dashboard")
     def dashboard():
         route_start = time.perf_counter()
         experiments = []
@@ -389,9 +395,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             }
         )
 
-    @app.route("/self_distance", defaults={"exp_id": None})
-    @app.route("/self_distance/<exp_id>")
-    def self_distance(exp_id: Optional[str]):
+    @app.route("/self_distance_z", defaults={"exp_id": None})
+    @app.route("/self_distance_z/<exp_id>")
+    def self_distance_z(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
         def _resolve_self_distance_csv_dir(exp_path: Path) -> Optional[Path]:
@@ -482,9 +488,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
-    @app.route("/state_embedding", defaults={"exp_id": None})
-    @app.route("/state_embedding/<exp_id>")
-    def state_embedding(exp_id: Optional[str]):
+    @app.route("/self_distance_s", defaults={"exp_id": None})
+    @app.route("/self_distance_s/<exp_id>")
+    def self_distance_s(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
         def _resolve_self_distance_s_csv_dir(exp_path: Path) -> Optional[Path]:
@@ -611,9 +617,125 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
-    @app.route("/diagnostics", defaults={"exp_id": None})
-    @app.route("/diagnostics/<exp_id>")
-    def diagnostics(exp_id: Optional[str]):
+    @app.route("/self_distance_zvs", defaults={"exp_id": None})
+    @app.route("/self_distance_zvs/<exp_id>")
+    def self_distance_zvs(exp_id: Optional[str]):
+        requested = exp_id or request.args.get("id")
+
+        def _resolve_self_distance_z_csv_dir(exp_path: Path) -> Optional[Path]:
+            new_dir = exp_path / "self_distance_z"
+            old_dir = exp_path / "self_distance"
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.csv"))
+            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.csv"))
+            if new_has and old_has:
+                raise RuntimeError(f"Found both self_distance_z and self_distance outputs in {exp_path}.")
+            if new_has:
+                return new_dir
+            if old_has:
+                return old_dir
+            return None
+
+        def _resolve_self_distance_s_csv_dir(exp_path: Path) -> Optional[Path]:
+            new_dir = exp_path / "self_distance_s"
+            old_dir = exp_path / "state_embedding"
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.csv"))
+            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_*.csv"))
+            if new_has and old_has:
+                raise RuntimeError(f"Found both self_distance_s and state_embedding outputs in {exp_path}.")
+            if new_has:
+                return new_dir
+            if old_has:
+                return old_dir
+            return None
+
+        def _self_distance_z_image_conflict(exp_path: Path) -> None:
+            new_dir = exp_path / "vis_self_distance_z"
+            old_dir = exp_path / "vis_self_distance"
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.png"))
+            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.png"))
+            if new_has and old_has:
+                raise RuntimeError(f"Found both vis_self_distance_z and vis_self_distance images in {exp_path}.")
+
+        def _self_distance_s_image_conflict(exp_path: Path) -> None:
+            old_dir = exp_path / "vis_state_embedding"
+            new_dir = exp_path / "vis_self_distance_s"
+            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_[0-9]*.png"))
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.png"))
+            if old_has and new_has:
+                raise RuntimeError(f"Found both vis_state_embedding and vis_self_distance_s images in {exp_path}.")
+
+        def _latest_self_distance_zvs_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                z_dir = _resolve_self_distance_z_csv_dir(row.path)
+                s_dir = _resolve_self_distance_s_csv_dir(row.path)
+                if z_dir is None or s_dir is None:
+                    continue
+                if not (any(z_dir.glob("self_distance_z_*.csv")) or any(z_dir.glob("self_distance_*.csv"))):
+                    continue
+                if not (any(s_dir.glob("self_distance_s_*.csv")) or any(s_dir.glob("state_embedding_*.csv"))):
+                    continue
+                return row.id
+            return None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                z_dir = _resolve_self_distance_z_csv_dir(requested_path)
+                s_dir = _resolve_self_distance_s_csv_dir(requested_path)
+                if z_dir is not None and s_dir is not None:
+                    selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_self_distance_zvs_id()
+
+        if selected_id is None:
+            return render_template(
+                "self_distance_zs.html",
+                experiments=[],
+                experiment=None,
+                page_title="Self-distance (Z vs S)",
+                cfg=cfg,
+                active_nav="self_distance_zvs",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_diagnostics_images=False,
+            include_diagnostics_frames=False,
+            include_graph_diagnostics=False,
+        )
+        if selected is None or selected.self_distance_csv is None or selected.state_embedding_csv is None:
+            abort(404, "Experiment not found for self-distance (Z vs S).")
+        _self_distance_z_image_conflict(selected.path)
+        _self_distance_s_image_conflict(selected.path)
+
+        figure = _build_single_experiment_figure(selected)
+
+        return render_template(
+            "self_distance_zs.html",
+            experiments=[],
+            experiment=selected,
+            figure=figure,
+            page_title="Self-distance (Z vs S)",
+            cfg=cfg,
+            active_nav="self_distance_zvs",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
+    @app.route("/diagnostics_z", defaults={"exp_id": None})
+    @app.route("/diagnostics_z/<exp_id>")
+    def diagnostics_z(exp_id: Optional[str]):
         route_start = time.perf_counter()
         requested = exp_id or request.args.get("id")
 
@@ -795,9 +917,151 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
-    @app.route("/graph_diagnostics", defaults={"exp_id": None})
-    @app.route("/graph_diagnostics/<exp_id>")
-    def graph_diagnostics(exp_id: Optional[str]):
+    @app.route("/diagnostics_s", defaults={"exp_id": None})
+    @app.route("/diagnostics_s/<exp_id>")
+    def diagnostics_s(exp_id: Optional[str]):
+        route_start = time.perf_counter()
+        requested = exp_id or request.args.get("id")
+
+        def _latest_diagnostics_s_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                if _diagnostics_s_exists(row.path):
+                    return row.id
+            return sorted_rows[0].id if sorted_rows else None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_diagnostics_s_id()
+
+        if selected_id is None:
+            return render_template(
+                "diagnostics_page_s.html",
+                experiments=[],
+                experiment=None,
+                diagnostics_map={},
+                diagnostics_csv_map={},
+                frame_map={},
+                cfg=cfg,
+                active_nav="diagnostics_s",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_graph_diagnostics=False,
+            include_diagnostics_images=False,
+            include_diagnostics_frames=True,
+            include_diagnostics_s=True,
+        )
+        if selected is None:
+            abort(404, "Experiment not found for diagnostics (S).")
+
+        build_maps_start = time.perf_counter()
+        figure = _build_single_experiment_figure(selected)
+        diagnostics_map: Dict[str, Dict[int, str]] = {}
+        for name, paths in selected.diagnostics_s_images.items():
+            per_step: Dict[int, str] = {}
+            for path in paths:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map[name] = per_step
+
+        # Add state embedding self-distance images (S) keyed by step.
+        if selected.state_embedding_images:
+            per_step = {}
+            for path in selected.state_embedding_images:
+                stem = path.stem
+                if "hist" in stem or "cosine" in stem:
+                    continue
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map["self_distance_s"] = per_step
+
+        diagnostics_csv_map: Dict[str, Dict[int, str]] = {}
+        for name, paths in selected.diagnostics_s_csvs.items():
+            per_step: Dict[int, str] = {}
+            for path in paths:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_csv_map[name] = per_step
+
+        frame_map: Dict[int, List[Dict[str, str]]] = {}
+        for step, frames in selected.diagnostics_frames.items():
+            entries: List[Dict[str, str]] = []
+            for img_path, src_path, action_label, action_id in frames:
+                try:
+                    rel = img_path.relative_to(selected.path)
+                except ValueError:
+                    continue
+                entries.append(
+                    {
+                        "url": url_for("serve_asset", relative_path=f"{selected.id}/{rel}"),
+                        "source": src_path or rel.as_posix(),
+                        "action": action_label or "",
+                        "action_id": "" if action_id is None else str(action_id),
+                    }
+                    )
+            if entries:
+                frame_map[step] = entries
+
+        _log_timing(
+            "diagnostics_s.build_maps",
+            build_maps_start,
+            images=sum(len(v) for v in diagnostics_map.values()),
+            csvs=sum(len(v) for v in diagnostics_csv_map.values()),
+            frames=sum(len(v) for v in frame_map.values()),
+        )
+        _log_timing("diagnostics_s.total", route_start, selected=selected.id)
+        return render_template(
+            "diagnostics_page_s.html",
+            experiments=[],
+            experiment=selected,
+            diagnostics_map=diagnostics_map,
+            diagnostics_csv_map=diagnostics_csv_map,
+            frame_map=frame_map,
+            figure=figure,
+            cfg=cfg,
+            active_nav="diagnostics_s",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
+    @app.route("/graph_diagnostics_z", defaults={"exp_id": None})
+    @app.route("/graph_diagnostics_z/<exp_id>")
+    def graph_diagnostics_z(exp_id: Optional[str]):
         route_start = time.perf_counter()
         requested = exp_id or request.args.get("id")
 
@@ -1058,6 +1322,170 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
+    @app.route("/graph_diagnostics_zvs", defaults={"exp_id": None})
+    @app.route("/graph_diagnostics_zvs/<exp_id>")
+    def graph_diagnostics_zvs(exp_id: Optional[str]):
+        route_start = time.perf_counter()
+        requested = exp_id or request.args.get("id")
+
+        def _latest_graph_zvs_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                if _graph_diagnostics_exists(row.path) and _graph_diagnostics_exists(row.path, folder_name="graph_diagnostics_s"):
+                    return row.id
+            return None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                if _graph_diagnostics_exists(requested_path) and _graph_diagnostics_exists(requested_path, folder_name="graph_diagnostics_s"):
+                    selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_graph_zvs_id()
+
+        if selected_id is None:
+            return render_template(
+                "graph_diagnostics_zs.html",
+                experiments=[],
+                experiment=None,
+                graph_map_z={},
+                graph_map_s={},
+                steps_z=[],
+                steps_s=[],
+                history_z=[],
+                history_s=[],
+                history_url_z=None,
+                history_url_s=None,
+                history_plot_url_z=None,
+                history_plot_url_s=None,
+                figure=None,
+                cfg=cfg,
+                active_nav="graph_diagnostics_zvs",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_self_distance=False,
+            include_diagnostics_images=False,
+            include_diagnostics_frames=False,
+            include_graph_diagnostics=True,
+            include_graph_diagnostics_s=True,
+        )
+        if selected is None:
+            abort(404, "Experiment not found for graph diagnostics (Z vs S).")
+
+        figure = _build_single_experiment_figure(selected)
+
+        def _build_graph_map(paths_by_name: Dict[str, List[Path]]) -> Dict[str, Dict[int, str]]:
+            out: Dict[str, Dict[int, str]] = {}
+            for name, paths in paths_by_name.items():
+                per_step: Dict[int, str] = {}
+                for path in paths:
+                    stem = path.stem
+                    suffix = stem.split("_")[-1] if "_" in stem else stem
+                    try:
+                        step = int(suffix)
+                    except ValueError:
+                        continue
+                    try:
+                        rel = path.relative_to(selected.path)
+                    except ValueError:
+                        continue
+                    per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+                if per_step:
+                    out[name] = per_step
+            return out
+
+        graph_map_z = _build_graph_map(selected.graph_diagnostics_images)
+        graph_map_s = _build_graph_map(selected.graph_diagnostics_s_images)
+        steps_z = selected.graph_diagnostics_steps
+        steps_s = selected.graph_diagnostics_s_steps
+
+        history_rows_z: List[Dict[str, float]] = []
+        history_rows_s: List[Dict[str, float]] = []
+        history_url_z: Optional[str] = None
+        history_url_s: Optional[str] = None
+        history_plot_url_z: Optional[str] = None
+        history_plot_url_s: Optional[str] = None
+
+        history_files_z = selected.graph_diagnostics_csvs.get("metrics_history", [])
+        if history_files_z:
+            latest_hist = history_files_z[-1]
+            history_rows_z = _parse_graph_history_csv(latest_hist)
+            try:
+                rel = latest_hist.relative_to(selected.path)
+                history_url_z = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            except ValueError:
+                history_url_z = None
+
+        history_files_s = selected.graph_diagnostics_s_csvs.get("metrics_history", [])
+        if history_files_s:
+            latest_hist = history_files_s[-1]
+            history_rows_s = _parse_graph_history_csv(latest_hist)
+            try:
+                rel = latest_hist.relative_to(selected.path)
+                history_url_s = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            except ValueError:
+                history_url_s = None
+
+        def _latest_history_plot(images: Dict[str, List[Path]]) -> Optional[str]:
+            plot_path: Optional[Path] = None
+            latest_history_images = images.get("metrics_history_latest", [])
+            history_images = images.get("metrics_history", [])
+            if latest_history_images:
+                plot_path = latest_history_images[-1]
+            elif history_images:
+                plot_path = history_images[-1]
+            if plot_path is None:
+                return None
+            try:
+                rel = plot_path.relative_to(selected.path)
+                return url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            except ValueError:
+                return None
+
+        history_plot_url_z = _latest_history_plot(selected.graph_diagnostics_images)
+        history_plot_url_s = _latest_history_plot(selected.graph_diagnostics_s_images)
+
+        _log_timing(
+            "graph_diagnostics_zvs.total",
+            route_start,
+            selected=selected.id,
+            images=sum(len(v) for v in graph_map_z.values()) + sum(len(v) for v in graph_map_s.values()),
+            steps=len(steps_z) + len(steps_s),
+            history=len(history_rows_z) + len(history_rows_s),
+        )
+        return render_template(
+            "graph_diagnostics_zs.html",
+            experiments=[],
+            experiment=selected,
+            graph_map_z=graph_map_z,
+            graph_map_s=graph_map_s,
+            steps_z=steps_z,
+            steps_s=steps_s,
+            history_z=history_rows_z,
+            history_s=history_rows_s,
+            history_url_z=history_url_z,
+            history_url_s=history_url_s,
+            history_plot_url_z=history_plot_url_z,
+            history_plot_url_s=history_plot_url_s,
+            figure=figure,
+            cfg=cfg,
+            active_nav="graph_diagnostics_zvs",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
     @app.route("/assets/<path:relative_path>")
     def serve_asset(relative_path: str):
         target = _resolve_asset_path(cfg.output_dir, relative_path)
@@ -1160,4 +1588,19 @@ def _resolve_asset_path(root: Path, relative_path: str) -> Path:
         target.relative_to(root_path)
     except ValueError:
         abort(404)
+    if target.exists():
+        return target
+    if "graph_diagnostics_z" in target.parts:
+        fallback_rel = Path(*[("graph_diagnostics" if part == "graph_diagnostics_z" else part) for part in target.parts])
+        try:
+            fallback_rel = fallback_rel.relative_to(root_path)
+        except ValueError:
+            return target
+        fallback = (root_path / fallback_rel).resolve()
+        try:
+            fallback.relative_to(root_path)
+        except ValueError:
+            return target
+        if fallback.exists():
+            return fallback
     return target
