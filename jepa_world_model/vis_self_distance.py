@@ -128,6 +128,7 @@ def write_self_distance_plots(
     embedding_label: str = "z",
     title_prefix: str = "Self-distance",
     file_prefix: str = "self_distance",
+    cosine_prefix: Optional[str] = None,
 ) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 3, figsize=(14, 8.5))
@@ -182,7 +183,8 @@ def write_self_distance_plots(
     fig_cos.suptitle(f"{title_prefix} (cosine): {trajectory_label}", fontsize=12)
     fig_cos.colorbar(sc_cos, ax=axes_cos[2], label="timestep")
     fig_cos.tight_layout(rect=[0, 0, 1, 0.93])
-    out_path_cos = plot_dir / f"{file_prefix}_cosine_{global_step:07d}.png"
+    cosine_prefix = cosine_prefix or f"{file_prefix}_cosine"
+    out_path_cos = plot_dir / f"{cosine_prefix}_{global_step:07d}.png"
     fig_cos.savefig(out_path_cos, dpi=200, bbox_inches="tight")
     plt.close(fig_cos)
 
@@ -196,6 +198,7 @@ def write_self_distance_outputs_from_embeddings(
     embedding_label: str = "z",
     title_prefix: str = "Self-distance",
     file_prefix: str = "self_distance",
+    cosine_prefix: Optional[str] = None,
     start_index: int = 0,
 ) -> None:
     if embeddings.shape[0] < 2:
@@ -238,6 +241,7 @@ def write_self_distance_outputs_from_embeddings(
         embedding_label=embedding_label,
         title_prefix=title_prefix,
         file_prefix=file_prefix,
+        cosine_prefix=cosine_prefix,
     )
 
 
@@ -251,6 +255,7 @@ def write_self_distance_outputs(
     embedding_label: str = "z",
     title_prefix: str = "Self-distance",
     file_prefix: str = "self_distance",
+    cosine_prefix: Optional[str] = None,
 ) -> None:
     if traj_inputs.frames.shape[1] < 2:
         return
@@ -266,5 +271,6 @@ def write_self_distance_outputs(
         embedding_label=embedding_label,
         title_prefix=title_prefix,
         file_prefix=file_prefix,
+        cosine_prefix=cosine_prefix,
         start_index=0,
     )

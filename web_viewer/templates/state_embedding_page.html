@@ -68,7 +68,7 @@
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
         <h3 class="mb-1">{{ page_title if page_title is defined else "State embedding" }}</h3>
-        <div class="text-muted small">No experiments with state_embedding.csv</div>
+        <div class="text-muted small">No experiments with self_distance_s.csv</div>
         {% endif %}
     </div>
     {% if experiment %}
@@ -79,10 +79,10 @@
 </div>
 
 {% if not experiment %}
-<div class="text-muted fst-italic">No state_embedding.csv found in any experiments.</div>
+<div class="text-muted fst-italic">No self_distance_s.csv found in any experiments.</div>
 {% else %}
 <div class="small text-muted mb-2">
-    Loaded from {{ experiment.state_embedding_csv.name }}{% if experiment.state_embedding_images %}, latest PNG in vis_state_embedding{% endif %}.
+    Loaded from {{ experiment.state_embedding_csv.name }}{% if experiment.state_embedding_images %}, latest PNG in vis_self_distance_s{% endif %}.
 </div>
 <div class="row gy-1 gx-3 mt-3">
     <div class="col-12 col-lg-4">
@@ -252,7 +252,7 @@
         const stateEmbeddingMap = {};
         {% if experiment.state_embedding_images %}
         {% for img in experiment.state_embedding_images %}
-        {% if "hist" not in img.stem %}
+        {% if "hist" not in img.stem and "cosine" not in img.stem %}
         {% set rel_img = img.relative_to(experiment.path) %}
         {% set stem = img.stem.split('_')|last %}
         {% set step = stem|int %}
@@ -393,7 +393,7 @@
 
         const buildPlots = (rows) => {
             if (!rows.length) {
-                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in state_embedding.csv.</p>";
+                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance_s.csv.</p>";
                 if (priorPlot) priorPlot.innerHTML = "";
                 if (scatterPlot) scatterPlot.innerHTML = "";
                 if (firstPlotCos) firstPlotCos.innerHTML = "";

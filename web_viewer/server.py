@@ -327,6 +327,29 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def self_distance(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
+        def _resolve_self_distance_csv_dir(exp_path: Path) -> Optional[Path]:
+            """Support legacy self_distance outputs while preferring self_distance_z; error if both exist."""
+            new_dir = exp_path / "self_distance_z"
+            old_dir = exp_path / "self_distance"
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.csv"))
+            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.csv"))
+            if new_has and old_has:
+                raise RuntimeError(f"Found both self_distance_z and self_distance outputs in {exp_path}.")
+            if new_has:
+                return new_dir
+            if old_has:
+                return old_dir
+            return None
+
+        def _self_distance_z_image_conflict(exp_path: Path) -> None:
+            """Prefer vis_self_distance_z images but fail if legacy+new images both exist."""
+            new_dir = exp_path / "vis_self_distance_z"
+            old_dir = exp_path / "vis_self_distance"
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.png"))
+            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.png"))
+            if new_has and old_has:
+                raise RuntimeError(f"Found both vis_self_distance_z and vis_self_distance images in {exp_path}.")
+
         def _latest_self_distance_id() -> Optional[str]:
             index_rows = build_experiment_index(cfg.output_dir)
             if not index_rows:
@@ -337,8 +360,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                csv_path = row.path / "self_distance" / "self_distance_000000.csv"
-                if csv_path.exists():
+                csv_dir = _resolve_self_distance_csv_dir(row.path)
+                if csv_dir is None:
+                    continue
+                if any(csv_dir.glob("self_distance_z_*.csv")) or any(csv_dir.glob("self_distance_*.csv")):
                     return row.id
             return None
 
@@ -346,8 +371,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                csv_dir = requested_path / "self_distance"
-                if csv_dir.exists() and any(csv_dir.glob("self_distance_*.csv")):
+                csv_dir = _resolve_self_distance_csv_dir(requested_path)
+                if csv_dir is not None and (
+                    any(csv_dir.glob("self_distance_z_*.csv")) or any(csv_dir.glob("self_distance_*.csv"))
+                ):
                     selected_id = requested
         if selected_id is None:
             selected_id = _latest_self_distance_id()
@@ -372,6 +399,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         if selected is None or selected.self_distance_csv is None:
             abort(404, "Experiment not found for self-distance.")
+        _self_distance_z_image_conflict(selected.path)
 
         figure = _build_single_experiment_figure(selected)
 
@@ -392,6 +420,29 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def state_embedding(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
+        def _resolve_self_distance_s_csv_dir(exp_path: Path) -> Optional[Path]:
+            """Support legacy state_embedding outputs while preferring self_distance_s; error if both exist."""
+            new_dir = exp_path / "self_distance_s"
+            old_dir = exp_path / "state_embedding"
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.csv"))
+            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_*.csv"))
+            if new_has and old_has:
+                raise RuntimeError(f"Found both self_distance_s and state_embedding outputs in {exp_path}.")
+            if new_has:
+                return new_dir
+            if old_has:
+                return old_dir
+            return None
+
+        def _self_distance_s_image_conflict(exp_path: Path) -> None:
+            """Avoid ambiguous self-distance (S) image sources between legacy and renamed folders."""
+            old_dir = exp_path / "vis_state_embedding"
+            new_dir = exp_path / "vis_self_distance_s"
+            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_[0-9]*.png"))
+            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.png"))
+            if old_has and new_has:
+                raise RuntimeError(f"Found both vis_state_embedding and vis_self_distance_s images in {exp_path}.")
+
         def _latest_state_embedding_id() -> Optional[str]:
             index_rows = build_experiment_index(cfg.output_dir)
             if not index_rows:
@@ -402,8 +453,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                csv_dir = row.path / "state_embedding"
-                if csv_dir.exists() and any(csv_dir.glob("state_embedding_*.csv")):
+                csv_dir = _resolve_self_distance_s_csv_dir(row.path)
+                if csv_dir is not None and (
+                    any(csv_dir.glob("self_distance_s_*.csv")) or any(csv_dir.glob("state_embedding_*.csv"))
+                ):
                     return row.id
             return None
 
@@ -411,8 +464,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                csv_dir = requested_path / "state_embedding"
-                if csv_dir.exists() and any(csv_dir.glob("state_embedding_*.csv")):
+                csv_dir = _resolve_self_distance_s_csv_dir(requested_path)
+                if csv_dir is not None and (
+                    any(csv_dir.glob("self_distance_s_*.csv")) or any(csv_dir.glob("state_embedding_*.csv"))
+                ):
                     selected_id = requested
         if selected_id is None:
             selected_id = _latest_state_embedding_id()
@@ -443,6 +498,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         if selected is None or selected.state_embedding_csv is None:
             abort(404, "Experiment not found for state embedding diagnostics.")
+        _self_distance_s_image_conflict(selected.path)
 
         figure = _build_single_experiment_figure(selected)
 
@@ -457,9 +513,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             if stem.startswith("state_embedding_hist_"):
                 key = "state_embedding_hist"
                 prefix = "state_embedding_hist_"
-            elif stem.startswith("state_embedding_"):
+            elif stem.startswith("self_distance_s_") or stem.startswith("state_embedding_"):
                 key = "state_embedding"
-                prefix = "state_embedding_"
+                prefix = "self_distance_s_" if stem.startswith("self_distance_s_") else "state_embedding_"
+            elif stem.startswith("self_distance_cosine_") or stem.startswith("state_embedding_cosine_"):
+                continue
             else:
                 continue
             suffix = stem[len(prefix) :]
@@ -554,6 +612,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             per_step: Dict[int, str] = {}
             for path in selected.self_distance_images:
                 stem = path.stem
+                if "cosine" in stem:
+                    continue
                 suffix = stem.split("_")[-1] if "_" in stem else stem
                 try:
                     step = int(suffix)
@@ -569,7 +629,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             per_step = {}
             for path in selected.state_embedding_images:
                 stem = path.stem
-                if "hist" in stem:
+                if "hist" in stem or "cosine" in stem:
                     continue
                 suffix = stem.split("_")[-1] if "_" in stem else stem
                 try:

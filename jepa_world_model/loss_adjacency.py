@@ -20,7 +20,7 @@ class AdjacencyConfig:
     mask_self_edges: bool = False
     topk_candidates: int = 0
     sigma_aug: float = 0.05
-    detach_encoder: bool = False
+    detach_encoder: bool = True
     epsilon: float = 1e-4
 
 

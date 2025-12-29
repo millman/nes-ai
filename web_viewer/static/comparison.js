@@ -17,8 +17,8 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_rolling_1", label: "vis_rolling_1", prefix: "rollout_", folder: "vis_rolling_1" },
   { value: "embeddings", label: "embeddings", prefix: "embeddings_", folder: "embeddings" },
   { value: "samples_hard", label: "samples_hard", prefix: "hard_", folder: "samples_hard" },
-  { value: "vis_self_distance", label: "vis_self_distance", prefix: "self_distance_", folder: "vis_self_distance" },
-  { value: "vis_state_embedding", label: "vis_state_embedding", prefix: "state_embedding_", folder: "vis_state_embedding" },
+  { value: "vis_self_distance_z", label: "vis_self_distance_z", prefix: "self_distance_z_", folder: "vis_self_distance_z" },
+  { value: "vis_self_distance_s", label: "vis_self_distance_s", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
   { value: "vis_delta_z_pca", label: "vis_delta_z_pca", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
   { value: "vis_action_alignment", label: "vis_action_alignment", prefix: "action_alignment_", folder: "vis_action_alignment" },
   {

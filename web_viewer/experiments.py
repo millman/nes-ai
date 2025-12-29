@@ -726,8 +726,8 @@ VIS_STEP_SPECS = [
     ("vis_rolling_1", "vis_rolling_1", "rollout_*.png", "rollout_"),
     ("embeddings", "embeddings", "embeddings_*.png", "embeddings_"),
     ("samples_hard", "samples_hard", "hard_*.png", "hard_"),
-    ("vis_self_distance", "vis_self_distance", "self_distance_*.png", "self_distance_"),
-    ("vis_state_embedding", "vis_state_embedding", "state_embedding_[0-9]*.png", "state_embedding_"),
+    ("vis_self_distance_z", "vis_self_distance_z", "self_distance_z_*.png", "self_distance_z_"),
+    ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),
     ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
     ("vis_action_alignment", "vis_action_alignment", "action_alignment_*.png", "action_alignment_"),
     ("vis_action_alignment_detail", "vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
@@ -778,35 +778,75 @@ def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
             continue
         if steps:
             step_map[key] = sorted(steps)
+    if "vis_self_distance_z" not in step_map:
+        fallback_folder = root / "vis_self_distance"
+        if fallback_folder.exists():
+            steps = set()
+            for png in fallback_folder.glob("self_distance_*.png"):
+                step = _parse_step_from_stem(png.stem, "self_distance_")
+                if step is not None:
+                    steps.add(step)
+            if steps:
+                step_map["vis_self_distance_z"] = sorted(steps)
+    if "vis_self_distance_s" not in step_map:
+        fallback_folder = root / "vis_state_embedding"
+        if fallback_folder.exists():
+            steps = set()
+            for png in fallback_folder.glob("state_embedding_[0-9]*.png"):
+                step = _parse_step_from_stem(png.stem, "state_embedding_")
+                if step is not None:
+                    steps.add(step)
+            if steps:
+                step_map["vis_self_distance_s"] = sorted(steps)
     return step_map
 
 
 def _collect_self_distance_images(root: Path) -> List[Path]:
-    folder = root / "vis_self_distance"
-    if not folder.exists():
-        return []
-    return sorted(folder.glob("self_distance_*.png"))
+    new_folder = root / "vis_self_distance_z"
+    old_folder = root / "vis_self_distance"
+    new_files = sorted(new_folder.glob("self_distance_z_*.png")) if new_folder.exists() else []
+    old_files = sorted(old_folder.glob("self_distance_*.png")) if old_folder.exists() else []
+    if new_files and old_files:
+        raise ValueError("Both vis_self_distance_z and vis_self_distance contain self-distance images.")
+    return new_files or old_files
 
 
 def _collect_state_embedding_images(root: Path) -> List[Path]:
-    folder = root / "vis_state_embedding"
-    if not folder.exists():
-        return []
-    return sorted(folder.glob("state_embedding_*.png"))
+    hist_folder = root / "vis_state_embedding"
+    hist_files = sorted(hist_folder.glob("state_embedding_hist_*.png")) if hist_folder.exists() else []
+    new_folder = root / "vis_self_distance_s"
+    new_files = []
+    if new_folder.exists():
+        new_files = sorted(new_folder.glob("self_distance_cosine_*.png")) + sorted(new_folder.glob("self_distance_s_*.png"))
+    old_files = []
+    if hist_folder.exists():
+        old_files = (
+            sorted(hist_folder.glob("state_embedding_cosine_*.png"))
+            + sorted(hist_folder.glob("state_embedding_[0-9]*.png"))
+        )
+    if new_files and old_files:
+        raise ValueError("Both vis_state_embedding and vis_self_distance_s contain self-distance images.")
+    return hist_files + (new_files or old_files)
 
 
 def _collect_state_embedding_csvs(root: Path) -> List[Path]:
-    folder = root / "state_embedding"
-    if not folder.exists():
-        return []
-    return sorted(folder.glob("state_embedding_*.csv"))
+    new_folder = root / "self_distance_s"
+    old_folder = root / "state_embedding"
+    new_files = sorted(new_folder.glob("self_distance_s_*.csv")) if new_folder.exists() else []
+    old_files = sorted(old_folder.glob("state_embedding_*.csv")) if old_folder.exists() else []
+    if new_files and old_files:
+        raise ValueError("Both self_distance_s and state_embedding contain self-distance CSVs.")
+    return new_files or old_files
 
 
 def _collect_self_distance_csvs(root: Path) -> List[Path]:
-    folder = root / "self_distance"
-    if not folder.exists():
-        return []
-    return sorted(folder.glob("self_distance_*.csv"))
+    new_folder = root / "self_distance_z"
+    old_folder = root / "self_distance"
+    new_files = sorted(new_folder.glob("self_distance_z_*.csv")) if new_folder.exists() else []
+    old_files = sorted(old_folder.glob("self_distance_*.csv")) if old_folder.exists() else []
+    if new_files and old_files:
+        raise ValueError("Both self_distance_z and self_distance contain self-distance CSVs.")
+    return new_files or old_files
 
 
 def _ensure_model_diff(path: Path) -> str:
@@ -841,21 +881,31 @@ def _ensure_model_diff(path: Path) -> str:
 
 def _quick_self_distance_csv(root: Path) -> Optional[Path]:
     """Cheap existence check for self-distance outputs."""
-    folder = root / "self_distance"
-    if not folder.exists():
-        return None
-    for path in folder.glob("self_distance_*.csv"):
-        return path
+    new_folder = root / "self_distance_z"
+    old_folder = root / "self_distance"
+    new_files = list(new_folder.glob("self_distance_z_*.csv")) if new_folder.exists() else []
+    old_files = list(old_folder.glob("self_distance_*.csv")) if old_folder.exists() else []
+    if new_files and old_files:
+        raise ValueError("Both self_distance_z and self_distance contain self-distance CSVs.")
+    if new_files:
+        return new_files[0]
+    if old_files:
+        return old_files[0]
     return None
 
 
 def _quick_state_embedding_csv(root: Path) -> Optional[Path]:
     """Cheap existence check for state embedding outputs."""
-    folder = root / "state_embedding"
-    if not folder.exists():
-        return None
-    for path in folder.glob("state_embedding_*.csv"):
-        return path
+    new_folder = root / "self_distance_s"
+    old_folder = root / "state_embedding"
+    new_files = list(new_folder.glob("self_distance_s_*.csv")) if new_folder.exists() else []
+    old_files = list(old_folder.glob("state_embedding_*.csv")) if old_folder.exists() else []
+    if new_files and old_files:
+        raise ValueError("Both self_distance_s and state_embedding contain self-distance CSVs.")
+    if new_files:
+        return new_files[0]
+    if old_files:
+        return old_files[0]
     return None
 
 

@@ -68,7 +68,7 @@
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
         <h3 class="mb-1">{{ page_title if page_title is defined else "Self-distance" }}</h3>
-        <div class="text-muted small">No experiments with self_distance.csv</div>
+        <div class="text-muted small">No experiments with self_distance_z.csv</div>
         {% endif %}
     </div>
     {% if experiment %}
@@ -79,10 +79,10 @@
 </div>
 
 {% if not experiment %}
-<div class="text-muted fst-italic">No self_distance.csv found in any experiments.</div>
+<div class="text-muted fst-italic">No self_distance_z.csv found in any experiments.</div>
 {% else %}
 <div class="small text-muted mb-2">
-    Loaded from {{ experiment.self_distance_csv.name }}{% if experiment.self_distance_images %}, latest PNG in vis_self_distance{% endif %}.
+    Loaded from {{ experiment.self_distance_csv.name }}{% if experiment.self_distance_images %}, latest PNG in vis_self_distance_z{% endif %}.
 </div>
 <div class="row gy-1 gx-3 mt-3">
     <div class="col-12 col-lg-4">
@@ -328,7 +328,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const buildPlots = (rows) => {
             if (!rows.length) {
-                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance.csv.</p>";
+                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance_z.csv.</p>";
                 if (priorPlot) priorPlot.innerHTML = "";
                 if (scatterPlot) scatterPlot.innerHTML = "";
                 if (firstPlotCos) firstPlotCos.innerHTML = "";
@@ -536,7 +536,7 @@ document.addEventListener("DOMContentLoaded", () => {
             },
             error: (err) => {
                 if (firstPlot) {
-                    firstPlot.innerHTML = `<p class="text-danger small">Error loading self_distance.csv: ${err.message}</p>`;
+                    firstPlot.innerHTML = `<p class="text-danger small">Error loading self_distance_z.csv: ${err.message}</p>`;
                 }
             }
         });

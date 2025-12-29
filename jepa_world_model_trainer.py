@@ -3221,10 +3221,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     samples_hard_val_dir = run_dir / "samples_hard_val"
     inputs_vis_dir = run_dir / "vis_inputs"
     pair_vis_dir = run_dir / "vis_pairs"
-    vis_self_distance_dir = run_dir / "vis_self_distance"
+    vis_self_distance_z_dir = run_dir / "vis_self_distance_z"
+    vis_self_distance_s_dir = run_dir / "vis_self_distance_s"
     vis_state_embedding_dir = run_dir / "vis_state_embedding"
-    state_embedding_dir = run_dir / "state_embedding"
-    self_distance_dir = run_dir / "self_distance"
+    self_distance_z_dir = run_dir / "self_distance_z"
+    self_distance_s_dir = run_dir / "self_distance_s"
     checkpoints_dir = run_dir / "checkpoints"
 
     print(f"[run] Writing outputs to {run_dir}")
@@ -3242,10 +3243,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     adjacency_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
-    vis_self_distance_dir.mkdir(parents=True, exist_ok=True)
+    vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
+    vis_self_distance_s_dir.mkdir(parents=True, exist_ok=True)
     vis_state_embedding_dir.mkdir(parents=True, exist_ok=True)
-    state_embedding_dir.mkdir(parents=True, exist_ok=True)
-    self_distance_dir.mkdir(parents=True, exist_ok=True)
+    self_distance_z_dir.mkdir(parents=True, exist_ok=True)
+    self_distance_s_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     debug_vis = cfg.debug_visualization
@@ -3654,12 +3656,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         model,
                         self_distance_inputs,
                         device,
-                        self_distance_dir,
-                        vis_self_distance_dir,
+                        self_distance_z_dir,
+                        vis_self_distance_z_dir,
                         global_step,
                         embedding_label="z",
                         title_prefix="Self-distance (Z)",
-                        file_prefix="self_distance",
+                        file_prefix="self_distance_z",
                     )
                 if self_distance_inputs is not None:
                     hist_frames = rolling_batch_cpu[0] if rolling_batch_cpu is not None else None
@@ -3668,7 +3670,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         model,
                         self_distance_inputs,
                         device,
-                        state_embedding_dir,
+                        self_distance_s_dir,
+                        vis_self_distance_s_dir,
                         vis_state_embedding_dir,
                         global_step,
                         hist_frames_cpu=hist_frames,
@@ -3756,12 +3759,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 model,
                 self_distance_inputs,
                 device,
-                self_distance_dir,
-                vis_self_distance_dir,
+                self_distance_z_dir,
+                vis_self_distance_z_dir,
                 last_step if last_step >= 0 else 0,
                 embedding_label="z",
                 title_prefix="Self-distance (Z)",
-                file_prefix="self_distance",
+                file_prefix="self_distance_z",
             )
     if last_step >= 0:
         _save_checkpoint(

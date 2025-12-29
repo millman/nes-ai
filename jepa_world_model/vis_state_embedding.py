@@ -80,6 +80,7 @@ def write_state_embedding_outputs(
     device: torch.device,
     csv_dir: Path,
     plot_dir: Path,
+    hist_plot_dir: Optional[Path],
     global_step: int,
     hist_frames_cpu: Optional[torch.Tensor] = None,
     hist_actions_cpu: Optional[torch.Tensor] = None,
@@ -107,7 +108,8 @@ def write_state_embedding_outputs(
         global_step,
         embedding_label="s",
         title_prefix="Self-distance (S)",
-        file_prefix="state_embedding",
+        file_prefix="self_distance_s",
+        cosine_prefix="self_distance_cosine",
         start_index=warmup,
     )
 
@@ -128,4 +130,5 @@ def write_state_embedding_outputs(
         return
     hist_flat = hist_s.reshape(-1, hist_s.shape[-1])
     hist_norm = torch.norm(hist_flat, dim=-1).detach().cpu().numpy()
-    write_state_embedding_histogram(plot_dir, hist_norm, global_step)
+    hist_dir = hist_plot_dir if hist_plot_dir is not None else plot_dir
+    write_state_embedding_histogram(hist_dir, hist_norm, global_step)
