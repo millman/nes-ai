@@ -656,16 +656,25 @@ def _write_metadata(
 ) -> None:
     """Write combined metadata, preserving existing values."""
     current_title, current_tags, current_starred, current_archived = _read_metadata(path)
+    existing_data: Dict[str, object] = {}
+    if path.exists():
+        try:
+            parsed = tomli.loads(path.read_text())
+            if isinstance(parsed, dict):
+                existing_data = dict(parsed)
+        except (tomli.TOMLDecodeError, OSError):
+            existing_data = {}
     next_title = title.strip() if isinstance(title, str) else None
     next_tags = tags.strip() if isinstance(tags, str) else None
     next_starred = current_starred if starred is None else _coerce_bool(starred)
     next_archived = current_archived if archived is None else _coerce_bool(archived)
-    payload = {
+    payload = dict(existing_data)
+    payload.update({
         "title": (next_title if next_title is not None and next_title else current_title or "Untitled"),
         "tags": (next_tags if next_tags is not None else current_tags),
         "starred": next_starred,
         "archived": next_archived,
-    }
+    })
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomli_w.dumps(payload))
 

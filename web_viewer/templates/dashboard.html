@@ -147,11 +147,37 @@
     border-color: #f3d08b;
     background: #fffaf0;
   }
+  .dashboard-flag-toggle,
+  .dashboard-archive-toggle {
+    border: none;
+    color: #6c757d;
+  }
   .dashboard-flag-toggle.is-active {
     color: #d39e00;
   }
   .dashboard-archive-toggle.is-active {
-    color: #6c757d;
+    color: #8b5a2b;
+  }
+  .dashboard-flag-toggle:hover,
+  .dashboard-flag-toggle:focus-visible {
+    background-color: #e9ecef;
+  }
+  .dashboard-archive-toggle:hover,
+  .dashboard-archive-toggle:focus-visible {
+    background-color: #e9ecef;
+  }
+  .dashboard-flag-toggle:hover:not(.is-active),
+  .dashboard-flag-toggle:focus-visible:not(.is-active),
+  .dashboard-archive-toggle:hover:not(.is-active),
+  .dashboard-archive-toggle:focus-visible:not(.is-active) {
+    color: #212529;
+  }
+  .cell.select .form-check-input {
+    cursor: pointer;
+  }
+  .cell.select .form-check-input:hover,
+  .cell.select .form-check-input:focus-visible {
+    background-color: #e9ecef;
   }
   .runs-row[data-archived="true"] .cell {
     opacity: 0.7;
@@ -189,8 +215,18 @@
                         title="{{ 'Unstar' if exp.starred else 'Star' }}"
                         aria-label="{{ 'Unstar' if exp.starred else 'Star' }}"
                     >
-                    <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                        <path d="M8 0l2.47 4.99 5.5.8-3.99 3.89.94 5.49L8 12.9l-4.92 2.58.94-5.49L0 5.79l5.53-.8z"/>
+                    <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" aria-hidden="true">
+                        {% if exp.starred %}
+                        <path fill="currentColor" d="M8 0l2.47 4.99 5.5.8-3.99 3.89.94 5.49L8 12.9l-4.92 2.58.94-5.49L0 5.79l5.53-.8z"/>
+                        {% else %}
+                        <polygon
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.2"
+                            stroke-linejoin="round"
+                            points="8,1.5 9.9,5.1 13.9,5.7 11,8.5 11.7,12.5 8,10.6 4.3,12.5 5,8.5 2.1,5.7 6.1,5.1"
+                        />
+                        {% endif %}
                     </svg>
                     </button>
                     <button
@@ -201,9 +237,36 @@
                         title="{{ 'Unarchive' if exp.archived else 'Archive' }}"
                         aria-label="{{ 'Unarchive' if exp.archived else 'Archive' }}"
                     >
-                    <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                        <path d="M12.643 1.5H3.357L2.5 3h11z"/>
-                        <path d="M13.5 4H2.5a.5.5 0 0 0-.5.5v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-7a.5.5 0 0 0-.5-.5M8 6.5a.5.5 0 0 1 .5.5v2H7.5V7a.5.5 0 0 1 .5-.5"/>
+                    <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" aria-hidden="true">
+                        {% if exp.archived %}
+                        <path fill="currentColor" d="M12.643 1.5H3.357L2.5 3h11z"/>
+                        <path fill="currentColor" d="M13.5 4H2.5a.5.5 0 0 0-.5.5v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-7a.5.5 0 0 0-.5-.5M8 6.5a.5.5 0 0 1 .5.5v2H7.5V7a.5.5 0 0 1 .5-.5"/>
+                        {% else %}
+                        <path
+                            d="M2.5 3.5h11l-1 2h-9l-1-2z"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.2"
+                            stroke-linejoin="round"
+                        />
+                        <rect
+                            x="3.5"
+                            y="5.8"
+                            width="9"
+                            height="7.2"
+                            rx="1"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.2"
+                        />
+                        <path
+                            d="M6.5 7.8h3"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.2"
+                            stroke-linecap="round"
+                        />
+                        {% endif %}
                     </svg>
                     </button>
                 </div>
