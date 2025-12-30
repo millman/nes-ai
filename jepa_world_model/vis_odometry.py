@@ -152,7 +152,7 @@ def _plot_latent_prediction_comparison(
     t = np.arange(z_next.shape[0])
     diff = z_next - z_hat
     diff_norm = np.linalg.norm(diff, axis=1)
-    axes[0].plot(t, diff_norm, color="tab:blue", linewidth=1.6, marker="o", markersize=4)
+    axes[0].plot(t, diff_norm, marker="o", markersize=4, linewidth=1.0, color="tab:blue")
     axes[0].set_title(f"||{embedding_label} - {hat_label}|| over time")
     axes[0].set_xlabel("time")
     axes[0].set_ylabel(f"||{embedding_label} - {hat_label}||")

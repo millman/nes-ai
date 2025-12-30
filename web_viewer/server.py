@@ -123,9 +123,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def _load_all() -> List[Experiment]:
         return list_experiments(cfg.output_dir)
 
-    def _get_experiment_or_404(exp_id: str) -> Experiment:
+    def _get_experiment_or_404(exp_id: str, *, include_rollout_steps: bool = False) -> Experiment:
         exp_path = cfg.output_dir / exp_id
-        experiment = load_experiment(exp_path)
+        experiment = load_experiment(
+            exp_path,
+            include_rollout_steps=include_rollout_steps,
+        )
         if experiment is None:
             abort(404, f"Experiment {exp_id} not found.")
         return experiment
@@ -170,11 +173,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             exp_start = time.perf_counter()
             exp = load_experiment(
                 row.path,
-                include_self_distance=False,
-                include_diagnostics_images=False,
-                include_diagnostics_frames=False,
-                include_graph_diagnostics=False,
-                include_last_modified=False,
+                include_odometry=True,
+                include_max_step=True,
             )
             if exp is not None:
                 starred_experiments.append(exp)
@@ -186,11 +186,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             exp_start = time.perf_counter()
             exp = load_experiment(
                 cfg.output_dir / exp_id,
-                include_self_distance=False,
-                include_diagnostics_images=False,
-                include_diagnostics_frames=False,
-                include_graph_diagnostics=False,
-                include_last_modified=False,
+                include_odometry=True,
+                include_max_step=True,
             )
             if exp is not None:
                 experiments.append(exp)
@@ -256,11 +253,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 continue
             exp = load_experiment(
                 row.path,
-                include_self_distance=False,
-                include_diagnostics_images=False,
-                include_diagnostics_frames=False,
-                include_graph_diagnostics=False,
-                include_last_modified=False,
             )
             if exp is not None:
                 experiments.append(exp)
@@ -279,7 +271,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
     @app.route("/experiment/<exp_id>")
     def experiment_detail(exp_id: str):
-        experiment = _get_experiment_or_404(exp_id)
+        experiment = _get_experiment_or_404(exp_id, include_rollout_steps=True)
         figure = _build_single_experiment_figure(experiment)
         viz_steps = _collect_visualization_steps(experiment.path)
         if experiment.rollout_steps:
@@ -381,11 +373,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 abort(404, f"Experiment {exp_id} not found.")
             exp = load_experiment(
                 exp_path,
-                include_self_distance=False,
-                include_diagnostics_images=False,
-                include_diagnostics_frames=False,
-                include_graph_diagnostics=False,
-                include_last_modified=False,
+                include_rollout_steps=True,
             )
             if exp is None:
                 abort(404, f"Experiment {exp_id} not found.")
@@ -470,9 +458,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_diagnostics_images=False,
-            include_diagnostics_frames=False,
-            include_graph_diagnostics=False,
+            include_self_distance=True,
         )
         if selected is None or selected.self_distance_csv is None:
             abort(404, "Experiment not found for self-distance.")
@@ -568,10 +554,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_self_distance=False,
-            include_diagnostics_images=False,
-            include_diagnostics_frames=False,
-            include_graph_diagnostics=False,
+            include_state_embedding=True,
         )
         if selected is None or selected.state_embedding_csv is None:
             abort(404, "Experiment not found for state embedding diagnostics.")
@@ -714,9 +697,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_diagnostics_images=False,
-            include_diagnostics_frames=False,
-            include_graph_diagnostics=False,
+            include_self_distance=True,
+            include_state_embedding=True,
         )
         if selected is None or selected.self_distance_csv is None or selected.state_embedding_csv is None:
             abort(404, "Experiment not found for self-distance (Z vs S).")
@@ -781,11 +763,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_self_distance=False,
-            include_diagnostics_images=False,
-            include_diagnostics_frames=False,
-            include_graph_diagnostics=False,
-            include_state_embedding=False,
+            include_odometry=True,
         )
         if selected is None:
             abort(404, "Experiment not found for odometry.")
@@ -881,7 +859,13 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 first_experiment_id=None,
             )
 
-        selected = load_experiment(cfg.output_dir / selected_id, include_graph_diagnostics=False)
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_self_distance=True,
+            include_diagnostics_images=True,
+            include_diagnostics_frames=True,
+            include_state_embedding=True,
+        )
         if selected is None:
             abort(404, "Experiment not found for diagnostics.")
 
@@ -1067,10 +1051,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_graph_diagnostics=False,
-            include_diagnostics_images=False,
             include_diagnostics_frames=True,
             include_diagnostics_s=True,
+            include_state_embedding=True,
         )
         if selected is None:
             abort(404, "Experiment not found for diagnostics (S).")
@@ -1215,8 +1198,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_graph_diagnostics=False,
+            include_self_distance=True,
+            include_diagnostics_images=True,
             include_diagnostics_s=True,
+            include_state_embedding=True,
         )
         if selected is None:
             abort(404, "Experiment not found for diagnostics.")
@@ -1361,9 +1346,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_self_distance=False,
-            include_diagnostics_images=False,
-            include_diagnostics_frames=False,
             include_graph_diagnostics=True,
         )
         if selected is None:
@@ -1492,10 +1474,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_self_distance=False,
-            include_diagnostics_images=False,
-            include_diagnostics_frames=False,
-            include_graph_diagnostics=False,
             include_graph_diagnostics_s=True,
         )
         if selected is None:
@@ -1629,9 +1607,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_self_distance=False,
-            include_diagnostics_images=False,
-            include_diagnostics_frames=False,
             include_graph_diagnostics=True,
             include_graph_diagnostics_s=True,
         )

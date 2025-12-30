@@ -64,7 +64,13 @@
         <div class="card-header py-2">Current z PCA/ICA/t-SNE</div>
         <div class="card-body">
             {% if not odometry_steps %}
-            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No vis_odometry images found in experiment {{ experiment.id }}.
+                {% else %}
+                No vis_odometry images found in any experiments.
+                {% endif %}
+            </div>
             {% else %}
             <img id="odometry-z-img" class="odometry-card-img d-none" alt="odometry z">
             <div class="text-muted small" id="odometry-z-caption"></div>
@@ -75,7 +81,13 @@
         <div class="card-header py-2">Current s PCA/ICA/t-SNE</div>
         <div class="card-body">
             {% if not odometry_steps %}
-            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No vis_odometry images found in experiment {{ experiment.id }}.
+                {% else %}
+                No vis_odometry images found in any experiments.
+                {% endif %}
+            </div>
             {% else %}
             <img id="odometry-s-img" class="odometry-card-img d-none" alt="odometry s">
             <div class="text-muted small" id="odometry-s-caption"></div>
@@ -86,7 +98,13 @@
         <div class="card-header py-2">||z - z_hat|| + scatter</div>
         <div class="card-body">
             {% if not odometry_steps %}
-            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No vis_odometry images found in experiment {{ experiment.id }}.
+                {% else %}
+                No vis_odometry images found in any experiments.
+                {% endif %}
+            </div>
             {% else %}
             <img id="odometry-zhat-img" class="odometry-card-img d-none" alt="z vs z_hat">
             <div class="text-muted small" id="odometry-zhat-caption"></div>
@@ -97,7 +115,13 @@
         <div class="card-header py-2">||s - s_hat|| + scatter</div>
         <div class="card-body">
             {% if not odometry_steps %}
-            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No vis_odometry images found in experiment {{ experiment.id }}.
+                {% else %}
+                No vis_odometry images found in any experiments.
+                {% endif %}
+            </div>
             {% else %}
             <img id="odometry-shat-img" class="odometry-card-img d-none" alt="s vs s_hat">
             <div class="text-muted small" id="odometry-shat-caption"></div>

@@ -156,7 +156,7 @@ def list_experiments(output_dir: Path) -> List[Experiment]:
     if not output_dir.exists():
         return experiments
     for subdir in sorted(p for p in output_dir.iterdir() if p.is_dir()):
-        exp = load_experiment(subdir, include_graph_diagnostics=False)
+        exp = load_experiment(subdir)
         if exp is not None:
             experiments.append(exp)
     experiments.sort(key=lambda e: e.name, reverse=True)
@@ -187,15 +187,17 @@ def build_experiment_index(output_dir: Path) -> List[ExperimentIndex]:
 
 def load_experiment(
     path: Path,
-    include_self_distance: bool = True,
-    include_diagnostics_images: bool = True,
-    include_diagnostics_frames: bool = True,
+    include_self_distance: bool = False,
+    include_diagnostics_images: bool = False,
+    include_diagnostics_frames: bool = False,
     include_diagnostics_s: bool = False,
-    include_graph_diagnostics: bool = True,
-    include_state_embedding: bool = True,
-    include_odometry: bool = True,
-    include_graph_diagnostics_s: Optional[bool] = None,
-    include_last_modified: bool = True,
+    include_graph_diagnostics: bool = False,
+    include_state_embedding: bool = False,
+    include_odometry: bool = False,
+    include_graph_diagnostics_s: bool = False,
+    include_last_modified: bool = False,
+    include_rollout_steps: bool = False,
+    include_max_step: bool = False,
 ) -> Optional[Experiment]:
     if not path.is_dir():
         return None
@@ -282,7 +284,6 @@ def load_experiment(
         diagnostics_s_csvs = _collect_diagnostics_csvs_s(path)
     else:
         diagnostics_s_steps = [0] if _diagnostics_s_exists(path) else []
-    include_graph_diagnostics_s = include_graph_diagnostics if include_graph_diagnostics_s is None else include_graph_diagnostics_s
     graph_diagnostics_images: Dict[str, List[Path]] = {}
     graph_diagnostics_steps: List[int] = []
     graph_diagnostics_csvs: Dict[str, List[Path]] = {}
@@ -338,8 +339,8 @@ def load_experiment(
     _profile("load_experiment.text_meta", section_start, path)
     section_start = time.perf_counter()
 
-    rollout_steps = _collect_rollout_steps(path)
-    max_step = _get_max_step(loss_csv) if loss_csv and loss_csv.exists() else None
+    rollout_steps = _collect_rollout_steps(path) if include_rollout_steps else []
+    max_step = _get_max_step(loss_csv) if include_max_step and loss_csv and loss_csv.exists() else None
     last_modified = _get_last_modified(path) if include_last_modified else _quick_last_modified(path)
     total_params, flops_per_step = _read_model_metadata(metadata_model_path)
     _profile(
@@ -1020,14 +1021,14 @@ def _quick_self_distance_csv(root: Path) -> Optional[Path]:
     """Cheap existence check for self-distance outputs."""
     new_folder = root / "self_distance_z"
     old_folder = root / "self_distance"
-    new_files = list(new_folder.glob("self_distance_z_*.csv")) if new_folder.exists() else []
-    old_files = list(old_folder.glob("self_distance_*.csv")) if old_folder.exists() else []
-    if new_files and old_files:
+    new_file = next(new_folder.glob("self_distance_z_*.csv"), None) if new_folder.exists() else None
+    old_file = next(old_folder.glob("self_distance_*.csv"), None) if old_folder.exists() else None
+    if new_file and old_file:
         raise ValueError("Both self_distance_z and self_distance contain self-distance CSVs.")
-    if new_files:
-        return new_files[0]
-    if old_files:
-        return old_files[0]
+    if new_file:
+        return new_file
+    if old_file:
+        return old_file
     return None
 
 
@@ -1035,14 +1036,14 @@ def _quick_state_embedding_csv(root: Path) -> Optional[Path]:
     """Cheap existence check for state embedding outputs."""
     new_folder = root / "self_distance_s"
     old_folder = root / "state_embedding"
-    new_files = list(new_folder.glob("self_distance_s_*.csv")) if new_folder.exists() else []
-    old_files = list(old_folder.glob("state_embedding_*.csv")) if old_folder.exists() else []
-    if new_files and old_files:
+    new_file = next(new_folder.glob("self_distance_s_*.csv"), None) if new_folder.exists() else None
+    old_file = next(old_folder.glob("state_embedding_*.csv"), None) if old_folder.exists() else None
+    if new_file and old_file:
         raise ValueError("Both self_distance_s and state_embedding contain self-distance CSVs.")
-    if new_files:
-        return new_files[0]
-    if old_files:
-        return old_files[0]
+    if new_file:
+        return new_file
+    if old_file:
+        return old_file
     return None
 
 
@@ -1094,46 +1095,34 @@ def _collect_diagnostics_images_s(root: Path) -> Dict[str, List[Path]]:
 def _diagnostics_exists(root: Path) -> bool:
     """Cheap check for any diagnostics output without globbing everything."""
     diag_dirs = [
-        (root / "vis_delta_z_pca", "*.png"),
-        (root / "vis_delta_z_pca", "*.csv"),
-        (root / "vis_action_alignment_z", "*.png"),
-        (root / "vis_action_alignment_z", "*.csv"),
-        (root / "vis_action_alignment", "*.png"),
-        (root / "vis_action_alignment", "*.csv"),
-        (root / "vis_cycle_error_z", "*.png"),
-        (root / "vis_cycle_error_z", "*.csv"),
-        (root / "vis_cycle_error", "*.png"),
-        (root / "vis_cycle_error", "*.csv"),
-        (root / "vis_diagnostics_frames", "*.csv"),
+        root / "vis_delta_z_pca",
+        root / "vis_action_alignment_z",
+        root / "vis_action_alignment",
+        root / "vis_cycle_error_z",
+        root / "vis_cycle_error",
+        root / "vis_diagnostics_frames",
     ]
-    for folder, pattern in diag_dirs:
+    suffixes = (".png", ".csv", ".txt")
+    for folder in diag_dirs:
         if not folder.exists():
             continue
-        try:
-            for _ in folder.glob(pattern):
-                return True
-        except OSError:
-            continue
+        if _folder_has_any_file(folder, suffixes):
+            return True
     return False
 
 
 def _diagnostics_s_exists(root: Path) -> bool:
     diag_dirs = [
-        (root / "vis_delta_s_pca", "*.png"),
-        (root / "vis_delta_s_pca", "*.csv"),
-        (root / "vis_action_alignment_s", "*.png"),
-        (root / "vis_action_alignment_s", "*.csv"),
-        (root / "vis_cycle_error_s", "*.png"),
-        (root / "vis_cycle_error_s", "*.csv"),
+        root / "vis_delta_s_pca",
+        root / "vis_action_alignment_s",
+        root / "vis_cycle_error_s",
     ]
-    for folder, pattern in diag_dirs:
+    suffixes = (".png", ".csv", ".txt")
+    for folder in diag_dirs:
         if not folder.exists():
             continue
-        try:
-            for _ in folder.glob(pattern):
-                return True
-        except OSError:
-            continue
+        if _folder_has_any_file(folder, suffixes):
+            return True
     return False
 
 
@@ -1312,13 +1301,7 @@ def _graph_diagnostics_exists(root: Path, folder_name: str = "graph_diagnostics_
     folder = _resolve_graph_diagnostics_folder(root, folder_name)
     if folder is None:
         return False
-    try:
-        for pattern in ("*.png", "*.csv"):
-            for _ in folder.glob(pattern):
-                return True
-    except OSError:
-        return False
-    return False
+    return _folder_has_any_file(folder, (".png", ".csv"))
 
 
 def _get_max_step(csv_path: Path) -> Optional[int]:
@@ -1326,6 +1309,22 @@ def _get_max_step(csv_path: Path) -> Optional[int]:
     if not csv_path.exists():
         return None
     try:
+        with csv_path.open("r", newline="") as handle:
+            header = handle.readline()
+        if not header:
+            return None
+        header_fields = next(csv.reader([header]))
+        if "step" not in header_fields:
+            return None
+        step_idx = header_fields.index("step")
+        last_line = _read_last_non_empty_line(csv_path)
+        if last_line:
+            try:
+                row = next(csv.reader([last_line]))
+                if step_idx < len(row):
+                    return int(float(row[step_idx]))
+            except (ValueError, TypeError, csv.Error):
+                pass
         with csv_path.open("r", newline="") as handle:
             reader = csv.DictReader(handle)
             if not reader.fieldnames or "step" not in reader.fieldnames:
@@ -1341,6 +1340,47 @@ def _get_max_step(csv_path: Path) -> Optional[int]:
             return max_step
     except (OSError, csv.Error):
         return None
+
+
+def _read_last_non_empty_line(path: Path, chunk_size: int = 8192) -> str:
+    """Read the last non-empty line from a file without scanning it all."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            end_pos = handle.tell()
+            if end_pos == 0:
+                return ""
+            buffer = b""
+            pos = end_pos
+            while pos > 0:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                handle.seek(pos)
+                buffer = handle.read(read_size) + buffer
+                if b"\n" in buffer or pos == 0:
+                    lines = buffer.splitlines()
+                    for raw in reversed(lines):
+                        if raw.strip():
+                            return raw.decode("utf-8", errors="replace")
+                    if pos == 0:
+                        return ""
+            return ""
+    except OSError:
+        return ""
+
+
+def _folder_has_any_file(folder: Path, suffixes: Tuple[str, ...]) -> bool:
+    """Return True if folder contains any file with a matching suffix."""
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue
+                if entry.name.lower().endswith(suffixes):
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def _get_last_modified(path: Path) -> Optional[datetime]:
