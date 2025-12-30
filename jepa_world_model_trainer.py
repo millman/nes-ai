@@ -3297,6 +3297,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     vis_self_distance_z_dir = run_dir / "vis_self_distance_z"
     vis_self_distance_s_dir = run_dir / "vis_self_distance_s"
     vis_state_embedding_dir = run_dir / "vis_state_embedding"
+    vis_odometry_dir = run_dir / "vis_odometry"
     self_distance_z_dir = run_dir / "self_distance_z"
     self_distance_s_dir = run_dir / "self_distance_s"
     checkpoints_dir = run_dir / "checkpoints"
@@ -3322,6 +3323,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_s_dir.mkdir(parents=True, exist_ok=True)
     vis_state_embedding_dir.mkdir(parents=True, exist_ok=True)
+    vis_odometry_dir.mkdir(parents=True, exist_ok=True)
     self_distance_z_dir.mkdir(parents=True, exist_ok=True)
     self_distance_s_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -3749,6 +3751,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         self_distance_s_dir,
                         vis_self_distance_s_dir,
                         vis_state_embedding_dir,
+                        vis_odometry_dir,
                         global_step,
                         hist_frames_cpu=hist_frames,
                         hist_actions_cpu=hist_actions,

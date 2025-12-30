@@ -177,21 +177,60 @@ def _plot_rank_cdf(out_path: Path, ranks: np.ndarray, k: int, title: str) -> Non
 def _plot_neff_violin(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 4))
-    data = [neff1, neff2]
+    def _clean(values: np.ndarray) -> np.ndarray:
+        if values.size == 0:
+            return values
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return finite
+        return finite[finite > 0]
+
+    data = [_clean(neff1), _clean(neff2)]
     labels = ["Neff1", "Neff2"]
     if all(arr.size == 0 for arr in data):
         ax.text(0.5, 0.5, "No neighborhood stats available.", ha="center", va="center")
     else:
-        ax.violinplot(data, showmeans=True, showextrema=True)
+        violin_parts = ax.violinplot(
+            data,
+            showmeans=False,
+            showextrema=False,
+            showmedians=False,
+            widths=0.7,
+        )
+        colors = ["tab:blue", "tab:green"]
+        for idx, body in enumerate(violin_parts.get("bodies", [])):
+            body.set_facecolor(colors[idx % len(colors)])
+            body.set_edgecolor("black")
+            body.set_alpha(0.25)
+            verts = body.get_paths()[0].vertices
+            center_x = np.mean(verts[:, 0])
+            verts[:, 0] = np.minimum(verts[:, 0], center_x)
+
+        ax.boxplot(
+            data,
+            widths=0.18,
+            vert=True,
+            patch_artist=True,
+            showfliers=False,
+            boxprops={"facecolor": "white", "edgecolor": "black", "alpha": 0.8},
+            medianprops={"color": "black", "linewidth": 1.2},
+            whiskerprops={"color": "black", "linewidth": 1.0},
+            capprops={"color": "black", "linewidth": 1.0},
+        )
+
+        rng = np.random.default_rng(0)
         for idx, arr in enumerate(data):
             if arr.size == 0:
                 continue
+            jitter = rng.normal(loc=0.0, scale=0.04, size=arr.size)
+            offset = 0.18
             ax.scatter(
-                np.full_like(arr, idx + 1, dtype=np.float32),
+                np.full_like(arr, idx + 1, dtype=np.float32) + offset + jitter,
                 arr,
-                s=8,
-                alpha=0.15,
-                color="tab:blue" if idx == 0 else "tab:green",
+                s=10,
+                alpha=0.25,
+                color=colors[idx % len(colors)],
+                edgecolor="none",
             )
         ax.set_xticks([1, 2])
         ax.set_xticklabels(labels)

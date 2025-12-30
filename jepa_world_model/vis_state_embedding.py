@@ -10,6 +10,12 @@ import numpy as np
 import torch
 
 from jepa_world_model.vis_self_distance import write_self_distance_outputs_from_embeddings
+from jepa_world_model.vis_odometry import (
+    _rollout_open_loop,
+    _rollout_predictions,
+    _plot_latent_prediction_comparison,
+    _plot_odometry_embeddings,
+)
 
 
 def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
@@ -81,6 +87,7 @@ def write_state_embedding_outputs(
     csv_dir: Path,
     plot_dir: Path,
     hist_plot_dir: Optional[Path],
+    odometry_plot_dir: Optional[Path],
     global_step: int,
     hist_frames_cpu: Optional[torch.Tensor] = None,
     hist_actions_cpu: Optional[torch.Tensor] = None,
@@ -112,6 +119,56 @@ def write_state_embedding_outputs(
         cosine_prefix="self_distance_cosine",
         start_index=warmup,
     )
+
+    if odometry_plot_dir is not None:
+        z = embeddings[0].detach().cpu().numpy()
+        z_seq = z[warmup:]
+        if z_seq.shape[0] >= 2:
+            delta_z = z_seq[1:] - z_seq[:-1]
+            current_z = np.cumsum(delta_z, axis=0)
+            _plot_odometry_embeddings(
+                odometry_plot_dir / f"odometry_z_{global_step:07d}.png",
+                current_z,
+                "current z",
+            )
+
+        s_np = s.detach().cpu().numpy()
+        if s_np.shape[0] >= 2:
+            delta_s = s_np[1:] - s_np[:-1]
+            current_s = np.cumsum(delta_s, axis=0)
+            _plot_odometry_embeddings(
+                odometry_plot_dir / f"odometry_s_{global_step:07d}.png",
+                current_s,
+                "current s",
+            )
+
+        z_hat = _rollout_predictions(model, embeddings, actions)[0].detach().cpu().numpy()
+        if z_hat.shape[0] >= 1:
+            z_next = z[1 + warmup :]
+            z_hat_trim = z_hat[warmup:]
+            min_len = min(z_next.shape[0], z_hat_trim.shape[0])
+            if min_len >= 2:
+                _plot_latent_prediction_comparison(
+                    odometry_plot_dir / f"z_vs_z_hat_{global_step:07d}.png",
+                    z_next[:min_len],
+                    z_hat_trim[:min_len],
+                    "z",
+                )
+
+        h_hat_open = _rollout_open_loop(model, embeddings, actions)
+        if h_hat_open.shape[1] > 0:
+            s_hat = model.state_head(h_hat_open)[0].detach().cpu().numpy()
+            s_next = s_np[1:]
+            s_hat_trim = s_hat[warmup:]
+            s_next_trim = s_next[warmup:] if warmup < s_next.shape[0] else s_next[:0]
+            min_len = min(s_next_trim.shape[0], s_hat_trim.shape[0])
+            if min_len >= 2:
+                _plot_latent_prediction_comparison(
+                    odometry_plot_dir / f"s_vs_s_hat_{global_step:07d}.png",
+                    s_next_trim[:min_len],
+                    s_hat_trim[:min_len],
+                    "s",
+                )
 
     hist_frames = hist_frames_cpu if hist_frames_cpu is not None else traj_inputs.frames
     if hist_frames.ndim != 5 or hist_frames.shape[1] < 1:

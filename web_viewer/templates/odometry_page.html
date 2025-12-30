@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<style>
+.odometry-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(260px, 1fr));
+    gap: 1rem;
+}
+.odometry-card-img {
+    width: 100%;
+    height: auto;
+    border: 1px solid #e9ecef;
+    border-radius: 0.5rem;
+    background: #f8f9fa;
+}
+.odometry-loss-plot {
+    height: 220px;
+}
+@media (max-width: 768px) {
+    .odometry-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div>
+        {% if experiment %}
+        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
+        {% else %}
+        <h3 class="mb-1">{{ page_title if page_title is defined else "Odometry" }}</h3>
+        {% endif %}
+    </div>
+    {% if experiment %}
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('experiment_detail', exp_id=experiment.id) }}">Open experiment</a>
+    </div>
+    {% endif %}
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No experiments available.</div>
+{% else %}
+<div class="card mb-3">
+    <div class="card-header py-2 d-flex align-items-center gap-2">
+        <strong>Training metrics</strong>
+        {% if odometry_steps %}
+        <span class="text-muted small">hover to scrub steps</span>
+        <span class="ms-auto text-muted small">Step: <span id="odometry-step-label">{{ odometry_steps[-1] }}</span></span>
+        {% endif %}
+    </div>
+    <div class="card-body">
+        <div id="odometry-loss-plot" class="odometry-loss-plot"></div>
+    </div>
+</div>
+
+<div class="odometry-grid">
+    <div class="card h-100">
+        <div class="card-header py-2">Current z PCA/ICA/t-SNE</div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            {% else %}
+            <img id="odometry-z-img" class="odometry-card-img d-none" alt="odometry z">
+            <div class="text-muted small" id="odometry-z-caption"></div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2">Current s PCA/ICA/t-SNE</div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            {% else %}
+            <img id="odometry-s-img" class="odometry-card-img d-none" alt="odometry s">
+            <div class="text-muted small" id="odometry-s-caption"></div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2">||z - z_hat|| + scatter</div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            {% else %}
+            <img id="odometry-zhat-img" class="odometry-card-img d-none" alt="z vs z_hat">
+            <div class="text-muted small" id="odometry-zhat-caption"></div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2">||s - s_hat|| + scatter</div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">No vis_odometry images found in any experiments.</div>
+            {% else %}
+            <img id="odometry-shat-img" class="odometry-card-img d-none" alt="s vs s_hat">
+            <div class="text-muted small" id="odometry-shat-caption"></div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if experiment %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const lossPlot = document.getElementById("odometry-loss-plot");
+    const figure = {{ figure | tojson if figure else 'null' }};
+    const steps = {{ odometry_steps | tojson }};
+    const odometryMap = {{ odometry_map | tojson }};
+    const stepLabel = document.getElementById("odometry-step-label");
+    const targets = {
+        odometry_z: {img: document.getElementById("odometry-z-img"), caption: document.getElementById("odometry-z-caption")},
+        odometry_s: {img: document.getElementById("odometry-s-img"), caption: document.getElementById("odometry-s-caption")},
+        z_vs_z_hat: {img: document.getElementById("odometry-zhat-img"), caption: document.getElementById("odometry-zhat-caption")},
+        s_vs_s_hat: {img: document.getElementById("odometry-shat-img"), caption: document.getElementById("odometry-shat-caption")},
+    };
+    let pinnedStep = steps.length ? steps[steps.length - 1] : null;
+
+    function nearestStep(value) {
+        if (!steps.length) return null;
+        let best = steps[0];
+        let bestDiff = Math.abs(value - best);
+        for (let i = 1; i < steps.length; i++) {
+            const diff = Math.abs(value - steps[i]);
+            if (diff < bestDiff) {
+                best = steps[i];
+                bestDiff = diff;
+            }
+        }
+        return best;
+    }
+
+    function resolveUrl(key, step) {
+        const perStep = odometryMap[step] || odometryMap[String(step)] || {};
+        return perStep[key] || null;
+    }
+
+    function updateImages(step) {
+        if (!step) {
+            return;
+        }
+        if (stepLabel) {
+            stepLabel.textContent = step;
+        }
+        Object.entries(targets).forEach(([key, refs]) => {
+            if (!refs.img || !refs.caption) return;
+            const url = resolveUrl(key, step);
+            if (url) {
+                refs.img.src = url;
+                refs.img.classList.remove("d-none");
+                refs.caption.textContent = `Step ${step}`;
+            } else {
+                refs.img.classList.add("d-none");
+                refs.caption.textContent = `Missing ${key} image for step ${step}`;
+            }
+        });
+    }
+
+    if (!lossPlot || typeof Plotly === "undefined") return;
+    if (!figure || !figure.data || !figure.layout) {
+        lossPlot.innerHTML = "<div class='text-muted fst-italic small'>Loss plot not available.</div>";
+        updateImages(pinnedStep);
+        return;
+    }
+    const layout = {
+        ...figure.layout,
+        height: 220,
+        margin: { ...(figure.layout?.margin || {}), t: 30, b: 50, l: 50, r: 10 },
+    };
+    const config = buildPlotlyConfig(figure.config || {});
+    Plotly.react(lossPlot, figure.data, layout, config).then(() => {
+        lossPlot.on("plotly_hover", (event) => {
+            const point = event?.points?.[0];
+            if (!point || typeof point.x === "undefined") return;
+            const nearest = nearestStep(point.x);
+            if (nearest !== null) {
+                pinnedStep = nearest;
+                updateImages(pinnedStep);
+            }
+        });
+    });
+    updateImages(pinnedStep);
+});
+</script>
+{% endif %}
+{% endblock %}

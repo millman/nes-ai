@@ -21,6 +21,7 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_self_distance_s", label: "vis_self_distance_s", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
   { value: "vis_delta_z_pca", label: "vis_delta_z_pca", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
   { value: "vis_delta_s_pca", label: "vis_delta_s_pca", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
+  { value: "vis_odometry", label: "vis_odometry", prefix: "odometry_z_", folder: "vis_odometry" },
   {
     value: "vis_action_alignment_detail",
     label: "vis_action_alignment_z:detail",

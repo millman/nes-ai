@@ -737,6 +737,108 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
+    @app.route("/odometry", defaults={"exp_id": None})
+    @app.route("/odometry/<exp_id>")
+    def odometry(exp_id: Optional[str]):
+        requested = exp_id or request.args.get("id")
+
+        def _latest_experiment_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            return sorted_rows[0].id if sorted_rows else None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_experiment_id()
+
+        index_rows = build_experiment_index(cfg.output_dir)
+        experiment_ids = [row.id for row in sorted(index_rows, key=lambda r: r.id, reverse=True)]
+
+        if selected_id is None:
+            return render_template(
+                "odometry_page.html",
+                experiments=experiment_ids,
+                experiment=None,
+                figure=None,
+                odometry_map={},
+                odometry_steps=[],
+                page_title="Odometry",
+                cfg=cfg,
+                active_nav="odometry",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_self_distance=False,
+            include_diagnostics_images=False,
+            include_diagnostics_frames=False,
+            include_graph_diagnostics=False,
+            include_state_embedding=False,
+        )
+        if selected is None:
+            abort(404, "Experiment not found for odometry.")
+
+        odometry_map: Dict[int, Dict[str, str]] = {}
+        for path in selected.odometry_images:
+            stem = path.stem
+            try:
+                rel = path.relative_to(selected.path)
+            except ValueError:
+                continue
+            label = None
+            prefix = None
+            if stem.startswith("odometry_z_"):
+                label = "odometry_z"
+                prefix = "odometry_z_"
+            elif stem.startswith("odometry_s_"):
+                label = "odometry_s"
+                prefix = "odometry_s_"
+            elif stem.startswith("z_vs_z_hat_"):
+                label = "z_vs_z_hat"
+                prefix = "z_vs_z_hat_"
+            elif stem.startswith("s_vs_s_hat_"):
+                label = "s_vs_s_hat"
+                prefix = "s_vs_s_hat_"
+            if label is None or prefix is None:
+                continue
+            suffix = stem[len(prefix) :]
+            try:
+                step = int(suffix)
+            except ValueError:
+                continue
+            odometry_map.setdefault(step, {})[label] = url_for(
+                "serve_asset", relative_path=f"{selected.id}/{rel}"
+            )
+
+        steps = sorted(odometry_map.keys())
+        figure = _build_single_experiment_figure(selected)
+
+        return render_template(
+            "odometry_page.html",
+            experiments=experiment_ids,
+            experiment=selected,
+            figure=figure,
+            odometry_map=odometry_map,
+            odometry_steps=steps,
+            page_title="Odometry",
+            cfg=cfg,
+            active_nav="odometry",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
     @app.route("/diagnostics_z", defaults={"exp_id": None})
     @app.route("/diagnostics_z/<exp_id>")
     def diagnostics_z(exp_id: Optional[str]):

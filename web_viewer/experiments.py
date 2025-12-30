@@ -113,6 +113,7 @@ class Experiment:
     state_embedding_csv: Optional[Path]
     state_embedding_images: List[Path]
     state_embedding_csvs: List[Path]
+    odometry_images: List[Path]
     diagnostics_images: Dict[str, List[Path]]
     diagnostics_steps: List[int]
     diagnostics_csvs: Dict[str, List[Path]]
@@ -192,6 +193,7 @@ def load_experiment(
     include_diagnostics_s: bool = False,
     include_graph_diagnostics: bool = True,
     include_state_embedding: bool = True,
+    include_odometry: bool = True,
     include_graph_diagnostics_s: Optional[bool] = None,
     include_last_modified: bool = True,
 ) -> Optional[Experiment]:
@@ -247,6 +249,18 @@ def load_experiment(
     )
     section_start = time.perf_counter()
 
+    odometry_images: List[Path] = []
+    if include_odometry:
+        odometry_images = _collect_odometry_images(path)
+    _profile(
+        "load_experiment.odometry",
+        section_start,
+        path,
+        images=len(odometry_images),
+        included=include_odometry,
+    )
+    section_start = time.perf_counter()
+
     diagnostics_images: Dict[str, List[Path]] = {}
     diagnostics_steps: List[int] = []
     diagnostics_csvs: Dict[str, List[Path]] = {}
@@ -266,6 +280,8 @@ def load_experiment(
         diagnostics_s_images = _collect_diagnostics_images_s(path)
         diagnostics_s_steps = _collect_diagnostics_steps(diagnostics_s_images)
         diagnostics_s_csvs = _collect_diagnostics_csvs_s(path)
+    else:
+        diagnostics_s_steps = [0] if _diagnostics_s_exists(path) else []
     include_graph_diagnostics_s = include_graph_diagnostics if include_graph_diagnostics_s is None else include_graph_diagnostics_s
     graph_diagnostics_images: Dict[str, List[Path]] = {}
     graph_diagnostics_steps: List[int] = []
@@ -372,6 +388,7 @@ def load_experiment(
         state_embedding_csv=latest_state_embedding_csv,
         state_embedding_images=state_embedding_images,
         state_embedding_csvs=state_embedding_csvs,
+        odometry_images=odometry_images,
         diagnostics_images=diagnostics_images,
         diagnostics_steps=diagnostics_steps,
         diagnostics_csvs=diagnostics_csvs,
@@ -800,6 +817,7 @@ VIS_STEP_SPECS = [
     ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),
     ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
     ("vis_delta_s_pca", "vis_delta_s_pca", "delta_s_pca_*.png", "delta_s_pca_"),
+    ("vis_odometry", "vis_odometry", "odometry_z_*.png", "odometry_z_"),
     ("vis_action_alignment_detail", "vis_action_alignment_z", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_action_alignment_detail_s", "vis_action_alignment_s", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_cycle_error", "vis_cycle_error_z", "cycle_error_*.png", "cycle_error_"),
@@ -939,6 +957,13 @@ def _collect_state_embedding_images(root: Path) -> List[Path]:
     if new_files and old_files:
         raise ValueError("Both vis_state_embedding and vis_self_distance_s contain self-distance images.")
     return hist_files + (new_files or old_files)
+
+
+def _collect_odometry_images(root: Path) -> List[Path]:
+    folder = root / "vis_odometry"
+    if not folder.exists():
+        return []
+    return sorted(folder.glob("*.png"))
 
 
 def _collect_state_embedding_csvs(root: Path) -> List[Path]:
