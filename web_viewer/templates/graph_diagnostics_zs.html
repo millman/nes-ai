@@ -461,6 +461,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const initialStep = stepsZ.length ? stepsZ[stepsZ.length - 1] : (stepsS.length ? stepsS[stepsS.length - 1] : 0);
     updateForStep(initialStep);
     updatePinState(true);
+
+    const tooltipTriggerList = Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.forEach((el) => {
+        try {
+            new bootstrap.Tooltip(el);
+        } catch (e) {
+            // ignore init failure
+        }
+    });
 });
 </script>
 {% endblock %}

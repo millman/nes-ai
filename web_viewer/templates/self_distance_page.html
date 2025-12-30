@@ -289,6 +289,46 @@ document.addEventListener("DOMContentLoaded", () => {
             stepPath.textContent = `${entry.path} (step ${nearest})`;
         };
 
+        const buildActionMap = (rows) => {
+            const map = {};
+            rows.forEach((row) => {
+                const trajectory = row.trajectory || row.trajectory_label || "trajectory";
+                const step = Number(row.timestep);
+                if (!Number.isFinite(step)) return;
+                const actionLabel = row.action_label || "";
+                if (!map[trajectory]) {
+                    map[trajectory] = { firstStep: step, firstAction: actionLabel, actions: {} };
+                }
+                map[trajectory].actions[step] = actionLabel;
+                if (step < map[trajectory].firstStep) {
+                    map[trajectory].firstStep = step;
+                    map[trajectory].firstAction = actionLabel;
+                }
+            });
+            return map;
+        };
+
+        let actionByTrajectory = {};
+
+        const getFirstAction = (trajectory, fallback) => {
+            const entry = actionByTrajectory[trajectory];
+            if (entry && entry.firstAction) return entry.firstAction;
+            return fallback || "";
+        };
+
+        const getPriorAction = (trajectory, step, fallback) => {
+            const entry = actionByTrajectory[trajectory];
+            if (!entry) return fallback || "";
+            const priorStep = Number(step) - 1;
+            if (Number.isFinite(priorStep) && entry.actions && entry.actions[priorStep]) {
+                return entry.actions[priorStep];
+            }
+            if (Number.isFinite(entry.firstStep) && Number.isFinite(step) && step <= entry.firstStep) {
+                return entry.firstAction || fallback || "";
+            }
+            return fallback || "";
+        };
+
         const attachHover = (plotEl, mode) => {
             plotEl.on("plotly_hover", (event) => {
                 const point = event?.points?.[0];
@@ -302,10 +342,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 const frameLabelText = payload[5] || `t=${step}`;
                 const headerText = `${trajectory} • t=${step}`;
                 const actionText = payload[6] || "";
+                const firstActionText = getFirstAction(trajectory, actionText);
+                const priorActionText = getPriorAction(trajectory, step, actionText);
 
                 if (mode === "first") {
                     updateFrameVisibility(false);
-                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
                     setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                     if (priorImg && priorLabel) {
                         priorImg.classList.add("d-none");
@@ -314,13 +356,13 @@ document.addEventListener("DOMContentLoaded", () => {
                     }
                 } else if (mode === "prior") {
                     updateFrameVisibility(true);
-                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
-                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, priorActionText);
                     setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                 } else {
                     updateFrameVisibility(true);
-                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
-                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, priorActionText);
                     setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                 }
             });
@@ -525,12 +567,18 @@ document.addEventListener("DOMContentLoaded", () => {
             skipEmptyLines: true,
             complete: (results) => {
                 const rows = results.data;
+                actionByTrajectory = buildActionMap(rows);
                 buildPlots(rows);
                 if (rows.length) {
                     const firstRow = rows[0];
-                    setImage(firstImg, firstLabel, firstAction, firstRow.first_frame_path, `first: ${firstRow.frame_label || "t=0"}`, firstRow.action_label || "");
-                    setImage(priorImg, priorLabel, priorAction, firstRow.prior_frame_path, "prior: t=0", firstRow.action_label || "");
-                    setImage(currentImg, currentLabel, currentAction, firstRow.frame_path, `t=${firstRow.timestep}`, firstRow.action_label || "");
+                    const trajectory = firstRow.trajectory || firstRow.trajectory_label || "trajectory";
+                    const step = Number(firstRow.timestep);
+                    const actionText = firstRow.action_label || "";
+                    const firstActionText = getFirstAction(trajectory, actionText);
+                    const priorActionText = getPriorAction(trajectory, step, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstRow.first_frame_path, `first: ${firstRow.frame_label || "t=0"}`, firstActionText);
+                    setImage(priorImg, priorLabel, priorAction, firstRow.prior_frame_path, "prior: t=0", priorActionText);
+                    setImage(currentImg, currentLabel, currentAction, firstRow.frame_path, `t=${firstRow.timestep}`, actionText);
                     updateFrameVisibility(true);
                 }
             },

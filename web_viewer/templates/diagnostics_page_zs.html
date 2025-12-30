@@ -79,7 +79,8 @@
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div class="d-flex align-items-center gap-2 flex-wrap">
         {% if experiment %}
-        <h3 class="mb-1">Diagnostics (Z vs S) <small class="text-muted">({{ experiment.id }})</small></h3>
+        {% set heading_title = experiment.title if experiment.title != "Untitled" else experiment.name %}
+        <h3 class="mb-1">{{ heading_title }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
         <h3 class="mb-1">Diagnostics (Z vs S)</h3>
         <div class="text-muted small">No experiments with diagnostics outputs.</div>

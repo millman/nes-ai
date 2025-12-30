@@ -198,6 +198,8 @@ def load_experiment(
     include_last_modified: bool = False,
     include_rollout_steps: bool = False,
     include_max_step: bool = False,
+    include_model_diff: bool = False,
+    include_model_diff_generation: bool = False,
 ) -> Optional[Experiment]:
     if not path.is_dir():
         return None
@@ -324,18 +326,30 @@ def load_experiment(
 
     notes_path = path / "notes.txt"
     metadata_custom_path = path / "experiment_metadata.txt"
+    meta_start = time.perf_counter()
     title, tags, starred, archived = _read_metadata(metadata_custom_path)
     metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
     metadata_data_root = _extract_data_root_from_metadata(metadata_text) if metadata_text else None
-    if metadata_model_diff_path.exists():
-        metadata_model_diff_text_raw = metadata_model_diff_path.read_text()
-    else:
-        metadata_model_diff_text_raw = _ensure_model_diff(path)
-    metadata_model_diff_items = _parse_model_diff_items(metadata_model_diff_text_raw)
-    metadata_model_diff_text = _render_model_diff(metadata_model_diff_text_raw)
+    _profile("load_experiment.text_meta.base", meta_start, path)
+    meta_start = time.perf_counter()
+    metadata_model_diff_text_raw = "—"
+    metadata_model_diff_items: List[Tuple[str, str, bool]] = []
+    metadata_model_diff_text = "—"
+    if include_model_diff:
+        if metadata_model_diff_path.exists():
+            metadata_model_diff_text_raw = metadata_model_diff_path.read_text()
+        elif include_model_diff_generation:
+            metadata_model_diff_text_raw = _ensure_model_diff(path)
+        else:
+            metadata_model_diff_text_raw = "model_diff.txt missing."
+        metadata_model_diff_items = _parse_model_diff_items(metadata_model_diff_text_raw)
+        metadata_model_diff_text = _render_model_diff(metadata_model_diff_text_raw)
+    _profile("load_experiment.text_meta.model_diff", meta_start, path)
+    meta_start = time.perf_counter()
     git_metadata_text = metadata_git_path.read_text() if metadata_git_path.exists() else "metadata_git.txt missing."
     git_commit = _extract_git_commit(git_metadata_text)
     notes_text = _read_or_create_notes(notes_path)
+    _profile("load_experiment.text_meta.notes", meta_start, path)
     _profile("load_experiment.text_meta", section_start, path)
     section_start = time.perf_counter()
 

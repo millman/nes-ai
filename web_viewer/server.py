@@ -175,6 +175,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 row.path,
                 include_odometry=True,
                 include_max_step=True,
+                include_model_diff=True,
+                include_model_diff_generation=True,
             )
             if exp is not None:
                 starred_experiments.append(exp)
@@ -188,6 +190,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 cfg.output_dir / exp_id,
                 include_odometry=True,
                 include_max_step=True,
+                include_model_diff=True,
+                include_model_diff_generation=True,
             )
             if exp is not None:
                 experiments.append(exp)

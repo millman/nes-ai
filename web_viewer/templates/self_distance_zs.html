@@ -288,7 +288,45 @@ document.addEventListener("DOMContentLoaded", () => {
         pathEl.textContent = `${entry.path} (step ${nearest})`;
     };
 
-    const attachHover = (plotEl) => {
+    const buildActionMap = (rows) => {
+        const map = {};
+        rows.forEach((row) => {
+            const trajectory = row.trajectory || row.trajectory_label || "trajectory";
+            const step = Number(row.timestep);
+            if (!Number.isFinite(step)) return;
+            const actionLabel = row.action_label || "";
+            if (!map[trajectory]) {
+                map[trajectory] = { firstStep: step, firstAction: actionLabel, actions: {} };
+            }
+            map[trajectory].actions[step] = actionLabel;
+            if (step < map[trajectory].firstStep) {
+                map[trajectory].firstStep = step;
+                map[trajectory].firstAction = actionLabel;
+            }
+        });
+        return map;
+    };
+
+    const getFirstAction = (actionMap, trajectory, fallback) => {
+        const entry = actionMap[trajectory];
+        if (entry && entry.firstAction) return entry.firstAction;
+        return fallback || "";
+    };
+
+    const getPriorAction = (actionMap, trajectory, step, fallback) => {
+        const entry = actionMap[trajectory];
+        if (!entry) return fallback || "";
+        const priorStep = Number(step) - 1;
+        if (Number.isFinite(priorStep) && entry.actions && entry.actions[priorStep]) {
+            return entry.actions[priorStep];
+        }
+        if (Number.isFinite(entry.firstStep) && Number.isFinite(step) && step <= entry.firstStep) {
+            return entry.firstAction || fallback || "";
+        }
+        return fallback || "";
+    };
+
+    const attachHover = (plotEl, actionMap) => {
         plotEl.on("plotly_hover", (event) => {
             const point = event?.points?.[0];
             if (!point || !point.customdata) return;
@@ -301,9 +339,11 @@ document.addEventListener("DOMContentLoaded", () => {
             const frameLabelText = payload[5] || `t=${step}`;
             const headerText = `${trajectory} • t=${step}`;
             const actionText = payload[6] || "";
+            const firstActionText = getFirstAction(actionMap, trajectory, actionText);
+            const priorActionText = getPriorAction(actionMap, trajectory, step, actionText);
 
-            setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
-            setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+            setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
+            setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, priorActionText);
             setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
             updateSelfDistanceImage(step, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
             updateSelfDistanceImage(step, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
@@ -353,6 +393,8 @@ document.addEventListener("DOMContentLoaded", () => {
             },
         };
 
+        const actionMap = buildActionMap(rows);
+
         Plotly.newPlot(
             firstEl,
             [
@@ -373,7 +415,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 yaxis: { title: `1 - cos(${axisLabel}0, ${axisLabel}t)` },
             },
             plotConfig,
-        ).then(() => attachHover(firstEl));
+        ).then(() => attachHover(firstEl, actionMap));
 
         Plotly.newPlot(
             priorEl,
@@ -395,7 +437,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 yaxis: { title: `1 - cos(${axisLabel}(t-1), ${axisLabel}t)` },
             },
             plotConfig,
-        ).then(() => attachHover(priorEl));
+        ).then(() => attachHover(priorEl, actionMap));
     };
 
     const updatePinState = (nextState) => {
