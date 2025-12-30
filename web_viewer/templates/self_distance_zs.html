@@ -310,7 +310,10 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     };
 
-    const buildCosinePlots = (rows, firstEl, priorEl, label, axisLabel, titlePrefix, color) => {
+    const cosineFirstColor = "#3b6fb6";
+    const cosinePriorColor = "#3e8f3e";
+
+    const buildCosinePlots = (rows, firstEl, priorEl, label, axisLabel, titlePrefix) => {
         if (!rows.length) {
             if (firstEl) firstEl.innerHTML = `<p class='text-muted fst-italic'>No rows in ${label} CSV.</p>`;
             if (priorEl) priorEl.innerHTML = "";
@@ -358,8 +361,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     y: distFirstCos,
                     mode: "lines+markers",
                     name: "cosine distance to first",
-                    marker: { size: 4, color },
-                    line: { width: 1.5, color },
+                    marker: { size: 4, color: cosineFirstColor },
+                    line: { width: 1.5, color: cosineFirstColor },
                     customdata: custom,
                     hovertemplate: "%{y:.4f}<extra></extra>",
                 },
@@ -380,8 +383,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     y: distPriorCos,
                     mode: "lines+markers",
                     name: "cosine distance to prior",
-                    marker: { size: 4, color },
-                    line: { width: 1.5, color },
+                    marker: { size: 4, color: cosinePriorColor },
+                    line: { width: 1.5, color: cosinePriorColor },
                     customdata: custom,
                     hovertemplate: "%{y:.4f}<extra></extra>",
                 },
@@ -411,7 +414,23 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     if (diagFigure && diagLossPlot) {
-        Plotly.react(diagLossPlot, diagFigure.data, diagFigure.layout, buildPlotlyConfig(diagFigure.config || {}));
+        Plotly.react(diagLossPlot, diagFigure.data, diagFigure.layout, buildPlotlyConfig(diagFigure.config || {})).then(() => {
+            let lastHoverStep = null;
+            diagLossPlot.on("plotly_hover", (event) => {
+                const point = event?.points?.[0];
+                if (!point || typeof point.x === "undefined") return;
+                const step = Number(point.x);
+                if (!Number.isFinite(step)) return;
+                lastHoverStep = step;
+                updateSelfDistanceImage(step, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+                updateSelfDistanceImage(step, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
+            });
+            diagLossPlot.on("plotly_unhover", () => {
+                if (lastHoverStep === null) return;
+                updateSelfDistanceImage(lastHoverStep, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+                updateSelfDistanceImage(lastHoverStep, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
+            });
+        });
     }
 
     const loadCsv = (url) => new Promise((resolve) => {
@@ -426,8 +445,8 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     Promise.all([loadCsv(zCsvUrl), loadCsv(sCsvUrl)]).then(([zRows, sRows]) => {
-        buildCosinePlots(zRows, zFirstPlot, zPriorPlot, "self_distance_z.csv", "z", "Z ·", "#3b6fb6");
-        buildCosinePlots(sRows, sFirstPlot, sPriorPlot, "self_distance_s.csv", "s", "S ·", "#6f9b5a");
+        buildCosinePlots(zRows, zFirstPlot, zPriorPlot, "self_distance_z.csv", "z", "Z ·");
+        buildCosinePlots(sRows, sFirstPlot, sPriorPlot, "self_distance_s.csv", "s", "S ·");
         const initialStep = zRows.length ? Number(zRows[zRows.length - 1].timestep) : 0;
         updateSelfDistanceImage(initialStep, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
         updateSelfDistanceImage(initialStep, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");

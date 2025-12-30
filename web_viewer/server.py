@@ -277,7 +277,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected_ids[0] if selected_ids else (index_rows[0].id if index_rows else None),
         )
 
-    @app.route("/experiments/<exp_id>")
+    @app.route("/experiment/<exp_id>")
     def experiment_detail(exp_id: str):
         experiment = _get_experiment_or_404(exp_id)
         figure = _build_single_experiment_figure(experiment)
@@ -295,6 +295,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             active_experiment_id=experiment.id,
             first_experiment_id=experiment.id,
         )
+
+    @app.route("/experiments/<exp_id>")
+    def experiment_detail_redirect(exp_id: str):
+        return redirect(url_for("experiment_detail", exp_id=exp_id))
 
     @app.post("/experiments/<exp_id>/notes")
     def update_notes(exp_id: str):
@@ -1055,6 +1059,154 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             figure=figure,
             cfg=cfg,
             active_nav="diagnostics_s",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
+    @app.route("/diagnostics_zvs", defaults={"exp_id": None})
+    @app.route("/diagnostics_zvs/<exp_id>")
+    def diagnostics_zvs(exp_id: Optional[str]):
+        route_start = time.perf_counter()
+        requested = exp_id or request.args.get("id")
+
+        def _latest_diagnostics_zvs_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            fallback = None
+            for row in sorted_rows:
+                has_z = _diagnostics_exists(row.path)
+                has_s = _diagnostics_s_exists(row.path)
+                if has_z and has_s:
+                    return row.id
+                if fallback is None and (has_z or has_s):
+                    fallback = row.id
+            return fallback
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_diagnostics_zvs_id()
+
+        if selected_id is None:
+            return render_template(
+                "diagnostics_page_zs.html",
+                experiments=[],
+                experiment=None,
+                diagnostics_map_z={},
+                diagnostics_map_s={},
+                diagnostic_steps=[],
+                figure=None,
+                cfg=cfg,
+                active_nav="diagnostics_zvs",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_graph_diagnostics=False,
+            include_diagnostics_s=True,
+        )
+        if selected is None:
+            abort(404, "Experiment not found for diagnostics.")
+
+        build_maps_start = time.perf_counter()
+        figure = _build_single_experiment_figure(selected)
+
+        diagnostics_map_z: Dict[str, Dict[int, str]] = {}
+        for name, paths in selected.diagnostics_images.items():
+            per_step: Dict[int, str] = {}
+            for path in paths:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map_z[name] = per_step
+
+        if selected.self_distance_images:
+            per_step = {}
+            for path in selected.self_distance_images:
+                stem = path.stem
+                if "cosine" in stem:
+                    continue
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map_z["self_distance"] = per_step
+
+        diagnostics_map_s: Dict[str, Dict[int, str]] = {}
+        for name, paths in selected.diagnostics_s_images.items():
+            per_step = {}
+            for path in paths:
+                stem = path.stem
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map_s[name] = per_step
+
+        if selected.state_embedding_images:
+            per_step = {}
+            for path in selected.state_embedding_images:
+                stem = path.stem
+                if "hist" in stem or "cosine" in stem:
+                    continue
+                suffix = stem.split("_")[-1] if "_" in stem else stem
+                try:
+                    step = int(suffix)
+                except ValueError:
+                    continue
+                rel = path.relative_to(selected.path)
+                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            if per_step:
+                diagnostics_map_s["self_distance_s"] = per_step
+
+        step_set: set[int] = set()
+        for per_step in diagnostics_map_z.values():
+            step_set.update(per_step.keys())
+        for per_step in diagnostics_map_s.values():
+            step_set.update(per_step.keys())
+        diagnostic_steps = sorted(step_set)
+
+        _log_timing(
+            "diagnostics_zvs.build_maps",
+            build_maps_start,
+            images=sum(len(v) for v in diagnostics_map_z.values()) + sum(len(v) for v in diagnostics_map_s.values()),
+        )
+        _log_timing("diagnostics_zvs.total", route_start, selected=selected.id)
+        return render_template(
+            "diagnostics_page_zs.html",
+            experiments=[],
+            experiment=selected,
+            diagnostics_map_z=diagnostics_map_z,
+            diagnostics_map_s=diagnostics_map_s,
+            diagnostic_steps=diagnostic_steps,
+            figure=figure,
+            cfg=cfg,
+            active_nav="diagnostics_zvs",
             active_experiment_id=selected.id,
             first_experiment_id=selected.id,
         )

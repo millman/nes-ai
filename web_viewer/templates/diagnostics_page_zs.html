@@ -1,0 +1,350 @@
+{% extends "base.html" %}
+
+{% set steps = diagnostic_steps if diagnostic_steps is defined else [] %}
+{% set step_count = steps|length %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<style>
+.diagnostic-row-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem 1rem;
+}
+
+.diagnostics-loss-wrapper {
+    position: relative;
+}
+
+.diagnostics-loss-plot {
+    height: 220px;
+}
+
+.diagnostics-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+
+.diagnostics-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.diagnostics-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+
+.diagnostics-loss-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
+}
+
+.diagnostic-subtitle {
+    font-size: 0.88em;
+    color: #6c757d;
+    font-weight: 400;
+    margin-left: 4px;
+}
+
+@media (max-width: 991.98px) {
+    .diagnostic-row-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        {% if experiment %}
+        <h3 class="mb-1">Diagnostics (Z vs S) <small class="text-muted">({{ experiment.id }})</small></h3>
+        {% else %}
+        <h3 class="mb-1">Diagnostics (Z vs S)</h3>
+        <div class="text-muted small">No experiments with diagnostics outputs.</div>
+        {% endif %}
+    </div>
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No diagnostics images found in any experiments.</div>
+{% else %}
+
+{% if step_count %}
+<div class="diagnostics-loss-wrapper mb-3" id="diagnostics-loss-wrapper">
+    <button
+        type="button"
+        class="diagnostics-pin-btn"
+        id="diagnostics-loss-pin"
+        aria-pressed="false"
+        aria-label="Pin diagnostics plot"
+        title="Pin diagnostics plot"
+    >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+        </svg>
+    </button>
+    <div id="diagnostics-loss-plot" class="diagnostics-loss-plot"></div>
+</div>
+
+<div class="text-muted small mb-3">Hover the loss plot to set the diagnostics step. Current step: <span id="diagnostics-step-label">—</span></div>
+
+<div class="diagnostic-row-grid mb-3">
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-z-delta-header">Delta-z PCA</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-z-delta-img" class="img-fluid rounded border d-none" alt="Delta-z PCA diagnostic">
+            <div class="text-muted small" id="diagnostics-z-delta-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-s-delta-header">Delta-s PCA</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-s-delta-img" class="img-fluid rounded border d-none" alt="Delta-s PCA diagnostic">
+            <div class="text-muted small" id="diagnostics-s-delta-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-z-align-header">Alignment detail</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-z-align-img" class="img-fluid rounded border d-none" alt="Alignment detail diagnostic">
+            <div class="text-muted small" id="diagnostics-z-align-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-s-align-header">Alignment detail (S)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-s-align-img" class="img-fluid rounded border d-none" alt="Alignment detail (S) diagnostic">
+            <div class="text-muted small" id="diagnostics-s-align-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-z-self-header">Self-distance (Z)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-z-self-img" class="img-fluid rounded border d-none" alt="Self-distance (Z) diagnostic">
+            <div class="text-muted small" id="diagnostics-z-self-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-s-self-header">Self-distance (S)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-s-self-img" class="img-fluid rounded border d-none" alt="Self-distance (S) diagnostic">
+            <div class="text-muted small" id="diagnostics-s-self-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-z-cycle-header">Cycle error (Z)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-z-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (Z) diagnostic">
+            <div class="text-muted small" id="diagnostics-z-cycle-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2" id="diagnostics-s-cycle-header">Cycle error (S)</div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-s-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (S) diagnostic">
+            <div class="text-muted small" id="diagnostics-s-cycle-caption"></div>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="text-muted fst-italic">Diagnostics PNGs not found for this experiment.</div>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if experiment and step_count %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const steps = {{ steps | tojson }};
+    const diagnosticsZ = {{ diagnostics_map_z | tojson }};
+    const diagnosticsS = {{ diagnostics_map_s | tojson }};
+    const stepLabel = document.getElementById("diagnostics-step-label");
+    const lossPlot = document.getElementById("diagnostics-loss-plot");
+    const lossWrapper = document.getElementById("diagnostics-loss-wrapper");
+    const lossPinButton = document.getElementById("diagnostics-loss-pin");
+    const figure = {{ figure | tojson if figure else 'null' }};
+    let lossPinned = false;
+
+    const targetsZ = {
+        delta_z_pca: {
+            img: document.getElementById("diagnostics-z-delta-img"),
+            caption: document.getElementById("diagnostics-z-delta-caption"),
+            header: document.getElementById("diagnostics-z-delta-header"),
+            title: "Delta-z PCA",
+            label: "vis_delta_z_pca",
+        },
+        action_alignment_detail: {
+            img: document.getElementById("diagnostics-z-align-img"),
+            caption: document.getElementById("diagnostics-z-align-caption"),
+            header: document.getElementById("diagnostics-z-align-header"),
+            title: "Alignment detail",
+            label: "alignment detail",
+        },
+        self_distance: {
+            img: document.getElementById("diagnostics-z-self-img"),
+            caption: document.getElementById("diagnostics-z-self-caption"),
+            header: document.getElementById("diagnostics-z-self-header"),
+            title: "Self-distance (Z)",
+            label: "self_distance",
+        },
+        cycle_error: {
+            img: document.getElementById("diagnostics-z-cycle-img"),
+            caption: document.getElementById("diagnostics-z-cycle-caption"),
+            header: document.getElementById("diagnostics-z-cycle-header"),
+            title: "Cycle error (Z)",
+            label: "vis_cycle_error_z",
+        },
+    };
+
+    const targetsS = {
+        delta_s_pca: {
+            img: document.getElementById("diagnostics-s-delta-img"),
+            caption: document.getElementById("diagnostics-s-delta-caption"),
+            header: document.getElementById("diagnostics-s-delta-header"),
+            title: "Delta-s PCA",
+            label: "vis_delta_s_pca",
+        },
+        action_alignment_detail_s: {
+            img: document.getElementById("diagnostics-s-align-img"),
+            caption: document.getElementById("diagnostics-s-align-caption"),
+            header: document.getElementById("diagnostics-s-align-header"),
+            title: "Alignment detail (S)",
+            label: "alignment detail (S)",
+        },
+        self_distance_s: {
+            img: document.getElementById("diagnostics-s-self-img"),
+            caption: document.getElementById("diagnostics-s-self-caption"),
+            header: document.getElementById("diagnostics-s-self-header"),
+            title: "Self-distance (S)",
+            label: "self_distance_s",
+        },
+        cycle_error_s: {
+            img: document.getElementById("diagnostics-s-cycle-img"),
+            caption: document.getElementById("diagnostics-s-cycle-caption"),
+            header: document.getElementById("diagnostics-s-cycle-header"),
+            title: "Cycle error (S)",
+            label: "vis_cycle_error_s",
+        },
+    };
+
+    function resolveUrl(diagMap, diagKey, step) {
+        const perDiag = diagMap[diagKey] || {};
+        return perDiag[step] || perDiag[String(step)] || null;
+    }
+
+    function updateTargets(step, targetMap, mapData) {
+        Object.entries(targetMap).forEach(([key, refs]) => {
+            if (!refs.img || !refs.caption) return;
+            const url = resolveUrl(mapData, key, step);
+            const headerText = refs.title ? refs.title : "";
+            if (url) {
+                refs.img.src = url;
+                refs.img.classList.remove("d-none");
+                if (refs.header) {
+                    refs.header.innerHTML = `${headerText} <span class="diagnostic-subtitle">(${refs.label} @ step ${step})</span>`;
+                }
+                refs.caption.textContent = "";
+            } else {
+                refs.img.classList.add("d-none");
+                if (refs.header) {
+                    refs.header.textContent = headerText;
+                }
+                refs.caption.textContent = `No image for step ${step} in ${refs.label}`;
+            }
+        });
+    }
+
+    function nearestStep(target) {
+        if (!steps.length) return null;
+        let best = steps[0];
+        let bestDiff = Math.abs(target - steps[0]);
+        for (let i = 1; i < steps.length; i++) {
+            const diff = Math.abs(target - steps[i]);
+            if (diff < bestDiff) {
+                best = steps[i];
+                bestDiff = diff;
+            }
+        }
+        return best;
+    }
+
+    function updateForStep(stepValue) {
+        const nearest = nearestStep(stepValue);
+        const step = nearest !== null ? nearest : steps[steps.length - 1];
+        if (stepLabel) stepLabel.textContent = step ?? "—";
+        updateTargets(step, targetsZ, diagnosticsZ);
+        updateTargets(step, targetsS, diagnosticsS);
+    }
+
+    function renderLossPlot() {
+        if (!lossPlot) return;
+        if (typeof Plotly === "undefined") {
+            return;
+        }
+        if (!figure || !figure.data || !figure.layout) {
+            return;
+        }
+        const layout = {
+            ...figure.layout,
+            height: 220,
+            margin: { ...(figure.layout?.margin || {}), t: 30, b: 50, l: 50, r: 10 },
+        };
+        const config = buildPlotlyConfig(figure.config || {});
+        Plotly.react(lossPlot, figure.data, layout, config).then(() => {
+            lossPlot.on("plotly_hover", (event) => {
+                const point = event?.points?.[0];
+                if (!point || typeof point.x === "undefined") return;
+                updateForStep(point.x);
+            });
+        });
+    }
+
+    function setLossPinned(pinned) {
+        if (!lossWrapper || !lossPinButton) return;
+        lossPinned = pinned;
+        lossWrapper.classList.toggle("sticky-active", pinned);
+        lossPinButton.classList.toggle("active", pinned);
+        lossPinButton.setAttribute("aria-pressed", pinned ? "true" : "false");
+        lossPinButton.setAttribute("title", pinned ? "Unpin diagnostics plot" : "Pin diagnostics plot");
+    }
+
+    setLossPinned(true);
+    renderLossPlot();
+
+    const initialStep = steps.length ? steps[steps.length - 1] : null;
+    if (initialStep !== null) {
+        updateForStep(initialStep);
+    }
+
+    if (lossPinButton && lossWrapper) {
+        lossPinButton.addEventListener("click", () => {
+            setLossPinned(!lossPinned);
+        });
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

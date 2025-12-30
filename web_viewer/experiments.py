@@ -800,9 +800,9 @@ VIS_STEP_SPECS = [
     ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),
     ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
     ("vis_delta_s_pca", "vis_delta_s_pca", "delta_s_pca_*.png", "delta_s_pca_"),
-    ("vis_action_alignment_detail", "vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_action_alignment_detail", "vis_action_alignment_z", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_action_alignment_detail_s", "vis_action_alignment_s", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    ("vis_cycle_error", "vis_cycle_error", "cycle_error_*.png", "cycle_error_"),
+    ("vis_cycle_error", "vis_cycle_error_z", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
     ("vis_adjacency", "vis_adjacency", "adjacency_*.png", "adjacency_"),
     ("vis_graph_rank1_cdf_z", "graph_diagnostics_z", "rank1_cdf_*.png", "rank1_cdf_"),
@@ -870,6 +870,26 @@ def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
                     steps.add(step)
             if steps:
                 step_map["vis_self_distance_s"] = sorted(steps)
+    if "vis_action_alignment_detail" not in step_map:
+        fallback_folder = root / "vis_action_alignment"
+        if fallback_folder.exists():
+            steps = set()
+            for png in fallback_folder.glob("action_alignment_detail_*.png"):
+                step = _parse_step_from_stem(png.stem, "action_alignment_detail_")
+                if step is not None:
+                    steps.add(step)
+            if steps:
+                step_map["vis_action_alignment_detail"] = sorted(steps)
+    if "vis_cycle_error" not in step_map:
+        fallback_folder = root / "vis_cycle_error"
+        if fallback_folder.exists():
+            steps = set()
+            for png in fallback_folder.glob("cycle_error_*.png"):
+                step = _parse_step_from_stem(png.stem, "cycle_error_")
+                if step is not None:
+                    steps.add(step)
+            if steps:
+                step_map["vis_cycle_error"] = sorted(steps)
     legacy_graph = root / "graph_diagnostics"
     if legacy_graph.exists():
         legacy_specs = [
@@ -1002,18 +1022,31 @@ def _quick_state_embedding_csv(root: Path) -> Optional[Path]:
 
 
 def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
-    diag_specs = [
-        ("delta_z_pca", root / "vis_delta_z_pca", "delta_z_pca_*.png"),
-        ("variance_spectrum", root / "vis_delta_z_pca", "delta_z_variance_spectrum_*.png"),
-        ("action_alignment_detail", root / "vis_action_alignment", "action_alignment_detail_*.png"),
-        ("cycle_error", root / "vis_cycle_error", "*.png"),
-    ]
     images: Dict[str, List[Path]] = {}
-    for name, folder, pattern in diag_specs:
-        if folder.exists():
-            imgs = sorted(folder.glob(pattern))
-            if imgs:
-                images[name] = imgs
+    delta_dir = root / "vis_delta_z_pca"
+    if delta_dir.exists():
+        delta_imgs = sorted(delta_dir.glob("delta_z_pca_*.png"))
+        if delta_imgs:
+            images["delta_z_pca"] = delta_imgs
+        spectrum_imgs = sorted(delta_dir.glob("delta_z_variance_spectrum_*.png"))
+        if spectrum_imgs:
+            images["variance_spectrum"] = spectrum_imgs
+
+    alignment_dir = root / "vis_action_alignment_z"
+    alignment_imgs = sorted(alignment_dir.glob("action_alignment_detail_*.png")) if alignment_dir.exists() else []
+    if not alignment_imgs:
+        fallback_dir = root / "vis_action_alignment"
+        alignment_imgs = sorted(fallback_dir.glob("action_alignment_detail_*.png")) if fallback_dir.exists() else []
+    if alignment_imgs:
+        images["action_alignment_detail"] = alignment_imgs
+
+    cycle_dir = root / "vis_cycle_error_z"
+    cycle_imgs = sorted(cycle_dir.glob("*.png")) if cycle_dir.exists() else []
+    if not cycle_imgs:
+        fallback_dir = root / "vis_cycle_error"
+        cycle_imgs = sorted(fallback_dir.glob("*.png")) if fallback_dir.exists() else []
+    if cycle_imgs:
+        images["cycle_error"] = cycle_imgs
     return images
 
 
@@ -1038,8 +1071,12 @@ def _diagnostics_exists(root: Path) -> bool:
     diag_dirs = [
         (root / "vis_delta_z_pca", "*.png"),
         (root / "vis_delta_z_pca", "*.csv"),
+        (root / "vis_action_alignment_z", "*.png"),
+        (root / "vis_action_alignment_z", "*.csv"),
         (root / "vis_action_alignment", "*.png"),
         (root / "vis_action_alignment", "*.csv"),
+        (root / "vis_cycle_error_z", "*.png"),
+        (root / "vis_cycle_error_z", "*.csv"),
         (root / "vis_cycle_error", "*.png"),
         (root / "vis_cycle_error", "*.csv"),
         (root / "vis_diagnostics_frames", "*.csv"),
@@ -1092,10 +1129,16 @@ def _collect_diagnostics_steps(diagnostics_images: Dict[str, List[Path]]) -> Lis
 
 
 def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
+    alignment_dir = root / "vis_action_alignment_z"
+    if not alignment_dir.exists():
+        alignment_dir = root / "vis_action_alignment"
+    cycle_dir = root / "vis_cycle_error_z"
+    if not cycle_dir.exists():
+        cycle_dir = root / "vis_cycle_error"
     diag_dirs = {
         "delta_z_pca": root / "vis_delta_z_pca",
-        "action_alignment": root / "vis_action_alignment",
-        "cycle_error": root / "vis_cycle_error",
+        "action_alignment": alignment_dir,
+        "cycle_error": cycle_dir,
         "frame_alignment": root / "vis_diagnostics_frames",
     }
     csvs: Dict[str, List[Path]] = {}

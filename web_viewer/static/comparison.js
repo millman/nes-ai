@@ -23,9 +23,9 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_delta_s_pca", label: "vis_delta_s_pca", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
   {
     value: "vis_action_alignment_detail",
-    label: "vis_action_alignment:detail",
+    label: "vis_action_alignment_z:detail",
     prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment",
+    folder: "vis_action_alignment_z",
   },
   {
     value: "vis_action_alignment_detail_s",
@@ -33,7 +33,7 @@ const IMAGE_FOLDER_OPTIONS = [
     prefix: "action_alignment_detail_",
     folder: "vis_action_alignment_s",
   },
-  { value: "vis_cycle_error", label: "vis_cycle_error", prefix: "cycle_error_", folder: "vis_cycle_error" },
+  { value: "vis_cycle_error", label: "vis_cycle_error_z", prefix: "cycle_error_", folder: "vis_cycle_error_z" },
   { value: "vis_cycle_error_s", label: "vis_cycle_error_s", prefix: "cycle_error_", folder: "vis_cycle_error_s" },
   { value: "vis_adjacency", label: "vis_adjacency", prefix: "adjacency_", folder: "vis_adjacency" },
   { value: "vis_graph_rank1_cdf_z", label: "vis_graph_rank1_cdf_z", prefix: "rank1_cdf_", folder: "graph_diagnostics_z" },
@@ -595,7 +595,7 @@ function buildLossImageCell(exp) {
 
   if (exp.loss_image) {
     const link = document.createElement("a");
-    link.href = `/experiments/${exp.id}`;
+    link.href = `/experiment/${exp.id}`;
     link.className = "d-block";
     const img = document.createElement("img");
     img.loading = "lazy";
