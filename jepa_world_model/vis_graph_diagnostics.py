@@ -13,6 +13,8 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
+from jepa_world_model.vis_raincloud import plot_half_raincloud
+
 if TYPE_CHECKING:
     from jepa_world_model_trainer import GraphDiagnosticsConfig, JEPAWorldModel
 
@@ -190,53 +192,14 @@ def _plot_neff_violin(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) -> N
     if all(arr.size == 0 for arr in data):
         ax.text(0.5, 0.5, "No neighborhood stats available.", ha="center", va="center")
     else:
-        violin_parts = ax.violinplot(
+        plot_half_raincloud(
+            ax,
             data,
-            showmeans=False,
-            showextrema=False,
-            showmedians=False,
-            widths=0.7,
+            labels,
+            "Effective neighborhood size",
+            log_scale=True,
+            colors=["tab:blue", "tab:green"],
         )
-        colors = ["tab:blue", "tab:green"]
-        for idx, body in enumerate(violin_parts.get("bodies", [])):
-            body.set_facecolor(colors[idx % len(colors)])
-            body.set_edgecolor("black")
-            body.set_alpha(0.25)
-            verts = body.get_paths()[0].vertices
-            center_x = np.mean(verts[:, 0])
-            verts[:, 0] = np.minimum(verts[:, 0], center_x)
-
-        ax.boxplot(
-            data,
-            widths=0.18,
-            vert=True,
-            patch_artist=True,
-            showfliers=False,
-            boxprops={"facecolor": "white", "edgecolor": "black", "alpha": 0.8},
-            medianprops={"color": "black", "linewidth": 1.2},
-            whiskerprops={"color": "black", "linewidth": 1.0},
-            capprops={"color": "black", "linewidth": 1.0},
-        )
-
-        rng = np.random.default_rng(0)
-        for idx, arr in enumerate(data):
-            if arr.size == 0:
-                continue
-            jitter = rng.normal(loc=0.0, scale=0.04, size=arr.size)
-            offset = 0.18
-            ax.scatter(
-                np.full_like(arr, idx + 1, dtype=np.float32) + offset + jitter,
-                arr,
-                s=10,
-                alpha=0.25,
-                color=colors[idx % len(colors)],
-                edgecolor="none",
-            )
-        ax.set_xticks([1, 2])
-        ax.set_xticklabels(labels)
-        ax.set_ylabel("Effective neighborhood size")
-        ax.set_yscale("log")
-        ax.grid(True, alpha=0.3)
     ax.set_title("Neighborhood size (exp entropy)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")

@@ -64,7 +64,7 @@
         <strong>Training metrics</strong>
         {% if odometry_steps %}
         <span class="text-muted small">hover to scrub steps</span>
-        <span class="ms-auto text-muted small">Step: <span id="odometry-step-label">{{ odometry_steps[-1] }}</span></span>
+        <span class="ms-auto text-muted small">Step: <span id="odometry-step-label" class="odometry-step-label">{{ odometry_steps[-1] }}</span></span>
         {% endif %}
     </div>
     <div class="card-body">
@@ -76,12 +76,15 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Cumulative sum of Δz PCA/ICA/t-SNE</span>
-            <span
-                class="odometry-info-icon"
-                data-bs-toggle="tooltip"
-                data-bs-placement="left"
-                title="Trajectory of cumulative delta-z over time (after warmup), projected with PCA/ICA/t-SNE."
-            >i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Trajectory of cumulative delta-z over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
+                >i</span>
+            </div>
         </div>
         <div class="card-body">
             {% if not odometry_steps %}
@@ -101,12 +104,15 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Cumulative sum of Δs PCA/ICA/t-SNE</span>
-            <span
-                class="odometry-info-icon"
-                data-bs-toggle="tooltip"
-                data-bs-placement="left"
-                title="Trajectory of cumulative delta-s over time (after warmup), projected with PCA/ICA/t-SNE."
-            >i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Trajectory of cumulative delta-s over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
+                >i</span>
+            </div>
         </div>
         <div class="card-body">
             {% if not odometry_steps %}
@@ -126,12 +132,15 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>||z - z_hat|| + scatter</span>
-            <span
-                class="odometry-info-icon"
-                data-bs-toggle="tooltip"
-                data-bs-placement="left"
-                title="Predictor error norm over time plus a z vs. z_hat scatter view."
-            >i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Predictor error norm over time plus a z vs. z_hat scatter view. Read: the line shows ||z - z_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
+                >i</span>
+            </div>
         </div>
         <div class="card-body">
             {% if not odometry_steps %}
@@ -151,12 +160,15 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>||s - s_hat|| + scatter</span>
-            <span
-                class="odometry-info-icon"
-                data-bs-toggle="tooltip"
-                data-bs-placement="left"
-                title="Predictor error norm over time plus an s vs. s_hat scatter view."
-            >i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Predictor error norm over time plus an s vs. s_hat scatter view. Read: the line shows ||s - s_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
+                >i</span>
+            </div>
         </div>
         <div class="card-body">
             {% if not odometry_steps %}
@@ -195,7 +207,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const figure = {{ figure | tojson if figure else 'null' }};
     const steps = {{ odometry_steps | tojson }};
     const odometryMap = {{ odometry_map | tojson }};
-    const stepLabel = document.getElementById("odometry-step-label");
+    const stepLabels = document.querySelectorAll(".odometry-step-label");
     const targets = {
         odometry_z: {img: document.getElementById("odometry-z-img"), caption: document.getElementById("odometry-z-caption")},
         odometry_s: {img: document.getElementById("odometry-s-img"), caption: document.getElementById("odometry-s-caption")},
@@ -227,16 +239,16 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!step) {
             return;
         }
-        if (stepLabel) {
-            stepLabel.textContent = step;
-        }
+        stepLabels.forEach((label) => {
+            label.textContent = step;
+        });
         Object.entries(targets).forEach(([key, refs]) => {
             if (!refs.img || !refs.caption) return;
             const url = resolveUrl(key, step);
             if (url) {
                 refs.img.src = url;
                 refs.img.classList.remove("d-none");
-                refs.caption.textContent = `Step ${step}`;
+                refs.caption.textContent = "";
             } else {
                 refs.img.classList.add("d-none");
                 refs.caption.textContent = `Missing ${key} image for step ${step}`;

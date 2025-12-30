@@ -12,6 +12,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import compress_actions_to_ids
+from jepa_world_model.vis_raincloud import plot_half_raincloud
 
 
 @dataclass
@@ -23,6 +24,7 @@ class VisCtrlMetrics:
     composition_error_mean: float
     composition_errors: np.ndarray
     jaccard_means: Dict[int, float]
+    jaccard_samples: Dict[int, np.ndarray]
 
 
 def _compute_global_variance(embeddings: torch.Tensor) -> float:
@@ -86,13 +88,16 @@ def _compute_jaccard_over_time(
     batch_size: int,
     ks: Iterable[int],
     delta: int = 1,
-) -> Dict[int, float]:
+) -> Tuple[Dict[int, float], Dict[int, np.ndarray]]:
     if knn_idx.size == 0 or seq_len <= delta:
-        return {int(k): float("nan") for k in ks}
+        empty_means = {int(k): float("nan") for k in ks}
+        empty_samples = {int(k): np.zeros(0, dtype=np.float32) for k in ks}
+        return empty_means, empty_samples
     ks_list = [int(k) for k in ks]
     max_k = knn_idx.shape[1]
     totals = {k: 0.0 for k in ks_list}
     counts = {k: 0 for k in ks_list}
+    samples: Dict[int, List[float]] = {k: [] for k in ks_list}
     for b in range(batch_size):
         base = b * seq_len
         for t in range(seq_len - delta):
@@ -110,9 +115,13 @@ def _compute_jaccard_over_time(
                 union = len(set_a | set_b)
                 if union == 0:
                     continue
-                totals[k] += inter / union
+                score = inter / union
+                totals[k] += score
+                samples[k].append(score)
                 counts[k] += 1
-    return {k: (totals[k] / counts[k]) if counts[k] else float("nan") for k in ks_list}
+    means = {k: (totals[k] / counts[k]) if counts[k] else float("nan") for k in ks_list}
+    sample_arrays = {k: np.asarray(samples[k], dtype=np.float32) for k in ks_list}
+    return means, sample_arrays
 
 
 def _compute_eigen_spectrum(embeddings: torch.Tensor, top_k: int = 10) -> Tuple[np.ndarray, float]:
@@ -208,7 +217,7 @@ def compute_vis_ctrl_metrics(
     if not np.isfinite(variance):
         variance = _compute_global_variance(flat)
     comp_mean, comp_vals = _compute_two_step_composition_error(embeddings, actions, min_action_count, warmup)
-    jaccard_means = _compute_jaccard_over_time(knn_idx, t, b, ks, delta=stability_delta)
+    jaccard_means, jaccard_samples = _compute_jaccard_over_time(knn_idx, t, b, ks, delta=stability_delta)
     return VisCtrlMetrics(
         knn_mean_distances=knn_means,
         knn_distance_samples=knn_samples,
@@ -217,68 +226,8 @@ def compute_vis_ctrl_metrics(
         composition_error_mean=comp_mean,
         composition_errors=comp_vals,
         jaccard_means=jaccard_means,
+        jaccard_samples=jaccard_samples,
     )
-
-
-def _plot_raincloud(
-    ax: plt.Axes,
-    data: Sequence[np.ndarray],
-    labels: Sequence[str],
-    ylabel: str,
-    log_scale: bool = False,
-) -> None:
-    if all(arr.size == 0 for arr in data):
-        ax.text(0.5, 0.5, "No kNN samples available.", ha="center", va="center")
-        ax.axis("off")
-        return
-    violin_parts = ax.violinplot(
-        data,
-        showmeans=False,
-        showextrema=False,
-        showmedians=False,
-        widths=0.7,
-    )
-    colors = ["tab:blue", "tab:green", "tab:orange", "tab:purple", "tab:red"]
-    for idx, body in enumerate(violin_parts.get("bodies", [])):
-        body.set_facecolor(colors[idx % len(colors)])
-        body.set_edgecolor("black")
-        body.set_alpha(0.25)
-        verts = body.get_paths()[0].vertices
-        center_x = np.mean(verts[:, 0])
-        verts[:, 0] = np.minimum(verts[:, 0], center_x)
-
-    ax.boxplot(
-        data,
-        widths=0.18,
-        vert=True,
-        patch_artist=True,
-        showfliers=False,
-        boxprops={"facecolor": "white", "edgecolor": "black", "alpha": 0.8},
-        medianprops={"color": "black", "linewidth": 1.2},
-        whiskerprops={"color": "black", "linewidth": 1.0},
-        capprops={"color": "black", "linewidth": 1.0},
-    )
-
-    rng = np.random.default_rng(0)
-    for idx, arr in enumerate(data):
-        if arr.size == 0:
-            continue
-        jitter = rng.normal(loc=0.0, scale=0.04, size=arr.size)
-        offset = 0.18
-        ax.scatter(
-            np.full_like(arr, idx + 1, dtype=np.float32) + offset + jitter,
-            arr,
-            s=10,
-            alpha=0.25,
-            color=colors[idx % len(colors)],
-            edgecolor="none",
-        )
-    ax.set_xticks(list(range(1, len(labels) + 1)))
-    ax.set_xticklabels(labels)
-    ax.set_ylabel(ylabel)
-    if log_scale:
-        ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
 
 
 def save_smoothness_plot(
@@ -292,7 +241,7 @@ def save_smoothness_plot(
     if ks:
         samples = [metrics.knn_distance_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
         labels = [f"k={k}" for k in ks]
-        _plot_raincloud(axes[0], samples, labels, "mean kNN distance")
+        plot_half_raincloud(axes[0], samples, labels, "kNN distance")
         axes[0].set_title(f"kNN distance raincloud ({embedding_label})")
     else:
         axes[0].text(0.5, 0.5, "No kNN data.", ha="center", va="center")
@@ -350,10 +299,9 @@ def save_stability_plot(
     ks = sorted(metrics.jaccard_means.keys())
     fig, ax = plt.subplots(figsize=(7, 4.5))
     if ks:
-        vals = [metrics.jaccard_means[k] for k in ks]
-        ax.plot(ks, vals, marker="o", color="tab:orange")
-        ax.set_xlabel("k")
-        ax.set_ylabel("mean Jaccard")
+        samples = [metrics.jaccard_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
+        labels = [f"k={k}" for k in ks]
+        plot_half_raincloud(ax, samples, labels, "Jaccard")
         ax.set_ylim(0.0, 1.0)
         ax.set_title(f"Neighborhood stability ({embedding_label})")
     else:

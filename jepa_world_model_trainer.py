@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from collections import defaultdict
 import os
 from pathlib import Path
-from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import math
 import random
@@ -22,12 +22,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import tomli_w
 import tyro
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from datetime import datetime
 from time import perf_counter
-import warnings
 
 try:
     from pytorch_optimizer import SOAP
@@ -41,6 +40,8 @@ from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
 from jepa_world_model.loss import FocalL1Loss, HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
 from jepa_world_model.loss_adjacency import AdjacencyConfig, adjacency_losses, gaussian_augment
+from jepa_world_model.loss_sigreg import sigreg_loss
+from jepa_world_model.loss_patch_recon import patch_recon_loss
 from jepa_world_model.metadata import write_run_metadata, write_git_metadata
 from jepa_world_model.vis import (
     describe_action_tensor,
@@ -70,6 +71,10 @@ from jepa_world_model.vis_vis_ctrl import (
     save_stability_plot,
     write_vis_ctrl_metrics_csv,
 )
+from jepa_world_model.encoder_schedule import _derive_encoder_schedule, _suggest_encoder_schedule
+from jepa_world_model.step_schedule import _parse_schedule, _should_run_schedule
+from jepa_world_model.data import TrajectorySequenceDataset, collate_batch, load_actions_for_trajectory
+from jepa_world_model.hard_sample_reservoir import HardSampleReservoir, inject_hard_examples_into_batch
 
 
 
@@ -269,33 +274,6 @@ EMA_CONSISTENCY_LOSS = nn.MSELoss()
 # ------------------------------------------------------------
 # Configs and containers
 # ------------------------------------------------------------
-
-
-def _derive_encoder_schedule(embedding_dim: int, num_layers: int) -> Tuple[int, ...]:
-    """Derive a channel schedule that doubles each layer and ends at embedding_dim."""
-    if num_layers < 1:
-        raise ValueError("num_downsample_layers must be positive.")
-    factor = 2 ** (num_layers - 1)
-    if embedding_dim % factor != 0:
-        raise ValueError("embedding_dim must be divisible by 2^(num_downsample_layers - 1) for automatic schedule.")
-    base_channels = max(1, embedding_dim // factor)
-    schedule: List[int] = []
-    current = base_channels
-    for _ in range(num_layers):
-        schedule.append(current)
-        current *= 2
-    schedule[-1] = embedding_dim
-    return tuple(schedule)
-
-
-def _suggest_encoder_schedule(embedding_dim: int, num_layers: int) -> str:
-    """Generate a suggested encoder_schedule for error messages."""
-    try:
-        suggested = _derive_encoder_schedule(embedding_dim, num_layers)
-        return f"encoder_schedule={suggested}"
-    except ValueError:
-        # If we can't derive, suggest a simple pattern
-        return f"encoder_schedule with {num_layers} layers ending in {embedding_dim}"
 
 
 @dataclass
@@ -520,8 +498,24 @@ class VisCtrlConfig:
 class TrainConfig:
     data_root: Path = Path("data.gridworldkey_wander_to_key")
     output_dir: Path = Path("out.jepa_world_model_trainer")
-    log_every_steps: int = 10
-    vis_every_steps: int = 50
+    log_schedule: Annotated[
+        Union[str, Tuple[Tuple[int, Optional[int]], ...]],
+        tyro.conf.arg(
+            help=(
+                "Logging schedule entries use every_steps:max_step (or None for no cap). "
+                "Example: '10:None' or '10:100, 50:1000'. Commas or spaces separate entries."
+            )
+        ),
+    ] = "10:None"
+    vis_schedule: Annotated[
+        Union[str, Tuple[Tuple[int, Optional[int]], ...]],
+        tyro.conf.arg(
+            help=(
+                "Visualization schedule entries use every_steps:max_step (or None for no cap). "
+                "Example: '10:100 50:1000 100:10000 200:None'. Commas or spaces separate entries."
+            )
+        ),
+    ] = "10:100 50:1000 100:10000 200:None"
     checkpoint_every_steps: int = 100
     steps: int = 100_000
     show_timing_breakdown: bool = True
@@ -802,63 +796,6 @@ def ema_latent_consistency_loss(
     return EMA_CONSISTENCY_LOSS(embeddings, ema_embeddings.detach())
 
 
-def sigreg_loss(embeddings: torch.Tensor, num_projections: int) -> torch.Tensor:
-    b, t, d = embeddings.shape
-    flat = embeddings.reshape(b * t, d)
-    device = embeddings.device
-    directions = torch.randn(num_projections, d, device=device)
-    directions = F.normalize(directions, dim=-1)
-    projected = flat @ directions.t()
-    projected = projected.t()
-    sorted_proj, _ = torch.sort(projected, dim=1)
-    normal_samples = torch.randn_like(projected)
-    sorted_normal, _ = torch.sort(normal_samples, dim=1)
-    return SIGREG_LOSS(sorted_proj, sorted_normal)
-
-
-def patch_recon_loss(
-    recon: torch.Tensor, target: torch.Tensor, patch_sizes: Sequence[int]
-) -> torch.Tensor:
-    """
-    Compute reconstruction loss over a grid of overlapping patches for multiple sizes.
-
-    Rationale: keep supervision in image space without adding feature taps or extra
-    forward passes—cheap to bolt on and works with the existing decoder output.
-    A more traditional multi-scale hardness term could sample patches from intermediate
-    CNN layers (feature pyramids, perceptual losses) with size-aware weights, but that
-    would require exposing/retaining feature maps and increase memory/compute.
-    """
-    if not patch_sizes:
-        raise ValueError("patch_recon_loss requires at least one patch size.")
-    h, w = recon.shape[-2], recon.shape[-1]
-    total = recon.new_tensor(0.0)
-    count = 0
-
-    def _grid_indices(limit: int, size: int) -> Iterable[int]:
-        step = max(1, size // 2)  # 50% overlap by default
-        positions = list(range(0, limit - size + 1, step))
-        if positions and positions[-1] != limit - size:
-            positions.append(limit - size)
-        elif not positions:
-            positions = [0]
-        return positions
-
-    for patch_size in patch_sizes:
-        if patch_size <= 0:
-            raise ValueError("patch_recon_loss requires all patch sizes to be > 0.")
-        if patch_size > h or patch_size > w:
-            raise ValueError(f"patch_size={patch_size} exceeds recon dimensions {(h, w)}.")
-        row_starts = _grid_indices(h, patch_size)
-        col_starts = _grid_indices(w, patch_size)
-        for rs in row_starts:
-            for cs in col_starts:
-                recon_patch = recon[..., rs : rs + patch_size, cs : cs + patch_size]
-                target_patch = target[..., rs : rs + patch_size, cs : cs + patch_size]
-                total = total + RECON_LOSS(recon_patch, target_patch)
-                count += 1
-    return total / count if count > 0 else recon.new_tensor(0.0)
-
-
 def multi_scale_recon_loss_gauss(
     recon: torch.Tensor,
     target: torch.Tensor,
@@ -1078,7 +1015,7 @@ def _compute_losses_and_metrics(
     )
     combined_latent = torch.cat([outputs["embeddings"], h_states], dim=-1)
     loss_sigreg = (
-        sigreg_loss(combined_latent, cfg.sigreg.projections)
+        sigreg_loss(combined_latent, cfg.sigreg.projections, loss_fn=SIGREG_LOSS)
         if weights.sigreg > 0
         else images.new_tensor(0.0)
     )
@@ -1116,7 +1053,12 @@ def _compute_losses_and_metrics(
         loss_recon_multi_box = images.new_tensor(0.0)
 
     if weights.recon_patch > 0 and recon is not None:
-        loss_recon_patch = patch_recon_loss(recon, images, cfg.patch_recon.patch_sizes)
+        loss_recon_patch = patch_recon_loss(
+            recon,
+            images,
+            cfg.patch_recon.patch_sizes,
+            loss_fn=RECON_LOSS,
+        )
     else:
         loss_recon_patch = images.new_tensor(0.0)
 
@@ -1223,111 +1165,6 @@ def _compute_losses_and_metrics(
         metrics["grad_decoder"] = decoder_grad_norm
 
     return metrics, difficulty_info, world_loss, (world_grad_norm, decoder_grad_norm)
-
-
-# ------------------------------------------------------------
-# Example dataset + dataloader
-# ------------------------------------------------------------
-
-
-def collate_batch(
-    batch: Iterable[Tuple[torch.Tensor, torch.Tensor, List[str], int]]
-) -> Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor]:
-    obs, actions, paths, indices = zip(*batch)
-    obs_tensor = torch.stack(obs, dim=0)
-    act_tensor = torch.stack(actions, dim=0)
-    path_batch = [list(seq) for seq in paths]
-    idx_tensor = torch.tensor(indices, dtype=torch.long)
-    return obs_tensor, act_tensor, path_batch, idx_tensor
-
-
-def _load_actions_for_trajectory(traj_dir: Path, expected_length: Optional[int] = None) -> np.ndarray:
-    """Load actions.npz for a trajectory and ensure alignment."""
-    actions_path = Path(traj_dir) / "actions.npz"
-    if not actions_path.is_file():
-        raise FileNotFoundError(f"Missing actions.npz for {traj_dir}")
-    with np.load(actions_path) as data:
-        action_arr = data["actions"] if "actions" in data else data[list(data.files)[0]]
-    if action_arr.ndim == 1:
-        action_arr = action_arr[:, None]
-    action_arr = action_arr.astype(np.float32, copy=False)
-    if expected_length is not None and action_arr.shape[0] != expected_length:
-        raise ValueError(
-            f"Action count {action_arr.shape[0]} does not match frame count {expected_length} in {traj_dir}"
-        )
-    return action_arr
-
-
-class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[str], int]]):
-    """Load contiguous frame/action sequences from recorded trajectories."""
-
-    def __init__(
-        self,
-        root: Path,
-        seq_len: int,
-        image_hw: Tuple[int, int],
-        max_traj: Optional[int] = None,
-        included_trajectories: Optional[Sequence[str]] = None,
-    ) -> None:
-        self.root = Path(root)
-        self.seq_len = seq_len
-        self.image_hw = image_hw
-        if self.seq_len < 1:
-            raise ValueError("seq_len must be positive.")
-        trajectories = list_trajectories(self.root)
-        if included_trajectories is not None:
-            include_set = set(included_trajectories)
-            items = [(name, frames) for name, frames in trajectories.items() if name in include_set]
-        else:
-            items = list(trajectories.items())
-        if max_traj is not None:
-            items = items[:max_traj]
-        self.samples: List[Tuple[List[Path], np.ndarray, int]] = []
-        self.action_dim: Optional[int] = None
-        for traj_name, frame_paths in items:
-            if len(frame_paths) < self.seq_len:
-                warnings.warn(
-                    f"Skipping trajectory {traj_name} shorter than seq_len {self.seq_len}",
-                    RuntimeWarning,
-                )
-                continue
-            action_arr = _load_actions_for_trajectory(self.root / traj_name, expected_length=len(frame_paths))
-            if self.action_dim is None:
-                self.action_dim = action_arr.shape[1]
-            elif self.action_dim != action_arr.shape[1]:
-                raise ValueError(
-                    f"Inconsistent action dimension for {traj_name}: expected {self.action_dim}, got {action_arr.shape[1]}"
-                )
-            if len(frame_paths) < self.seq_len:
-                raise ValueError(f"Trajectory {traj_name} shorter than seq_len {self.seq_len}")
-            max_start = len(frame_paths) - self.seq_len
-            for start in range(max_start + 1):
-                self.samples.append((frame_paths, action_arr, start))
-        if not self.samples:
-            raise AssertionError(f"No usable sequences found under {self.root}")
-        if self.action_dim is None:
-            raise AssertionError("Failed to infer action dimensionality.")
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
-        frame_paths, actions, start = self.samples[index]
-        frames: List[torch.Tensor] = []
-        path_slice: List[str] = []
-        for offset in range(self.seq_len):
-            path = frame_paths[start + offset]
-            frame = load_frame_as_tensor(path, size=self.image_hw)
-            frames.append(frame)
-            path_slice.append(str(path))
-        action_slice = actions[start : start + self.seq_len]
-        # Each frame/action pair must stay aligned so the predictor knows which action follows each observation.
-        assert len(frames) == self.seq_len, f"Expected {self.seq_len} frames, got {len(frames)}"
-        assert action_slice.shape[0] == self.seq_len, (
-            f"Expected {self.seq_len} actions, got {action_slice.shape[0]}"
-        )
-        assert action_slice.shape[1] == actions.shape[1], "Action dimensionality changed unexpectedly."
-        return torch.stack(frames, dim=0), torch.from_numpy(action_slice), path_slice, index
 
 
 def _split_trajectories(
@@ -1678,124 +1515,6 @@ def grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
     return float(total**0.5)
 
 
-def _short_traj_state_label(frame_path: str) -> str:
-    path = Path(frame_path)
-    traj = next((part for part in path.parts if part.startswith("traj_")), path.parent.name)
-    return f"{traj}/{path.stem}"
-
-
-@dataclass
-class HardSampleRecord:
-    dataset_index: int
-    score: float
-    frame_path: str
-    label: str
-    sequence_paths: List[str]
-    frame_index: int
-
-
-class HardSampleReservoir:
-    def __init__(self, capacity: int, sample_decay: float = 0.9, rng: random.Random = None) -> None:
-        self.capacity = max(0, capacity)
-        self.sample_decay = sample_decay
-        self._samples: Dict[int, HardSampleRecord] = {}
-        if rng is None:
-            raise ValueError("HardSampleReservoir requires an explicit RNG; got None.")
-        self.rng = rng
-
-    def __len__(self) -> int:
-        return len(self._samples)
-
-    def update(
-        self,
-        indices: List[int],
-        paths: List[List[str]],
-        scores: List[float],
-        frame_indices: List[int],
-    ) -> None:
-        if self.capacity <= 0:
-            return
-        for idx, seq_paths, score, frame_idx in zip(indices, paths, scores, frame_indices):
-            if seq_paths is None or not seq_paths:
-                continue
-            score_val = float(score)
-            if not math.isfinite(score_val):
-                continue
-            idx_int = int(idx)
-            frame_list = list(seq_paths)
-            frame_pos = max(0, min(int(frame_idx), len(frame_list) - 1))
-            frame_path = frame_list[frame_pos]
-            label = _short_traj_state_label(frame_path)
-            record = self._samples.get(idx_int)
-            if record is None:
-                self._samples[idx_int] = HardSampleRecord(idx_int, score_val, frame_path, label, frame_list, frame_pos)
-            else:
-                if score_val >= record.score:
-                    record.score = score_val
-                    record.frame_path = frame_path
-                    record.label = label
-                    record.sequence_paths = frame_list
-                    record.frame_index = frame_pos
-                else:
-                    record.score = (record.score * 0.75) + (score_val * 0.25)
-        self._prune()
-
-    def sample_records(self, count: int) -> List[HardSampleRecord]:
-        if count <= 0 or not self._samples:
-            return []
-        population = list(self._samples.values())
-        count = min(count, len(population))
-        weights = [max(record.score, 1e-6) for record in population]
-        chosen = self.rng.choices(population=population, weights=weights, k=count)
-        return chosen
-
-    def mark_sampled(self, dataset_index: int) -> None:
-        record = self._samples.get(dataset_index)
-        if record is None:
-            return
-        record.score *= self.sample_decay
-        if record.score <= 1e-6:
-            self._samples.pop(dataset_index, None)
-
-    def topk(self, limit: int) -> List[HardSampleRecord]:
-        if limit <= 0 or not self._samples:
-            return []
-        limit = min(limit, len(self._samples))
-        return sorted(self._samples.values(), key=lambda rec: rec.score, reverse=True)[:limit]
-
-    def _prune(self) -> None:
-        if self.capacity <= 0 or len(self._samples) <= self.capacity:
-            return
-        ordered = sorted(self._samples.items(), key=lambda item: item[1].score, reverse=True)
-        self._samples = dict(ordered[: self.capacity])
-
-
-def inject_hard_examples_into_batch(
-    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
-    dataset: TrajectorySequenceDataset,
-    reservoir: Optional[HardSampleReservoir],
-    mix_ratio: float,
-) -> None:
-    if reservoir is None or mix_ratio <= 0:
-        return
-    images, actions, paths, indices = batch
-    batch_size = images.shape[0]
-    if batch_size == 0 or len(reservoir) == 0:
-        return
-    ratio = max(0.0, min(1.0, mix_ratio))
-    desired = min(int(round(batch_size * ratio)), len(reservoir))
-    if desired <= 0:
-        return
-    hard_records = reservoir.sample_records(desired)
-    for slot, record in enumerate(hard_records):
-        hard_obs, hard_actions, hard_paths, hard_index = dataset[record.dataset_index]
-        images[slot].copy_(hard_obs)
-        actions[slot].copy_(hard_actions)
-        paths[slot] = list(hard_paths)
-        indices[slot] = hard_index
-        reservoir.mark_sampled(record.dataset_index)
-
-
 def _infer_raw_frame_shape(dataset: TrajectorySequenceDataset) -> Tuple[int, int, int]:
     if not dataset.samples:
         raise ValueError("Cannot infer frame shape without dataset samples.")
@@ -2067,7 +1786,7 @@ def _extract_frame_labels(
     slice_paths = sample_paths[start_idx:end]
     if len(slice_paths) < length:
         slice_paths = sample_paths[-length:]
-    return [_short_traj_state_label(path) for path in slice_paths]
+    return [short_traj_state_label(path) for path in slice_paths]
 
 
 LOSS_CMAP = plt.get_cmap("coolwarm")
@@ -3127,7 +2846,7 @@ def _prepare_self_distance_inputs(
         labels.append(short_traj_state_label(str(src)))
     if not frames:
         return None
-    actions = _load_actions_for_trajectory(data_root / chosen, expected_length=len(frames))
+    actions = load_actions_for_trajectory(data_root / chosen, expected_length=len(frames))
     action_dim = actions.shape[1]
     action_ids = compress_actions_to_ids(actions)
     action_labels = [decode_action_id(int(aid), action_dim) for aid in action_ids]
@@ -3611,7 +3330,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             )
 
         # Log outputs.
-        if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
+        if _should_run_schedule(global_step, cfg.log_schedule):
             log_start = perf_counter()
             val_metrics: Optional[Dict[str, float]] = None
             val_difficulty: Optional[BatchDifficultyInfo] = None
@@ -3691,10 +3410,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             )
 
         # --- Rollout/embedding/hard-sample visualizations ---
-        if (
-            cfg.vis_every_steps > 0
-            and global_step % cfg.vis_every_steps == 0
-        ):
+        if _should_run_schedule(global_step, cfg.vis_schedule):
             vis_start = perf_counter()
             model.eval()
             with torch.no_grad():
@@ -3963,6 +3679,11 @@ def main() -> None:
     cfg = tyro.cli(
         TrainConfig,
         config=(tyro.conf.HelptextFromCommentsOff,),
+    )
+    cfg = replace(
+        cfg,
+        log_schedule=_parse_schedule(cfg.log_schedule),
+        vis_schedule=_parse_schedule(cfg.vis_schedule),
     )
     model_cfg = ModelConfig()
     run_training(cfg, model_cfg, cfg.loss_weights, title=cfg.title)

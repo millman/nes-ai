@@ -68,7 +68,7 @@
     <div class="card-header py-2 d-flex align-items-center gap-2">
         <strong>Training metrics</strong>
         <span class="text-muted small">hover to scrub steps</span>
-        <span class="ms-auto text-muted small">Step: <span id="graph-step-label">{{ steps[-1] if steps else '—' }}</span></span>
+        <span class="ms-auto text-muted small">Step: <span id="graph-step-label" class="graph-step-label">{{ steps[-1] if steps else '—' }}</span></span>
     </div>
     <div class="card-body">
         <div id="graph-loss-plot" class="graph-loss-plot"></div>
@@ -79,7 +79,10 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>1-step rank CDF</span>
-            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Good: curve near top-left, high hit@K. Watch for flat/slow curves (poor 1-step retrieval).">i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="graph-step-label">—</span></span>
+                <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Good: curve near top-left, high hit@K. Watch for flat/slow curves (poor 1-step retrieval).">i</span>
+            </div>
         </div>
         <div class="card-body">
             <img id="graph-rank1-img" class="graph-card-img d-none" alt="Rank1 CDF">
@@ -89,7 +92,10 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>2-hop rank CDF</span>
-            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Compare to 1-step: big drop means poor composability; similar curves mean paths compose.">i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="graph-step-label">—</span></span>
+                <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Compare to 1-step: big drop means poor composability; similar curves mean paths compose.">i</span>
+            </div>
         </div>
         <div class="card-body">
             <img id="graph-rank2-img" class="graph-card-img d-none" alt="Rank2 CDF">
@@ -99,7 +105,10 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Neighborhood size</span>
-            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Expect Neff2 moderately above Neff1. Huge Neff2 or very wide spread flags diffusion/shortcuts; tiny values mean overly sharp edges.">i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="graph-step-label">—</span></span>
+                <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Expect Neff2 moderately above Neff1. Huge Neff2 or very wide spread flags diffusion/shortcuts; tiny values mean overly sharp edges.">i</span>
+            </div>
         </div>
         <div class="card-body">
             <img id="graph-neff-img" class="graph-card-img d-none" alt="Neighborhood size raincloud">
@@ -109,7 +118,10 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>In-degree / hubness</span>
-            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Healthy graphs have balanced degrees; very high max/top-1% indicates hub collapse.">i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="graph-step-label">—</span></span>
+                <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Healthy graphs have balanced degrees; very high max/top-1% indicates hub collapse.">i</span>
+            </div>
         </div>
         <div class="card-body">
             <img id="graph-indegree-img" class="graph-card-img d-none" alt="In-degree histogram">
@@ -119,7 +131,10 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Edge consistency</span>
-            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error ||{{ embedding_label | default('z') }}hat - {{ embedding_label | default('z') }}T||² for sampled top-K edges. Lower is better; long tails or multimodal bumps hint at implausible edges.">i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="graph-step-label">—</span></span>
+                <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error ||{{ embedding_label | default('z') }}hat - {{ embedding_label | default('z') }}T||² for sampled top-K edges. Lower is better; long tails or multimodal bumps hint at implausible edges.">i</span>
+            </div>
         </div>
         <div class="card-body">
             <img id="graph-edge-img" class="graph-card-img d-none" alt="Edge consistency histogram">
@@ -129,7 +144,10 @@
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>History</span>
-            <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Look for stable or improving hit@K, moderate Neff growth, low long-gap, steady mutual, bounded max in-degree.">i</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="graph-step-label">—</span></span>
+                <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Look for stable or improving hit@K, moderate Neff growth, low long-gap, steady mutual, bounded max in-degree.">i</span>
+            </div>
         </div>
         <div class="card-body">
             {% if history_plot_url %}
@@ -172,7 +190,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const graphMap = {{ graph_map | tojson }};
     const history = {{ history | tojson }};
     const figure = {{ figure | tojson if figure else 'null' }};
-    const stepLabel = document.getElementById("graph-step-label");
+    const stepLabels = document.querySelectorAll(".graph-step-label");
     const lossPlot = document.getElementById("graph-loss-plot");
     const targets = {
         rank1_cdf: {img: document.getElementById("graph-rank1-img"), caption: document.getElementById("graph-rank1-caption"), label: "rank1 CDF"},
@@ -242,7 +260,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (url) {
                 refs.img.src = url;
                 refs.img.classList.remove("d-none");
-                refs.caption.textContent = `Step ${step}`;
+                refs.caption.textContent = "";
             } else {
                 refs.img.classList.add("d-none");
                 refs.caption.textContent = `Missing image for step ${step}`;
@@ -266,7 +284,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function updateForStep(step) {
-        if (stepLabel) stepLabel.textContent = step ?? "—";
+        stepLabels.forEach((label) => {
+            label.textContent = step ?? "—";
+        });
         updateImages(step);
         updateSummary(step);
     }

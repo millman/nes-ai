@@ -19,11 +19,8 @@ import tyro
 
 from jepa_world_model.conv_encoder_decoder import Encoder
 from jepa_world_model.diagnostics.layer_distance_scan import run_layer_distance_scan
-from jepa_world_model_trainer import (
-    ModelConfig,
-    TrajectorySequenceDataset,
-    collate_batch,
-)
+from jepa_world_model_trainer import ModelConfig
+from jepa_world_model.data import TrajectorySequenceDataset, collate_batch
 from torch.utils.data import DataLoader
 from utils.device_utils import pick_device
 
