@@ -129,7 +129,7 @@ def write_state_embedding_outputs(
             _plot_odometry_embeddings(
                 odometry_plot_dir / f"odometry_z_{global_step:07d}.png",
                 current_z,
-                "current z",
+                "Cumulative sum of Δz",
             )
 
         s_np = s.detach().cpu().numpy()
@@ -139,7 +139,7 @@ def write_state_embedding_outputs(
             _plot_odometry_embeddings(
                 odometry_plot_dir / f"odometry_s_{global_step:07d}.png",
                 current_s,
-                "current s",
+                "Cumulative sum of Δs",
             )
 
         z_hat = _rollout_predictions(model, embeddings, actions)[0].detach().cpu().numpy()

@@ -24,8 +24,8 @@
                     { value: "vis_self_distance_s", label: "Self-distance (S):Distance", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
                     { value: "vis_delta_z_pca", label: "Diagnostics (Z):Delta PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
                     { value: "vis_delta_s_pca", label: "Diagnostics (S):Delta PCA", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
-                    { value: "vis_odometry_current_z", label: "Odometry:Current z PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
-                    { value: "vis_odometry_current_s", label: "Odometry:Current s PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
+                    { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
+                    { value: "vis_odometry_current_s", label: "Odometry:Cumulative sum of Δs PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
                     { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
                     { value: "vis_odometry_s_vs_s_hat", label: "Odometry:||s - s_hat|| + scatter", prefix: "s_vs_s_hat_", folder: "vis_odometry" },
                     { value: "vis_action_alignment_detail", label: "Diagnostics (Z):Action alignment", prefix: "action_alignment_detail_", folder: "vis_action_alignment_z" },
@@ -303,8 +303,8 @@
                     <option value="vis_graph_neff_violin_z">Graph Diagnostics (Z):Neighborhood size</option>
                     <option value="vis_graph_rank1_cdf_z">Graph Diagnostics (Z):Rank-1 CDF</option>
                     <option value="vis_graph_rank2_cdf_z">Graph Diagnostics (Z):Rank-2 CDF</option>
-                    <option value="vis_odometry_current_s">Odometry:Current s PCA/ICA/t-SNE</option>
-                    <option value="vis_odometry_current_z">Odometry:Current z PCA/ICA/t-SNE</option>
+                    <option value="vis_odometry_current_s">Odometry:Cumulative sum of Δs PCA/ICA/t-SNE</option>
+                    <option value="vis_odometry_current_z">Odometry:Cumulative sum of Δz PCA/ICA/t-SNE</option>
                     <option value="vis_odometry_s_vs_s_hat">Odometry:||s - s_hat|| + scatter</option>
                     <option value="vis_odometry_z_vs_z_hat">Odometry:||z - z_hat|| + scatter</option>
                     <option value="vis_fixed_0">Rollouts:Fixed 0</option>

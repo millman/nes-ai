@@ -39,6 +39,7 @@ from .experiments import (
     _diagnostics_exists,
     _diagnostics_s_exists,
     _graph_diagnostics_exists,
+    _vis_ctrl_exists,
     _collect_visualization_steps,
     extract_alignment_summary,
 )
@@ -119,6 +120,35 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             return []
         rows.sort(key=lambda r: r.get("step", float("inf")))
         return rows
+
+    def _build_vis_ctrl_figure(rows: List[Dict[str, float]]) -> Optional[Dict]:
+        if not rows:
+            return None
+        steps = [row.get("step", float("nan")) for row in rows]
+        metric_keys = sorted({key for row in rows for key in row.keys() if key != "step"})
+        data = []
+        for key in metric_keys:
+            values = [row.get(key, float("nan")) for row in rows]
+            data.append(
+                {
+                    "type": "scatter",
+                    "mode": "lines",
+                    "name": key,
+                    "x": steps,
+                    "y": values,
+                    "hovertemplate": "%{y}<extra></extra>",
+                }
+            )
+        layout = {
+            "template": "plotly_white",
+            "xaxis": {"title": "Step"},
+            "yaxis": {"title": "Metric"},
+            "margin": {"t": 40, "b": 40, "l": 60, "r": 20},
+            "hovermode": "x unified",
+            "hoverlabel": {"namelength": -1, "align": "left"},
+            "legend": {"title": {"text": "Metric"}},
+        }
+        return {"data": data, "layout": layout}
 
     def _load_all() -> List[Experiment]:
         return list_experiments(cfg.output_dir)
@@ -1715,6 +1745,108 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             figure=figure,
             cfg=cfg,
             active_nav="graph_diagnostics_zvs",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
+    @app.route("/vis_ctrl", defaults={"exp_id": None})
+    @app.route("/vis_ctrl/<exp_id>")
+    def vis_ctrl(exp_id: Optional[str]):
+        requested = exp_id or request.args.get("id")
+
+        def _latest_vis_ctrl_id() -> Optional[str]:
+            index_rows = build_experiment_index(cfg.output_dir)
+            if not index_rows:
+                return None
+            sorted_rows = sorted(
+                index_rows,
+                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                if _vis_ctrl_exists(row.path):
+                    return row.id
+            return None
+
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir() and _vis_ctrl_exists(requested_path):
+                selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_vis_ctrl_id()
+
+        if selected_id is None:
+            return render_template(
+                "vis_ctrl_page.html",
+                experiment=None,
+                steps=[],
+                vis_ctrl_map_z={},
+                vis_ctrl_map_s={},
+                csv_url=None,
+                cfg=cfg,
+                active_nav="vis_ctrl",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+
+        selected = load_experiment(
+            cfg.output_dir / selected_id,
+            include_vis_ctrl=True,
+        )
+        if selected is None:
+            abort(404, "Experiment not found for Vis v Ctrl outputs.")
+
+        def _build_vis_ctrl_map(paths_by_name: Dict[str, List[Path]]) -> Tuple[Dict[str, Dict[int, str]], Dict[str, Dict[int, str]]]:
+            map_z: Dict[str, Dict[int, str]] = {}
+            map_s: Dict[str, Dict[int, str]] = {}
+            for name, paths in paths_by_name.items():
+                target = map_z if name.endswith("_z") else map_s if name.endswith("_s") else None
+                if target is None:
+                    continue
+                per_step: Dict[int, str] = {}
+                for path in paths:
+                    stem = path.stem
+                    suffix = stem.split("_")[-1] if "_" in stem else stem
+                    try:
+                        step = int(suffix)
+                    except ValueError:
+                        continue
+                    try:
+                        rel = path.relative_to(selected.path)
+                    except ValueError:
+                        continue
+                    per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+                if per_step:
+                    target[name] = per_step
+            return map_z, map_s
+
+        vis_ctrl_map_z, vis_ctrl_map_s = _build_vis_ctrl_map(selected.vis_ctrl_images)
+        steps = selected.vis_ctrl_steps
+        csv_url: Optional[str] = None
+        history_rows: List[Dict[str, float]] = []
+        figure: Optional[Dict] = None
+        if selected.vis_ctrl_csvs:
+            latest_csv = selected.vis_ctrl_csvs[-1]
+            history_rows = _parse_graph_history_csv(latest_csv)
+            figure = _build_vis_ctrl_figure(history_rows)
+            try:
+                rel = latest_csv.relative_to(selected.path)
+                csv_url = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            except ValueError:
+                csv_url = None
+
+        return render_template(
+            "vis_ctrl_page.html",
+            experiment=selected,
+            steps=steps,
+            vis_ctrl_map_z=vis_ctrl_map_z,
+            vis_ctrl_map_s=vis_ctrl_map_s,
+            csv_url=csv_url,
+            history=history_rows,
+            figure=figure,
+            cfg=cfg,
+            active_nav="vis_ctrl",
             active_experiment_id=selected.id,
             first_experiment_id=selected.id,
         )

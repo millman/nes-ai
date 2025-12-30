@@ -127,6 +127,9 @@ class Experiment:
     graph_diagnostics_s_images: Dict[str, List[Path]]
     graph_diagnostics_s_steps: List[int]
     graph_diagnostics_s_csvs: Dict[str, List[Path]]
+    vis_ctrl_images: Dict[str, List[Path]]
+    vis_ctrl_steps: List[int]
+    vis_ctrl_csvs: List[Path]
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -192,6 +195,7 @@ def load_experiment(
     include_diagnostics_frames: bool = False,
     include_diagnostics_s: bool = False,
     include_graph_diagnostics: bool = False,
+    include_vis_ctrl: bool = False,
     include_state_embedding: bool = False,
     include_odometry: bool = False,
     include_graph_diagnostics_s: bool = False,
@@ -304,6 +308,15 @@ def load_experiment(
         graph_diagnostics_s_csvs = _collect_graph_diagnostics_csvs(path, folder_name="graph_diagnostics_s")
     else:
         graph_diagnostics_s_steps = [0] if _graph_diagnostics_exists(path, folder_name="graph_diagnostics_s") else []
+    vis_ctrl_images: Dict[str, List[Path]] = {}
+    vis_ctrl_steps: List[int] = []
+    vis_ctrl_csvs: List[Path] = []
+    if include_vis_ctrl:
+        vis_ctrl_images = _collect_vis_ctrl_images(path)
+        vis_ctrl_steps = _collect_diagnostics_steps(vis_ctrl_images)
+        vis_ctrl_csvs = _collect_vis_ctrl_csvs(path)
+    else:
+        vis_ctrl_steps = [0] if _vis_ctrl_exists(path) else []
     _profile(
         "load_experiment.diagnostics",
         section_start,
@@ -417,6 +430,9 @@ def load_experiment(
         graph_diagnostics_s_images=graph_diagnostics_s_images,
         graph_diagnostics_s_steps=graph_diagnostics_s_steps,
         graph_diagnostics_s_csvs=graph_diagnostics_s_csvs,
+        vis_ctrl_images=vis_ctrl_images,
+        vis_ctrl_steps=vis_ctrl_steps,
+        vis_ctrl_csvs=vis_ctrl_csvs,
     )
 
 
@@ -853,6 +869,12 @@ VIS_STEP_SPECS = [
     ("vis_graph_in_degree_hist_s", "graph_diagnostics_s", "in_degree_hist_*.png", "in_degree_hist_"),
     ("vis_graph_edge_consistency_s", "graph_diagnostics_s", "edge_consistency_*.png", "edge_consistency_"),
     ("vis_graph_metrics_history_s", "graph_diagnostics_s", "metrics_history_*.png", "metrics_history_"),
+    ("vis_ctrl_smoothness_z", "vis_vis_ctrl", "smoothness_z_*.png", "smoothness_z_"),
+    ("vis_ctrl_smoothness_s", "vis_vis_ctrl", "smoothness_s_*.png", "smoothness_s_"),
+    ("vis_ctrl_composition_z", "vis_vis_ctrl", "composition_error_z_*.png", "composition_error_z_"),
+    ("vis_ctrl_composition_s", "vis_vis_ctrl", "composition_error_s_*.png", "composition_error_s_"),
+    ("vis_ctrl_stability_z", "vis_vis_ctrl", "stability_z_*.png", "stability_z_"),
+    ("vis_ctrl_stability_s", "vis_vis_ctrl", "stability_s_*.png", "stability_s_"),
 ]
 
 
@@ -1252,6 +1274,57 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str, s
             continue
     _profile("diagnostics.frames", start_time, root, csv_files=csv_count, frames=frame_count)
     return frame_map
+
+
+def _collect_vis_ctrl_images(root: Path) -> Dict[str, List[Path]]:
+    images: Dict[str, List[Path]] = {}
+    vis_dir = root / "vis_vis_ctrl"
+    specs = [
+        ("smoothness_z", "smoothness_z_*.png"),
+        ("smoothness_s", "smoothness_s_*.png"),
+        ("composition_z", "composition_error_z_*.png"),
+        ("composition_s", "composition_error_s_*.png"),
+        ("stability_z", "stability_z_*.png"),
+        ("stability_s", "stability_s_*.png"),
+    ]
+    if vis_dir.exists():
+        for name, pattern in specs:
+            files = sorted(vis_dir.glob(pattern))
+            if files:
+                images[name] = files
+    alignment_z = root / "vis_action_alignment_z"
+    alignment_s = root / "vis_action_alignment_s"
+    if alignment_z.exists():
+        files = sorted(alignment_z.glob("action_alignment_detail_*.png"))
+        if files:
+            images["alignment_z"] = files
+    if alignment_s.exists():
+        files = sorted(alignment_s.glob("action_alignment_detail_*.png"))
+        if files:
+            images["alignment_s"] = files
+    return images
+
+
+def _collect_vis_ctrl_csvs(root: Path) -> List[Path]:
+    metrics_dir = root / "metrics"
+    if metrics_dir.exists():
+        history = metrics_dir / "vis_ctrl_metrics.csv"
+        if history.exists():
+            return [history]
+    folder = root / "vis_ctrl"
+    if not folder.exists():
+        return []
+    return sorted(folder.glob("vis_ctrl_metrics_*.csv"))
+
+
+def _vis_ctrl_exists(root: Path) -> bool:
+    vis_dir = root / "vis_vis_ctrl"
+    if vis_dir.exists() and any(vis_dir.glob("smoothness_z_*.png")):
+        return True
+    metrics_dir = root / "metrics"
+    if metrics_dir.exists() and (metrics_dir / "vis_ctrl_metrics.csv").exists():
+        return True
+    return False
 
 
 def _resolve_graph_diagnostics_folder(root: Path, folder_name: str) -> Optional[Path]:

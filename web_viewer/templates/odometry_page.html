@@ -22,6 +22,19 @@
 .odometry-loss-plot {
     height: 220px;
 }
+.odometry-info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3949ab;
+    font-size: 12px;
+    border: 1px solid #c5cae9;
+    cursor: pointer;
+}
 @media (max-width: 768px) {
     .odometry-grid {
         grid-template-columns: 1fr;
@@ -61,7 +74,15 @@
 
 <div class="odometry-grid">
     <div class="card h-100">
-        <div class="card-header py-2">Current z PCA/ICA/t-SNE</div>
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Cumulative sum of Δz PCA/ICA/t-SNE</span>
+            <span
+                class="odometry-info-icon"
+                data-bs-toggle="tooltip"
+                data-bs-placement="left"
+                title="Trajectory of cumulative delta-z over time (after warmup), projected with PCA/ICA/t-SNE."
+            >i</span>
+        </div>
         <div class="card-body">
             {% if not odometry_steps %}
             <div class="text-muted fst-italic small">
@@ -78,7 +99,15 @@
         </div>
     </div>
     <div class="card h-100">
-        <div class="card-header py-2">Current s PCA/ICA/t-SNE</div>
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Cumulative sum of Δs PCA/ICA/t-SNE</span>
+            <span
+                class="odometry-info-icon"
+                data-bs-toggle="tooltip"
+                data-bs-placement="left"
+                title="Trajectory of cumulative delta-s over time (after warmup), projected with PCA/ICA/t-SNE."
+            >i</span>
+        </div>
         <div class="card-body">
             {% if not odometry_steps %}
             <div class="text-muted fst-italic small">
@@ -95,7 +124,15 @@
         </div>
     </div>
     <div class="card h-100">
-        <div class="card-header py-2">||z - z_hat|| + scatter</div>
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>||z - z_hat|| + scatter</span>
+            <span
+                class="odometry-info-icon"
+                data-bs-toggle="tooltip"
+                data-bs-placement="left"
+                title="Predictor error norm over time plus a z vs. z_hat scatter view."
+            >i</span>
+        </div>
         <div class="card-body">
             {% if not odometry_steps %}
             <div class="text-muted fst-italic small">
@@ -112,7 +149,15 @@
         </div>
     </div>
     <div class="card h-100">
-        <div class="card-header py-2">||s - s_hat|| + scatter</div>
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>||s - s_hat|| + scatter</span>
+            <span
+                class="odometry-info-icon"
+                data-bs-toggle="tooltip"
+                data-bs-placement="left"
+                title="Predictor error norm over time plus an s vs. s_hat scatter view."
+            >i</span>
+        </div>
         <div class="card-body">
             {% if not odometry_steps %}
             <div class="text-muted fst-italic small">
@@ -133,6 +178,16 @@
 {% endblock %}
 
 {% block extra_scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const tooltipTriggerList = Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.forEach((el) => {
+        if (window.bootstrap) {
+            new bootstrap.Tooltip(el);
+        }
+    });
+});
+</script>
 {% if experiment %}
 <script>
 document.addEventListener("DOMContentLoaded", () => {

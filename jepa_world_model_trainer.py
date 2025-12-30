@@ -63,6 +63,13 @@ from jepa_world_model.vis_self_distance import write_self_distance_outputs
 from jepa_world_model.vis_state_embedding import write_state_embedding_outputs
 from jepa_world_model.vis_cycle_error import compute_cycle_errors, save_cycle_error_plot
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
+from jepa_world_model.vis_vis_ctrl import (
+    compute_vis_ctrl_metrics,
+    save_composition_error_plot,
+    save_smoothness_plot,
+    save_stability_plot,
+    write_vis_ctrl_metrics_csv,
+)
 
 
 
@@ -500,6 +507,16 @@ class GraphDiagnosticsConfig:
 
 
 @dataclass
+class VisCtrlConfig:
+    enabled: bool = True
+    sample_sequences: int = 128
+    knn_k_values: Tuple[int, ...] = (1, 2, 5, 10)
+    knn_chunk_size: int = 512
+    min_action_count: int = 5
+    stability_delta: int = 1
+
+
+@dataclass
 class TrainConfig:
     data_root: Path = Path("data.gridworldkey_wander_to_key")
     output_dir: Path = Path("out.jepa_world_model_trainer")
@@ -546,6 +563,7 @@ class TrainConfig:
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
     graph_diagnostics: GraphDiagnosticsConfig = field(default_factory=GraphDiagnosticsConfig)
+    vis_ctrl: VisCtrlConfig = field(default_factory=VisCtrlConfig)
 
     # CLI-only field (not part of training config, used for experiment metadata)
     title: Annotated[Optional[str], tyro.conf.arg(aliases=["-m"])] = None
@@ -2312,7 +2330,8 @@ def _save_delta_pca_plot(
         axes[1, 1].plot(proj_flat[:, 0], np.zeros_like(proj_flat[:, 0]), ".", alpha=0.6)
         axes[1, 1].set_xlabel(f"PC1 ({embedding_label})")
         axes[1, 1].set_ylabel("density")
-    axes[1, 1].set_title(f"Embedding projections ({embedding_label})")
+    upper_label = embedding_label.upper()
+    axes[1, 1].set_title(f"PCA of {upper_label} on motion-defined Δ{upper_label} basis")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
@@ -3266,6 +3285,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     embedding_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     diagnostics_generator = torch.Generator()
     diagnostics_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+    vis_ctrl_generator = torch.Generator()
+    vis_ctrl_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_rng = random.Random(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_val_rng = random.Random(python_rng.randint(0, 2**32 - 1))
     # Dedicated RNGs keep visualization sampling consistent across experiments.
@@ -3291,6 +3312,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
+    vis_ctrl_dir = run_dir / "vis_vis_ctrl"
     adjacency_vis_dir = run_dir / "vis_adjacency"
     samples_hard_dir = run_dir / "samples_hard"
     samples_hard_val_dir = run_dir / "samples_hard_val"
@@ -3319,6 +3341,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
         graph_diagnostics_s_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.vis_ctrl.enabled:
+        vis_ctrl_dir.mkdir(parents=True, exist_ok=True)
     adjacency_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
@@ -3524,6 +3548,16 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             cfg.diagnostics.sample_sequences,
             generator=diagnostics_generator,
         )
+    vis_ctrl_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[List[List[str]]]]] = None
+    if cfg.vis_ctrl.enabled:
+        if diagnostics_batch_cpu is not None:
+            vis_ctrl_batch_cpu = diagnostics_batch_cpu
+        elif cfg.vis_ctrl.sample_sequences > 0:
+            vis_ctrl_batch_cpu = _build_embedding_batch(
+                dataset,
+                cfg.vis_ctrl.sample_sequences,
+                generator=vis_ctrl_generator,
+            )
 
     def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
         total_time = sum(totals.values())
@@ -3787,6 +3821,67 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         delta_s_dir=diagnostics_delta_s_dir,
                         alignment_s_dir=diagnostics_alignment_s_dir,
                         cycle_s_dir=diagnostics_cycle_s_dir,
+                    )
+                if cfg.vis_ctrl.enabled and vis_ctrl_batch_cpu is not None:
+                    vis_frames = vis_ctrl_batch_cpu[0].to(device)
+                    vis_actions = vis_ctrl_batch_cpu[1].to(device)
+                    vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
+                    _, _, _, vis_h_states = _predictor_rollout(model, vis_embeddings, vis_actions)
+                    vis_s_embeddings = model.state_head(vis_h_states)
+                    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
+                    metrics_z = compute_vis_ctrl_metrics(
+                        vis_embeddings,
+                        vis_actions,
+                        cfg.vis_ctrl.knn_k_values,
+                        warmup_frames,
+                        cfg.vis_ctrl.min_action_count,
+                        cfg.vis_ctrl.stability_delta,
+                        cfg.vis_ctrl.knn_chunk_size,
+                    )
+                    metrics_s = compute_vis_ctrl_metrics(
+                        vis_s_embeddings,
+                        vis_actions,
+                        cfg.vis_ctrl.knn_k_values,
+                        warmup_frames,
+                        cfg.vis_ctrl.min_action_count,
+                        cfg.vis_ctrl.stability_delta,
+                        cfg.vis_ctrl.knn_chunk_size,
+                    )
+                    save_smoothness_plot(
+                        vis_ctrl_dir / f"smoothness_z_{global_step:07d}.png",
+                        metrics_z,
+                        "z",
+                    )
+                    save_smoothness_plot(
+                        vis_ctrl_dir / f"smoothness_s_{global_step:07d}.png",
+                        metrics_s,
+                        "s",
+                    )
+                    save_composition_error_plot(
+                        vis_ctrl_dir / f"composition_error_z_{global_step:07d}.png",
+                        metrics_z,
+                        "z",
+                    )
+                    save_composition_error_plot(
+                        vis_ctrl_dir / f"composition_error_s_{global_step:07d}.png",
+                        metrics_s,
+                        "s",
+                    )
+                    save_stability_plot(
+                        vis_ctrl_dir / f"stability_z_{global_step:07d}.png",
+                        metrics_z,
+                        "z",
+                    )
+                    save_stability_plot(
+                        vis_ctrl_dir / f"stability_s_{global_step:07d}.png",
+                        metrics_s,
+                        "s",
+                    )
+                    write_vis_ctrl_metrics_csv(
+                        metrics_dir / "vis_ctrl_metrics.csv",
+                        global_step,
+                        metrics_z,
+                        metrics_s,
                     )
                 if cfg.graph_diagnostics.enabled:
                     graph_frames = graph_diag_batch_cpu[0] if graph_diag_batch_cpu is not None else rolling_batch_cpu[0]

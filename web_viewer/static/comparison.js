@@ -21,8 +21,8 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_self_distance_s", label: "Self-distance (S):Distance", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
   { value: "vis_delta_z_pca", label: "Diagnostics (Z):Delta PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
   { value: "vis_delta_s_pca", label: "Diagnostics (S):Delta PCA", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
-  { value: "vis_odometry_current_z", label: "Odometry:Current z PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
-  { value: "vis_odometry_current_s", label: "Odometry:Current s PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
+  { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
+  { value: "vis_odometry_current_s", label: "Odometry:Cumulative sum of Δs PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
   { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
   { value: "vis_odometry_s_vs_s_hat", label: "Odometry:||s - s_hat|| + scatter", prefix: "s_vs_s_hat_", folder: "vis_odometry" },
   {

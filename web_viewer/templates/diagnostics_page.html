@@ -107,6 +107,20 @@
     margin-left: 4px;
  }
 
+.diagnostic-info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3949ab;
+    font-size: 12px;
+    border: 1px solid #c5cae9;
+    cursor: pointer;
+}
+
 @media (max-width: 991.98px) {
     .diagnostic-grid-top,
     .diagnostic-grid-bottom {
@@ -185,7 +199,15 @@
 <div id="diagnostics-top-grid" class="collapse show">
     <div class="diagnostic-grid-top mb-3">
         <div class="card h-100 diag-delta">
-            <div class="card-header py-2" id="diagnostics-delta-header">Delta-z PCA</div>
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-delta-header">
+                <span>Delta-z PCA</span>
+                <span
+                    class="diagnostic-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="PCA of delta-z steps across the batch. Shows motion directions (delta-z) and full-z projections onto the motion-defined basis."
+                >i</span>
+            </div>
             <div class="card-body d-flex flex-column gap-2">
                 <img id="diagnostics-delta-img" class="img-fluid rounded border d-none" alt="Delta-z PCA diagnostic">
                 <div class="text-muted small" id="diagnostics-delta-caption"></div>
@@ -273,6 +295,16 @@
 {% endblock %}
 
 {% block extra_scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const tooltipTriggerList = Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.forEach((el) => {
+        if (window.bootstrap) {
+            new bootstrap.Tooltip(el);
+        }
+    });
+});
+</script>
 {% if experiment and step_count %}
 <script>
 document.addEventListener("DOMContentLoaded", () => {

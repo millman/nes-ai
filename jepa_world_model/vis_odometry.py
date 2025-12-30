@@ -73,6 +73,8 @@ def _rollout_open_loop(
 def _compute_pca_2d(data: np.ndarray) -> Optional[np.ndarray]:
     if data.shape[0] < 2:
         return None
+    if not np.isfinite(data).all():
+        return None
     centered = data - data.mean(axis=0, keepdims=True)
     try:
         _, _, vt = np.linalg.svd(centered, full_matrices=False)

@@ -1,0 +1,310 @@
+{% extends "base.html" %}
+
+{% set steps = steps if steps is defined else [] %}
+{% set step_count = steps|length %}
+
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<style>
+.vis-ctrl-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem 1rem;
+}
+.vis-ctrl-card img {
+    width: 100%;
+    height: auto;
+    border-radius: 0.5rem;
+    border: 1px solid #e9ecef;
+}
+.vis-ctrl-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+.vis-ctrl-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+.vis-ctrl-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+.vis-ctrl-plot-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
+}
+.vis-ctrl-info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3949ab;
+    font-size: 12px;
+    border: 1px solid #c5cae9;
+    cursor: pointer;
+}
+@media (max-width: 991.98px) {
+    .vis-ctrl-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+        {% if experiment %}
+        {% set heading_title = experiment.title if experiment.title != "Untitled" else experiment.name %}
+        <h3 class="mb-1">{{ heading_title }} <small class="text-muted">({{ experiment.id }})</small></h3>
+        {% else %}
+        <h3 class="mb-1">Vis v Ctrl</h3>
+        <div class="text-muted small">No experiments with Vis v Ctrl outputs.</div>
+        {% endif %}
+    </div>
+    {% if csv_url %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ csv_url }}" target="_blank" rel="noreferrer">Download latest CSV</a>
+    {% endif %}
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No Vis v Ctrl outputs found.</div>
+{% else %}
+<div class="card mb-3 vis-ctrl-plot-wrapper" id="vis-ctrl-plot-wrapper">
+    <button
+        type="button"
+        class="vis-ctrl-pin-btn active"
+        id="vis-ctrl-plot-pin"
+        aria-pressed="true"
+        aria-label="Pin Vis v Ctrl metrics plot"
+        title="Unpin Vis v Ctrl metrics plot"
+    >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+        </svg>
+    </button>
+    <div class="card-header py-2 d-flex align-items-center gap-2">
+        <strong>Vis v Ctrl metrics</strong>
+        <span class="text-muted small">hover to scrub steps</span>
+        <span class="ms-auto text-muted small">Step: <span id="vis-ctrl-step-label">—</span></span>
+    </div>
+    <div class="card-body">
+        <div id="vis-ctrl-metrics-plot" style="height: 220px;"></div>
+    </div>
+</div>
+
+<div class="vis-ctrl-grid mb-3">
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Action alignment (Z)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Per-action cosine alignment of delta-z directions.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-align-z-img" class="img-fluid d-none" alt="Action alignment (Z)">
+            <div class="text-muted small" id="vis-ctrl-align-z-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Action alignment (S)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Per-action cosine alignment of delta-s directions.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-align-s-img" class="img-fluid d-none" alt="Action alignment (S)">
+            <div class="text-muted small" id="vis-ctrl-align-s-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Local smoothness (Z)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Mean kNN distance and global variance in Z.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-smooth-z-img" class="img-fluid d-none" alt="Local smoothness (Z)">
+            <div class="text-muted small" id="vis-ctrl-smooth-z-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Local smoothness (S)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Mean kNN distance and global variance in S.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-smooth-s-img" class="img-fluid d-none" alt="Local smoothness (S)">
+            <div class="text-muted small" id="vis-ctrl-smooth-s-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Two-step composition error (Z)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Error between observed 2-step delta and mean action-direction composition in Z.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-comp-z-img" class="img-fluid d-none" alt="Two-step composition error (Z)">
+            <div class="text-muted small" id="vis-ctrl-comp-z-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Two-step composition error (S)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Error between observed 2-step delta and mean action-direction composition in S.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-comp-s-img" class="img-fluid d-none" alt="Two-step composition error (S)">
+            <div class="text-muted small" id="vis-ctrl-comp-s-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Neighborhood stability (Z)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Mean Jaccard overlap of kNN sets across time for Z.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-stability-z-img" class="img-fluid d-none" alt="Neighborhood stability (Z)">
+            <div class="text-muted small" id="vis-ctrl-stability-z-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Neighborhood stability (S)</span>
+            <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Mean Jaccard overlap of kNN sets across time for S.">i</span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-stability-s-img" class="img-fluid d-none" alt="Neighborhood stability (S)">
+            <div class="text-muted small" id="vis-ctrl-stability-s-caption"></div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if experiment %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const steps = {{ steps | tojson }};
+    const mapZ = {{ vis_ctrl_map_z | tojson }};
+    const mapS = {{ vis_ctrl_map_s | tojson }};
+    const history = {{ history | tojson }};
+    const figure = {{ figure | tojson if figure else 'null' }};
+    const stepLabel = document.getElementById("vis-ctrl-step-label");
+    const metricsPlot = document.getElementById("vis-ctrl-metrics-plot");
+    const plotWrapper = document.getElementById("vis-ctrl-plot-wrapper");
+    const plotPinButton = document.getElementById("vis-ctrl-plot-pin");
+    let plotPinned = true;
+
+    const targets = [
+        { key: "alignment_z", img: "vis-ctrl-align-z-img", caption: "vis-ctrl-align-z-caption", map: mapZ },
+        { key: "alignment_s", img: "vis-ctrl-align-s-img", caption: "vis-ctrl-align-s-caption", map: mapS },
+        { key: "smoothness_z", img: "vis-ctrl-smooth-z-img", caption: "vis-ctrl-smooth-z-caption", map: mapZ },
+        { key: "smoothness_s", img: "vis-ctrl-smooth-s-img", caption: "vis-ctrl-smooth-s-caption", map: mapS },
+        { key: "composition_z", img: "vis-ctrl-comp-z-img", caption: "vis-ctrl-comp-z-caption", map: mapZ },
+        { key: "composition_s", img: "vis-ctrl-comp-s-img", caption: "vis-ctrl-comp-s-caption", map: mapS },
+        { key: "stability_z", img: "vis-ctrl-stability-z-img", caption: "vis-ctrl-stability-z-caption", map: mapZ },
+        { key: "stability_s", img: "vis-ctrl-stability-s-img", caption: "vis-ctrl-stability-s-caption", map: mapS },
+    ];
+
+    const pickClosest = (entries, step) => {
+        if (!entries) return null;
+        if (entries[step]) return step;
+        const keys = Object.keys(entries).map(Number).sort((a, b) => a - b);
+        if (!keys.length) return null;
+        for (let i = keys.length - 1; i >= 0; i -= 1) {
+            if (keys[i] <= step) return keys[i];
+        }
+        return keys[keys.length - 1];
+    };
+
+    const updatePanel = (target, step) => {
+        const imgEl = document.getElementById(target.img);
+        const capEl = document.getElementById(target.caption);
+        const entry = target.map[target.key];
+        const chosen = pickClosest(entry, step);
+        if (!entry || chosen === null) {
+            imgEl.classList.add("d-none");
+            capEl.textContent = "No Vis v Ctrl outputs found.";
+            return;
+        }
+        imgEl.src = entry[chosen];
+        imgEl.classList.remove("d-none");
+        capEl.textContent = `step ${chosen}`;
+    };
+
+    const updateAll = (step) => {
+        targets.forEach((target) => updatePanel(target, step));
+        if (stepLabel) stepLabel.textContent = step;
+    };
+
+    const historySteps = history.map((row) => Number(row.step)).filter((val) => Number.isFinite(val));
+    const initialStep = steps.length
+        ? steps[steps.length - 1]
+        : (historySteps.length ? historySteps[historySteps.length - 1] : 0);
+    updateAll(initialStep);
+
+    function updatePinState(nextState) {
+        plotPinned = nextState;
+        if (!plotWrapper || !plotPinButton) return;
+        plotWrapper.classList.toggle("sticky-active", plotPinned);
+        plotPinButton.classList.toggle("active", plotPinned);
+        plotPinButton.setAttribute("aria-pressed", plotPinned ? "true" : "false");
+        plotPinButton.setAttribute("title", plotPinned ? "Unpin Vis v Ctrl metrics plot" : "Pin Vis v Ctrl metrics plot");
+    }
+
+    if (plotPinButton) {
+        plotPinButton.addEventListener("click", () => {
+            updatePinState(!plotPinned);
+        });
+    }
+
+    if (figure && metricsPlot && typeof Plotly !== "undefined") {
+        Plotly.react(metricsPlot, figure.data, figure.layout, buildPlotlyConfig(figure.config || {})).then(() => {
+            metricsPlot.on("plotly_hover", (ev) => {
+                const point = ev?.points?.[0];
+                if (!point) return;
+                const step = Math.max(0, Math.round(point.x));
+                updateAll(step);
+            });
+            metricsPlot.on("plotly_unhover", () => {
+                if (plotPinned) return;
+                updateAll(initialStep);
+            });
+        });
+    }
+
+    updatePinState(true);
+
+    const tooltipTriggerList = Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.forEach((el) => {
+        try {
+            new bootstrap.Tooltip(el);
+        } catch (e) {
+            // ignore init failure
+        }
+    });
+});
+</script>
+{% endif %}
+{% endblock %}

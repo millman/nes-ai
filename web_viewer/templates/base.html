@@ -49,6 +49,16 @@
                         {% endif %}
                     </li>
                     <li class="nav-item d-none d-lg-block text-white-50">|</li>
+                    <li class="nav-item">
+                        {% if active_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'vis_ctrl' else '' }}" href="{{ url_for('vis_ctrl', exp_id=active_experiment_id) }}">Vis v Ctrl</a>
+                        {% elif first_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'vis_ctrl' else '' }}" href="{{ url_for('vis_ctrl', exp_id=first_experiment_id) }}">Vis v Ctrl</a>
+                        {% else %}
+                        <span class="nav-link disabled text-secondary">Vis v Ctrl</span>
+                        {% endif %}
+                    </li>
+                    <li class="nav-item d-none d-lg-block text-white-50">|</li>
                     <li class="nav-item d-flex align-items-center">
                         {% if active_experiment_id %}
                         <a class="nav-link px-0 {{ 'active' if current_nav in ['diagnostics', 'diagnostics_s', 'diagnostics_zvs'] else '' }}" href="{{ url_for('diagnostics_zvs', exp_id=active_experiment_id) }}">Diagnostics</a>
