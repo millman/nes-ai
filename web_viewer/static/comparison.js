@@ -21,7 +21,10 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_self_distance_s", label: "Self-distance (S):Distance", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
   { value: "vis_delta_z_pca", label: "Diagnostics (Z):Delta PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
   { value: "vis_delta_s_pca", label: "Diagnostics (S):Delta PCA", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
-  { value: "vis_odometry", label: "Odometry:Overview", prefix: "odometry_z_", folder: "vis_odometry" },
+  { value: "vis_odometry_current_z", label: "Odometry:Current z PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
+  { value: "vis_odometry_current_s", label: "Odometry:Current s PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
+  { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
+  { value: "vis_odometry_s_vs_s_hat", label: "Odometry:||s - s_hat|| + scatter", prefix: "s_vs_s_hat_", folder: "vis_odometry" },
   {
     value: "vis_action_alignment_detail",
     label: "Diagnostics (Z):Action alignment",
@@ -49,7 +52,19 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_graph_in_degree_hist_s", label: "Graph Diagnostics (S):In-degree", prefix: "in_degree_hist_", folder: "graph_diagnostics_s" },
   { value: "vis_graph_edge_consistency_s", label: "Graph Diagnostics (S):Edge consistency", prefix: "edge_consistency_", folder: "graph_diagnostics_s" },
   { value: "vis_graph_metrics_history_s", label: "Graph Diagnostics (S):Metrics history", prefix: "metrics_history_", folder: "graph_diagnostics_s" },
-].sort((a, b) => a.value.localeCompare(b.value));
+].sort((a, b) => {
+  const groupA = a.label.split(":")[0].trim();
+  const groupB = b.label.split(":")[0].trim();
+  const groupCompare = groupA.localeCompare(groupB);
+  if (groupCompare !== 0) {
+    return groupCompare;
+  }
+  const labelCompare = a.label.localeCompare(b.label);
+  if (labelCompare !== 0) {
+    return labelCompare;
+  }
+  return a.value.localeCompare(b.value);
+});
 
 function getImageOption(folderValue) {
   return IMAGE_FOLDER_OPTIONS.find((opt) => opt.value === folderValue);

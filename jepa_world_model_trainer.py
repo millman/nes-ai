@@ -529,6 +529,7 @@ class TrainConfig:
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
+    detach_decoder: bool = False
 
     # Specific losses
     adjacency: AdjacencyConfig = field(default_factory=AdjacencyConfig)
@@ -1009,7 +1010,8 @@ def _compute_losses_and_metrics(
     )
     recon: Optional[torch.Tensor] = None
     if need_recon:
-        recon = decoder(outputs["embeddings"])
+        decoder_embeddings = outputs["embeddings"].detach() if cfg.detach_decoder else outputs["embeddings"]
+        recon = decoder(decoder_embeddings)
 
     loss_jepa_raw, action_logits, delta_pred, z_hat_next, h_preds, h_states = jepa_loss(model, outputs, actions)
     loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
