@@ -67,32 +67,22 @@
 }
 
 .experiment-cell {
-    overflow-x: auto;
+    overflow-x: visible;
 }
 
-.title-input-group {
-    max-width: 100%;
-    position: relative;
+.table-responsive.inline-hover-active {
+    overflow: visible;
 }
 
+.title-input-group,
 .tags-input-group {
     max-width: 100%;
     position: relative;
+    display: inline-flex;
+    align-items: stretch;
 }
 
-.title-input-group::after {
-    content: "";
-    position: absolute;
-    top: 0;
-    right: 0;
-    width: 0;
-    height: 0;
-    border-style: solid;
-    border-width: 0 10px 10px 0;
-    border-color: transparent #cbd5f5 transparent transparent;
-    opacity: 0.6;
-}
-
+.title-input-group::after,
 .tags-input-group::after {
     content: "";
     position: absolute;
@@ -104,13 +94,10 @@
     border-width: 0 10px 10px 0;
     border-color: transparent #cbd5f5 transparent transparent;
     opacity: 0.6;
+    pointer-events: none;
 }
 
-.title-input-group:hover::after {
-    border-color: transparent #94a3b8 transparent transparent;
-    opacity: 1;
-}
-
+.title-input-group:hover::after,
 .tags-input-group:hover::after {
     border-color: transparent #94a3b8 transparent transparent;
     opacity: 1;
@@ -136,35 +123,43 @@
     line-height: 1;
 }
 
-.title-form {
-    margin: 0;
-}
-
 .title-form .exp-title-input,
 .tags-form .exp-tags-input {
     cursor: pointer;
+    min-width: 100%;
 }
 
-.title-form .exp-title-input:not([readonly]) {
-    background-color: #fff;
-    border-color: #ced4da;
-    cursor: text;
-    padding-left: 0.5rem;
-}
-
+.title-form .exp-title-input:not([readonly]),
 .tags-form .exp-tags-input:not([readonly]) {
     background-color: #fff;
     border-color: #ced4da;
     cursor: text;
 }
 
+.title-form .exp-title-input:not([readonly]) {
+    padding-left: 0.5rem;
+}
 
-.title-input-group:hover .exp-title-input[readonly] {
+.title-input-group:hover .exp-title-input[readonly],
+.tags-input-group:hover .exp-tags-input[readonly] {
     background-color: #f8fafc;
 }
 
-.tags-input-group:hover .exp-tags-input[readonly] {
-    background-color: #f8fafc;
+.title-input-group.hover-expanded,
+.tags-input-group.hover-expanded {
+    position: relative;
+    z-index: 20;
+    max-width: none;
+}
+
+.title-input-group.hover-expanded .exp-title-input,
+.tags-input-group.hover-expanded .exp-tags-input {
+    background-color: #fff;
+    border: 1px solid #cbd5f5;
+    margin: -1px;
+    max-width: none !important;
+    min-width: 0 !important;
+    transition: none;
 }
 
 .notes-form textarea,

@@ -490,6 +490,73 @@ function wireTagsForms(root) {
   tagForms.forEach((form) => wireTagsForm(form));
 }
 
+function setupInlineHoverExpansion(group, input) {
+  if (!group || !input) {
+    return;
+  }
+  let hovering = false;
+  let focused = false;
+  let baseGroupWidth = null;
+  let baseInputWidth = null;
+  let extraWidth = null;
+  const overflowRoot = group.closest(".runs-grid") || group.closest(".table-responsive");
+  const expand = () => {
+    if (baseGroupWidth === null) {
+      const groupRect = group.getBoundingClientRect();
+      const inputRect = input.getBoundingClientRect();
+      baseGroupWidth = groupRect.width;
+      baseInputWidth = inputRect.width;
+      extraWidth = Math.max(0, groupRect.width - inputRect.width);
+    }
+    // Only expand if content doesn't fit
+    const needsExpansion = input.scrollWidth > input.clientWidth;
+    if (!needsExpansion) {
+      return;
+    }
+    const inputWidth = Math.max(input.scrollWidth + 12, baseInputWidth || 0);
+    const groupWidth = Math.max(inputWidth + (extraWidth || 0), baseGroupWidth || 0);
+    input.style.setProperty("width", `${inputWidth}px`, "important");
+    group.style.setProperty("width", `${groupWidth}px`, "important");
+    group.classList.add("hover-expanded");
+    if (overflowRoot) {
+      overflowRoot.classList.add("inline-hover-active");
+    }
+  };
+  const collapse = () => {
+    input.style.removeProperty("width");
+    group.style.removeProperty("width");
+    group.classList.remove("hover-expanded");
+    if (overflowRoot) {
+      overflowRoot.classList.remove("inline-hover-active");
+    }
+  };
+  group.addEventListener("mouseenter", () => {
+    hovering = true;
+    expand();
+  });
+  group.addEventListener("mouseleave", () => {
+    hovering = false;
+    if (!focused) {
+      collapse();
+    }
+  });
+  input.addEventListener("focus", () => {
+    focused = true;
+    expand();
+  });
+  input.addEventListener("blur", () => {
+    focused = false;
+    if (!hovering) {
+      collapse();
+    }
+  });
+  input.addEventListener("input", () => {
+    if (hovering || focused) {
+      expand();
+    }
+  });
+}
+
 function wireTitleForm(form) {
   const expId = form.dataset.expId;
   const input = form.querySelector(".exp-title-input");
@@ -597,6 +664,7 @@ function wireTitleForm(form) {
     }
   });
   updateState();
+  setupInlineHoverExpansion(group, input);
 }
 
 function wireTagsForm(form) {
@@ -706,6 +774,7 @@ function wireTagsForm(form) {
     }
   });
   updateState();
+  setupInlineHoverExpansion(group, input);
 }
 
 function wireMetadataToggles(root) {
