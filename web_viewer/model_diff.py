@@ -14,6 +14,7 @@ import tomli
 import tomli_w
 
 from jepa_world_model.metadata import write_run_metadata
+from jepa_world_model.step_schedule import _parse_schedule
 
 
 def _run_git(args: list[str], cwd: Optional[Path] = None) -> str:
@@ -291,6 +292,46 @@ def _collect_changed_leaves(current: Any, base: Any, path: List[str], out: List[
         out.append((leaf, current))
 
 
+def _normalize_schedule(raw: Any) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if raw.lower() == "null":
+            return None
+        try:
+            return _parse_schedule(raw)
+        except ValueError:
+            return raw
+    if isinstance(raw, (list, tuple)):
+        cleaned: List[Any] = []
+        for entry in raw:
+            if isinstance(entry, str):
+                if entry.lower() == "null":
+                    cleaned.append(None)
+                else:
+                    cleaned.append(entry)
+                continue
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                every_steps = entry[0]
+                max_raw = entry[1]
+                if isinstance(max_raw, str) and max_raw.lower() in ("null", "none"):
+                    max_raw = None
+                cleaned.append((every_steps, max_raw))
+                continue
+            cleaned.append(entry)
+        try:
+            return _parse_schedule(cleaned)
+        except ValueError:
+            return raw
+    return raw
+
+
+def _normalize_train_config(train_cfg: Dict[str, Any]) -> None:
+    for field in ("log_schedule", "vis_schedule"):
+        if field in train_cfg:
+            train_cfg[field] = _normalize_schedule(train_cfg[field])
+
+
 def generate_model_diff(exp_dir: Path, trainer_path: str = "jepa_world_model_trainer.py", repo_root: Optional[Path] = None) -> Path:
     # --- Cache setup ---
     cache_dir = exp_dir / "server_cache"
@@ -304,6 +345,7 @@ def generate_model_diff(exp_dir: Path, trainer_path: str = "jepa_world_model_tra
 
     # --- Read current metadata ---
     train_current, model_current = _read_configs_from_metadata(metadata_path)
+    _normalize_train_config(train_current)
     base_commit = _extract_commit_from_metadata(metadata_git_text=metadata_git_path.read_text())
 
     # --- Resolve git roots and cache ---
@@ -317,6 +359,7 @@ def generate_model_diff(exp_dir: Path, trainer_path: str = "jepa_world_model_tra
     base_dir = _write_base_metadata(base_commit, git_root, trainer_rel, git_cache_root, exp_dir.name)
     base_metadata_path = base_dir / "metadata.txt"
     train_base, model_base = _read_configs_from_metadata(base_metadata_path)
+    _normalize_train_config(train_base)
 
     # --- Compute diff as single-line CSV of leaf changes ---
     changed: List[Tuple[str, Any]] = []
