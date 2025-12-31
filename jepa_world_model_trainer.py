@@ -288,9 +288,10 @@ class ModelConfig:
             └─ Encoder(encoder_schedule → pool → z_dim = encoder_schedule[-1])
             ▼
         z_t ────────────────────────────────┐
-                        ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}, ŝ_{t+1}
+                        ├─ BeliefUpdate([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}
         h_t (state_dim) ─────────────────────┘
             │
+            ├→ h2z(h_t) → ẑ_t (projection head)
             ├→ h2s(h_t) → s_t (planning embedding)
             ├→ ActionDeltaHead([z_t, z_{t+1}]) → action logits (action_z)
             ├→ ActionDeltaHead_s([s_t, s_{t+1}]) → action logits (action_s)
@@ -299,7 +300,7 @@ class ModelConfig:
     Notes:
     • image_size must be divisible by 2**len(encoder_schedule) and 2**len(decoder_schedule) (if provided).
     • encoder_schedule[-1] defines embedding_dim (z_dim); state_dim defines h dimensionality.
-    • hidden_dim is the predictor’s internal width; action_dim is the controller space size.
+    • hidden_dim is the belief update internal width; action_dim is the controller space size.
     • decoder_schedule defaults to encoder_schedule if not set.
     """
 
