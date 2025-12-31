@@ -93,7 +93,7 @@ LegacyEncoder = ConvEncoder
 LegacyVisualizationDecoder = ConvVisualizationDecoder
 
 
-class StateEmbeddingProjector(nn.Module):
+class HiddenToSProjector(nn.Module):
     """Project hidden state to a planning/state embedding."""
 
     def __init__(self, h_dim: int, s_dim: int, hidden_dim: int, unit_norm: bool) -> None:
@@ -126,10 +126,15 @@ class PredictorNetwork(nn.Module):
         action_dim: int,
         film_layers: int,
         state_dim: int,
+        predictor_layers: int,
     ) -> None:
         super().__init__()
+        if predictor_layers < 1:
+            raise ValueError("predictor_layers must be >= 1.")
         self.in_proj = nn.Linear(embedding_dim + action_dim + state_dim, hidden_dim)
-        self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.hidden_layers = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(predictor_layers - 1)]
+        )
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
         self.activation = nn.SiLU(inplace=True)
@@ -137,6 +142,7 @@ class PredictorNetwork(nn.Module):
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.state_dim = state_dim
+        self.predictor_layers = predictor_layers
         self.delta_scale = 1.0
         self.use_delta_squash = False
 
@@ -150,7 +156,8 @@ class PredictorNetwork(nn.Module):
         act_flat = actions.reshape(-1, actions.shape[-1])
         h_flat = hidden_state.reshape(-1, hidden_state.shape[-1])
         hidden = self.activation(self.in_proj(torch.cat([emb_flat, h_flat, act_flat], dim=-1)))
-        hidden = self.activation(self.hidden_proj(hidden))
+        for layer in self.hidden_layers:
+            hidden = self.activation(layer(hidden))
         raw_delta = self.out_proj(hidden)
         h_next = self.h_out(hidden)
         if self.use_delta_squash:
@@ -173,6 +180,7 @@ class PredictorNetwork(nn.Module):
             "action_dim": self.action_dim,
             "state_dim": self.state_dim,
             "conditioning": "concat(z,h,action)",
+            "layers": self.predictor_layers,
         }
 
 
@@ -199,22 +207,22 @@ class HiddenToZProjector(nn.Module):
 
 
 class ActionDeltaHead(nn.Module):
-    """Predict controller actions from latent deltas to avoid action-conditioning leakage."""
+    """Predict controller actions from consecutive latent pairs to avoid action-conditioning leakage."""
 
     def __init__(self, latent_dim: int, hidden_dim: int, action_dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.LayerNorm(latent_dim),
-            nn.Linear(latent_dim, hidden_dim),
+            nn.LayerNorm(latent_dim * 2),
+            nn.Linear(latent_dim * 2, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, action_dim),
         )
 
-    def forward(self, delta: torch.Tensor) -> torch.Tensor:
-        original_shape = delta.shape[:-1]
-        flat = delta.reshape(-1, delta.shape[-1])
+    def forward(self, latent_pair: torch.Tensor) -> torch.Tensor:
+        original_shape = latent_pair.shape[:-1]
+        flat = latent_pair.reshape(-1, latent_pair.shape[-1])
         logits = self.net(flat)
         return logits.view(*original_shape, logits.shape[-1])
 
@@ -273,7 +281,6 @@ RECON_LOSS = HardnessWeightedL1Loss()
 JEPA_LOSS = nn.MSELoss()
 SIGREG_LOSS = nn.MSELoss()
 ACTION_RECON_LOSS = nn.BCEWithLogitsLoss()
-EMA_CONSISTENCY_LOSS = nn.MSELoss()
 
 
 # ------------------------------------------------------------
@@ -292,7 +299,9 @@ class ModelConfig:
                         ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}, ŝ_{t+1}
         h_t (state_dim) ─────────────────────┘
             │
-            ├→ StateHead(h_t) → s_t (planning embedding)
+            ├→ h2s(h_t) → s_t (planning embedding)
+            ├→ ActionDeltaHead([z_t, z_{t+1}]) → action logits (action_z)
+            ├→ ActionDeltaHead_s([s_t, s_{t+1}]) → action logits (action_s)
             └→ Decoder(decoder_schedule → image reconstruction from z)
 
     Notes:
@@ -309,7 +318,11 @@ class ModelConfig:
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
     action_dim: int = 8
     predictor_film_layers: int = 2
+    # Number of linear layers in the predictor trunk (including in_proj).
+    predictor_layers: int = 2
     state_dim: int = 256
+    # Optional separate dimension for the projected planning embedding s (h2s).
+    # If None, defaults to state_dim so h and s share dimensionality.
     state_embed_dim: Optional[int] = None
     state_embed_unit_norm: bool = False
     state_warmup_frames: int = 8
@@ -351,6 +364,9 @@ class LossWeights:
         * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
         * Purpose: advance the observable latent consistent with the next encoded frame.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
+    - loss_h2z_2hop: hidden->z projection at t+2; extra weight on multi-step belief alignment.
+    - loss_z_rollout: rollout z predictions over multiple steps against z targets.
+    - loss_s_rollout: rollout s predictions over multiple steps against s targets.
     Other losses (recon, rollout, etc.) behave as before.
     """
     # Latent transition supervision: ẑ_{t+1} (from predictor) vs detached z_{t+1}; shapes encoder+predictor via z_t.
@@ -365,17 +381,21 @@ class LossWeights:
     delta: float = 0.0
 
     # Action controller input reconstruction
-    action_recon: float = 1.0
-    # Action prediction from s-deltas (state embedding).
-    action_s: float = 0.0
+    action_z: float = 0.0
+    # Action prediction from consecutive s pairs (state embedding).
+    action_s: float = 1.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
-    h2z: float = 1.0
+    h2z: float = 0.0
+    # Project hidden→z for t+2 targets; separate weight for multi-step alignment.
+    h2z_2hop: float = 0.0
 
-    rollout: float = 0.0
+    # Rollout s with predicted z; compare to teacher-forced s targets.
+    s_rollout: float = 0.0
+    # Rollout z predictions against future z targets.
+    z_rollout: float = 0.0
 
     consistency: float = 0.0
-    ema_consistency: float = 0.0
 
     # Adjacency: adj0 enforces invariance between clean/noisy state embeddings (s) at same timestep.
     adj0: float = 0.0
@@ -383,10 +403,6 @@ class LossWeights:
     adj1: float = 0.0
     # Adjacency: adj2 enforces two-hop composition in s-space toward s_{t+2}.
     adj2: float = 0.0
-
-@dataclass
-class LossEMAConfig:
-    momentum: float = 0.99
 
 @dataclass
 class LossRolloutConfig:
@@ -549,7 +565,6 @@ class TrainConfig:
 
     # Specific losses
     adjacency: AdjacencyConfig = field(default_factory=AdjacencyConfig)
-    ema: LossEMAConfig = field(default_factory=LossEMAConfig)
     rollout: LossRolloutConfig = field(default_factory=LossRolloutConfig)
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
@@ -620,9 +635,10 @@ class JEPAWorldModel(nn.Module):
             cfg.action_dim * 2,
             cfg.predictor_film_layers,
             cfg.state_dim,
+            cfg.predictor_layers,
         )
         self.state_dim = cfg.state_dim
-        self.state_head = StateEmbeddingProjector(
+        self.h2s = HiddenToSProjector(
             cfg.state_dim,
             cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
@@ -719,8 +735,8 @@ def jepa_loss(
         delta = embeddings.new_zeros(embeddings[:, :-1].shape)
         return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
-    delta_true = embeddings[:, 1:] - embeddings[:, :-1]
-    action_logits = model.action_delta_head(delta_true)
+    pair_true = torch.cat([embeddings[:, :-1], embeddings[:, 1:]], dim=-1)
+    action_logits = model.action_delta_head(pair_true)
     return JEPA_LOSS(preds, target), action_logits, delta_pred, preds, h_preds, h_states
 
 
@@ -738,7 +754,7 @@ def delta_prediction_loss(
     return loss, pred_norm, target_norm
 
 
-def rollout_loss(
+def z_rollout_loss(
     model: JEPAWorldModel,
     embeddings: torch.Tensor,
     actions: torch.Tensor,
@@ -770,19 +786,45 @@ def rollout_loss(
     return total / steps if steps > 0 else embeddings.new_tensor(0.0)
 
 
+def s_rollout_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    h_states: torch.Tensor,
+    s_targets: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+) -> torch.Tensor:
+    if rollout_horizon <= 1:
+        return embeddings.new_tensor(0.0)
+    b, t, _ = embeddings.shape
+    if t < 2:
+        return embeddings.new_tensor(0.0)
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
+    paired_actions = _pair_actions(actions)
+    for start in range(warmup, t - 1):
+        current = embeddings[:, start]
+        h_current = h_states[:, start]
+        max_h = min(rollout_horizon, t - start - 1)
+        for offset in range(max_h):
+            act = paired_actions[:, start + offset]
+            pred, _, h_next = model.predictor(current, h_current, act)
+            s_pred = model.h2s(h_next)
+            s_target = s_targets[:, start + offset + 1].detach()
+            total = total + F.mse_loss(s_pred, s_target)
+            steps += 1
+            current = pred.detach()
+            h_current = h_next
+    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+
+
 def latent_consistency_loss(embeddings: torch.Tensor) -> torch.Tensor:
     if embeddings.shape[1] < 2:
         return embeddings.new_tensor(0.0)
     diffs = embeddings[:, 1:] - embeddings[:, :-1]
     return diffs.abs().mean()
-
-
-def ema_latent_consistency_loss(
-    embeddings: torch.Tensor, ema_embeddings: torch.Tensor
-) -> torch.Tensor:
-    if embeddings.shape != ema_embeddings.shape:
-        raise ValueError("EMA and online embeddings must share shape for consistency loss.")
-    return EMA_CONSISTENCY_LOSS(embeddings, ema_embeddings.detach())
 
 
 def multi_scale_recon_loss_gauss(
@@ -831,24 +873,6 @@ def multi_scale_recon_loss_box(
     return loss_raw
 
 
-def build_ema_model(model: JEPAWorldModel) -> JEPAWorldModel:
-    device = next(model.parameters()).device
-    ema_model = JEPAWorldModel(model.cfg).to(device)
-    ema_model.load_state_dict(model.state_dict())
-    for param in ema_model.parameters():
-        param.requires_grad_(False)
-    ema_model.eval()
-    return ema_model
-
-
-def update_ema_model(source: JEPAWorldModel, target: JEPAWorldModel, momentum: float) -> None:
-    if not (0.0 <= momentum <= 1.0):
-        raise ValueError("EMA momentum must be between 0 and 1.")
-    if momentum == 1.0:
-        return
-    with torch.no_grad():
-        for tgt_param, src_param in zip(target.parameters(), source.parameters()):
-            tgt_param.data.mul_(momentum).add_(src_param.data, alpha=1.0 - momentum)
 # ------------------------------------------------------------
 # Training loop utilities
 # ------------------------------------------------------------
@@ -869,8 +893,6 @@ def training_step(
     batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
     cfg: TrainConfig,
     weights: LossWeights,
-    ema_model: Optional[JEPAWorldModel] = None,
-    ema_momentum: float = 0.0,
     loss_norm_ema: Optional[Dict[str, float]] = None,
 ) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo]]:
     metrics, difficulty_info, world_loss, grads = _compute_losses_and_metrics(
@@ -879,8 +901,6 @@ def training_step(
         batch,
         cfg,
         weights,
-        ema_model=ema_model,
-        ema_momentum=ema_momentum,
         track_hard_examples=True,
         for_training=True,
         optimizer=optimizer,
@@ -907,8 +927,6 @@ def validation_step(
         batch,
         cfg,
         weights,
-        ema_model=None,
-        ema_momentum=0.0,
         track_hard_examples=True,
         for_training=False,
         optimizer=None,
@@ -926,8 +944,6 @@ def _compute_losses_and_metrics(
     batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
     cfg: TrainConfig,
     weights: LossWeights,
-    ema_model: Optional[JEPAWorldModel],
-    ema_momentum: float,
     track_hard_examples: bool,
     for_training: bool,
     optimizer: Optional[torch.optim.Optimizer],
@@ -958,20 +974,35 @@ def _compute_losses_and_metrics(
         recon = decoder(decoder_embeddings)
 
     loss_jepa_raw, action_logits, delta_pred, z_hat_next, h_preds, h_states = jepa_loss(model, outputs, actions)
-    loss_jepa = loss_jepa_raw if weights.jepa > 0 else images.new_tensor(0.0)
-    loss_delta_raw, delta_pred_norm, delta_target_norm = delta_prediction_loss(delta_pred, outputs["embeddings"])
-    loss_delta = loss_delta_raw if weights.delta > 0 else images.new_tensor(0.0)
-    prev_actions = actions[:, :-1]
-    if weights.action_recon > 0 and prev_actions.numel() > 0:
-        loss_action = ACTION_RECON_LOSS(action_logits, prev_actions)
+    if weights.jepa > 0:
+        loss_jepa = loss_jepa_raw
     else:
-        loss_action = images.new_tensor(0.0)
-    loss_action_s = images.new_tensor(0.0)
-    if weights.action_s > 0 and prev_actions.numel() > 0:
-        s_states = model.state_head(h_states)
-        s_delta_true = s_states[:, 1:] - s_states[:, :-1]
-        action_logits_s = model.action_delta_head_s(s_delta_true)
+        loss_jepa = images.new_tensor(0.0)
+
+    if weights.delta > 0:
+        loss_delta_raw, delta_pred_norm, delta_target_norm = delta_prediction_loss(delta_pred, outputs["embeddings"])
+        loss_delta = loss_delta_raw
+    else:
+        loss_delta = images.new_tensor(0.0)
+        delta_pred_norm = images.new_tensor(0.0)
+        delta_target_norm = images.new_tensor(0.0)
+
+    prev_actions = actions[:, :-1]
+    if weights.action_z > 0 and prev_actions.numel() > 0:
+        loss_action_z = ACTION_RECON_LOSS(action_logits, prev_actions)
+    else:
+        loss_action_z = images.new_tensor(0.0)
+
+    s_states: Optional[torch.Tensor] = None
+    if (weights.action_s > 0 or weights.s_rollout > 0) and h_states.numel() > 0:
+        s_states = model.h2s(h_states)
+
+    if weights.action_s > 0 and prev_actions.numel() > 0 and s_states is not None:
+        s_pair_true = torch.cat([s_states[:, :-1], s_states[:, 1:]], dim=-1)
+        action_logits_s = model.action_delta_head_s(s_pair_true)
         loss_action_s = ACTION_RECON_LOSS(action_logits_s, prev_actions)
+    else:
+        loss_action_s = images.new_tensor(0.0)
 
     with torch.no_grad():
         if prev_actions.numel() > 0:
@@ -985,8 +1016,8 @@ def _compute_losses_and_metrics(
             action_accuracy_all = images.new_tensor(0.0)
 
     warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
-    loss_rollout = (
-        rollout_loss(
+    loss_z_rollout = (
+        z_rollout_loss(
             model,
             outputs["embeddings"],
             actions,
@@ -994,7 +1025,7 @@ def _compute_losses_and_metrics(
             cfg.rollout.horizon,
             warmup_frames,
         )
-        if weights.rollout > 0
+        if weights.z_rollout > 0
         else images.new_tensor(0.0)
     )
     loss_consistency = (
@@ -1008,23 +1039,37 @@ def _compute_losses_and_metrics(
         if weights.sigreg > 0
         else images.new_tensor(0.0)
     )
-    loss_ema_consistency = images.new_tensor(0.0)
-    if ema_model is not None and weights.ema_consistency > 0:
-        with torch.no_grad():
-            ema_outputs = ema_model.encode_sequence(images)
-        loss_ema_consistency = ema_latent_consistency_loss(outputs["embeddings"], ema_outputs["embeddings"])
-
     # Hidden-state dynamics and cross-projection losses
     loss_h2z = images.new_tensor(0.0)
-    need_hidden = weights.h2z > 0
+    loss_h2z_2hop = images.new_tensor(0.0)
+    loss_s_rollout = images.new_tensor(0.0)
+    need_hidden = (
+        weights.h2z > 0
+        or weights.h2z_2hop > 0
+        or weights.s_rollout > 0
+    )
     if need_hidden:
         seq_len = outputs["embeddings"].shape[1]
-        if weights.h2z > 0 and h_states.numel() > 0 and seq_len > 0:
+        if h_states.numel() > 0 and seq_len > 0:
             start = max(min(warmup_frames, seq_len - 1), 0)
-            if seq_len - start > 0:
+            if weights.h2z > 0 and seq_len - start > 0:
                 h_stack = h_states[:, start:]
                 z_hat_from_h = model.h_to_z(h_stack)
                 loss_h2z = F.mse_loss(z_hat_from_h, outputs["embeddings"][:, start:].detach())
+            if weights.h2z_2hop > 0 and seq_len - start > 2:
+                h_stack_2 = h_states[:, start + 2 :]
+                z_hat_from_h2 = model.h_to_z(h_stack_2)
+                loss_h2z_2hop = F.mse_loss(z_hat_from_h2, outputs["embeddings"][:, start + 2 :].detach())
+            if weights.s_rollout > 0 and s_states is not None:
+                loss_s_rollout = s_rollout_loss(
+                    model,
+                    outputs["embeddings"],
+                    actions,
+                    h_states,
+                    s_states,
+                    cfg.rollout.horizon,
+                    warmup_frames,
+                )
 
     if weights.recon > 0 and recon is not None:
         loss_recon = RECON_LOSS(recon, images)
@@ -1080,12 +1125,13 @@ def _compute_losses_and_metrics(
         weights.jepa * _scaled("loss_jepa", loss_jepa)
         + weights.delta * _scaled("loss_delta", loss_delta)
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
-        + weights.rollout * _scaled("loss_rollout", loss_rollout)
+        + weights.z_rollout * _scaled("loss_z_rollout", loss_z_rollout)
         + weights.consistency * _scaled("loss_consistency", loss_consistency)
-        + weights.ema_consistency * _scaled("loss_ema_consistency", loss_ema_consistency)
-        + weights.action_recon * _scaled("loss_action", loss_action)
+        + weights.action_z * _scaled("loss_action_z", loss_action_z)
         + weights.action_s * _scaled("loss_action_s", loss_action_s)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
+        + weights.h2z_2hop * _scaled("loss_h2z_2hop", loss_h2z_2hop)
+        + weights.s_rollout * _scaled("loss_s_rollout", loss_s_rollout)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
@@ -1103,8 +1149,6 @@ def _compute_losses_and_metrics(
         world_grad_norm = grad_norm(model.parameters())
         decoder_grad_norm = grad_norm(decoder.parameters())
         optimizer.step()
-        if ema_model is not None:
-            update_ema_model(model, ema_model, ema_momentum)
 
     difficulty_info: Optional[BatchDifficultyInfo] = None
     if (
@@ -1126,16 +1170,17 @@ def _compute_losses_and_metrics(
     metrics = {
         "loss_jepa": loss_jepa.item(),
         "loss_sigreg": loss_sigreg.item(),
-        "loss_rollout": loss_rollout.item(),
+        "loss_z_rollout": loss_z_rollout.item(),
         "loss_consistency": loss_consistency.item(),
-        "loss_ema_consistency": loss_ema_consistency.item(),
         "loss_recon": loss_recon.item(),
         "loss_recon_multi_gauss": loss_recon_multi_gauss.item(),
         "loss_recon_multi_box": loss_recon_multi_box.item(),
         "loss_recon_patch": loss_recon_patch.item(),
-        "loss_action": loss_action.item(),
+        "loss_action_z": loss_action_z.item(),
         "loss_action_s": loss_action_s.item(),
         "loss_h2z": loss_h2z.item(),
+        "loss_h2z_2hop": loss_h2z_2hop.item(),
+        "loss_s_rollout": loss_s_rollout.item(),
         "loss_delta": loss_delta.item(),
         "delta_pred_norm": delta_pred_norm.item(),
         "delta_target_norm": delta_target_norm.item(),
@@ -1214,12 +1259,10 @@ def log_metrics(
         filtered.pop("loss_delta", None)
     if weights.sigreg <= 0:
         filtered.pop("loss_sigreg", None)
-    if weights.rollout <= 0:
-        filtered.pop("loss_rollout", None)
+    if weights.z_rollout <= 0:
+        filtered.pop("loss_z_rollout", None)
     if weights.consistency <= 0:
         filtered.pop("loss_consistency", None)
-    if weights.ema_consistency <= 0:
-        filtered.pop("loss_ema_consistency", None)
     if weights.recon <= 0:
         filtered.pop("loss_recon", None)
     if weights.recon_multi_gauss <= 0:
@@ -1249,12 +1292,16 @@ def log_metrics(
         filtered["loss_val_recon_multi_box"] = metrics["loss_val_recon_multi_box"]
     if "loss_val_recon_patch" in metrics:
         filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
-    if weights.action_recon <= 0:
-        filtered.pop("loss_action", None)
+    if weights.action_z <= 0:
+        filtered.pop("loss_action_z", None)
     if weights.action_s <= 0:
         filtered.pop("loss_action_s", None)
     if weights.h2z <= 0:
         filtered.pop("loss_h2z", None)
+    if weights.h2z_2hop <= 0:
+        filtered.pop("loss_h2z_2hop", None)
+    if weights.s_rollout <= 0:
+        filtered.pop("loss_s_rollout", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1282,16 +1329,17 @@ LOSS_COLUMNS = [
     "loss_val_recon_patch",
     "loss_jepa",
     "loss_sigreg",
-    "loss_rollout",
+    "loss_z_rollout",
     "loss_consistency",
-    "loss_ema_consistency",
     "loss_recon",
     "loss_recon_multi_gauss",
     "loss_recon_multi_box",
     "loss_recon_patch",
-    "loss_action",
+    "loss_action_z",
     "loss_action_s",
     "loss_h2z",
+    "loss_h2z_2hop",
+    "loss_s_rollout",
     "loss_delta",
     "delta_pred_norm",
     "delta_target_norm",
@@ -1321,16 +1369,17 @@ class LossHistory:
     val_recon_patch: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
-    rollout: List[float] = field(default_factory=list)
+    z_rollout: List[float] = field(default_factory=list)
     consistency: List[float] = field(default_factory=list)
-    ema_consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     recon_multi_gauss: List[float] = field(default_factory=list)
     recon_multi_box: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
-    action: List[float] = field(default_factory=list)
+    action_z: List[float] = field(default_factory=list)
     action_s: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
+    h2z_2hop: List[float] = field(default_factory=list)
+    s_rollout: List[float] = field(default_factory=list)
     delta: List[float] = field(default_factory=list)
     delta_pred_norm: List[float] = field(default_factory=list)
     delta_target_norm: List[float] = field(default_factory=list)
@@ -1357,16 +1406,17 @@ class LossHistory:
         self.val_recon_patch.append(metrics.get("loss_val_recon_patch", 0.0))
         self.jepa.append(metrics["loss_jepa"])
         self.sigreg.append(metrics["loss_sigreg"])
-        self.rollout.append(metrics["loss_rollout"])
+        self.z_rollout.append(metrics["loss_z_rollout"])
         self.consistency.append(metrics["loss_consistency"])
-        self.ema_consistency.append(metrics["loss_ema_consistency"])
         self.recon.append(metrics["loss_recon"])
         self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
         self.recon_patch.append(metrics["loss_recon_patch"])
-        self.action.append(metrics["loss_action"])
+        self.action_z.append(metrics["loss_action_z"])
         self.action_s.append(metrics["loss_action_s"])
         self.h2z.append(metrics["loss_h2z"])
+        self.h2z_2hop.append(metrics["loss_h2z_2hop"])
+        self.s_rollout.append(metrics["loss_s_rollout"])
         self.delta.append(metrics["loss_delta"])
         self.delta_pred_norm.append(metrics["delta_pred_norm"])
         self.delta_target_norm.append(metrics["delta_target_norm"])
@@ -1404,16 +1454,17 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.val_recon_patch,
             history.jepa,
             history.sigreg,
-            history.rollout,
+            history.z_rollout,
             history.consistency,
-            history.ema_consistency,
             history.recon,
             history.recon_multi_gauss,
             history.recon_multi_box,
             history.recon_patch,
-            history.action,
+            history.action_z,
             history.action_s,
             history.h2z,
+            history.h2z_2hop,
+            history.s_rollout,
             history.delta,
             history.delta_pred_norm,
             history.delta_target_norm,
@@ -1447,11 +1498,12 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         "jepa": _color(1),
         "sigreg": _color(2),
         "recon": _color(3),
-        "rollout": _color(4),
+        "z_rollout": _color(4),
         "consistency": _color(5),
-        "action": _color(6),
+        "action_z": _color(6),
         "action_s": _color(7),
-        "ema_consistency": _color(8),
+        "h2z_2hop": _color(16),
+        "s_rollout": _color(17),
     }
     plt.plot(history.steps, history.world, label="world", color=color_map["world"])
     if any(val != 0.0 for val in history.val_world):
@@ -1467,16 +1519,18 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
     plt.plot(history.steps, history.sigreg, label="sigreg", color=color_map["sigreg"])
     plt.plot(history.steps, history.recon, label="recon", color=color_map["recon"])
-    if any(val != 0.0 for val in history.rollout):
-        plt.plot(history.steps, history.rollout, label="rollout", color=color_map["rollout"])
+    if any(val != 0.0 for val in history.z_rollout):
+        plt.plot(history.steps, history.z_rollout, label="z_rollout", color=color_map["z_rollout"])
     if any(val != 0.0 for val in history.consistency):
         plt.plot(history.steps, history.consistency, label="consistency", color=color_map["consistency"])
-    if any(val != 0.0 for val in history.ema_consistency):
-        plt.plot(history.steps, history.ema_consistency, label="ema_consistency", color=color_map["ema_consistency"])
-    if any(val != 0.0 for val in history.action):
-        plt.plot(history.steps, history.action, label="action_recon", color=color_map["action"])
+    if any(val != 0.0 for val in history.action_z):
+        plt.plot(history.steps, history.action_z, label="action_z", color=color_map["action_z"])
     if any(val != 0.0 for val in history.action_s):
         plt.plot(history.steps, history.action_s, label="action_s", color=color_map["action_s"])
+    if any(val != 0.0 for val in history.h2z_2hop):
+        plt.plot(history.steps, history.h2z_2hop, label="h2z_2hop", color=color_map["h2z_2hop"])
+    if any(val != 0.0 for val in history.s_rollout):
+        plt.plot(history.steps, history.s_rollout, label="s_rollout", color=color_map["s_rollout"])
     if any(val != 0.0 for val in history.recon_patch):
         plt.plot(history.steps, history.recon_patch, label="recon_patch", color=_color(8))
     if any(val != 0.0 for val in history.recon_multi_gauss):
@@ -1612,25 +1666,26 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     # FiLM layers (applied twice, each has gamma/beta projections)
     for _ in range(cfg.predictor_film_layers * 2):
         predictor_flops += _linear_flops(hidden_dim, hidden_dim) * 2  # gamma + beta
-    # hidden_proj
-    predictor_flops += _linear_flops(hidden_dim, hidden_dim)
+    # hidden layers after in_proj
+    for _ in range(max(cfg.predictor_layers - 1, 0)):
+        predictor_flops += _linear_flops(hidden_dim, hidden_dim)
     # out_proj
     predictor_flops += _linear_flops(hidden_dim, emb_dim)
 
     num_predictions = batch_size * (seq_len - 1)
     predictor_total = predictor_flops * num_predictions
 
-    # --- Action-from-delta head (per transition) ---
+    # --- Action-from-pair head (per transition) ---
     delta_head_flops = 0
-    delta_head_flops += _linear_flops(emb_dim, hidden_dim)
+    delta_head_flops += _linear_flops(emb_dim * 2, hidden_dim)
     delta_head_flops += _linear_flops(hidden_dim, hidden_dim)
     delta_head_flops += _linear_flops(hidden_dim, action_dim)
     delta_head_total = delta_head_flops * num_predictions
 
-    # --- Action-from-s-delta head (per transition) ---
+    # --- Action-from-s-pair head (per transition) ---
     s_dim = cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim
     s_delta_head_flops = 0
-    s_delta_head_flops += _linear_flops(s_dim, hidden_dim)
+    s_delta_head_flops += _linear_flops(s_dim * 2, hidden_dim)
     s_delta_head_flops += _linear_flops(hidden_dim, hidden_dim)
     s_delta_head_flops += _linear_flops(hidden_dim, action_dim)
     s_delta_head_total = s_delta_head_flops * num_predictions
@@ -2785,7 +2840,7 @@ def _save_diagnostics_outputs(
     if delta_s_dir is not None and alignment_s_dir is not None and cycle_s_dir is not None:
         with torch.no_grad():
             _, _, _, h_states = _predictor_rollout(model, embeddings, actions)
-            s_embeddings = model.state_head(h_states)
+            s_embeddings = model.h2s(h_states)
         motion_s = _compute_motion_subspace(s_embeddings, actions_cpu, cfg.top_k_components, paths)
         if motion_s is not None:
             _save_motion_diagnostics_outputs(
@@ -3133,8 +3188,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     model = JEPAWorldModel(model_cfg).to(device)
 
     ema_model: Optional[JEPAWorldModel] = None
-    if cfg.loss_weights.ema_consistency > 0 and cfg.ema.momentum >= 0.0:
-        ema_model = build_ema_model(model)
 
     decoder_schedule = model_cfg.decoder_schedule if model_cfg.decoder_schedule is not None else model_cfg.encoder_schedule
     decoder = VisualizationDecoder(
@@ -3269,9 +3322,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
         # Take a training step.
         train_start = perf_counter()
-        metrics, difficulty_info = training_step(
-            model, decoder, optimizer, batch, cfg, weights, ema_model, cfg.ema.momentum, loss_norm_ema
-        )
+        metrics, difficulty_info = training_step(model, decoder, optimizer, batch, cfg, weights, loss_norm_ema)
         timing_totals["train"] += perf_counter() - train_start
 
         # Update hard examples.
@@ -3417,7 +3468,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         "PCA z",
                     )
                     h_states = _rollout_hidden_states(model, embed_outputs["embeddings"], embed_actions)
-                    s_embeddings = model.state_head(h_states)
+                    s_embeddings = model.h2s(h_states)
                     save_embedding_projection(
                         s_embeddings,
                         pca_s_dir / f"pca_s_{global_step:07d}.png",
@@ -3504,7 +3555,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     vis_actions = vis_ctrl_batch_cpu[1].to(device)
                     vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
                     _, _, _, vis_h_states = _predictor_rollout(model, vis_embeddings, vis_actions)
-                    vis_s_embeddings = model.state_head(vis_h_states)
+                    vis_s_embeddings = model.h2s(vis_h_states)
                     warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
                     metrics_z = compute_vis_ctrl_metrics(
                         vis_embeddings,

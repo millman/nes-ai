@@ -339,10 +339,10 @@ def save_graph_diagnostics(
     # Prepare flattened latent tensors and normalization.
     embedding_label = embedding_kind
     if embedding_kind == "s":
-        s_targets = model.state_head(h_states)
-        s_hat_full = torch.cat([model.state_head(h_preds), model.state_head(h_states[:, -1:, :])], dim=1)
+        s_targets = model.h2s(h_states)
+        s_hat_full = torch.cat([model.h2s(h_preds), model.h2s(h_states[:, -1:, :])], dim=1)
         if cfg.use_ema_targets and ema_model is not None and ema_h_states is not None:
-            targets = ema_model.state_head(ema_h_states)
+            targets = ema_model.h2s(ema_h_states)
         else:
             targets = s_targets
         z_flat = s_targets.reshape(-1, s_targets.shape[-1])

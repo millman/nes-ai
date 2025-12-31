@@ -219,7 +219,7 @@ def adjacency_losses(
     h_plan_full = _rollout_hidden_states(model, plan_embeddings, actions)
     plan_embeddings = plan_embeddings[:, warmup:]
     h_plan = h_plan_full[:, warmup:]
-    states = model.state_head(h_plan)
+    states = model.h2s(h_plan)
 
     loss_adj0 = zero
     if weights.adj0 > 0 and states.shape[1] > 1:
@@ -230,7 +230,7 @@ def adjacency_losses(
         if cfg.detach_encoder:
             z_noisy = z_noisy.detach()
         h_noisy_full = _rollout_hidden_states(model, z_noisy, actions)
-        states_noisy = model.state_head(h_noisy_full[:, warmup:])
+        states_noisy = model.h2s(h_noisy_full[:, warmup:])
         loss_adj0 = adjacency_loss_adj0(states, states_noisy, weights, cfg)
 
     state_dim = states.shape[-1]
@@ -244,7 +244,7 @@ def adjacency_losses(
             h_plan[:, :-1],
             paired_actions[:, :-1],
         )
-        state_preds = model.state_head(h_pred1)
+        state_preds = model.h2s(h_pred1)
 
     if weights.adj1 > 0:
         loss_adj1, adj_entropy, adj_hit = adjacency_loss_adj1(
@@ -262,7 +262,7 @@ def adjacency_losses(
                 h_pred1[:, :-1],
                 paired_actions[:, 1:-1],
             )
-            state_preds2 = model.state_head(h_pred2)
+            state_preds2 = model.h2s(h_pred2)
         if state_preds2 is None:
             state_preds2 = states.new_zeros((states.shape[0], max(states.shape[1] - 2, 0), state_dim))
         loss_adj2, adj2_hit = adjacency_loss_adj2(

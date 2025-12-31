@@ -99,7 +99,7 @@ def write_state_embedding_outputs(
         embeddings = model.encode_sequence(frames)["embeddings"]
         actions = torch.from_numpy(traj_inputs.actions).to(device).unsqueeze(0)
         h_states = _rollout_hidden_states(model, embeddings, actions)
-        s = model.state_head(h_states)[0]
+        s = model.h2s(h_states)[0]
 
     warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
     warmup = max(min(warmup_frames, s.shape[0] - 1), 0)
@@ -157,7 +157,7 @@ def write_state_embedding_outputs(
 
         h_hat_open = _rollout_open_loop(model, embeddings, actions)
         if h_hat_open.shape[1] > 0:
-            s_hat = model.state_head(h_hat_open)[0].detach().cpu().numpy()
+            s_hat = model.h2s(h_hat_open)[0].detach().cpu().numpy()
             s_next = s_np[1:]
             s_hat_trim = s_hat[warmup:]
             s_next_trim = s_next[warmup:] if warmup < s_next.shape[0] else s_next[:0]
@@ -180,7 +180,7 @@ def write_state_embedding_outputs(
         hist_embeddings = model.encode_sequence(hist_frames)["embeddings"]
         hist_actions = hist_actions_cpu.to(device)
         hist_h_states = _rollout_hidden_states(model, hist_embeddings, hist_actions)
-        hist_s = model.state_head(hist_h_states)
+        hist_s = model.h2s(hist_h_states)
     hist_warmup = max(min(warmup_frames, hist_s.shape[1] - 1), 0)
     hist_s = hist_s[:, hist_warmup:]
     if hist_s.shape[1] < 1:
