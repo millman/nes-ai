@@ -212,15 +212,16 @@ document.addEventListener("DOMContentLoaded", () => {
         sample_size: document.getElementById("graph-samples"),
     };
 
-    function nearestStep(value) {
+    function nearestStepAtOrBelow(value) {
         if (!steps.length) return null;
-        let best = steps[0];
-        let bestDiff = Math.abs(value - best);
-        for (let i = 1; i < steps.length; i++) {
-            const diff = Math.abs(value - steps[i]);
-            if (diff < bestDiff) {
-                best = steps[i];
-                bestDiff = diff;
+        let best = null;
+        for (let i = 0; i < steps.length; i++) {
+            const step = steps[i];
+            if (step > value) {
+                continue;
+            }
+            if (best === null || step > best) {
+                best = step;
             }
         }
         return best;
@@ -309,7 +310,7 @@ document.addEventListener("DOMContentLoaded", () => {
             lossPlot.on("plotly_hover", (event) => {
                 const point = event?.points?.[0];
                 if (!point || typeof point.x === "undefined") return;
-                const nearest = nearestStep(point.x);
+                const nearest = nearestStepAtOrBelow(point.x);
                 if (nearest !== null) {
                     updateForStep(nearest);
                 }

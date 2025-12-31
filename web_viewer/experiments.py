@@ -843,6 +843,8 @@ VIS_STEP_SPECS = [
     ("vis_rolling_0", "vis_rolling_0", "rollout_*.png", "rollout_"),
     ("vis_rolling_1", "vis_rolling_1", "rollout_*.png", "rollout_"),
     ("embeddings", "embeddings", "embeddings_*.png", "embeddings_"),
+    ("pca_z", "pca_z", "pca_z_*.png", "pca_z_"),
+    ("pca_s", "pca_s", "pca_s_*.png", "pca_s_"),
     ("samples_hard", "samples_hard", "hard_*.png", "hard_"),
     ("vis_self_distance_z", "vis_self_distance_z", "self_distance_z_*.png", "self_distance_z_"),
     ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),

@@ -15,6 +15,11 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.75rem 1rem;
 }
+.vis-ctrl-grid-quad {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem 1rem;
+}
 .vis-ctrl-card img {
     width: 100%;
     height: auto;
@@ -72,6 +77,14 @@
     .vis-ctrl-grid {
         grid-template-columns: 1fr;
     }
+    .vis-ctrl-grid-quad {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 575.98px) {
+    .vis-ctrl-grid-quad {
+        grid-template-columns: 1fr;
+    }
 }
 </style>
 
@@ -110,9 +123,10 @@
         <strong>Vis v Ctrl metrics</strong>
         <span class="text-muted small">hover to scrub steps</span>
         <span class="ms-auto text-muted small">Step: <span id="vis-ctrl-step-label" class="vis-ctrl-step-label">—</span></span>
+        <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Z vs S are combined aggregates of three signals: local smoothness (mean kNN distance across k), two-step composition error, and neighborhood stability (mean Jaccard across k). Each combined value is the mean of those three components at the current step, letting you compare overall Z vs S consistency in one line. Formula: combined = (mean_k knn_mean_k + composition_error + mean_k jaccard_k) / 3.">i</span>
     </div>
     <div class="card-body">
-        <div id="vis-ctrl-metrics-plot" style="height: 220px;"></div>
+        <div id="vis-ctrl-metrics-plot" style="height: 260px;"></div>
     </div>
 </div>
 
@@ -169,6 +183,9 @@
             <div class="text-muted small" id="vis-ctrl-smooth-s-caption"></div>
         </div>
     </div>
+</div>
+
+<div class="vis-ctrl-grid-quad mb-3">
     <div class="card vis-ctrl-card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Two-step composition error (Z)</span>
@@ -184,19 +201,6 @@
     </div>
     <div class="card vis-ctrl-card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>Two-step composition error (S)</span>
-            <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="vis-ctrl-step-label">—</span></span>
-                <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Error between observed 2-step delta and mean action-direction composition in S. Read: histogram shows error spread; mean line summarizes typical mismatch. Good: low mean error with a tight distribution.">i</span>
-            </div>
-        </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="vis-ctrl-comp-s-img" class="img-fluid d-none" alt="Two-step composition error (S)">
-            <div class="text-muted small" id="vis-ctrl-comp-s-caption"></div>
-        </div>
-    </div>
-    <div class="card vis-ctrl-card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Neighborhood stability (Z)</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="vis-ctrl-step-label">—</span></span>
@@ -206,6 +210,19 @@
         <div class="card-body d-flex flex-column gap-2">
             <img id="vis-ctrl-stability-z-img" class="img-fluid d-none" alt="Neighborhood stability (Z)">
             <div class="text-muted small" id="vis-ctrl-stability-z-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Two-step composition error (S)</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="vis-ctrl-step-label">—</span></span>
+                <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Error between observed 2-step delta and mean action-direction composition in S. Read: histogram shows error spread; mean line summarizes typical mismatch. Good: low mean error with a tight distribution.">i</span>
+            </div>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-comp-s-img" class="img-fluid d-none" alt="Two-step composition error (S)">
+            <div class="text-muted small" id="vis-ctrl-comp-s-caption"></div>
         </div>
     </div>
     <div class="card vis-ctrl-card h-100">
@@ -290,6 +307,22 @@ document.addEventListener("DOMContentLoaded", () => {
         : (historySteps.length ? historySteps[historySteps.length - 1] : 0);
     updateAll(initialStep);
 
+    const nearestStepAtOrBelow = (value) => {
+        const candidates = steps.length ? steps : historySteps;
+        if (!candidates.length) return null;
+        let best = null;
+        for (let i = 0; i < candidates.length; i += 1) {
+            const step = candidates[i];
+            if (step > value) {
+                continue;
+            }
+            if (best === null || step > best) {
+                best = step;
+            }
+        }
+        return best;
+    };
+
     function updatePinState(nextState) {
         plotPinned = nextState;
         if (!plotWrapper || !plotPinButton) return;
@@ -310,8 +343,10 @@ document.addEventListener("DOMContentLoaded", () => {
             metricsPlot.on("plotly_hover", (ev) => {
                 const point = ev?.points?.[0];
                 if (!point) return;
-                const step = Math.max(0, Math.round(point.x));
-                updateAll(step);
+                const nearest = nearestStepAtOrBelow(point.x);
+                if (nearest !== null) {
+                    updateAll(nearest);
+                }
             });
             metricsPlot.on("plotly_unhover", () => {
                 if (plotPinned) return;

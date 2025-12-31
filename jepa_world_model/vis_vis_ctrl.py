@@ -12,7 +12,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import compress_actions_to_ids
-from jepa_world_model.vis_raincloud import plot_half_raincloud
+from jepa_world_model.plot_raincloud import plot_raincloud
 
 
 @dataclass
@@ -241,7 +241,7 @@ def save_smoothness_plot(
     if ks:
         samples = [metrics.knn_distance_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
         labels = [f"k={k}" for k in ks]
-        plot_half_raincloud(axes[0], samples, labels, "kNN distance")
+        plot_raincloud(axes[0], samples, labels, "kNN distance")
         axes[0].set_title(f"kNN distance raincloud ({embedding_label})")
     else:
         axes[0].text(0.5, 0.5, "No kNN data.", ha="center", va="center")
@@ -301,7 +301,7 @@ def save_stability_plot(
     if ks:
         samples = [metrics.jaccard_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
         labels = [f"k={k}" for k in ks]
-        plot_half_raincloud(ax, samples, labels, "Jaccard")
+        plot_raincloud(ax, samples, labels, "Jaccard")
         ax.set_ylim(0.0, 1.0)
         ax.set_title(f"Neighborhood stability ({embedding_label})")
     else:

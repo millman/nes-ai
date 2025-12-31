@@ -401,15 +401,16 @@ document.addEventListener("DOMContentLoaded", () => {
         sample_size: document.getElementById("graph-s-samples"),
     };
 
-    function nearestStep(value, steps) {
+    function nearestStepAtOrBelow(value, steps) {
         if (!steps.length) return null;
-        let best = steps[0];
-        let bestDiff = Math.abs(value - best);
-        for (let i = 1; i < steps.length; i++) {
-            const diff = Math.abs(value - steps[i]);
-            if (diff < bestDiff) {
-                best = steps[i];
-                bestDiff = diff;
+        let best = null;
+        for (let i = 0; i < steps.length; i++) {
+            const step = steps[i];
+            if (step > value) {
+                continue;
+            }
+            if (best === null || step > best) {
+                best = step;
             }
         }
         return best;
@@ -429,7 +430,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function updateSummary(history, summaryTargets, step) {
         if (!history.length) return;
-        const nearest = nearestStep(step, history.map((r) => r.step || 0));
+        const nearest = nearestStepAtOrBelow(step, history.map((r) => r.step || 0));
         if (nearest === null) return;
         const row = history.find((r) => Number(r.step) === Number(nearest));
         if (!row) return;
@@ -455,9 +456,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function updateForStep(stepValue) {
-        const step = Math.max(0, Math.round(stepValue));
-        const nearestZ = nearestStep(step, stepsZ);
-        const nearestS = nearestStep(step, stepsS);
+        const step = Math.max(0, stepValue);
+        const nearestZ = nearestStepAtOrBelow(step, stepsZ);
+        const nearestS = nearestStepAtOrBelow(step, stepsS);
         stepLabels.forEach((label) => {
             const scope = label.getAttribute("data-step-scope");
             if (scope === "z") {

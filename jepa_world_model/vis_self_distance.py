@@ -125,10 +125,10 @@ def write_self_distance_plots(
     dist_first_cos_np,
     dist_prior_cos_np,
     global_step: int,
-    embedding_label: str = "z",
-    title_prefix: str = "Self-distance",
-    file_prefix: str = "self_distance",
-    cosine_prefix: Optional[str] = None,
+    embedding_label: str,
+    title_prefix: str,
+    file_prefix: str,
+    cosine_prefix: Optional[str],
 ) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 3, figsize=(14, 8.5))
@@ -195,10 +195,10 @@ def write_self_distance_outputs_from_embeddings(
     csv_dir: Path,
     plot_dir: Path,
     global_step: int,
-    embedding_label: str = "z",
-    title_prefix: str = "Self-distance",
-    file_prefix: str = "self_distance",
-    cosine_prefix: Optional[str] = None,
+    embedding_label: str,
+    title_prefix: str,
+    file_prefix: str,
+    cosine_prefix: Optional[str],
     start_index: int = 0,
 ) -> None:
     if embeddings.shape[0] < 2:
@@ -252,10 +252,10 @@ def write_self_distance_outputs(
     csv_dir: Path,
     plot_dir: Path,
     global_step: int,
-    embedding_label: str = "z",
-    title_prefix: str = "Self-distance",
-    file_prefix: str = "self_distance",
-    cosine_prefix: Optional[str] = None,
+    embedding_label: str,
+    title_prefix: str,
+    file_prefix: str,
+    cosine_prefix: Optional[str],
 ) -> None:
     if traj_inputs.frames.shape[1] < 2:
         return

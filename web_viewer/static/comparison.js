@@ -15,12 +15,20 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_fixed_1", label: "Rollouts:Fixed 1", prefix: "rollout_", folder: "vis_fixed_1" },
   { value: "vis_rolling_0", label: "Rollouts:Rolling 0", prefix: "rollout_", folder: "vis_rolling_0" },
   { value: "vis_rolling_1", label: "Rollouts:Rolling 1", prefix: "rollout_", folder: "vis_rolling_1" },
-  { value: "embeddings", label: "Embeddings:Sequence", prefix: "embeddings_", folder: "embeddings" },
+  {
+    value: "pca_z",
+    label: "Diagnostics:PCA (Z)",
+    prefix: "pca_z_",
+    folder: "pca_z",
+    legacyPrefix: "embeddings_",
+    legacyFolder: "embeddings",
+  },
+  { value: "pca_s", label: "Diagnostics:PCA (S)", prefix: "pca_s_", folder: "pca_s" },
   { value: "samples_hard", label: "Samples:Hard", prefix: "hard_", folder: "samples_hard" },
   { value: "vis_self_distance_z", label: "Self-distance:Distance (Z)", prefix: "self_distance_z_", folder: "vis_self_distance_z" },
   { value: "vis_self_distance_s", label: "Self-distance:Distance (S)", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
-  { value: "vis_delta_z_pca", label: "Diagnostics:Delta PCA (Z)", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
-  { value: "vis_delta_s_pca", label: "Diagnostics:Delta PCA (S)", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
+  { value: "vis_delta_z_pca", label: "Diagnostics:Delta-z PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
+  { value: "vis_delta_s_pca", label: "Diagnostics:Delta-s PCA", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
   { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
   { value: "vis_odometry_current_s", label: "Odometry:Cumulative sum of Δs PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
   { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
@@ -37,6 +45,22 @@ const IMAGE_FOLDER_OPTIONS = [
     prefix: "action_alignment_detail_",
     folder: "vis_action_alignment_s",
   },
+  { value: "vis_ctrl_smoothness_z", label: "Vis v Ctrl:Local smoothness (Z)", prefix: "smoothness_z_", folder: "vis_vis_ctrl" },
+  { value: "vis_ctrl_smoothness_s", label: "Vis v Ctrl:Local smoothness (S)", prefix: "smoothness_s_", folder: "vis_vis_ctrl" },
+  {
+    value: "vis_ctrl_composition_z",
+    label: "Vis v Ctrl:Two-step composition error (Z)",
+    prefix: "composition_error_z_",
+    folder: "vis_vis_ctrl",
+  },
+  {
+    value: "vis_ctrl_composition_s",
+    label: "Vis v Ctrl:Two-step composition error (S)",
+    prefix: "composition_error_s_",
+    folder: "vis_vis_ctrl",
+  },
+  { value: "vis_ctrl_stability_z", label: "Vis v Ctrl:Neighborhood stability (Z)", prefix: "stability_z_", folder: "vis_vis_ctrl" },
+  { value: "vis_ctrl_stability_s", label: "Vis v Ctrl:Neighborhood stability (S)", prefix: "stability_s_", folder: "vis_vis_ctrl" },
   { value: "vis_cycle_error", label: "Diagnostics:Cycle error (Z)", prefix: "cycle_error_", folder: "vis_cycle_error_z" },
   { value: "vis_cycle_error_s", label: "Diagnostics:Cycle error (S)", prefix: "cycle_error_", folder: "vis_cycle_error_s" },
   { value: "vis_adjacency", label: "Adjacency:Graph", prefix: "adjacency_", folder: "vis_adjacency" },
@@ -70,14 +94,30 @@ function getImageOption(folderValue) {
   return IMAGE_FOLDER_OPTIONS.find((opt) => opt.value === folderValue);
 }
 
-function getImagePrefixForFolder(folderValue) {
+function resolveImageSpec(folderValue, stepsMap, expId) {
   const option = getImageOption(folderValue);
-  return option ? option.prefix : "rollout_";
-}
-
-function getImageFolderPath(folderValue) {
-  const option = getImageOption(folderValue);
-  return option ? option.folder || option.value : folderValue;
+  if (!option) {
+    return { stepsKey: folderValue, folderPath: folderValue, prefix: "rollout_" };
+  }
+  const map = stepsMap?.[expId];
+  const directSteps = map?.[folderValue];
+  if (
+    option.legacyFolder
+    && (!Array.isArray(directSteps) || !directSteps.length)
+    && Array.isArray(map?.[option.legacyFolder])
+    && map[option.legacyFolder].length
+  ) {
+    return {
+      stepsKey: option.legacyFolder,
+      folderPath: option.legacyFolder,
+      prefix: option.legacyPrefix || option.prefix,
+    };
+  }
+  return {
+    stepsKey: folderValue,
+    folderPath: option.folder || option.value,
+    prefix: option.prefix,
+  };
 }
 
 function getStepsForFolder(stepsMap, expId, folderValue) {
@@ -85,7 +125,8 @@ function getStepsForFolder(stepsMap, expId, folderValue) {
   if (!map) {
     return [];
   }
-  const direct = map[folderValue];
+  const spec = resolveImageSpec(folderValue, stepsMap, expId);
+  const direct = map[spec.stepsKey];
   if (Array.isArray(direct) && direct.length) {
     return direct;
   }
@@ -130,10 +171,9 @@ function computeInitialPreviewStep(stepsMap, folderValue) {
 function renderPreviewsAtStep(step, previews, stepsMap) {
   const targetStep = step !== null && step !== undefined ? Math.max(0, Math.round(step)) : null;
   const folderValue = currentImageFolder;
-  const folderPath = getImageFolderPath(folderValue);
-  const prefix = getImagePrefixForFolder(folderValue);
   Object.entries(previews || {}).forEach(([expId, preview]) => {
     const displayTitle = preview.displayTitle || expId;
+    const spec = resolveImageSpec(folderValue, stepsMap, expId);
     const available = getStepsForFolder(stepsMap, expId, folderValue);
     const matched = targetStep !== null ? nearestStepAtOrBelow(targetStep, available) : (available.length ? available[available.length - 1] : null);
     if (matched === null) {
@@ -145,16 +185,16 @@ function renderPreviewsAtStep(step, previews, stepsMap) {
       preview.img.removeAttribute("data-step");
       return;
     }
-    const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
-    const src = `/assets/${expId}/${folderPath}/${filename}`;
+    const filename = `${spec.prefix}${matched.toString().padStart(7, "0")}.png`;
+    const src = `/assets/${expId}/${spec.folderPath}/${filename}`;
     const pathText =
       targetStep !== null
-        ? `${expId}/${folderPath}/${filename} (selected ${targetStep}, showing ${matched})`
-        : `${expId}/${folderPath}/${filename} (showing ${matched})`;
+        ? `${expId}/${spec.folderPath}/${filename} (selected ${targetStep}, showing ${matched})`
+        : `${expId}/${spec.folderPath}/${filename} (showing ${matched})`;
     preview.title.textContent = displayTitle;
     preview.path.textContent = pathText;
     preview.img.src = src;
-    preview.img.alt = `${folderPath} ${matched}`;
+    preview.img.alt = `${spec.folderPath} ${matched}`;
     preview.img.dataset.step = String(matched);
     preview.img.classList.remove("d-none");
     preview.img.onerror = () => {
@@ -652,7 +692,7 @@ function collectPreviewMap(root) {
 function refreshPreviewImages(container, stepsMap) {
   const previews = collectPreviewMap(container);
   Object.entries(previews).forEach(([expId, preview]) => {
-    const steps = stepsMap?.[expId]?.[currentImageFolder] || stepsMap?.[expId]?.__fallback || [];
+    const steps = getStepsForFolder(stepsMap, expId, currentImageFolder);
     const latestStep = steps.length ? steps[steps.length - 1] : null;
     if (latestStep === null) {
       preview.img.classList.add("d-none");
@@ -660,13 +700,12 @@ function refreshPreviewImages(container, stepsMap) {
       preview.path.textContent = "No rollout image available.";
       return;
     }
-    const folderPath = getImageFolderPath(currentImageFolder);
-    const prefix = getImagePrefixForFolder(currentImageFolder);
-    preview.img.src = `/assets/${expId}/${folderPath}/${prefix}${latestStep}.png`;
+    const spec = resolveImageSpec(currentImageFolder, stepsMap, expId);
+    preview.img.src = `/assets/${expId}/${spec.folderPath}/${spec.prefix}${latestStep}.png`;
     preview.img.alt = `Rollout ${latestStep} for ${preview.displayTitle}`;
     preview.img.classList.remove("d-none");
     preview.missing.classList.add("d-none");
-    preview.path.textContent = `${folderPath}/${prefix}${latestStep}.png`;
+    preview.path.textContent = `${spec.folderPath}/${spec.prefix}${latestStep}.png`;
   });
 }
 

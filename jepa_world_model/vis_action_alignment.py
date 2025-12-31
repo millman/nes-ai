@@ -10,6 +10,7 @@ from matplotlib import colors as mcolors
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import decode_action_id
+from jepa_world_model.plot_strip_scatter import plot_strip_scatter
 
 
 def save_action_alignment_plot(
@@ -28,44 +29,24 @@ def save_action_alignment_plot(
         plt.close(fig)
         return
     labels = [decode_action_id(s["action_id"], action_dim) for s in stats]
-    x = np.arange(len(stats))
-    fig, ax = plt.subplots(figsize=(10, 6))
-    rng = np.random.default_rng(0)
-    for idx, stat in enumerate(stats):
+    samples: List[np.ndarray] = []
+    for stat in stats:
         cos_values = stat.get("cosines")
-        cos = np.asarray([] if cos_values is None else cos_values, dtype=np.float32)
-        if cos.size == 0:
-            continue
-        jitter = rng.uniform(-0.2, 0.2, size=cos.shape[0])
-        ax.scatter(
-            np.full_like(cos, x[idx], dtype=np.float32) + jitter,
-            cos,
-            s=18,
-            alpha=0.35,
-            color="tab:blue",
-            edgecolors="none",
-        )
-        ax.plot(
-            [x[idx] - 0.25, x[idx] + 0.25],
-            [stat["mean"], stat["mean"]],
-            color="tab:red",
-            linewidth=2,
-            alpha=0.9,
-        )
-        ax.text(
-            x[idx],
-            1.02,
-            f"n={stat['count']}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
+        samples.append(np.asarray([] if cos_values is None else cos_values, dtype=np.float32))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    plot_strip_scatter(
+        ax,
+        samples,
+        labels,
+        stat_fn=lambda arr: float(np.mean(arr)),
+        count_y_fn=lambda arr, stat: 1.02,
+        point_size=18,
+        count_fontsize=8,
+    )
 
     ax.axhline(cosine_high_threshold, color="gray", linestyle="--", linewidth=1, alpha=0.8)
     ax.set_ylabel("cosine alignment")
     ax.set_ylim(-1.05, 1.05)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
     ax.set_title("Action-conditioned cosine alignment (strip plot)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
@@ -95,30 +76,23 @@ def save_action_alignment_detail_plot(
     ax0 = axes[0, 0]
     if actions_sorted and any(per_action_cos.get(aid) is not None for aid in actions_sorted):
         actions_sorted = sorted(actions_sorted)
-        x = np.arange(len(actions_sorted))
-        rng = np.random.default_rng(0)
-        for idx, aid in enumerate(actions_sorted):
-            cos_vals = per_action_cos.get(aid)
-            if cos_vals is None or cos_vals.size == 0:
-                continue
-            jitter = rng.uniform(-0.2, 0.2, size=cos_vals.shape[0])
-            ax0.scatter(
-                np.full_like(cos_vals, x[idx], dtype=np.float32) + jitter,
-                cos_vals,
-                s=14,
-                alpha=0.35,
-                color="tab:blue",
-                edgecolors="none",
-            )
-            mean_val = float(np.mean(cos_vals))
-            ax0.plot([x[idx] - 0.25, x[idx] + 0.25], [mean_val, mean_val], color="tab:red", linewidth=2, alpha=0.9)
-            ax0.text(x[idx], 1.02, f"n={cos_vals.shape[0]}", ha="center", va="bottom", fontsize=7)
+        labels = [decode_action_id(aid, action_dim) for aid in actions_sorted]
+        samples = []
+        for aid in actions_sorted:
+            values = per_action_cos.get(aid)
+            samples.append(np.asarray([] if values is None else values, dtype=np.float32))
+        plot_strip_scatter(
+            ax0,
+            samples,
+            labels,
+            stat_fn=lambda arr: float(np.mean(arr)),
+            count_y_fn=lambda arr, stat: 1.02,
+            point_size=14,
+        )
         ax0.axhline(cosine_high_threshold, color="gray", linestyle="--", linewidth=1, alpha=0.8)
         ax0.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.8)
         ax0.set_ylabel("cosine alignment")
         ax0.set_ylim(-1.05, 1.05)
-        ax0.set_xticks(x)
-        ax0.set_xticklabels([decode_action_id(aid, action_dim) for aid in actions_sorted], rotation=35, ha="right", fontsize=9)
         ax0.set_title("Cosine alignment (per-action strip)")
     else:
         ax0.text(0.5, 0.5, "No valid cosine samples.", ha="center", va="center")
@@ -183,30 +157,21 @@ def save_action_alignment_detail_plot(
     # (1,0): per-action delta norm strip plot
     ax2 = axes[1, 0]
     if actions_sorted and any(per_action_norms.get(aid) is not None for aid in actions_sorted):
-        x = np.arange(len(actions_sorted))
-        rng = np.random.default_rng(0)
-        medians: List[float] = []
-        for idx, aid in enumerate(actions_sorted):
-            norms = per_action_norms.get(aid)
-            if norms is None or norms.size == 0:
-                continue
-            jitter = rng.uniform(-0.2, 0.2, size=norms.shape[0])
-            ax2.scatter(
-                np.full_like(norms, x[idx], dtype=np.float32) + jitter,
-                norms,
-                s=10,
-                alpha=0.35,
-                color="tab:blue",
-                edgecolors="none",
-            )
-            med = float(np.median(norms))
-            medians.append(med)
-            ax2.plot([x[idx] - 0.25, x[idx] + 0.25], [med, med], color="tab:red", linewidth=2, alpha=0.9)
-            ax2.text(x[idx], med, f"n={norms.shape[0]}", ha="center", va="bottom", fontsize=7)
+        labels = [decode_action_id(aid, action_dim) for aid in actions_sorted]
+        samples = []
+        for aid in actions_sorted:
+            values = per_action_norms.get(aid)
+            samples.append(np.asarray([] if values is None else values, dtype=np.float32))
+        medians = plot_strip_scatter(
+            ax2,
+            samples,
+            labels,
+            stat_fn=lambda arr: float(np.median(arr)),
+            count_y_fn=lambda arr, stat: stat,
+            point_size=10,
+        )
         if medians and all(m > 0 for m in medians):
             ax2.set_yscale("log")
-        ax2.set_xticks(x)
-        ax2.set_xticklabels([decode_action_id(aid, action_dim) for aid in actions_sorted], rotation=35, ha="right", fontsize=9)
         ax2.set_ylabel("delta norm")
         ax2.set_title("Delta norm by action (scatter/median)")
     else:

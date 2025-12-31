@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from jepa_world_model.vis_raincloud import plot_half_raincloud
+from jepa_world_model.plot_raincloud import plot_raincloud
 
 if TYPE_CHECKING:
     from jepa_world_model_trainer import GraphDiagnosticsConfig, JEPAWorldModel
@@ -192,7 +192,7 @@ def _plot_neff_violin(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) -> N
     if all(arr.size == 0 for arr in data):
         ax.text(0.5, 0.5, "No neighborhood stats available.", ha="center", va="center")
     else:
-        plot_half_raincloud(
+        plot_raincloud(
             ax,
             data,
             labels,

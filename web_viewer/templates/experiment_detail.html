@@ -18,18 +18,25 @@
                     { value: "vis_fixed_1", label: "Rollouts:Fixed 1", prefix: "rollout_", folder: "vis_fixed_1" },
                     { value: "vis_rolling_0", label: "Rollouts:Rolling 0", prefix: "rollout_", folder: "vis_rolling_0" },
                     { value: "vis_rolling_1", label: "Rollouts:Rolling 1", prefix: "rollout_", folder: "vis_rolling_1" },
-                    { value: "embeddings", label: "Embeddings:Sequence", prefix: "embeddings_", folder: "embeddings" },
+                    { value: "pca_z", label: "Diagnostics:PCA (Z)", prefix: "pca_z_", folder: "pca_z", legacyPrefix: "embeddings_", legacyFolder: "embeddings" },
+                    { value: "pca_s", label: "Diagnostics:PCA (S)", prefix: "pca_s_", folder: "pca_s" },
                     { value: "samples_hard", label: "Samples:Hard", prefix: "hard_", folder: "samples_hard" },
                     { value: "vis_self_distance_z", label: "Self-distance:Distance (Z)", prefix: "self_distance_z_", folder: "vis_self_distance_z" },
                     { value: "vis_self_distance_s", label: "Self-distance:Distance (S)", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
-                    { value: "vis_delta_z_pca", label: "Diagnostics:Delta PCA (Z)", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
-                    { value: "vis_delta_s_pca", label: "Diagnostics:Delta PCA (S)", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
+                    { value: "vis_delta_z_pca", label: "Diagnostics:Delta-z PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
+                    { value: "vis_delta_s_pca", label: "Diagnostics:Delta-s PCA", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
                     { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
                     { value: "vis_odometry_current_s", label: "Odometry:Cumulative sum of Δs PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
                     { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
                     { value: "vis_odometry_s_vs_s_hat", label: "Odometry:||s - s_hat|| + scatter", prefix: "s_vs_s_hat_", folder: "vis_odometry" },
                     { value: "vis_action_alignment_detail", label: "Diagnostics:Action alignment (Z)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_z" },
                     { value: "vis_action_alignment_detail_s", label: "Diagnostics:Action alignment (S)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_s" },
+                    { value: "vis_ctrl_smoothness_z", label: "Vis v Ctrl:Local smoothness (Z)", prefix: "smoothness_z_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_smoothness_s", label: "Vis v Ctrl:Local smoothness (S)", prefix: "smoothness_s_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_composition_z", label: "Vis v Ctrl:Two-step composition error (Z)", prefix: "composition_error_z_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_composition_s", label: "Vis v Ctrl:Two-step composition error (S)", prefix: "composition_error_s_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_stability_z", label: "Vis v Ctrl:Neighborhood stability (Z)", prefix: "stability_z_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_stability_s", label: "Vis v Ctrl:Neighborhood stability (S)", prefix: "stability_s_", folder: "vis_vis_ctrl" },
                     { value: "vis_cycle_error", label: "Diagnostics:Cycle error (Z)", prefix: "cycle_error_", folder: "vis_cycle_error_z" },
                     { value: "vis_cycle_error_s", label: "Diagnostics:Cycle error (S)", prefix: "cycle_error_", folder: "vis_cycle_error_s" },
                     { value: "vis_adjacency", label: "Adjacency:Graph", prefix: "adjacency_", folder: "vis_adjacency" },
@@ -153,13 +160,27 @@
                     }
 
                     const getFolder = () => (folderSelect && folderSelect.value) || "vis_fixed_0";
-                    const getPrefix = () => {
-                        const opt = IMAGE_FOLDER_OPTIONS.find((o) => o.value === getFolder());
-                        return opt ? opt.prefix : "rollout_";
-                    };
-                    const getFolderPath = () => {
-                        const opt = IMAGE_FOLDER_OPTIONS.find((o) => o.value === getFolder());
-                        return opt ? opt.folder || opt.value : getFolder();
+                    const resolveFolderSpec = (stepsMap) => {
+                        const folderValue = getFolder();
+                        const opt = IMAGE_FOLDER_OPTIONS.find((o) => o.value === folderValue);
+                        if (!opt) {
+                            return { key: folderValue, folder: folderValue, prefix: "rollout_" };
+                        }
+                        const directSteps = stepsMap && stepsMap[folderValue];
+                        if (
+                            opt.legacyFolder
+                            && (!Array.isArray(directSteps) || !directSteps.length)
+                            && stepsMap
+                            && Array.isArray(stepsMap[opt.legacyFolder])
+                            && stepsMap[opt.legacyFolder].length
+                        ) {
+                            return {
+                                key: opt.legacyFolder,
+                                folder: opt.legacyFolder,
+                                prefix: opt.legacyPrefix || opt.prefix,
+                            };
+                        }
+                        return { key: folderValue, folder: opt.folder || opt.value, prefix: opt.prefix };
                     };
 
                     const ensurePreviewStructure = () => {
@@ -176,7 +197,7 @@
                     const pathEl = () => pathDisplay;
                     const imgEl = () => preview.querySelector(".rollout-img");
                     const missingEl = () => preview.querySelector(".rollout-missing");
-                    const nearestStep = (target, list) => {
+                    const nearestStepAtOrBelow = (target, list) => {
                         if (!Array.isArray(list) || list.length === 0) {
                             return null;
                         }
@@ -194,9 +215,9 @@
                     };
                     const render = (step) => {
                         const target = Math.max(0, Math.round(step));
-                        const folder = getFolder();
-                        const folderSteps = (vizSteps && vizSteps[folder]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
-                        const matched = nearestStep(target, folderSteps);
+                        const spec = resolveFolderSpec(vizSteps || {});
+                        const folderSteps = (vizSteps && vizSteps[spec.key]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
+                        const matched = nearestStepAtOrBelow(target, folderSteps);
                         if (matched === null) {
                             const miss = missingEl();
                             const img = imgEl();
@@ -213,8 +234,8 @@
                             }
                             return;
                         }
-                        const prefix = getPrefix();
-                        const folderPath = getFolderPath();
+                        const prefix = spec.prefix;
+                        const folderPath = spec.folder;
                         const filename = `${prefix}${matched.toString().padStart(7, "0")}.png`;
                         const src = `/assets/${expId}/${folderPath}/${filename}`;
                         const path = pathEl();
@@ -253,9 +274,9 @@
                         render(point.x);
                     });
                     const renderLatest = () => {
-                        const folder = getFolder();
+                        const spec = resolveFolderSpec(vizSteps || {});
                         const stepsForFolder =
-                            (vizSteps && vizSteps[folder]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
+                            (vizSteps && vizSteps[spec.key]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
                         const lastStep = Array.isArray(stepsForFolder) && stepsForFolder.length
                             ? stepsForFolder[stepsForFolder.length - 1]
                             : null;
@@ -288,9 +309,16 @@
                     <option value="vis_action_alignment_detail">Diagnostics:Action alignment (Z)</option>
                     <option value="vis_cycle_error_s">Diagnostics:Cycle error (S)</option>
                     <option value="vis_cycle_error">Diagnostics:Cycle error (Z)</option>
-                    <option value="vis_delta_s_pca">Diagnostics:Delta PCA (S)</option>
-                    <option value="vis_delta_z_pca">Diagnostics:Delta PCA (Z)</option>
-                    <option value="embeddings">Embeddings:Sequence</option>
+                    <option value="vis_delta_s_pca">Diagnostics:Delta-s PCA</option>
+                    <option value="vis_delta_z_pca">Diagnostics:Delta-z PCA</option>
+                    <option value="pca_s">Diagnostics:PCA (S)</option>
+                    <option value="pca_z">Diagnostics:PCA (Z)</option>
+                    <option value="vis_ctrl_smoothness_z">Vis v Ctrl:Local smoothness (Z)</option>
+                    <option value="vis_ctrl_smoothness_s">Vis v Ctrl:Local smoothness (S)</option>
+                    <option value="vis_ctrl_composition_z">Vis v Ctrl:Two-step composition error (Z)</option>
+                    <option value="vis_ctrl_composition_s">Vis v Ctrl:Two-step composition error (S)</option>
+                    <option value="vis_ctrl_stability_z">Vis v Ctrl:Neighborhood stability (Z)</option>
+                    <option value="vis_ctrl_stability_s">Vis v Ctrl:Neighborhood stability (S)</option>
                     <option value="vis_graph_edge_consistency_s">Graph Diagnostics:Edge consistency (S)</option>
                     <option value="vis_graph_edge_consistency_z">Graph Diagnostics:Edge consistency (Z)</option>
                     <option value="vis_graph_in_degree_hist_s">Graph Diagnostics:In-degree (S)</option>

@@ -61,7 +61,7 @@ from jepa_world_model.loss_multi_scale_hardness import (
     multi_scale_hardness_loss_gaussian,
 )
 from jepa_world_model.vis_self_distance import write_self_distance_outputs
-from jepa_world_model.vis_state_embedding import write_state_embedding_outputs
+from jepa_world_model.vis_state_embedding import write_state_embedding_outputs, _rollout_hidden_states
 from jepa_world_model.vis_cycle_error import compute_cycle_errors, save_cycle_error_plot
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
 from jepa_world_model.vis_vis_ctrl import (
@@ -75,6 +75,11 @@ from jepa_world_model.encoder_schedule import _derive_encoder_schedule, _suggest
 from jepa_world_model.step_schedule import _parse_schedule, _should_run_schedule
 from jepa_world_model.data import TrajectorySequenceDataset, collate_batch, load_actions_for_trajectory
 from jepa_world_model.hard_sample_reservoir import HardSampleReservoir, inject_hard_examples_into_batch
+from jepa_world_model.vis_rollout import (
+    VisualizationSelection,
+    VisualizationSequence,
+    render_rollout_batch,
+)
 
 
 
@@ -564,12 +569,6 @@ class TrainConfig:
 
 
 @dataclass
-class VisualizationSelection:
-    row_indices: torch.Tensor
-    time_indices: torch.Tensor
-
-
-@dataclass
 class SelfDistanceInputs:
     frames: torch.Tensor  # [1, T, C, H, W] on CPU
     frame_paths: List[Path]  # relative to run directory
@@ -578,16 +577,6 @@ class SelfDistanceInputs:
     actions: np.ndarray  # [T, action_dim]
     action_labels: List[str]
     action_dim: int
-
-
-@dataclass
-class VisualizationSequence:
-    ground_truth: torch.Tensor
-    rollout: List[Optional[torch.Tensor]]
-    gradients: List[Optional[np.ndarray]]
-    reconstructions: torch.Tensor
-    labels: List[str]
-    actions: List[str] = field(default_factory=list)
 
 
 def _assert_adjacency_requirements(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights) -> None:
@@ -2898,92 +2887,52 @@ def _render_visualization_batch(
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
     frame_paths = batch_cpu[2]
-    if vis_frames.shape[0] == 0:
-        raise ValueError("Visualization batch must include at least one sequence.")
-    if vis_frames.shape[1] < 2:
-        raise ValueError("Visualization batch must include at least two frames.")
     vis_outputs = model.encode_sequence(vis_frames)
     vis_embeddings = vis_outputs["embeddings"]
     # Decoder no longer uses detail_skip - all spatial info is in the latent
     decoded_frames = decoder(vis_embeddings)
-    batch_size = vis_frames.shape[0]
-    min_start = 0
-    target_window = max(2, rollout_steps + 1)
-    if max_columns is not None:
-        target_window = max(target_window, max(2, max_columns))
-    max_window = min(target_window, vis_frames.shape[1] - min_start)
-    if max_window < 2:
-        raise ValueError("Visualization window must be at least two frames wide.")
-    max_start = max(min_start, vis_frames.shape[1] - max_window)
-    if selection is not None and selection.row_indices.numel() > 0:
-        num_rows = min(rows, selection.row_indices.numel())
-        row_indices = selection.row_indices[:num_rows].to(device=device)
-        base_starts = selection.time_indices[:num_rows].to(device=device)
-    else:
-        num_rows = min(rows, batch_size)
-        row_indices = torch.randperm(batch_size, generator=rng, device=device)[:num_rows]
-        base_starts = torch.randint(min_start, max_start + 1, (num_rows,), device=device, generator=rng)
-    sequences: List[VisualizationSequence] = []
-    debug_lines: List[str] = []
     paired_actions = _pair_actions(vis_actions)
-    for row_offset, idx in enumerate(row_indices):
-        start_idx = int(base_starts[row_offset].item()) if base_starts is not None else min_start
-        start_idx = max(min_start, min(start_idx, max_start))
-        gt_slice = vis_frames[idx, start_idx : start_idx + max_window]
-        if gt_slice.shape[0] < max_window:
-            continue
-        action_texts: List[str] = []
-        for offset in range(max_window):
-            action_idx = min(start_idx + offset, vis_actions.shape[1] - 1)
-            action_texts.append(describe_action_tensor(vis_actions[idx, action_idx]))
-        recon_tensor = decoded_frames[idx, start_idx : start_idx + max_window].clamp(0, 1)
-        rollout_frames: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
-        gradient_maps: List[Optional[np.ndarray]] = [None for _ in range(max_window)]
-        current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
-        current_hidden = current_embed.new_zeros(1, model.state_dim)
-        prev_pred_frame = decoded_frames[idx, start_idx].detach()
-        current_frame = prev_pred_frame
-        for step in range(1, max_window):
-            action = paired_actions[idx, start_idx + step - 1].unsqueeze(0)
-            prev_embed = current_embed
-            next_embed, _, next_hidden = model.predictor(current_embed, current_hidden, action)
-            decoded_next = decoder(next_embed)[0]
-            current_frame = decoded_next.clamp(0, 1)
+    items = render_rollout_batch(
+        vis_frames=vis_frames,
+        vis_actions=vis_actions,
+        embeddings=vis_embeddings,
+        decoded_frames=decoded_frames,
+        rows=rows,
+        rollout_steps=rollout_steps,
+        max_columns=max_columns,
+        selection=selection,
+        log_deltas=log_deltas,
+        predictor=model.predictor,
+        decode_fn=decoder,
+        paired_actions=paired_actions,
+        state_dim=model.state_dim,
+        action_text_fn=describe_action_tensor,
+        rng=rng,
+    )
+    sequences: List[VisualizationSequence] = []
+    grad_label = "Gradient Norm" if show_gradients else "Error Heatmap"
+    for item in items:
+        labels = _extract_frame_labels(frame_paths, item.row_index, item.start_idx, len(item.ground_truth))
+        gradients: List[Optional[np.ndarray]] = [None for _ in range(len(item.rollout))]
+        for step in range(1, len(item.rollout)):
+            current_frame = item.rollout[step]
+            if current_frame is None:
+                continue
+            target_frame = item.ground_truth[step]
             if show_gradients:
-                gradient_maps[step] = _prediction_gradient_heatmap(current_frame, gt_slice[step])
+                gradients[step] = _prediction_gradient_heatmap(current_frame, target_frame)
             else:
-                gradient_maps[step] = _loss_to_heatmap(gt_slice[step], current_frame)
-            rollout_frames[step] = current_frame.detach().cpu()
-            if log_deltas and row_offset < 2:
-                latent_norm = (next_embed - prev_embed).norm().item()
-                pixel_delta = (current_frame - prev_pred_frame).abs().mean().item()
-                frame_mse = F.mse_loss(current_frame, gt_slice[step]).item()
-                debug_lines.append(
-                    (
-                        f"[viz] row={int(idx)} step={step} "
-                        f"latent_norm={latent_norm:.4f} pixel_delta={pixel_delta:.4f} "
-                        f"frame_mse={frame_mse:.4f}"
-                    )
-                )
-            prev_pred_frame = current_frame.detach()
-            current_embed = next_embed
-            current_hidden = next_hidden
-        labels = _extract_frame_labels(frame_paths, int(idx.item()), start_idx, max_window)
+                gradients[step] = _loss_to_heatmap(target_frame, current_frame)
         sequences.append(
             VisualizationSequence(
-                ground_truth=gt_slice.detach().cpu(),
-                rollout=rollout_frames,
-                gradients=gradient_maps,
-                reconstructions=recon_tensor.detach().cpu(),
+                ground_truth=item.ground_truth,
+                rollout=item.rollout,
+                gradients=gradients,
+                reconstructions=item.reconstructions,
                 labels=labels,
-                actions=action_texts,
+                actions=item.actions,
             )
         )
-    if not sequences:
-        raise AssertionError("Failed to build any visualization sequences.")
-    if debug_lines:
-        print("\n".join(debug_lines))
-    grad_label = "Gradient Norm" if show_gradients else "Error Heatmap"
     return sequences, grad_label
 
 
@@ -3021,7 +2970,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     metrics_dir = run_dir / "metrics"
     fixed_vis_dir = run_dir / "vis_fixed"
     rolling_vis_dir = run_dir / "vis_rolling"
-    embeddings_vis_dir = run_dir / "embeddings"
+    pca_z_dir = run_dir / "pca_z"
+    pca_s_dir = run_dir / "pca_s"
     diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
     diagnostics_delta_s_dir = run_dir / "vis_delta_s_pca"
     diagnostics_alignment_dir = run_dir / "vis_action_alignment_z"
@@ -3048,7 +2998,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     print(f"[run] Writing outputs to {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    embeddings_vis_dir.mkdir(parents=True, exist_ok=True)
+    pca_z_dir.mkdir(parents=True, exist_ok=True)
+    pca_s_dir.mkdir(parents=True, exist_ok=True)
     if cfg.diagnostics.enabled:
         diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_delta_s_dir.mkdir(parents=True, exist_ok=True)
@@ -3458,10 +3409,19 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
                 if embedding_batch_cpu is not None:
                     embed_frames = embedding_batch_cpu[0].to(device)
+                    embed_actions = embedding_batch_cpu[1].to(device)
                     embed_outputs = model.encode_sequence(embed_frames)
                     save_embedding_projection(
                         embed_outputs["embeddings"],
-                        embeddings_vis_dir / f"embeddings_{global_step:07d}.png",
+                        pca_z_dir / f"pca_z_{global_step:07d}.png",
+                        "PCA z",
+                    )
+                    h_states = _rollout_hidden_states(model, embed_outputs["embeddings"], embed_actions)
+                    s_embeddings = model.state_head(h_states)
+                    save_embedding_projection(
+                        s_embeddings,
+                        pca_s_dir / f"pca_s_{global_step:07d}.png",
+                        "PCA s",
                     )
                 if hard_reservoir is not None:
                     hard_samples = hard_reservoir.topk(cfg.hard_example.vis_rows * cfg.hard_example.vis_columns)
@@ -3492,6 +3452,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         embedding_label="z",
                         title_prefix="Self-distance (Z)",
                         file_prefix="self_distance_z",
+                        cosine_prefix="self_distance_z_cosine",
                     )
                 if self_distance_inputs is not None:
                     hist_frames = rolling_batch_cpu[0] if rolling_batch_cpu is not None else None
@@ -3660,6 +3621,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embedding_label="z",
                 title_prefix="Self-distance (Z)",
                 file_prefix="self_distance_z",
+                cosine_prefix="self_distance_z_cosine",
             )
     if last_step >= 0:
         _save_checkpoint(

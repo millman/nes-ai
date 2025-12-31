@@ -126,24 +126,66 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             return None
         steps = [row.get("step", float("nan")) for row in rows]
         metric_keys = sorted({key for row in rows for key in row.keys() if key != "step"})
-        data = []
-        for key in metric_keys:
-            values = [row.get(key, float("nan")) for row in rows]
-            data.append(
-                {
-                    "type": "scatter",
-                    "mode": "lines",
-                    "name": key,
-                    "x": steps,
-                    "y": values,
-                    "hovertemplate": "%{y}<extra></extra>",
-                }
-            )
+        knn_keys = [key for key in metric_keys if "knn_mean" in key]
+        jaccard_keys = [key for key in metric_keys if "jaccard" in key]
+
+        def mean_for_keys(keys: List[str]) -> List[float]:
+            combined: List[float] = []
+            for row in rows:
+                values = [row.get(key) for key in keys if row.get(key) is not None]
+                valid = [value for value in values if value == value]
+                combined.append(sum(valid) / len(valid) if valid else float("nan"))
+            return combined
+
+        comp_keys = [key for key in metric_keys if key.endswith("_composition_error")]
+        var_keys = [key for key in metric_keys if key.endswith("_global_variance")]
+        knn_by_prefix = {
+            "z": [key for key in knn_keys if key.startswith("z_")],
+            "s": [key for key in knn_keys if key.startswith("s_")],
+        }
+        jaccard_by_prefix = {
+            "z": [key for key in jaccard_keys if key.startswith("z_")],
+            "s": [key for key in jaccard_keys if key.startswith("s_")],
+        }
+
+        def mean_values(values: List[float]) -> float:
+            valid = [value for value in values if value == value]
+            return sum(valid) / len(valid) if valid else float("nan")
+
+        def combined_series(prefix: str) -> List[float]:
+            knn_values = mean_for_keys(knn_by_prefix.get(prefix, []))
+            jaccard_values = mean_for_keys(jaccard_by_prefix.get(prefix, []))
+            comp_values = [row.get(f"{prefix}_composition_error", float("nan")) for row in rows]
+            combined: List[float] = []
+            for idx in range(len(rows)):
+                combined.append(
+                    mean_values([knn_values[idx], comp_values[idx], jaccard_values[idx]])
+                )
+            return combined
+
+        data = [
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "name": "z_combined",
+                "x": steps,
+                "y": combined_series("z"),
+                "hovertemplate": "%{y}<extra></extra>",
+            },
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "name": "s_combined",
+                "x": steps,
+                "y": combined_series("s"),
+                "hovertemplate": "%{y}<extra></extra>",
+            },
+        ]
         layout = {
             "template": "plotly_white",
             "xaxis": {"title": "Step"},
-            "yaxis": {"title": "Metric"},
-            "margin": {"t": 40, "b": 40, "l": 60, "r": 20},
+            "yaxis": {"title": "Combined local smoothness + composition error + stability"},
+            "margin": {"t": 30, "b": 40, "l": 60, "r": 20},
             "hovermode": "x unified",
             "hoverlabel": {"namelength": -1, "align": "left"},
             "legend": {"title": {"text": "Metric"}},
@@ -803,26 +845,40 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             abort(404, "Experiment not found for odometry.")
 
         odometry_map: Dict[int, Dict[str, str]] = {}
+        extra_paths = []
+        pca_z_dir = selected.path / "pca_z"
+        if pca_z_dir.exists():
+            extra_paths.extend((path, "pca_z", "pca_z_") for path in pca_z_dir.glob("pca_z_*.png"))
+        embeddings_dir = selected.path / "embeddings"
+        if embeddings_dir.exists():
+            extra_paths.extend((path, "pca_z", "embeddings_") for path in embeddings_dir.glob("embeddings_*.png"))
+        pca_s_dir = selected.path / "pca_s"
+        if pca_s_dir.exists():
+            extra_paths.extend((path, "pca_s", "pca_s_") for path in pca_s_dir.glob("pca_s_*.png"))
         for path in selected.odometry_images:
+            extra_paths.append((path, None, None))
+
+        for path, override_label, override_prefix in extra_paths:
             stem = path.stem
             try:
                 rel = path.relative_to(selected.path)
             except ValueError:
                 continue
-            label = None
-            prefix = None
-            if stem.startswith("odometry_z_"):
-                label = "odometry_z"
-                prefix = "odometry_z_"
-            elif stem.startswith("odometry_s_"):
-                label = "odometry_s"
-                prefix = "odometry_s_"
-            elif stem.startswith("z_vs_z_hat_"):
-                label = "z_vs_z_hat"
-                prefix = "z_vs_z_hat_"
-            elif stem.startswith("s_vs_s_hat_"):
-                label = "s_vs_s_hat"
-                prefix = "s_vs_s_hat_"
+            label = override_label
+            prefix = override_prefix
+            if label is None or prefix is None:
+                if stem.startswith("odometry_z_"):
+                    label = "odometry_z"
+                    prefix = "odometry_z_"
+                elif stem.startswith("odometry_s_"):
+                    label = "odometry_s"
+                    prefix = "odometry_s_"
+                elif stem.startswith("z_vs_z_hat_"):
+                    label = "z_vs_z_hat"
+                    prefix = "z_vs_z_hat_"
+                elif stem.startswith("s_vs_s_hat_"):
+                    label = "s_vs_s_hat"
+                    prefix = "s_vs_s_hat_"
             if label is None or prefix is None:
                 continue
             suffix = stem[len(prefix) :]
@@ -830,7 +886,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 step = int(suffix)
             except ValueError:
                 continue
-            odometry_map.setdefault(step, {})[label] = url_for(
+            per_step = odometry_map.setdefault(step, {})
+            if label in per_step and label == "pca_z" and prefix == "embeddings_":
+                continue
+            per_step[label] = url_for(
                 "serve_asset", relative_path=f"{selected.id}/{rel}"
             )
 
@@ -1771,8 +1830,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         selected_id: Optional[str] = None
         if requested:
             requested_path = cfg.output_dir / requested
-            if requested_path.is_dir() and _vis_ctrl_exists(requested_path):
-                selected_id = requested
+            if not requested_path.is_dir():
+                abort(404, f"Experiment {requested} not found.")
+            selected_id = requested
         if selected_id is None:
             selected_id = _latest_vis_ctrl_id()
 

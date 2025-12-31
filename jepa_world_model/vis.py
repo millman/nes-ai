@@ -63,7 +63,7 @@ def _annotate_with_text(image: np.ndarray, text: str) -> np.ndarray:
     return np.array(pil_image)
 
 
-def save_embedding_projection(embeddings: torch.Tensor, path: Path) -> None:
+def save_embedding_projection(embeddings: torch.Tensor, path: Path, title: str) -> None:
     flat = embeddings.detach().cpu().numpy()
     b, t, dim = flat.shape
     flat = flat.reshape(b * t, dim)
@@ -84,7 +84,7 @@ def save_embedding_projection(embeddings: torch.Tensor, path: Path) -> None:
     colors = colors / max(1, t - 1)
     plt.figure(figsize=(6, 5))
     plt.scatter(coords[:, 0], coords[:, 1], c=colors, cmap="viridis", s=10, alpha=0.7)
-    plt.title("Embedding Projection (PCA)")
+    plt.title(title)
     plt.xlabel("PC1")
     plt.ylabel("PC2")
     plt.colorbar(label="Time step")

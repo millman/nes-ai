@@ -9,8 +9,14 @@
 <style>
 .odometry-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(260px, 1fr));
+    grid-template-columns: repeat(8, minmax(110px, 1fr));
     gap: 1rem;
+}
+.odometry-span-3 {
+    grid-column: span 3;
+}
+.odometry-span-4 {
+    grid-column: span 4;
 }
 .odometry-card-img {
     width: 100%;
@@ -21,6 +27,43 @@
 }
 .odometry-loss-plot {
     height: 220px;
+}
+.odometry-plot-wrapper {
+    position: relative;
+}
+.odometry-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+.odometry-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+.odometry-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+.odometry-plot-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
 }
 .odometry-info-icon {
     display: inline-flex;
@@ -59,7 +102,19 @@
 {% if not experiment %}
 <div class="text-muted fst-italic">No experiments available.</div>
 {% else %}
-<div class="card mb-3">
+<div class="card mb-3 odometry-plot-wrapper sticky-active" id="odometry-plot-wrapper">
+    <button
+        type="button"
+        class="odometry-pin-btn active"
+        id="odometry-plot-pin"
+        aria-pressed="true"
+        aria-label="Pin odometry plot"
+        title="Unpin odometry plot"
+    >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+        </svg>
+    </button>
     <div class="card-header py-2 d-flex align-items-center gap-2">
         <strong>Training metrics</strong>
         {% if odometry_steps %}
@@ -74,6 +129,34 @@
 
 <div class="odometry-grid">
     <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>PCA z</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="PCA projection of z embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
+                >i</span>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No PCA images found in experiment {{ experiment.id }}.
+                {% else %}
+                No PCA images found in any experiments.
+                {% endif %}
+            </div>
+            {% else %}
+            <img id="odometry-pca-z-img" class="odometry-card-img d-none" alt="PCA z">
+            <div class="text-muted small" id="odometry-pca-z-caption"></div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card h-100 odometry-span-3">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Cumulative sum of Δz PCA/ICA/t-SNE</span>
             <div class="d-flex align-items-center gap-2">
@@ -103,6 +186,34 @@
     </div>
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>PCA s</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="PCA projection of s embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
+                >i</span>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No PCA images found in experiment {{ experiment.id }}.
+                {% else %}
+                No PCA images found in any experiments.
+                {% endif %}
+            </div>
+            {% else %}
+            <img id="odometry-pca-s-img" class="odometry-card-img d-none" alt="PCA s">
+            <div class="text-muted small" id="odometry-pca-s-caption"></div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card h-100 odometry-span-3">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Cumulative sum of Δs PCA/ICA/t-SNE</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
@@ -129,7 +240,7 @@
             {% endif %}
         </div>
     </div>
-    <div class="card h-100">
+    <div class="card h-100 odometry-span-4">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>||z - z_hat|| + scatter</span>
             <div class="d-flex align-items-center gap-2">
@@ -157,7 +268,7 @@
             {% endif %}
         </div>
     </div>
-    <div class="card h-100">
+    <div class="card h-100 odometry-span-4">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>||s - s_hat|| + scatter</span>
             <div class="d-flex align-items-center gap-2">
@@ -208,23 +319,44 @@ document.addEventListener("DOMContentLoaded", () => {
     const steps = {{ odometry_steps | tojson }};
     const odometryMap = {{ odometry_map | tojson }};
     const stepLabels = document.querySelectorAll(".odometry-step-label");
+    const plotWrapper = document.getElementById("odometry-plot-wrapper");
+    const plotPinButton = document.getElementById("odometry-plot-pin");
+    let plotPinned = true;
     const targets = {
+        pca_z: {img: document.getElementById("odometry-pca-z-img"), caption: document.getElementById("odometry-pca-z-caption")},
         odometry_z: {img: document.getElementById("odometry-z-img"), caption: document.getElementById("odometry-z-caption")},
+        pca_s: {img: document.getElementById("odometry-pca-s-img"), caption: document.getElementById("odometry-pca-s-caption")},
         odometry_s: {img: document.getElementById("odometry-s-img"), caption: document.getElementById("odometry-s-caption")},
         z_vs_z_hat: {img: document.getElementById("odometry-zhat-img"), caption: document.getElementById("odometry-zhat-caption")},
         s_vs_s_hat: {img: document.getElementById("odometry-shat-img"), caption: document.getElementById("odometry-shat-caption")},
     };
     let pinnedStep = steps.length ? steps[steps.length - 1] : null;
 
-    function nearestStep(value) {
+    function updatePinState(nextState) {
+        plotPinned = nextState;
+        if (!plotWrapper || !plotPinButton) return;
+        plotWrapper.classList.toggle("sticky-active", plotPinned);
+        plotPinButton.classList.toggle("active", plotPinned);
+        plotPinButton.setAttribute("aria-pressed", plotPinned ? "true" : "false");
+        plotPinButton.setAttribute("title", plotPinned ? "Unpin odometry plot" : "Pin odometry plot");
+    }
+
+    if (plotPinButton) {
+        plotPinButton.addEventListener("click", () => {
+            updatePinState(!plotPinned);
+        });
+    }
+
+    function nearestStepAtOrBelow(value) {
         if (!steps.length) return null;
-        let best = steps[0];
-        let bestDiff = Math.abs(value - best);
-        for (let i = 1; i < steps.length; i++) {
-            const diff = Math.abs(value - steps[i]);
-            if (diff < bestDiff) {
-                best = steps[i];
-                bestDiff = diff;
+        let best = null;
+        for (let i = 0; i < steps.length; i++) {
+            const step = steps[i];
+            if (step > value) {
+                continue;
+            }
+            if (best === null || step > best) {
+                best = step;
             }
         }
         return best;
@@ -272,7 +404,7 @@ document.addEventListener("DOMContentLoaded", () => {
         lossPlot.on("plotly_hover", (event) => {
             const point = event?.points?.[0];
             if (!point || typeof point.x === "undefined") return;
-            const nearest = nearestStep(point.x);
+            const nearest = nearestStepAtOrBelow(point.x);
             if (nearest !== null) {
                 pinnedStep = nearest;
                 updateImages(pinnedStep);
@@ -280,6 +412,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
     updateImages(pinnedStep);
+    updatePinState(true);
 });
 </script>
 {% endif %}
