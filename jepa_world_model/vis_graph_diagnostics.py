@@ -325,13 +325,13 @@ def save_graph_diagnostics(
         frames = frames_cpu.to(device)
         actions = actions_cpu.to(device)
         embeddings = model.encode_sequence(frames)["embeddings"]
-        preds, _, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
+        preds, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
         ema_embeddings: Optional[torch.Tensor] = None
         ema_h_states: Optional[torch.Tensor] = None
         if cfg.use_ema_targets and ema_model is not None:
             ema_embeddings = ema_model.encode_sequence(frames)["embeddings"]
             if embedding_kind == "s":
-                _, _, _, ema_h_states = _predictor_rollout(ema_model, ema_embeddings, actions)
+                _, _, ema_h_states = _predictor_rollout(ema_model, ema_embeddings, actions)
 
     batch_size, seq_len, latent_dim = embeddings.shape
     next_index, next2_index, chunk_ids = _flatten_graph_diag_indices(frames)

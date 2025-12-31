@@ -96,7 +96,7 @@ def render_rollout_batch(
         for step in range(1, max_window):
             action = paired_actions[idx, start_idx + step - 1].unsqueeze(0)
             prev_embed = current_embed
-            next_embed, _, next_hidden = predictor(current_embed, current_hidden, action)
+            next_embed, next_hidden = predictor(current_embed, current_hidden, action)
             decoded_next = decode_fn(next_embed)[0]
             current_frame = decoded_next.clamp(0, 1)
             rollout_frames[step] = current_frame.detach().cpu()

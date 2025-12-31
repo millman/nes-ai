@@ -118,7 +118,7 @@ class HiddenToSProjector(nn.Module):
         return s.view(*original_shape, s.shape[-1])
 
 
-class PredictorNetwork(nn.Module):
+class BeliefUpdate(nn.Module):
     def __init__(
         self,
         embedding_dim: int,
@@ -143,12 +143,10 @@ class PredictorNetwork(nn.Module):
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.predictor_layers = predictor_layers
-        self.delta_scale = 1.0
-        self.use_delta_squash = False
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if not (embeddings.shape[:-1] == actions.shape[:-1] == hidden_state.shape[:-1]):
             raise ValueError("Embeddings, hidden state, and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -158,23 +156,17 @@ class PredictorNetwork(nn.Module):
         hidden = self.activation(self.in_proj(torch.cat([emb_flat, h_flat, act_flat], dim=-1)))
         for layer in self.hidden_layers:
             hidden = self.activation(layer(hidden))
-        raw_delta = self.out_proj(hidden)
+        z_pred = self.out_proj(hidden)
         h_next = self.h_out(hidden)
-        if self.use_delta_squash:
-            delta = torch.tanh(raw_delta) * self.delta_scale
-        else:
-            delta = raw_delta * self.delta_scale
-        pred = emb_flat + delta
         h_next = h_next.view(*original_shape, h_next.shape[-1])
         return (
-            pred.view(*original_shape, pred.shape[-1]),
-            delta.view(*original_shape, delta.shape[-1]),
+            z_pred.view(*original_shape, z_pred.shape[-1]),
             h_next,
         )
 
     def shape_info(self) -> Dict[str, Any]:
         return {
-            "module": "Predictor",
+            "module": "BeliefUpdate",
             "latent_dim": self.embedding_dim,
             "hidden_dim": self.hidden_dim,
             "action_dim": self.action_dim,
@@ -378,7 +370,6 @@ class LossWeights:
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
     recon_multi_box: float = 0.3
-    delta: float = 0.0
 
     # Action controller input reconstruction
     action_z: float = 0.0
@@ -629,7 +620,7 @@ class JEPAWorldModel(nn.Module):
         )
         # latent_dim is encoder_schedule[-1]
         self.embedding_dim = self.encoder.latent_dim
-        self.predictor = PredictorNetwork(
+        self.predictor = BeliefUpdate(
             self.embedding_dim,
             cfg.hidden_dim,
             cfg.action_dim * 2,
@@ -690,19 +681,17 @@ def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
 
 def _predictor_rollout(
     model: JEPAWorldModel, embeddings: torch.Tensor, actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Roll predictor across sequence to produce z_hat, delta, and h states."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Roll belief update across sequence to produce z_hat and h states."""
     b, t, _ = embeddings.shape
     if t < 2:
         zero = embeddings.new_tensor(0.0)
         return (
             zero,
             zero,
-            zero,
             embeddings.new_zeros((b, t, model.state_dim)),
         )
     preds = []
-    deltas = []
     h_preds = []
     h_states = [embeddings.new_zeros(b, model.state_dim, device=embeddings.device)]
     paired_actions = _pair_actions(actions)
@@ -710,14 +699,12 @@ def _predictor_rollout(
         z_t = embeddings[:, step]
         h_t = h_states[-1]
         act_t = paired_actions[:, step]
-        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
+        pred, h_next = model.predictor(z_t, h_t, act_t)
         preds.append(pred)
-        deltas.append(delta)
         h_preds.append(h_next)
         h_states.append(h_next)
     return (
         torch.stack(preds, dim=1),
-        torch.stack(deltas, dim=1),
         torch.stack(h_preds, dim=1),
         torch.stack(h_states, dim=1),
     )
@@ -725,33 +712,18 @@ def _predictor_rollout(
 
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """JEPA loss plus action logits, using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
-    preds, delta_pred, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
+    preds, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
         logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
-        delta = embeddings.new_zeros(embeddings[:, :-1].shape)
-        return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
+        return zero, logits, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
     pair_true = torch.cat([embeddings[:, :-1], embeddings[:, 1:]], dim=-1)
     action_logits = model.action_delta_head(pair_true)
-    return JEPA_LOSS(preds, target), action_logits, delta_pred, preds, h_preds, h_states
-
-
-def delta_prediction_loss(
-    delta_pred: torch.Tensor, embeddings: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Auxiliary loss comparing predicted and target latent deltas."""
-    if embeddings.shape[1] < 2:
-        zero = embeddings.new_tensor(0.0)
-        return zero, zero, zero
-    delta_target = (embeddings[:, 1:] - embeddings[:, :-1]).detach()
-    loss = F.mse_loss(delta_pred, delta_target)
-    pred_norm = delta_pred.detach().norm(dim=-1).mean()
-    target_norm = delta_target.norm(dim=-1).mean()
-    return loss, pred_norm, target_norm
+    return JEPA_LOSS(preds, target), action_logits, preds, h_preds, h_states
 
 
 def z_rollout_loss(
@@ -777,7 +749,7 @@ def z_rollout_loss(
         h_current = h_states[:, start]
         for offset in range(max_h):
             act = paired_actions[:, start + offset]
-            pred, _, h_next = model.predictor(current, h_current, act)
+            pred, h_next = model.predictor(current, h_current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
@@ -810,7 +782,7 @@ def s_rollout_loss(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = paired_actions[:, start + offset]
-            pred, _, h_next = model.predictor(current, h_current, act)
+            pred, h_next = model.predictor(current, h_current, act)
             s_pred = model.h2s(h_next)
             s_target = s_targets[:, start + offset + 1].detach()
             total = total + F.mse_loss(s_pred, s_target)
@@ -973,19 +945,11 @@ def _compute_losses_and_metrics(
         decoder_embeddings = outputs["embeddings"].detach() if cfg.detach_decoder else outputs["embeddings"]
         recon = decoder(decoder_embeddings)
 
-    loss_jepa_raw, action_logits, delta_pred, z_hat_next, h_preds, h_states = jepa_loss(model, outputs, actions)
+    loss_jepa_raw, action_logits, _, h_preds, h_states = jepa_loss(model, outputs, actions)
     if weights.jepa > 0:
         loss_jepa = loss_jepa_raw
     else:
         loss_jepa = images.new_tensor(0.0)
-
-    if weights.delta > 0:
-        loss_delta_raw, delta_pred_norm, delta_target_norm = delta_prediction_loss(delta_pred, outputs["embeddings"])
-        loss_delta = loss_delta_raw
-    else:
-        loss_delta = images.new_tensor(0.0)
-        delta_pred_norm = images.new_tensor(0.0)
-        delta_target_norm = images.new_tensor(0.0)
 
     prev_actions = actions[:, :-1]
     if weights.action_z > 0 and prev_actions.numel() > 0:
@@ -1123,7 +1087,6 @@ def _compute_losses_and_metrics(
 
     world_loss = (
         weights.jepa * _scaled("loss_jepa", loss_jepa)
-        + weights.delta * _scaled("loss_delta", loss_delta)
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
         + weights.z_rollout * _scaled("loss_z_rollout", loss_z_rollout)
         + weights.consistency * _scaled("loss_consistency", loss_consistency)
@@ -1181,9 +1144,6 @@ def _compute_losses_and_metrics(
         "loss_h2z": loss_h2z.item(),
         "loss_h2z_2hop": loss_h2z_2hop.item(),
         "loss_s_rollout": loss_s_rollout.item(),
-        "loss_delta": loss_delta.item(),
-        "delta_pred_norm": delta_pred_norm.item(),
-        "delta_target_norm": delta_target_norm.item(),
         "loss_world": world_loss.item(),
         "action_accuracy_bit": action_accuracy_bit.item(),
         "action_accuracy_all": action_accuracy_all.item(),
@@ -1255,8 +1215,6 @@ def log_metrics(
     filtered = dict(metrics)
     if weights.jepa <= 0:
         filtered.pop("loss_jepa", None)
-    if weights.delta <= 0:
-        filtered.pop("loss_delta", None)
     if weights.sigreg <= 0:
         filtered.pop("loss_sigreg", None)
     if weights.z_rollout <= 0:
@@ -1340,9 +1298,6 @@ LOSS_COLUMNS = [
     "loss_h2z",
     "loss_h2z_2hop",
     "loss_s_rollout",
-    "loss_delta",
-    "delta_pred_norm",
-    "delta_target_norm",
     "loss_adj0",
     "loss_adj1",
     "loss_adj2",
@@ -1380,9 +1335,6 @@ class LossHistory:
     h2z: List[float] = field(default_factory=list)
     h2z_2hop: List[float] = field(default_factory=list)
     s_rollout: List[float] = field(default_factory=list)
-    delta: List[float] = field(default_factory=list)
-    delta_pred_norm: List[float] = field(default_factory=list)
-    delta_target_norm: List[float] = field(default_factory=list)
     action_acc_bit: List[float] = field(default_factory=list)
     action_acc_all: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
@@ -1417,9 +1369,6 @@ class LossHistory:
         self.h2z.append(metrics["loss_h2z"])
         self.h2z_2hop.append(metrics["loss_h2z_2hop"])
         self.s_rollout.append(metrics["loss_s_rollout"])
-        self.delta.append(metrics["loss_delta"])
-        self.delta_pred_norm.append(metrics["delta_pred_norm"])
-        self.delta_target_norm.append(metrics["delta_target_norm"])
         self.adj0.append(metrics.get("loss_adj0", 0.0))
         self.adj1.append(metrics.get("loss_adj1", 0.0))
         self.adj2.append(metrics.get("loss_adj2", 0.0))
@@ -1465,9 +1414,6 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.h2z,
             history.h2z_2hop,
             history.s_rollout,
-            history.delta,
-            history.delta_pred_norm,
-            history.delta_target_norm,
             history.adj0,
             history.adj1,
             history.adj2,
@@ -2839,7 +2785,7 @@ def _save_diagnostics_outputs(
 
     if delta_s_dir is not None and alignment_s_dir is not None and cycle_s_dir is not None:
         with torch.no_grad():
-            _, _, _, h_states = _predictor_rollout(model, embeddings, actions)
+            _, _, h_states = _predictor_rollout(model, embeddings, actions)
             s_embeddings = model.h2s(h_states)
         motion_s = _compute_motion_subspace(s_embeddings, actions_cpu, cfg.top_k_components, paths)
         if motion_s is not None:
@@ -3554,7 +3500,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     vis_frames = vis_ctrl_batch_cpu[0].to(device)
                     vis_actions = vis_ctrl_batch_cpu[1].to(device)
                     vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
-                    _, _, _, vis_h_states = _predictor_rollout(model, vis_embeddings, vis_actions)
+                    _, _, vis_h_states = _predictor_rollout(model, vis_embeddings, vis_actions)
                     vis_s_embeddings = model.h2s(vis_h_states)
                     warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
                     metrics_z = compute_vis_ctrl_metrics(

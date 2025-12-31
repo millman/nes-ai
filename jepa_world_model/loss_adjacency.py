@@ -58,7 +58,7 @@ def _rollout_hidden_states(
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = paired_actions[:, step]
-        _, _, h_next = model.predictor(z_t, h_t, act_t)
+        _, h_next = model.predictor(z_t, h_t, act_t)
         h_states[:, step + 1] = h_next
         h_t = h_next
     return h_states
@@ -239,7 +239,7 @@ def adjacency_losses(
     h_pred1: Optional[torch.Tensor] = None
     paired_actions = _pair_actions(actions)[:, warmup:]
     if (weights.adj1 > 0 or weights.adj2 > 0) and states.shape[1] >= 2:
-        z_pred1, _, h_pred1 = model.predictor(
+        z_pred1, h_pred1 = model.predictor(
             plan_embeddings[:, :-1],
             h_plan[:, :-1],
             paired_actions[:, :-1],
@@ -257,7 +257,7 @@ def adjacency_losses(
     if weights.adj2 > 0:
         state_preds2: Optional[torch.Tensor] = None
         if z_pred1 is not None and h_pred1 is not None and states.shape[1] >= 3 and z_pred1.shape[1] >= 2:
-            _, _, h_pred2 = model.predictor(
+            _, h_pred2 = model.predictor(
                 z_pred1[:, :-1],
                 h_pred1[:, :-1],
                 paired_actions[:, 1:-1],
