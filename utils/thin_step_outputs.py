@@ -74,12 +74,12 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=None,
         help=(
-            "Tiered keep intervals defined as start:interval pairs. "
-            "Example: --keep-schedule \"1000:200,10000:1000\" keeps all steps below "
-            "1000, then every 200 until 10000, and every 1000 thereafter. "
-            "Cannot be combined with --keep-every. "
-            "Defaults to 1000:1000,10000:1000 when neither keep option is given. "
-            "(default: %(default)s)."
+            f"Tiered keep intervals defined as start:interval pairs. "
+            f"Example: --keep-schedule \"1000:200,10000:1000\" keeps all steps below "
+            f"1000, then every 200 until 10000, and every 1000 thereafter. "
+            f"Cannot be combined with --keep-every. "
+            f"Defaults to {DEFAULT_KEEP_SCHEDULE_SPEC} when neither keep option is given. "
+            f"(default: %(default)s)."
         ),
     )
     parser.add_argument(
