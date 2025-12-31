@@ -318,7 +318,7 @@ class ModelConfig:
     # If None, defaults to state_dim so h and s share dimensionality.
     state_embed_dim: Optional[int] = None
     state_embed_unit_norm: bool = False
-    state_warmup_frames: int = 8
+    state_warmup_frames: int = 4
 
     @property
     def embedding_dim(self) -> int:
@@ -540,7 +540,7 @@ class TrainConfig:
 
     # Dataset & batching
     max_trajectories: Optional[int] = None
-    seq_len: int = 16
+    seq_len: int = 8
     batch_size: int = 8
 
     # Optimization
