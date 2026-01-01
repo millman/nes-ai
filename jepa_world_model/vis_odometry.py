@@ -42,8 +42,9 @@ def _rollout_predictions(
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = paired_actions[:, step]
-        pred, h_next = model.predictor(z_t, h_t, act_t)
-        preds.append(pred)
+        h_next = model.predictor(z_t, h_t, act_t)
+        z_pred = model.h_to_z(h_next)
+        preds.append(z_pred)
         h_t = h_next
     return torch.stack(preds, dim=1)
 
@@ -63,7 +64,8 @@ def _rollout_open_loop(
     h_preds = []
     for step in range(t - 1):
         act_t = paired_actions[:, step]
-        z_next, h_next = model.predictor(z_t, h_t, act_t)
+        h_next = model.predictor(z_t, h_t, act_t)
+        z_next = model.h_to_z(h_next)
         h_preds.append(h_next)
         z_t = z_next
         h_t = h_next

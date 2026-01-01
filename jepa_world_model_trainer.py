@@ -146,7 +146,7 @@ class BeliefUpdate(nn.Module):
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if not (embeddings.shape[:-1] == actions.shape[:-1] == hidden_state.shape[:-1]):
             raise ValueError("Embeddings, hidden state, and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -156,13 +156,10 @@ class BeliefUpdate(nn.Module):
         hidden = self.activation(self.in_proj(torch.cat([emb_flat, h_flat, act_flat], dim=-1)))
         for layer in self.hidden_layers:
             hidden = self.activation(layer(hidden))
-        z_pred = self.out_proj(hidden)
-        h_next = self.h_out(hidden)
+        h_delta = self.h_out(hidden)
+        h_next = h_delta + h_flat
         h_next = h_next.view(*original_shape, h_next.shape[-1])
-        return (
-            z_pred.view(*original_shape, z_pred.shape[-1]),
-            h_next,
-        )
+        return h_next
 
     def shape_info(self) -> Dict[str, Any]:
         return {
@@ -198,23 +195,45 @@ class HiddenToZProjector(nn.Module):
         return z_hat.view(*original_shape, z_hat.shape[-1])
 
 
+class HiddenToDeltaProjector(nn.Module):
+    """Project hidden state to a delta in the target latent space."""
+
+    def __init__(self, h_dim: int, target_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(h_dim),
+            nn.Linear(h_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, target_dim),
+        )
+        self.h_dim = h_dim
+        self.target_dim = target_dim
+        self.hidden_dim = hidden_dim
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        original_shape = h.shape[:-1]
+        h_flat = h.reshape(-1, h.shape[-1])
+        delta = self.net(h_flat)
+        return delta.view(*original_shape, delta.shape[-1])
+
+
 class ActionDeltaHead(nn.Module):
-    """Predict controller actions from consecutive latent pairs to avoid action-conditioning leakage."""
+    """Predict controller actions from latent deltas to avoid action-conditioning leakage."""
 
     def __init__(self, latent_dim: int, hidden_dim: int, action_dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.LayerNorm(latent_dim * 2),
-            nn.Linear(latent_dim * 2, hidden_dim),
+            nn.LayerNorm(latent_dim),
+            nn.Linear(latent_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, action_dim),
         )
 
-    def forward(self, latent_pair: torch.Tensor) -> torch.Tensor:
-        original_shape = latent_pair.shape[:-1]
-        flat = latent_pair.reshape(-1, latent_pair.shape[-1])
+    def forward(self, delta: torch.Tensor) -> torch.Tensor:
+        original_shape = delta.shape[:-1]
+        flat = delta.reshape(-1, delta.shape[-1])
         logits = self.net(flat)
         return logits.view(*original_shape, logits.shape[-1])
 
@@ -288,13 +307,14 @@ class ModelConfig:
             └─ Encoder(encoder_schedule → pool → z_dim = encoder_schedule[-1])
             ▼
         z_t ────────────────────────────────┐
-                        ├─ BeliefUpdate([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}
+                        ├─ BeliefUpdate([z_t, h_t, action_t]) → ĥ_{t+1}
         h_t (state_dim) ─────────────────────┘
             │
+            ├→ h2z_pred(ĥ_{t+1}) → ẑ_{t+1}
             ├→ h2z(h_t) → ẑ_t (projection head)
             ├→ h2s(h_t) → s_t (planning embedding)
-            ├→ ActionDeltaHead([z_t, z_{t+1}]) → action logits (action_z)
-            ├→ ActionDeltaHead_s([s_t, s_{t+1}]) → action logits (action_s)
+            ├→ ActionDeltaHead(z_{t+1} - z_t) → action logits (action_z)
+            ├→ ActionDeltaHead_s(s_{t+1} - s_t) → action logits (action_s)
             └→ Decoder(decoder_schedule → image reconstruction from z)
 
     Notes:
@@ -386,6 +406,10 @@ class LossWeights:
     s_rollout: float = 0.0
     # Rollout z predictions against future z targets.
     z_rollout: float = 0.0
+    # Auxiliary delta prediction from hidden state to z.
+    delta_z: float = 0.0
+    # Auxiliary delta prediction from hidden state to s.
+    delta_s: float = 0.0
 
     consistency: float = 0.0
 
@@ -641,6 +665,16 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
         )
+        self.h_to_delta_z = HiddenToDeltaProjector(
+            cfg.state_dim,
+            self.embedding_dim,
+            cfg.hidden_dim,
+        )
+        self.h_to_delta_s = HiddenToDeltaProjector(
+            cfg.state_dim,
+            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            cfg.hidden_dim,
+        )
         self.action_delta_head = ActionDeltaHead(
             self.embedding_dim,
             cfg.hidden_dim,
@@ -700,8 +734,9 @@ def _predictor_rollout(
         z_t = embeddings[:, step]
         h_t = h_states[-1]
         act_t = paired_actions[:, step]
-        pred, h_next = model.predictor(z_t, h_t, act_t)
-        preds.append(pred)
+        h_next = model.predictor(z_t, h_t, act_t)
+        z_pred = model.h_to_z(h_next)
+        preds.append(z_pred)
         h_preds.append(h_next)
         h_states.append(h_next)
     return (
@@ -722,8 +757,8 @@ def jepa_loss(
         logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
         return zero, logits, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
-    pair_true = torch.cat([embeddings[:, :-1], embeddings[:, 1:]], dim=-1)
-    action_logits = model.action_delta_head(pair_true)
+    delta_true = embeddings[:, 1:] - embeddings[:, :-1]
+    action_logits = model.action_delta_head(delta_true)
     return JEPA_LOSS(preds, target), action_logits, preds, h_preds, h_states
 
 
@@ -750,11 +785,12 @@ def z_rollout_loss(
         h_current = h_states[:, start]
         for offset in range(max_h):
             act = paired_actions[:, start + offset]
-            pred, h_next = model.predictor(current, h_current, act)
+            h_next = model.predictor(current, h_current, act)
+            z_pred = model.h_to_z(h_next)
             target_step = embeddings[:, start + offset + 1].detach()
-            total = total + JEPA_LOSS(pred, target_step)
+            total = total + JEPA_LOSS(z_pred, target_step)
             steps += 1
-            current = pred
+            current = z_pred
             h_current = h_next
     return total / steps if steps > 0 else embeddings.new_tensor(0.0)
 
@@ -783,12 +819,12 @@ def s_rollout_loss(
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = paired_actions[:, start + offset]
-            pred, h_next = model.predictor(current, h_current, act)
+            h_next = model.predictor(current, h_current, act)
             s_pred = model.h2s(h_next)
             s_target = s_targets[:, start + offset + 1].detach()
             total = total + F.mse_loss(s_pred, s_target)
             steps += 1
-            current = pred.detach()
+            current = model.h_to_z(h_next).detach()
             h_current = h_next
     return total / steps if steps > 0 else embeddings.new_tensor(0.0)
 
@@ -959,12 +995,12 @@ def _compute_losses_and_metrics(
         loss_action_z = images.new_tensor(0.0)
 
     s_states: Optional[torch.Tensor] = None
-    if (weights.action_s > 0 or weights.s_rollout > 0) and h_states.numel() > 0:
+    if (weights.action_s > 0 or weights.s_rollout > 0 or weights.delta_s > 0) and h_states.numel() > 0:
         s_states = model.h2s(h_states)
 
     if weights.action_s > 0 and prev_actions.numel() > 0 and s_states is not None:
-        s_pair_true = torch.cat([s_states[:, :-1], s_states[:, 1:]], dim=-1)
-        action_logits_s = model.action_delta_head_s(s_pair_true)
+        s_delta_true = s_states[:, 1:] - s_states[:, :-1]
+        action_logits_s = model.action_delta_head_s(s_delta_true)
         loss_action_s = ACTION_RECON_LOSS(action_logits_s, prev_actions)
     else:
         loss_action_s = images.new_tensor(0.0)
@@ -998,9 +1034,8 @@ def _compute_losses_and_metrics(
         if weights.consistency > 0
         else images.new_tensor(0.0)
     )
-    combined_latent = torch.cat([outputs["embeddings"], h_states], dim=-1)
     loss_sigreg = (
-        sigreg_loss(combined_latent, cfg.sigreg.projections, loss_fn=SIGREG_LOSS)
+        sigreg_loss(outputs["embeddings"], cfg.sigreg.projections, loss_fn=SIGREG_LOSS)
         if weights.sigreg > 0
         else images.new_tensor(0.0)
     )
@@ -1008,10 +1043,14 @@ def _compute_losses_and_metrics(
     loss_h2z = images.new_tensor(0.0)
     loss_h2z_2hop = images.new_tensor(0.0)
     loss_s_rollout = images.new_tensor(0.0)
+    loss_delta_z = images.new_tensor(0.0)
+    loss_delta_s = images.new_tensor(0.0)
     need_hidden = (
         weights.h2z > 0
         or weights.h2z_2hop > 0
         or weights.s_rollout > 0
+        or weights.delta_z > 0
+        or weights.delta_s > 0
     )
     if need_hidden:
         seq_len = outputs["embeddings"].shape[1]
@@ -1025,6 +1064,13 @@ def _compute_losses_and_metrics(
                 h_stack_2 = h_states[:, start + 2 :]
                 z_hat_from_h2 = model.h_to_z(h_stack_2)
                 loss_h2z_2hop = F.mse_loss(z_hat_from_h2, outputs["embeddings"][:, start + 2 :].detach())
+            if weights.delta_z > 0 and seq_len - start > 1:
+                h_stack_delta = h_states[:, start:-1]
+                delta_hat = model.h_to_delta_z(h_stack_delta)
+                delta_target = (
+                    outputs["embeddings"][:, start + 1 :] - outputs["embeddings"][:, start:-1]
+                ).detach()
+                loss_delta_z = F.mse_loss(delta_hat, delta_target)
             if weights.s_rollout > 0 and s_states is not None:
                 loss_s_rollout = s_rollout_loss(
                     model,
@@ -1035,6 +1081,11 @@ def _compute_losses_and_metrics(
                     cfg.rollout.horizon,
                     warmup_frames,
                 )
+            if weights.delta_s > 0 and s_states is not None and seq_len - start > 1:
+                h_stack_delta = h_states[:, start:-1]
+                delta_hat_s = model.h_to_delta_s(h_stack_delta)
+                delta_target_s = (s_states[:, start + 1 :] - s_states[:, start:-1]).detach()
+                loss_delta_s = F.mse_loss(delta_hat_s, delta_target_s)
 
     if weights.recon > 0 and recon is not None:
         loss_recon = RECON_LOSS(recon, images)
@@ -1096,6 +1147,8 @@ def _compute_losses_and_metrics(
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
         + weights.h2z_2hop * _scaled("loss_h2z_2hop", loss_h2z_2hop)
         + weights.s_rollout * _scaled("loss_s_rollout", loss_s_rollout)
+        + weights.delta_z * _scaled("loss_delta_z", loss_delta_z)
+        + weights.delta_s * _scaled("loss_delta_s", loss_delta_s)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
@@ -1145,6 +1198,8 @@ def _compute_losses_and_metrics(
         "loss_h2z": loss_h2z.item(),
         "loss_h2z_2hop": loss_h2z_2hop.item(),
         "loss_s_rollout": loss_s_rollout.item(),
+        "loss_delta_z": loss_delta_z.item(),
+        "loss_delta_s": loss_delta_s.item(),
         "loss_world": world_loss.item(),
         "action_accuracy_bit": action_accuracy_bit.item(),
         "action_accuracy_all": action_accuracy_all.item(),
@@ -1261,6 +1316,10 @@ def log_metrics(
         filtered.pop("loss_h2z_2hop", None)
     if weights.s_rollout <= 0:
         filtered.pop("loss_s_rollout", None)
+    if weights.delta_z <= 0:
+        filtered.pop("loss_delta_z", None)
+    if weights.delta_s <= 0:
+        filtered.pop("loss_delta_s", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1299,6 +1358,8 @@ LOSS_COLUMNS = [
     "loss_h2z",
     "loss_h2z_2hop",
     "loss_s_rollout",
+    "loss_delta_z",
+    "loss_delta_s",
     "loss_adj0",
     "loss_adj1",
     "loss_adj2",
@@ -1336,6 +1397,8 @@ class LossHistory:
     h2z: List[float] = field(default_factory=list)
     h2z_2hop: List[float] = field(default_factory=list)
     s_rollout: List[float] = field(default_factory=list)
+    delta_z: List[float] = field(default_factory=list)
+    delta_s: List[float] = field(default_factory=list)
     action_acc_bit: List[float] = field(default_factory=list)
     action_acc_all: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
@@ -1370,6 +1433,8 @@ class LossHistory:
         self.h2z.append(metrics["loss_h2z"])
         self.h2z_2hop.append(metrics["loss_h2z_2hop"])
         self.s_rollout.append(metrics["loss_s_rollout"])
+        self.delta_z.append(metrics.get("loss_delta_z", 0.0))
+        self.delta_s.append(metrics.get("loss_delta_s", 0.0))
         self.adj0.append(metrics.get("loss_adj0", 0.0))
         self.adj1.append(metrics.get("loss_adj1", 0.0))
         self.adj2.append(metrics.get("loss_adj2", 0.0))
@@ -1415,6 +1480,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.h2z,
             history.h2z_2hop,
             history.s_rollout,
+            history.delta_z,
+            history.delta_s,
             history.adj0,
             history.adj1,
             history.adj2,
@@ -2886,6 +2953,13 @@ def _render_visualization_batch(
     log_deltas: bool,
     rng: Optional[torch.Generator] = None,
 ) -> Tuple[List[VisualizationSequence], str]:
+    def _predict_z_and_h(
+        current_embed: torch.Tensor, current_hidden: torch.Tensor, action: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h_next = model.predictor(current_embed, current_hidden, action)
+        z_pred = model.h_to_z(h_next)
+        return z_pred, h_next
+
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
     frame_paths = batch_cpu[2]
@@ -2904,7 +2978,7 @@ def _render_visualization_batch(
         max_columns=max_columns,
         selection=selection,
         log_deltas=log_deltas,
-        predictor=model.predictor,
+        predictor=_predict_z_and_h,
         decode_fn=decoder,
         paired_actions=paired_actions,
         state_dim=model.state_dim,

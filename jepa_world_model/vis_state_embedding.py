@@ -44,7 +44,7 @@ def _rollout_hidden_states(
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = paired_actions[:, step]
-        _, h_next = model.predictor(z_t, h_t, act_t)
+        h_next = model.predictor(z_t, h_t, act_t)
         h_states[:, step + 1] = h_next
         h_t = h_next
     return h_states
