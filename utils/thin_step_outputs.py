@@ -235,8 +235,32 @@ def filter_files(
     return keep, remove
 
 
+def choose_unit(size: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return unit
+        value /= 1024
+    return "PB"
+
+
+def format_bytes(size: int, unit: Optional[str] = None) -> str:
+    if unit is None:
+        unit = choose_unit(size)
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    value = float(size)
+    for current in units:
+        if current == unit:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}{unit}"
+
+
 def summarize_tree(
-    stats: Dict[Path, Tuple[int, int, int, int]], max_depth: int
+    stats: Dict[Path, Tuple[int, int, int, int, int, int]], max_depth: int
 ) -> None:
     """Render a tree of directories with before/after counts."""
 
@@ -257,21 +281,26 @@ def summarize_tree(
             )
         node["stats"] = counts
 
-    def aggregate(node: Dict) -> Tuple[int, int, int, int]:
+    def aggregate(node: Dict) -> Tuple[int, int, int, int, int, int]:
         before = after = removed = kept = 0
+        before_bytes = after_bytes = 0
         if node.get("stats"):
-            b, a, r, k = node["stats"]
+            b, a, r, k, bb, ab = node["stats"]
             before += b
             after += a
             removed += r
             kept += k
+            before_bytes += bb
+            after_bytes += ab
         for child in node.get("children", {}).values():
-            cb, ca, cr, ck = aggregate(child)
+            cb, ca, cr, ck, cbb, cab = aggregate(child)
             before += cb
             after += ca
             removed += cr
             kept += ck
-        node["agg"] = (before, after, removed, kept)
+            before_bytes += cbb
+            after_bytes += cab
+        node["agg"] = (before, after, removed, kept, before_bytes, after_bytes)
         return node["agg"]
 
     aggregate(tree)
@@ -284,16 +313,81 @@ def summarize_tree(
             stats = child.get("agg")
             summary = ""
             if stats:
-                before, after, removed, kept = stats
+                before, after, removed, kept, before_bytes, after_bytes = stats
                 if removed > 0:
                     pct = 100.0 if before == 0 else (after / before) * 100
-                    summary = f" ({before} -> {after}, {pct:.1f}% remaining)"
+                    unit = choose_unit(max(before_bytes, after_bytes))
+                    summary = (
+                        f" ({before} -> {after}, {pct:.1f}% remaining, "
+                        f"{format_bytes(before_bytes, unit)} -> "
+                        f"{format_bytes(after_bytes, unit)})"
+                    )
             print(f"{prefix}{connector}{name}{summary}")
             if level + 1 < max_depth:
                 render(child, prefix + ("   " if is_last else "│  "), level + 1)
 
     print("Directory summary (tree):")
     render(tree, "", 0)
+
+
+def build_schedule_summary(
+    keep_every: Optional[int],
+    keep_schedule: Optional[KeepSchedule],
+    keep_before: Optional[int],
+    offset: int,
+) -> List[str]:
+    lines: List[str] = []
+
+    if keep_every is not None:
+        if keep_before is not None:
+            lines.append(f"Steps < {keep_before}: keep all steps.")
+        offset_value = offset % keep_every
+        lines.append(
+            f"Keep every {keep_every} steps (step % {keep_every} == {offset_value})."
+        )
+        return lines
+
+    if not keep_schedule:
+        lines.append("Keep schedule not specified; no thinning applied.")
+        return lines
+
+    if offset != 0:
+        lines.append("Offset applies per interval: keep when step % interval == offset.")
+
+    keep_all_until = 0
+    schedule_first_start = keep_schedule[0][0]
+    if schedule_first_start > 0:
+        keep_all_until = schedule_first_start
+    if keep_before is not None:
+        keep_all_until = max(keep_all_until, keep_before)
+    if keep_all_until > 0:
+        lines.append(f"Steps < {keep_all_until}: keep all steps.")
+
+    if keep_all_until < schedule_first_start:
+        effective_schedule = list(keep_schedule)
+    else:
+        interval_at_keep_all = keep_schedule[0][1]
+        for start, interval in keep_schedule:
+            if start <= keep_all_until:
+                interval_at_keep_all = interval
+            else:
+                break
+        effective_schedule = [(keep_all_until, interval_at_keep_all)]
+        for start, interval in keep_schedule:
+            if start > keep_all_until:
+                effective_schedule.append((start, interval))
+
+    for idx, (start, interval) in enumerate(effective_schedule):
+        end = None
+        if idx + 1 < len(effective_schedule):
+            end = effective_schedule[idx + 1][0] - 1
+        range_label = f"Steps {start}+" if end is None else f"Steps {start}-{end}"
+        if interval == 1:
+            action = "keep all steps"
+        else:
+            action = f"keep every {interval} steps"
+        lines.append(f"{range_label}: {action}.")
+    return lines
 
 
 def main() -> None:
@@ -316,7 +410,16 @@ def main() -> None:
     total_dirs = len(candidates)
     total_remove = 0
     total_keep = 0
-    per_dir_stats: Dict[Path, Tuple[int, int, int, int]] = {}
+    per_dir_stats: Dict[Path, Tuple[int, int, int, int, int, int]] = {}
+
+    def total_size(paths: Iterable[Path]) -> int:
+        size = 0
+        for path in paths:
+            try:
+                size += path.stat().st_size
+            except FileNotFoundError:
+                continue
+        return size
 
     for directory, files in sorted(candidates.items(), key=lambda item: str(item[0])):
         keep, remove = filter_files(
@@ -326,11 +429,16 @@ def main() -> None:
         removed_count = len(remove)
         kept_count = len(keep)
         after_count = before_count - removed_count
+        before_bytes = total_size(files)
+        removed_bytes = total_size(remove)
+        after_bytes = max(0, before_bytes - removed_bytes)
         per_dir_stats[directory] = (
             before_count,
             after_count,
             removed_count,
             kept_count,
+            before_bytes,
+            after_bytes,
         )
         total_keep += len(keep)
         total_remove += len(remove)
@@ -347,6 +455,12 @@ def main() -> None:
                 if args.verbose and not args.quiet:
                     print(f"  removed {path}")
 
+    schedule_lines = build_schedule_summary(
+        args.keep_every, keep_schedule, args.keep_before, args.offset
+    )
+    print("Schedule summary:")
+    for line in schedule_lines:
+        print(f"  - {line}")
     print(
         f"Processed {total_dirs} directories | kept {total_keep} files | "
         f"{'removed' if delete_mode else 'would remove'} {total_remove} files"
