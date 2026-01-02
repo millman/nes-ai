@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vis vs Ctrl diagnostics helpers."""
+"""Vis vs Ctrl metrics computation and CSV output."""
 from __future__ import annotations
 
 import csv
@@ -9,10 +9,8 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import compress_actions_to_ids
-from jepa_world_model.plot_raincloud import plot_raincloud
 
 
 @dataclass
@@ -59,7 +57,8 @@ def _compute_knn_indices(
 
 
 def _compute_knn_distance_stats(
-    knn_dist: np.ndarray, ks: Iterable[int]
+    knn_dist: np.ndarray,
+    ks: Iterable[int],
 ) -> Tuple[Dict[int, float], Dict[int, np.ndarray]]:
     if knn_dist.size == 0:
         empty_means = {int(k): float("nan") for k in ks}
@@ -206,7 +205,7 @@ def compute_vis_ctrl_metrics(
     if actions.ndim != 3:
         raise ValueError("Actions must have shape [B, T, action_dim].")
     if embeddings.shape[1] < max(warmup + 1, 1):
-        return VisCtrlMetrics({}, float("nan"), float("nan"), np.zeros(0, dtype=np.float32), {})
+        return VisCtrlMetrics({}, {}, np.zeros(0, dtype=np.float32), float("nan"), float("nan"), np.zeros(0, dtype=np.float32), {}, {})
     emb = embeddings[:, warmup:]
     b, t, _ = emb.shape
     flat = emb.reshape(b * t, emb.shape[-1]).cpu()
@@ -228,88 +227,6 @@ def compute_vis_ctrl_metrics(
         jaccard_means=jaccard_means,
         jaccard_samples=jaccard_samples,
     )
-
-
-def save_smoothness_plot(
-    out_path: Path,
-    metrics: VisCtrlMetrics,
-    embedding_label: str,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    ks = sorted(metrics.knn_mean_distances.keys())
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
-    if ks:
-        samples = [metrics.knn_distance_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
-        labels = [f"k={k}" for k in ks]
-        plot_raincloud(axes[0], samples, labels, "kNN distance")
-        axes[0].set_title(f"kNN distance raincloud ({embedding_label})")
-    else:
-        axes[0].text(0.5, 0.5, "No kNN data.", ha="center", va="center")
-        axes[0].axis("off")
-    eigvals = metrics.eigenvalues if metrics.eigenvalues.size else np.zeros(0, dtype=np.float32)
-    if eigvals.size:
-        axes[1].bar(np.arange(1, eigvals.size + 1), eigvals, color="tab:green", alpha=0.8)
-        axes[1].set_xlabel("eigenvalue rank")
-        axes[1].set_ylabel("eigenvalue")
-        variance_text = metrics.global_variance
-        if np.isfinite(variance_text):
-            title = f"Eigenvalue spectrum ({embedding_label})\n(global variance = {variance_text:.4f})"
-        else:
-            title = f"Eigenvalue spectrum ({embedding_label})"
-        axes[1].set_title(title)
-    else:
-        axes[1].text(0.5, 0.5, "No eigenvalues.", ha="center", va="center")
-        axes[1].axis("off")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_composition_error_plot(
-    out_path: Path,
-    metrics: VisCtrlMetrics,
-    embedding_label: str,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    if metrics.composition_errors.size:
-        ax.hist(metrics.composition_errors, bins=20, color="tab:purple", alpha=0.8)
-        ax.set_xlabel("two-step error")
-        ax.set_ylabel("count")
-        mean_val = metrics.composition_error_mean
-        if np.isfinite(mean_val):
-            ax.axvline(mean_val, color="tab:red", linestyle="--", linewidth=1.5)
-            ax.set_title(f"Two-step composition error ({embedding_label})")
-        else:
-            ax.set_title(f"Two-step composition error ({embedding_label})")
-    else:
-        ax.text(0.5, 0.5, "No composition errors.", ha="center", va="center")
-        ax.axis("off")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_stability_plot(
-    out_path: Path,
-    metrics: VisCtrlMetrics,
-    embedding_label: str,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    ks = sorted(metrics.jaccard_means.keys())
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    if ks:
-        samples = [metrics.jaccard_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
-        labels = [f"k={k}" for k in ks]
-        plot_raincloud(ax, samples, labels, "Jaccard")
-        ax.set_ylim(0.0, 1.0)
-        ax.set_title(f"Neighborhood stability ({embedding_label})")
-    else:
-        ax.text(0.5, 0.5, "No stability data.", ha="center", va="center")
-        ax.axis("off")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
 
 def write_vis_ctrl_metrics_csv(

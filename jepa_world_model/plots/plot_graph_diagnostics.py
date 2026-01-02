@@ -1,25 +1,57 @@
-#!/usr/bin/env python3
-"""Graph diagnostics computation and plotting."""
+"""Graph diagnostics components for composing outputs in the trainer."""
 from __future__ import annotations
 
 import csv
 import math
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
-from jepa_world_model.plot_raincloud import plot_raincloud
+from jepa_world_model.plots.plot_edge_consistency_hist import (
+    save_edge_consistency_hist_plot,
+)
+from jepa_world_model.plots.plot_graph_history import save_graph_history_plot
+from jepa_world_model.plots.plot_in_degree_hist import save_in_degree_hist_plot
+from jepa_world_model.plots.plot_neff_violin import save_neff_violin_plot
+from jepa_world_model.plots.plot_rank_cdf import save_rank_cdf_plot
 
-if TYPE_CHECKING:
-    from jepa_world_model_trainer import GraphDiagnosticsConfig, JEPAWorldModel
+@dataclass
+class GraphDiagnosticsConfig:
+    enabled: bool = True
+    sample_chunks: int = 32
+    chunk_len: int = 12
+    k_neighbors: int = 10
+    temp: float = 0.1
+    eps: float = 1e-8
+    long_gap_window: int = 50
+    top_m_candidates: int = 0
+    block_size: int = 256
+    normalize_latents: bool = True
+    use_predictor_scores: bool = True
+    use_ema_targets: bool = False
+    mask_self_edges: bool = True
+    include_edge_consistency: bool = True
+    edge_consistency_samples: int = 1024
 
 
-def _flatten_graph_diag_indices(batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+@dataclass
+class GraphDiagnosticsStats:
+    ranks1: np.ndarray
+    ranks2: np.ndarray
+    neff1: np.ndarray
+    neff2: np.ndarray
+    in_degree: np.ndarray
+    edge_errors: Optional[np.ndarray]
+    k: int
+    metrics: Dict[str, float]
+
+
+def build_graph_diag_indices(batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch_size, seq_len = batch.shape[:2]
     total = batch_size * seq_len
     next_index = torch.full((total,), -1, dtype=torch.long, device=batch.device)
@@ -154,89 +186,6 @@ def _write_graph_history(path: Path, metrics: Dict[str, float]) -> List[Dict[str
     return history
 
 
-def _plot_rank_cdf(out_path: Path, ranks: np.ndarray, k: int, title: str) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    if ranks.size == 0:
-        ax.text(0.5, 0.5, "No valid transitions.", ha="center", va="center")
-    else:
-        ranks_sorted = np.sort(ranks)
-        y = np.arange(1, len(ranks_sorted) + 1) / len(ranks_sorted)
-        ax.plot(ranks_sorted, y, label="CDF", color="tab:blue")
-        if k > 0:
-            ax.axvline(k, color="tab:orange", linestyle="--", label=f"K={k}")
-        ax.set_xscale("log")
-        ax.set_xlabel("Rank")
-        ax.set_ylabel("Fraction ≤ rank")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-    ax.set_title(title)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_neff_violin(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(6, 4))
-    def _clean(values: np.ndarray) -> np.ndarray:
-        if values.size == 0:
-            return values
-        finite = values[np.isfinite(values)]
-        if finite.size == 0:
-            return finite
-        return finite[finite > 0]
-
-    data = [_clean(neff1), _clean(neff2)]
-    labels = ["Neff1", "Neff2"]
-    if all(arr.size == 0 for arr in data):
-        ax.text(0.5, 0.5, "No neighborhood stats available.", ha="center", va="center")
-    else:
-        plot_raincloud(
-            ax,
-            data,
-            labels,
-            "Effective neighborhood size",
-            log_scale=True,
-            colors=["tab:blue", "tab:green"],
-        )
-    ax.set_title("Neighborhood size (exp entropy)")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_in_degree_hist(out_path: Path, in_degree: np.ndarray) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    if in_degree.size == 0:
-        ax.text(0.5, 0.5, "No edges to compute in-degree.", ha="center", va="center")
-    else:
-        bins = min(50, max(5, int(np.sqrt(in_degree.size))))
-        ax.hist(in_degree, bins=bins, color="tab:purple", alpha=0.8)
-        ax.set_xlabel("In-degree (top-K graph)")
-        ax.set_ylabel("Count")
-        ax.grid(True, alpha=0.3)
-    ax.set_title("Hubness / in-degree distribution")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_edge_consistency_hist(
-    out_path: Path,
-    edge_errors: np.ndarray,
-    embedding_label: str,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.hist(edge_errors, bins=30, color="tab:gray", alpha=0.85)
-    ax.set_title(f"Predictor-edge consistency (||{embedding_label}hat - {embedding_label}T||^2)")
-    ax.set_xlabel("error")
-    ax.set_ylabel("count")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
 
 def _compute_edge_errors(
@@ -260,108 +209,19 @@ def _compute_edge_errors(
     return ((pred_vec - tgt_vec) ** 2).sum(dim=1).detach().cpu().numpy()
 
 
-def _plot_graph_history(out_path: Path, history: List[Dict[str, float]], k: int) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-    if not history:
-        for ax in axes:
-            ax.text(0.5, 0.5, "History unavailable.", ha="center", va="center")
-            ax.axis("off")
-    else:
-        steps = [row.get("step", float("nan")) for row in history]
-        hit1 = [row.get("hit1_at_k", float("nan")) for row in history]
-        hit2 = [row.get("hit2_at_k", float("nan")) for row in history]
-        median_neff1 = [row.get("median_neff1", float("nan")) for row in history]
-        median_neff2 = [row.get("median_neff2", float("nan")) for row in history]
-        ratio = [row.get("neff_ratio", float("nan")) for row in history]
-        long_gap = [row.get("long_gap_rate", float("nan")) for row in history]
-        mutual = [row.get("mutual_rate", float("nan")) for row in history]
-        max_in = [row.get("max_in_degree", float("nan")) for row in history]
-
-        axes[0].plot(steps, hit1, marker="o", label=f"hit1@{k}", color="tab:blue")
-        axes[0].plot(steps, hit2, marker="o", label=f"hit2@{k}", color="tab:orange")
-        axes[0].set_ylabel("Hit rate")
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-
-        axes[1].plot(steps, median_neff1, marker="o", label="median Neff1", color="tab:green")
-        axes[1].plot(steps, median_neff2, marker="o", label="median Neff2", color="tab:red")
-        axes[1].plot(steps, ratio, marker="o", label="Neff2/Neff1", color="tab:purple")
-        axes[1].set_ylabel("Neighborhood size")
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-
-        axes[2].plot(steps, long_gap, marker="o", label="long-gap rate", color="tab:brown")
-        axes[2].plot(steps, mutual, marker="o", label="mutual kNN rate", color="tab:cyan")
-        axes[2].plot(steps, max_in, marker="o", label="max in-degree", color="tab:gray")
-        axes[2].set_xlabel("Step")
-        axes[2].set_ylabel("Graph health")
-        axes[2].legend()
-        axes[2].grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
 
-def save_graph_diagnostics(
-    model: JEPAWorldModel,
-    ema_model: Optional[JEPAWorldModel],
-    frames_cpu: torch.Tensor,
-    actions_cpu: torch.Tensor,
-    device: torch.device,
+def compute_graph_diagnostics_stats(
+    queries: torch.Tensor,
+    targets: torch.Tensor,
+    zhat_full: torch.Tensor,
+    next_index: torch.Tensor,
+    next2_index: torch.Tensor,
+    chunk_ids: torch.Tensor,
     cfg: GraphDiagnosticsConfig,
-    out_dir: Path,
     global_step: int,
-    embedding_kind: str = "z",
-    history_csv_path: Optional[Path] = None,
-) -> None:
-    from jepa_world_model_trainer import _predictor_rollout
-    if frames_cpu.ndim != 5:
-        raise ValueError("Graph diagnostics requires frames shaped [B, T, C, H, W].")
-    if frames_cpu.shape[1] < 3:
-        return
-    # Encode sequences and build predictor rollouts.
-    with torch.no_grad():
-        frames = frames_cpu.to(device)
-        actions = actions_cpu.to(device)
-        embeddings = model.encode_sequence(frames)["embeddings"]
-        preds, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
-        ema_embeddings: Optional[torch.Tensor] = None
-        ema_h_states: Optional[torch.Tensor] = None
-        if cfg.use_ema_targets and ema_model is not None:
-            ema_embeddings = ema_model.encode_sequence(frames)["embeddings"]
-            if embedding_kind == "s":
-                _, _, ema_h_states = _predictor_rollout(ema_model, ema_embeddings, actions)
-
-    batch_size, seq_len, latent_dim = embeddings.shape
-    next_index, next2_index, chunk_ids = _flatten_graph_diag_indices(frames)
-
-    # Prepare flattened latent tensors and normalization.
-    embedding_label = embedding_kind
-    if embedding_kind == "s":
-        s_targets = model.h2s(h_states)
-        s_hat_full = torch.cat([model.h2s(h_preds), model.h2s(h_states[:, -1:, :])], dim=1)
-        if cfg.use_ema_targets and ema_model is not None and ema_h_states is not None:
-            targets = ema_model.h2s(ema_h_states)
-        else:
-            targets = s_targets
-        z_flat = s_targets.reshape(-1, s_targets.shape[-1])
-        target_flat = targets.reshape(-1, targets.shape[-1])
-        zhat_full = s_hat_full.reshape(-1, s_hat_full.shape[-1])
-    else:
-        targets = ema_embeddings if cfg.use_ema_targets and ema_embeddings is not None else embeddings
-        z_flat = embeddings.reshape(-1, latent_dim)
-        target_flat = targets.reshape(-1, latent_dim)
-        zhat_full = torch.cat([preds, embeddings[:, -1:, :]], dim=1).reshape(-1, latent_dim)
-
-    if cfg.normalize_latents:
-        z_flat = F.normalize(z_flat, dim=-1)
-        target_flat = F.normalize(target_flat, dim=-1)
-        zhat_full = F.normalize(zhat_full, dim=-1)
-
-    # Build transition matrices and rank-based metrics.
-    queries = zhat_full if cfg.use_predictor_scores else z_flat
-    probs = _build_graph_transition_matrix(queries, target_flat, cfg)
+) -> GraphDiagnosticsStats:
+    probs = _build_graph_transition_matrix(queries, targets, cfg)
     probs2 = probs @ probs
 
     ranks1 = _graph_rank_stats(probs, next_index)
@@ -370,7 +230,6 @@ def save_graph_diagnostics(
     hit1_at_k = float((ranks1 <= k).mean()) if ranks1.size else float("nan")
     hit2_at_k = float((ranks2 <= k).mean()) if ranks2.size else float("nan")
 
-    # Neighborhood-size and connectivity diagnostics.
     neff1 = _graph_effective_neighborhood(probs, cfg.eps)
     neff2 = _graph_effective_neighborhood(probs2, cfg.eps)
     neff1_np = neff1.detach().cpu().numpy()
@@ -400,19 +259,17 @@ def save_graph_diagnostics(
     else:
         top_mean = float("nan")
 
-    # Edge-consistency sampling.
     edge_errors: Optional[np.ndarray] = None
     if cfg.include_edge_consistency and k > 0:
         edge_errors = _compute_edge_errors(
             probs,
             top_idx,
             zhat_full,
-            target_flat,
+            targets,
             k,
             cfg.edge_consistency_samples,
         )
 
-    # Persist metrics and plots.
     metrics: Dict[str, float] = {
         "step": float(global_step),
         "hit1_at_k": hit1_at_k,
@@ -427,24 +284,31 @@ def save_graph_diagnostics(
         "sample_size": float(probs.shape[0]),
     }
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _plot_rank_cdf(out_dir / f"rank1_cdf_{global_step:07d}.png", ranks1, k, "1-step rank CDF")
-    _plot_rank_cdf(out_dir / f"rank2_cdf_{global_step:07d}.png", ranks2, k, "2-hop rank CDF")
-    _plot_neff_violin(out_dir / f"neff_violin_{global_step:07d}.png", neff1_np, neff2_np)
-    _plot_in_degree_hist(out_dir / f"in_degree_hist_{global_step:07d}.png", in_degree)
-    if edge_errors is not None:
-        _plot_edge_consistency_hist(
-            out_dir / f"edge_consistency_{global_step:07d}.png",
-            edge_errors,
-            embedding_label=embedding_label,
-        )
+    return GraphDiagnosticsStats(
+        ranks1=ranks1,
+        ranks2=ranks2,
+        neff1=neff1_np,
+        neff2=neff2_np,
+        in_degree=in_degree,
+        edge_errors=edge_errors,
+        k=k,
+        metrics=metrics,
+    )
 
+
+def update_graph_diagnostics_history(
+    out_dir: Path,
+    stats: GraphDiagnosticsStats,
+    global_step: int,
+    history_csv_path: Optional[Path] = None,
+) -> List[Dict[str, float]]:
     history_path = _graph_history_path(out_dir)
-    history = _write_graph_history(history_path, metrics)
+    history = _write_graph_history(history_path, stats.metrics)
     if history_csv_path is not None:
         history_csv_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(history_path, history_csv_path)
     history_plot = out_dir / f"metrics_history_{global_step:07d}.png"
-    _plot_graph_history(history_plot, history, k)
+    save_graph_history_plot(history_plot, history, stats.k)
     latest_plot = out_dir / "metrics_history_latest.png"
     shutil.copy2(history_plot, latest_plot)
+    return history
