@@ -1,17 +1,16 @@
 """Action-alignment stats helper for diagnostics."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 
 def compute_action_alignment_stats(
-    motion: Dict[str, Any],
+    delta_proj: np.ndarray,
+    action_ids: np.ndarray,
     min_action_count: int,
     cosine_high_threshold: float,
 ) -> List[Dict[str, Any]]:
-    delta_proj = motion["delta_proj"]
-    action_ids = motion["action_ids"]
     stats: List[Dict[str, Any]] = []
     unique_actions, counts = np.unique(action_ids, return_counts=True)
     if unique_actions.size == 0:

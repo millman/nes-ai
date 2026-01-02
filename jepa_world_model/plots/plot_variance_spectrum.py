@@ -2,20 +2,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 
 def save_variance_spectrum_plot(
-    motion: Dict[str, Any],
+    variance_ratio: np.ndarray,
     out_dir: Path,
     global_step: int,
     embedding_label: str,
 ) -> None:
     out_path = out_dir / f"delta_{embedding_label}_variance_spectrum_{global_step:07d}.png"
-    variance_ratio = motion["variance_ratio"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     k = min(len(variance_ratio), 32)
     if k == 0:

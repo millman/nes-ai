@@ -10,12 +10,12 @@ import torch.nn.functional as F
 
 
 @dataclass
-class GeometryLossConfig:
+class LossGeometryConfig:
     margin: float = 0.1
     max_pairs: int = 0
 
 
-def geometry_ranking_loss(states: torch.Tensor, cfg: GeometryLossConfig) -> Tuple[torch.Tensor, torch.Tensor]:
+def geometry_ranking_loss(states: torch.Tensor, cfg: LossGeometryConfig) -> Tuple[torch.Tensor, torch.Tensor]:
     """Rank distances to the goal (last step) so later states are closer.
 
     Returns (loss, accuracy).

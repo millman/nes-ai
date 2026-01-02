@@ -1,7 +1,8 @@
 """Motion subspace helpers for diagnostics."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -26,14 +27,29 @@ def _compute_pca(delta_z_centered: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return vt, var_ratio
 
 
+@dataclass
+class MotionSubspace:
+    delta_proj: np.ndarray
+    proj_flat: np.ndarray
+    proj_sequences: List[np.ndarray]
+    variance_ratio: np.ndarray
+    components: np.ndarray
+    action_ids: np.ndarray
+    action_dim: int
+    actions_seq: np.ndarray
+    paths: List[List[str]]
+
+
 def build_motion_subspace(
     embeddings: torch.Tensor,
     actions: torch.Tensor,
     top_k_components: int,
-    paths: Optional[List[List[str]]],
-) -> Optional[Dict[str, Any]]:
+    paths: List[List[str]],
+) -> MotionSubspace:
     if embeddings.shape[1] < 2:
-        return None
+        raise AssertionError("Motion subspace requires at least two frames per sequence.")
+    if paths is None:
+        raise AssertionError("Motion subspace requires frame paths.")
     embed_np = embeddings.detach().cpu().numpy()
     action_np = actions.detach().cpu().numpy()
     batch, seq_len, latent_dim = embed_np.shape
@@ -44,7 +60,7 @@ def build_motion_subspace(
         action_vecs.append(action_np[b, :-1])
     delta_embed = np.concatenate(delta_list, axis=0)
     if delta_embed.shape[0] < 2:
-        return None
+        raise AssertionError("Motion subspace requires at least two delta steps.")
     actions_flat = np.concatenate(action_vecs, axis=0)
     action_ids = compress_actions_to_ids(actions_flat)
     delta_mean = delta_embed.mean(axis=0, keepdims=True)
@@ -61,14 +77,14 @@ def build_motion_subspace(
     for _ in range(batch):
         proj_sequences.append(proj_flat[offset : offset + seq_len])
         offset += seq_len
-    return {
-        "delta_proj": delta_proj,
-        "proj_flat": proj_flat,
-        "proj_sequences": proj_sequences,
-        "variance_ratio": variance_ratio,
-        "components": components,
-        "action_ids": action_ids,
-        "action_dim": action_np.shape[-1],
-        "actions_seq": action_np,
-        "paths": paths,
-    }
+    return MotionSubspace(
+        delta_proj=delta_proj,
+        proj_flat=proj_flat,
+        proj_sequences=proj_sequences,
+        variance_ratio=variance_ratio,
+        components=components,
+        action_ids=action_ids,
+        action_dim=action_np.shape[-1],
+        actions_seq=action_np,
+        paths=paths,
+    )

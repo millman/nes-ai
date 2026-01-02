@@ -11,14 +11,13 @@ from jepa_world_model.actions import decode_action_id
 
 def write_action_alignment_strength(
     alignment_stats: List[Dict[str, Any]],
-    motion: Dict[str, Any],
+    action_dim: int,
     out_dir: Path,
     global_step: int,
 ) -> None:
     """Summarize per-action directional strength relative to step magnitude."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"action_alignment_strength_{global_step:07d}.txt"
-    action_dim = motion["action_dim"]
     with path.open("w") as handle:
         if not alignment_stats:
             handle.write("No actions met alignment criteria.\n")

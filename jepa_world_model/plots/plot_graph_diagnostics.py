@@ -46,7 +46,7 @@ class GraphDiagnosticsStats:
     neff1: np.ndarray
     neff2: np.ndarray
     in_degree: np.ndarray
-    edge_errors: Optional[np.ndarray]
+    edge_errors: np.ndarray
     k: int
     metrics: Dict[str, float]
 
@@ -195,11 +195,11 @@ def _compute_edge_errors(
     target_flat: torch.Tensor,
     k: int,
     sample_limit: int,
-) -> Optional[np.ndarray]:
+) -> np.ndarray:
     total_edges = probs.shape[0] * k
     sample = min(sample_limit, total_edges)
     if sample <= 0:
-        return None
+        raise AssertionError("Edge consistency sampling requires at least one edge sample.")
     perm = torch.randperm(total_edges, device=probs.device)[:sample]
     rows = perm // k
     cols = perm % k
@@ -259,7 +259,6 @@ def compute_graph_diagnostics_stats(
     else:
         top_mean = float("nan")
 
-    edge_errors: Optional[np.ndarray] = None
     if cfg.include_edge_consistency and k > 0:
         edge_errors = _compute_edge_errors(
             probs,
@@ -269,6 +268,8 @@ def compute_graph_diagnostics_stats(
             k,
             cfg.edge_consistency_samples,
         )
+    else:
+        edge_errors = np.asarray([], dtype=np.float32)
 
     metrics: Dict[str, float] = {
         "step": float(global_step),

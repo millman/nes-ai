@@ -7,19 +7,20 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from jepa_world_model.actions import decode_action_id
+from jepa_world_model.plots.build_motion_subspace import MotionSubspace
 
 
 def write_action_alignment_crosscheck(
     alignment_stats: List[Dict[str, Any]],
-    motion: Dict[str, Any],
+    motion: MotionSubspace,
     out_dir: Path,
     global_step: int,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"action_alignment_crosscheck_{global_step:07d}.txt"
-    action_dim = motion["action_dim"]
-    action_ids = motion["action_ids"]
-    delta_proj = motion["delta_proj"]
+    action_dim = motion.action_dim
+    action_ids = motion.action_ids
+    delta_proj = motion.delta_proj
     mean_units: Dict[int, np.ndarray] = {}
     for stat in alignment_stats:
         mean_vec = stat.get("mean_dir")

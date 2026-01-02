@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Any, Dict
+
+import numpy as np
 
 
 def write_delta_variance_csv(
     delta_dir: Path,
     global_step: int,
-    motion: Dict[str, Any],
+    variance_ratio: np.ndarray,
     embedding_label: str,
 ) -> None:
     delta_dir.mkdir(parents=True, exist_ok=True)
@@ -17,5 +18,5 @@ def write_delta_variance_csv(
     with delta_var_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["component", "variance_ratio"])
-        for idx, val in enumerate(motion["variance_ratio"][:64]):  # cap rows
+        for idx, val in enumerate(variance_ratio[:64]):  # cap rows
             writer.writerow([idx, float(val)])

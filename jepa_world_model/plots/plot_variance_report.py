@@ -2,18 +2,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
 
 import numpy as np
 
 
 def write_variance_report(
-    motion: Dict[str, Any],
+    variance_ratio: np.ndarray,
     out_dir: Path,
     global_step: int,
     embedding_label: str,
 ) -> None:
-    variance_ratio = motion["variance_ratio"]
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / f"delta_{embedding_label}_pca_report_{global_step:07d}.txt"
     with report_path.open("w") as handle:

@@ -8,11 +8,10 @@ import numpy as np
 
 def build_action_alignment_debug(
     alignment_stats: List[Dict[str, Any]],
-    motion: Dict[str, Any],
+    delta_proj: np.ndarray,
+    action_ids: np.ndarray,
 ) -> Dict[str, Any]:
     """Build auxiliary tensors for debugging alignment drift/degeneracy."""
-    delta_proj = motion["delta_proj"]
-    action_ids = motion["action_ids"]
     mean_units: Dict[int, np.ndarray] = {}
     counts: Dict[int, int] = {}
     for stat in alignment_stats:

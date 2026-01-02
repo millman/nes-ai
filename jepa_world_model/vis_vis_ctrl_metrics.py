@@ -52,7 +52,7 @@ def _compute_knn_indices(
         dists[torch.arange(end - start), row_ids] = float("inf")
         vals, idx = torch.topk(dists, k=k, largest=False)
         knn_idx[start:end] = idx.cpu().numpy()
-        knn_dist[start:end] = vals.cpu().numpy()
+        knn_dist[start:end] = vals.detach().cpu().numpy()
     return knn_idx, knn_dist
 
 
@@ -206,6 +206,8 @@ def compute_vis_ctrl_metrics(
         raise ValueError("Actions must have shape [B, T, action_dim].")
     if embeddings.shape[1] < max(warmup + 1, 1):
         return VisCtrlMetrics({}, {}, np.zeros(0, dtype=np.float32), float("nan"), float("nan"), np.zeros(0, dtype=np.float32), {}, {})
+    embeddings = embeddings.detach()
+    actions = actions.detach()
     emb = embeddings[:, warmup:]
     b, t, _ = emb.shape
     flat = emb.reshape(b * t, emb.shape[-1]).cpu()

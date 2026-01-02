@@ -11,7 +11,7 @@ from jepa_world_model.actions import decode_action_id
 def write_action_alignment_csv(
     alignment_dir: Path,
     global_step: int,
-    motion: Dict[str, Any],
+    action_dim: int,
     alignment_stats: List[Dict[str, Any]],
 ) -> None:
     alignment_dir.mkdir(parents=True, exist_ok=True)
@@ -23,7 +23,7 @@ def write_action_alignment_csv(
             writer.writerow(
                 [
                     stat["action_id"],
-                    decode_action_id(stat["action_id"], motion["action_dim"]),
+                    decode_action_id(stat["action_id"], action_dim),
                     stat["count"],
                     stat["mean"],
                     stat["std"],

@@ -13,7 +13,7 @@ from jepa_world_model.actions import decode_action_id
 def write_cycle_error_summary_csv(
     cycle_dir: Path,
     global_step: int,
-    motion: Dict[str, Any],
+    action_dim: int,
     cycle_per_action: Dict[int, List[float]],
 ) -> None:
     cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -24,4 +24,4 @@ def write_cycle_error_summary_csv(
         for aid, vals in sorted(cycle_per_action.items(), key=lambda kv: len(kv[1]), reverse=True):
             if not vals:
                 continue
-            writer.writerow([aid, decode_action_id(aid, motion["action_dim"]), len(vals), float(np.mean(vals))])
+            writer.writerow([aid, decode_action_id(aid, action_dim), len(vals), float(np.mean(vals))])

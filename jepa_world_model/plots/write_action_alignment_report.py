@@ -11,14 +11,13 @@ from jepa_world_model.actions import decode_action_id
 
 def write_action_alignment_report(
     alignment_stats: List[Dict[str, Any]],
-    motion: Dict[str, Any],
+    action_dim: int,
     inverse_map: Dict[int, int],
     out_dir: Path,
     global_step: int,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / f"action_alignment_report_{global_step:07d}.txt"
-    action_dim = motion["action_dim"]
     with report_path.open("w") as handle:
         handle.write("Action alignment diagnostics (per action)\n")
         if not alignment_stats:

@@ -13,7 +13,7 @@ from jepa_world_model.actions import decode_action_id
 def write_action_alignment_pairwise_csv(
     alignment_dir: Path,
     global_step: int,
-    motion: Dict[str, Any],
+    action_dim: int,
     alignment_debug: Dict[str, Any],
 ) -> None:
     alignment_dir.mkdir(parents=True, exist_ok=True)
@@ -31,9 +31,9 @@ def write_action_alignment_pairwise_csv(
                 writer.writerow(
                     [
                         aid,
-                        decode_action_id(aid, motion["action_dim"]),
+                        decode_action_id(aid, action_dim),
                         bid,
-                        decode_action_id(bid, motion["action_dim"]),
+                        decode_action_id(bid, action_dim),
                         float(pairwise[i, j]),
                     ]
                 )

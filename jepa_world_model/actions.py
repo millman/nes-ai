@@ -7,7 +7,7 @@ from typing import Union
 import numpy as np
 import torch
 
-from nes_controller import CONTROLLER_STATE_DESC
+from nes_controller import CONTROLLER_STATE_DESC, _describe_controller_vector_compact
 
 
 def decode_action_id(action_id: int, action_dim: int) -> str:
@@ -33,3 +33,9 @@ def compress_actions_to_ids(actions: Union[np.ndarray, torch.Tensor]) -> Union[n
     binary = (flat > 0.5).astype(np.int64)
     weights = (1 << np.arange(binary.shape[1], dtype=np.int64))
     return (binary * weights).sum(axis=1)
+
+
+def describe_action_tensor(action: torch.Tensor) -> str:
+    vector = action.detach().cpu().numpy().reshape(-1)
+    binary = (vector > 0.5).astype(np.uint8)
+    return _describe_controller_vector_compact(binary)
