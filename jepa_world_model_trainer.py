@@ -369,7 +369,7 @@ class LossWeights:
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
     inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 0.1
+    inverse_dynamics_h: float = 0.0
 
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
     geometry_rank: float = 0.0
