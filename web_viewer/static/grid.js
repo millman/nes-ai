@@ -1,3 +1,6 @@
+let activeMetadataPopover = null;
+let metadataPopoverOutsideClickBound = false;
+
 document.addEventListener("DOMContentLoaded", () => {
   const forms = document.querySelectorAll(".notes-form");
   forms.forEach((form) => wireNotesForm(form));
@@ -171,6 +174,23 @@ function wireMetadataPopovers(root) {
     return;
   }
 
+  if (!metadataPopoverOutsideClickBound) {
+    document.addEventListener("click", (event) => {
+      if (!activeMetadataPopover) {
+        return;
+      }
+      if (
+        event.target.closest(".metadata-icon-btn, .git-icon-btn") ||
+        event.target.closest(".metadata-popover")
+      ) {
+        return;
+      }
+      activeMetadataPopover.close();
+      activeMetadataPopover = null;
+    });
+    metadataPopoverOutsideClickBound = true;
+  }
+
   buttons.forEach((button) => {
     // Dispose any existing popover
     const existing = bootstrap.Popover.getInstance(button);
@@ -194,6 +214,14 @@ function wireMetadataPopovers(root) {
         return `${pin}<pre class="metadata-popover-pre">${escapeHtml(text)}</pre>`;
       },
     });
+
+    const refreshContent = () => {
+      if (!popover.tip) {
+        return;
+      }
+      const body = popover.tip.querySelector(".popover-body");
+      if (body) body.innerHTML = popover._config.content();
+    };
 
     const update = () => {
       const shouldShow = pinned || hovering;
@@ -219,11 +247,21 @@ function wireMetadataPopovers(root) {
       event.preventDefault();
       event.stopPropagation();
       pinned = !pinned;
-      // Force content refresh to update badge
-      if (popover.tip) {
-        const body = popover.tip.querySelector(".popover-body");
-        if (body) body.innerHTML = popover._config.content();
+      if (pinned) {
+        activeMetadataPopover = {
+          button,
+          popover,
+          close: () => {
+            pinned = false;
+            refreshContent();
+            update();
+          },
+        };
+      } else if (activeMetadataPopover?.button === button) {
+        activeMetadataPopover = null;
       }
+      // Force content refresh to update badge
+      refreshContent();
       update();
     });
   });

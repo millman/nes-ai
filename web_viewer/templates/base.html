@@ -85,6 +85,30 @@
                     <li class="nav-item d-none d-lg-block text-white-50">|</li>
                     <li class="nav-item d-flex align-items-center">
                         {% if active_experiment_id %}
+                        <a class="nav-link px-0 {{ 'active' if current_nav in ['debug_z', 'debug_h', 'debug_s'] else '' }}" href="{{ url_for('debug_z', exp_id=active_experiment_id) }}">Debug Z H S</a>
+                        {% elif first_experiment_id %}
+                        <a class="nav-link px-0 {{ 'active' if current_nav in ['debug_z', 'debug_h', 'debug_s'] else '' }}" href="{{ url_for('debug_z', exp_id=first_experiment_id) }}">Debug Z H S</a>
+                        {% else %}
+                        <span class="nav-link px-0 disabled text-secondary">Debug Z H S</span>
+                        {% endif %}
+                        <span class="nav-link px-1"> </span>
+                        {% if active_experiment_id %}
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'debug_z' else '' }}" href="{{ url_for('debug_z', exp_id=active_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'debug_h' else '' }}" href="{{ url_for('debug_h', exp_id=active_experiment_id) }}">H</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'debug_s' else '' }}" href="{{ url_for('debug_s', exp_id=active_experiment_id) }}">S</a>
+                        {% elif first_experiment_id %}
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'debug_z' else '' }}" href="{{ url_for('debug_z', exp_id=first_experiment_id) }}">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'debug_h' else '' }}" href="{{ url_for('debug_h', exp_id=first_experiment_id) }}">H</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'debug_s' else '' }}" href="{{ url_for('debug_s', exp_id=first_experiment_id) }}">S</a>
+                        {% else %}
+                        <span class="nav-link disabled text-secondary px-1">Z</span>
+                        <span class="nav-link disabled text-secondary px-1">H</span>
+                        <span class="nav-link disabled text-secondary px-1">S</span>
+                        {% endif %}
+                    </li>
+                    <li class="nav-item d-none d-lg-block text-white-50">|</li>
+                    <li class="nav-item d-flex align-items-center">
+                        {% if active_experiment_id %}
                         <a class="nav-link px-0 {{ 'active' if current_nav in ['self_distance_z', 'self_distance_s', 'self_distance_zvs'] else '' }}" href="{{ url_for('self_distance_zvs', exp_id=active_experiment_id) }}">Self-distance</a>
                         {% elif first_experiment_id %}
                         <a class="nav-link px-0 {{ 'active' if current_nav in ['self_distance_z', 'self_distance_s', 'self_distance_zvs'] else '' }}" href="{{ url_for('self_distance_zvs', exp_id=first_experiment_id) }}">Self-distance</a>

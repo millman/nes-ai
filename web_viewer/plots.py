@@ -69,3 +69,44 @@ def build_overlay(
         legend_title_text="Experiment:Metric",
     )
     return fig.to_dict()
+
+
+def build_ranking_accuracy_plot(curves: LossCurveData) -> Optional[Dict]:
+    if not curves.series:
+        return None
+    accuracy = curves.series.get("geometry_rank_accuracy")
+    loss = curves.series.get("loss_geometry_rank")
+    if not accuracy and not loss:
+        return None
+    fig = go.Figure()
+    if accuracy:
+        fig.add_trace(
+            go.Scatter(
+                x=curves.steps,
+                y=accuracy,
+                mode="lines",
+                name="geometry_rank_accuracy",
+                hovertemplate="%{y:.3f}<extra></extra>",
+            )
+        )
+    if loss:
+        fig.add_trace(
+            go.Scatter(
+                x=curves.steps,
+                y=loss,
+                mode="lines",
+                name="loss_geometry_rank",
+                yaxis="y2",
+                hovertemplate="%{y:.3f}<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        template="plotly_white",
+        xaxis=dict(title="Step"),
+        yaxis=dict(title="Ranking accuracy", range=[0, 1]),
+        yaxis2=dict(title="Ranking loss", overlaying="y", side="right", type="log"),
+        margin=dict(t=40, b=40, l=60, r=60),
+        hovermode="x unified",
+        legend_title_text="Metric",
+    )
+    return fig.to_dict()

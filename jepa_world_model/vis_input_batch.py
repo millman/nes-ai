@@ -41,6 +41,13 @@ def save_input_batch_visualization(
             columns.append(frame_img)
         row_image = np.concatenate(columns, axis=1)
         grid_rows.append(row_image)
+        if recon is not None:
+            recon_columns: list[np.ndarray] = []
+            for step in range(seq_len):
+                recon_img = tensor_to_uint8_image(recon[row_idx, step])
+                recon_img = _annotate_with_text(recon_img, f"recon t{step}")
+                recon_columns.append(recon_img)
+            grid_rows.append(np.concatenate(recon_columns, axis=1))
         if include_deltas and recon is not None and seq_len > 1:
             delta_target = frames[row_idx, 1:] - frames[row_idx, :-1]
             delta_recon = recon[row_idx, 1:] - recon[row_idx, :-1]

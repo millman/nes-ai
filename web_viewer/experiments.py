@@ -1298,6 +1298,7 @@ def _collect_vis_ctrl_images(root: Path) -> Dict[str, List[Path]]:
                 images[name] = files
     alignment_z = root / "vis_action_alignment_z"
     alignment_s = root / "vis_action_alignment_s"
+    alignment_h = root / "vis_action_alignment_h"
     if alignment_z.exists():
         files = sorted(alignment_z.glob("action_alignment_detail_*.png"))
         if files:
@@ -1306,6 +1307,10 @@ def _collect_vis_ctrl_images(root: Path) -> Dict[str, List[Path]]:
         files = sorted(alignment_s.glob("action_alignment_detail_*.png"))
         if files:
             images["alignment_s"] = files
+    if alignment_h.exists():
+        files = sorted(alignment_h.glob("action_alignment_detail_*.png"))
+        if files:
+            images["alignment_h"] = files
     return images
 
 

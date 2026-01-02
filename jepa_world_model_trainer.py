@@ -416,26 +416,26 @@ class LossWeights:
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 0.3
+    recon_multi_box: float = 1.3
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
-    pixel_delta: float = 0.0
+    pixel_delta: float = 1.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
-    h2z: float = 0.0
+    h2z: float = 1.0
     # 2-hop composability (arbitrary actions): enforce predicted h-delta composition across two steps.
-    h2z_2hop: float = 0.0
+    h2z_2hop: float = 1.0
 
     # Auxiliary delta prediction from hidden state to z.
-    delta_z: float = 0.0
+    delta_z: float = 1.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 0.0
+    inverse_dynamics_z: float = 1.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 0.0
+    inverse_dynamics_h: float = 1.0
 
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
-    geometry_rank: float = 0.0
+    geometry_rank: float = 1.0
 
 @dataclass
 class LossSigRegConfig:
@@ -1093,7 +1093,8 @@ def _compute_losses_and_metrics(
     decoder_grad_norm = 0.0
     if for_training and optimizer is not None:
         optimizer.zero_grad()
-        world_loss.backward()
+        with torch.autograd.set_detect_anomaly(True):
+            world_loss.backward()
         world_grad_norm = grad_norm(model.parameters())
         decoder_grad_norm = grad_norm(decoder.parameters())
         optimizer.step()
@@ -1595,6 +1596,7 @@ def _prepare_graph_diagnostics(
     if graph_frames.shape[1] < 3:
         raise AssertionError("Graph diagnostics require sequences with at least three frames.")
     with torch.no_grad():
+        assert not torch.is_grad_enabled()
         graph_frames_device = graph_frames.to(device)
         graph_actions_device = graph_actions.to(device)
         graph_embeddings = model.encode_sequence(graph_frames_device)["embeddings"]
@@ -1612,6 +1614,7 @@ def _prepare_graph_diagnostics(
                 ema_embeddings,
                 graph_actions_device,
             )
+    assert torch.is_grad_enabled()
     next_index, next2_index, chunk_ids = build_graph_diag_indices(graph_frames_device)
     return GraphDiagnosticsBatch(
         graph_embeddings=graph_embeddings,
@@ -1717,9 +1720,11 @@ def _build_visualization_sequences(
     vis_actions = batch_cpu[1].to(device)
     frame_paths = batch_cpu[2]
     with torch.no_grad():
+        assert not torch.is_grad_enabled()
         vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
         decoded_frames = decoder(vis_embeddings)
         paired_actions = _pair_actions(vis_actions)
+    assert torch.is_grad_enabled()
     if vis_frames.shape[0] == 0:
         raise ValueError("Visualization batch must include at least one sequence.")
     if vis_frames.shape[1] < 2:
@@ -1764,6 +1769,7 @@ def _build_visualization_sequences(
             row_actions.append(describe_action_tensor(vis_actions[idx, action_idx]))
         row_rollout: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
         with torch.no_grad():
+            assert not torch.is_grad_enabled()
             current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
             current_hidden = current_embed.new_zeros(1, model.state_dim)
             prev_pred_frame = decoded_frames[idx, start_idx].detach()
@@ -1790,6 +1796,7 @@ def _build_visualization_sequences(
                 prev_pred_frame = current_frame.detach()
                 current_embed = next_embed
                 current_hidden = h_next
+        assert torch.is_grad_enabled()
         action_texts.append(row_actions)
         rollout_frames.append(row_rollout)
         kept_row_indices.append(idx)
@@ -2034,6 +2041,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_delta_s_dir = run_dir / "vis_delta_s_pca"
     diagnostics_alignment_dir = run_dir / "vis_action_alignment_z"
     diagnostics_alignment_s_dir = run_dir / "vis_action_alignment_s"
+    diagnostics_alignment_h_dir = run_dir / "vis_action_alignment_h"
     diagnostics_cycle_dir = run_dir / "vis_cycle_error_z"
     diagnostics_cycle_s_dir = run_dir / "vis_cycle_error_s"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
@@ -2062,6 +2070,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_delta_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_s_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
@@ -2337,6 +2346,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         ):
             recon_vis: torch.Tensor
             with torch.no_grad():
+                assert not torch.is_grad_enabled()
                 was_training = model.training
                 decoder_was_training = decoder.training
                 model.eval()
@@ -2348,6 +2358,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     model.train()
                 if decoder_was_training:
                     decoder.train()
+            assert torch.is_grad_enabled()
             save_input_batch_visualization(
                 inputs_vis_dir / f"inputs_{global_step:07d}.png",
                 rolling_batch_cpu[0],
@@ -2406,11 +2417,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             )
 
             with torch.no_grad():
+                assert not torch.is_grad_enabled()
                 embed_frames = embedding_batch_cpu[0].to(device)
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
                 h_states = _rollout_hidden_states(model, embed_outputs["embeddings"], embed_actions)
                 s_embeddings = model.h2s(h_states)
+            assert torch.is_grad_enabled()
             save_embedding_projection(
                 embed_outputs["embeddings"],
                 pca_z_dir / f"pca_z_{global_step:07d}.png",
@@ -2440,8 +2453,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     dataset.image_hw,
                 )
             with torch.no_grad():
+                assert not torch.is_grad_enabled()
                 self_dist_frames = self_distance_inputs.frames.to(device)
                 self_dist_embeddings = model.encode_sequence(self_dist_frames)["embeddings"][0]
+            assert torch.is_grad_enabled()
             write_self_distance_outputs(
                 self_dist_embeddings,
                 self_distance_inputs,
@@ -2475,6 +2490,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     raise AssertionError("Diagnostics require at least one sequence with two frames.")
 
                 with torch.no_grad():
+                    assert not torch.is_grad_enabled()
                     diag_frames_device = diag_frames.to(device)
                     diag_actions_device = diag_actions.to(device)
                     diag_embeddings = model.encode_sequence(diag_frames_device)["embeddings"]
@@ -2484,6 +2500,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         diag_actions_device,
                     )
                     diag_s_embeddings = model.h2s(diag_h_states)
+                assert torch.is_grad_enabled()
 
                 inverse_map = build_action_inverse_map(diag_actions.detach().cpu().numpy())
                 motion_z = build_motion_subspace(
@@ -2548,6 +2565,29 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     motion_z,
                     diagnostics_alignment_dir,
                     global_step,
+                )
+                motion_h = build_motion_subspace(
+                    diag_h_states,
+                    diag_actions,
+                    cfg.diagnostics.top_k_components,
+                    diag_paths,
+                )
+                alignment_stats_h = compute_action_alignment_stats(
+                    motion_h.delta_proj,
+                    motion_h.action_ids,
+                    cfg.diagnostics.min_action_count,
+                    cfg.diagnostics.cosine_high_threshold,
+                )
+                alignment_debug_h = build_action_alignment_debug(
+                    alignment_stats_h,
+                    motion_h.delta_proj,
+                    motion_h.action_ids,
+                )
+                save_action_alignment_detail_plot(
+                    diagnostics_alignment_h_dir / f"action_alignment_detail_{global_step:07d}.png",
+                    alignment_debug_h,
+                    cfg.diagnostics.cosine_high_threshold,
+                    motion_h.action_dim,
                 )
                 cycle_errors_z, cycle_per_action_z = compute_cycle_errors(
                     motion_z.proj_sequences,
