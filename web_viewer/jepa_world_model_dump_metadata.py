@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from jepa_world_model_trainer import ModelConfig, TrainConfig
+from jepa_world_model.model_config import ModelConfig
+from jepa_world_model_trainer import TrainConfig
 
 
 def main() -> None:

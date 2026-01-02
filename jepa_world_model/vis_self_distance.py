@@ -246,9 +246,8 @@ def write_self_distance_outputs_from_embeddings(
 
 
 def write_self_distance_outputs(
-    model,
+    embeddings: torch.Tensor,
     traj_inputs,
-    device: torch.device,
     csv_dir: Path,
     plot_dir: Path,
     global_step: int,
@@ -257,11 +256,10 @@ def write_self_distance_outputs(
     file_prefix: str,
     cosine_prefix: Optional[str],
 ) -> None:
-    if traj_inputs.frames.shape[1] < 2:
+    if embeddings.ndim == 3:
+        embeddings = embeddings[0]
+    if embeddings.shape[0] < 2:
         return
-    frames = traj_inputs.frames.to(device)
-    with torch.no_grad():
-        embeddings = model.encode_sequence(frames)["embeddings"][0]
     write_self_distance_outputs_from_embeddings(
         embeddings,
         traj_inputs,
