@@ -16,17 +16,6 @@ except ImportError:
     TSNE = None
 
 
-def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
-    """Concatenate current and prior actions for predictor conditioning."""
-    if actions.ndim != 3:
-        raise ValueError("Actions must have shape [B, T, action_dim].")
-    if actions.shape[1] == 0:
-        return actions.new_zeros((actions.shape[0], 0, actions.shape[2] * 2))
-    zeros = actions.new_zeros((actions.shape[0], 1, actions.shape[2]))
-    prev = torch.cat([zeros, actions[:, :-1]], dim=1)
-    return torch.cat([actions, prev], dim=-1)
-
-
 def _rollout_predictions(
     model,
     embeddings: torch.Tensor,
@@ -36,12 +25,11 @@ def _rollout_predictions(
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, embeddings.shape[-1]))
-    paired_actions = _pair_actions(actions)
     preds = []
     h_t = embeddings.new_zeros((b, model.state_dim))
     for step in range(t - 1):
         z_t = embeddings[:, step]
-        act_t = paired_actions[:, step]
+        act_t = actions[:, step]
         h_next = model.predictor(z_t, h_t, act_t)
         z_pred = model.h_to_z(h_next)
         preds.append(z_pred)
@@ -58,12 +46,11 @@ def _rollout_open_loop(
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, model.state_dim))
-    paired_actions = _pair_actions(actions)
     h_t = embeddings.new_zeros((b, model.state_dim))
     z_t = embeddings[:, 0]
     h_preds = []
     for step in range(t - 1):
-        act_t = paired_actions[:, step]
+        act_t = actions[:, step]
         h_next = model.predictor(z_t, h_t, act_t)
         z_next = model.h_to_z(h_next)
         h_preds.append(h_next)

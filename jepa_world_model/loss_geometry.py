@@ -15,31 +15,31 @@ class LossGeometryConfig:
     max_pairs: int = 0
 
 
-def geometry_ranking_loss(states: torch.Tensor, cfg: LossGeometryConfig) -> Tuple[torch.Tensor, torch.Tensor]:
+def geometry_ranking_loss(states: torch.Tensor, cfg: LossGeometryConfig) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Rank distances to the goal (last step) so later states are closer.
 
-    Returns (loss, accuracy).
+    Returns (loss, accuracy, pairs_per_batch).
     """
     if states.ndim != 3:
         raise ValueError("states must have shape [B, T, D].")
     bsz, seq_len, _ = states.shape
     if seq_len < 3:
         zero = states.new_tensor(0.0)
-        return zero, zero
+        return zero, zero, zero
 
     goal = states[:, -1]
     dist = torch.norm(states[:, :-1] - goal[:, None, :], dim=-1)
     steps = dist.shape[1]
     if steps < 2:
         zero = states.new_tensor(0.0)
-        return zero, zero
+        return zero, zero, zero
 
     diff = dist[:, :, None] - dist[:, None, :]
     mask = torch.triu(torch.ones(steps, steps, device=states.device, dtype=torch.bool), diagonal=1)
     diffs = diff[:, mask]
     if diffs.numel() == 0:
         zero = states.new_tensor(0.0)
-        return zero, zero
+        return zero, zero, zero
 
     if cfg.max_pairs and diffs.numel() > cfg.max_pairs * bsz:
         per_batch = min(cfg.max_pairs, diffs.shape[1])
@@ -48,4 +48,5 @@ def geometry_ranking_loss(states: torch.Tensor, cfg: LossGeometryConfig) -> Tupl
 
     loss = F.relu(cfg.margin - diffs).mean()
     accuracy = (diffs > 0).float().mean()
-    return loss, accuracy
+    pairs_per_batch = states.new_tensor(float(diffs.shape[1]))
+    return loss, accuracy, pairs_per_batch

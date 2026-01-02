@@ -12,7 +12,7 @@
 <style>
 .diagnostic-row-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.75rem 1rem;
 }
 
@@ -96,7 +96,7 @@
         {% set heading_title = experiment.title if experiment.title != "Untitled" else experiment.name %}
         <h3 class="mb-1">{{ heading_title }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
-        <h3 class="mb-1">Diagnostics (Z vs S)</h3>
+    <h3 class="mb-1">Diagnostics (Z vs H vs S)</h3>
         <div class="text-muted small">No experiments with diagnostics outputs.</div>
         {% endif %}
     </div>
@@ -143,6 +143,24 @@
         </div>
     </div>
     <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-delta-header">
+            <span class="diagnostic-title">Delta-h PCA</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                <span
+                    class="diagnostic-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="PCA of delta-h steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct dynamics modes."
+                >i</span>
+            </div>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-h-delta-img" class="img-fluid rounded border d-none" alt="Delta-h PCA diagnostic">
+            <div class="text-muted small" id="diagnostics-h-delta-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-delta-header">
             <span class="diagnostic-title">Delta-s PCA</span>
             <div class="d-flex align-items-center gap-2">
@@ -179,6 +197,24 @@
         </div>
     </div>
     <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-align-header">
+            <span class="diagnostic-title">Action alignment (H)</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                <span
+                    class="diagnostic-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Per-action cosine alignment of delta-h directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment."
+                >i</span>
+            </div>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-h-align-img" class="img-fluid rounded border d-none" alt="Alignment detail (H) diagnostic">
+            <div class="text-muted small" id="diagnostics-h-align-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-align-header">
             <span class="diagnostic-title">Action alignment (S)</span>
             <div class="d-flex align-items-center gap-2">
@@ -207,6 +243,16 @@
         </div>
     </div>
     <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-self-header">
+            <span class="diagnostic-title">Self-distance (H)</span>
+            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-h-self-img" class="img-fluid rounded border d-none" alt="Self-distance (H) diagnostic">
+            <div class="text-muted small" id="diagnostics-h-self-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-self-header">
             <span class="diagnostic-title">Self-distance (S)</span>
             <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
@@ -224,6 +270,16 @@
         <div class="card-body d-flex flex-column gap-2">
             <img id="diagnostics-z-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (Z) diagnostic">
             <div class="text-muted small" id="diagnostics-z-cycle-caption"></div>
+        </div>
+    </div>
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-cycle-header">
+            <span class="diagnostic-title">Cycle error (H)</span>
+            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="diagnostics-h-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (H) diagnostic">
+            <div class="text-muted small" id="diagnostics-h-cycle-caption"></div>
         </div>
     </div>
     <div class="card h-100">
@@ -259,6 +315,7 @@ document.addEventListener("DOMContentLoaded", () => {
 document.addEventListener("DOMContentLoaded", () => {
     const steps = {{ steps | tojson }};
     const diagnosticsZ = {{ diagnostics_map_z | tojson }};
+    const diagnosticsH = {{ diagnostics_map_h | tojson }};
     const diagnosticsS = {{ diagnostics_map_s | tojson }};
     const stepLabels = document.querySelectorAll(".diagnostics-step-label");
     const lossPlot = document.getElementById("diagnostics-loss-plot");
@@ -329,6 +386,37 @@ document.addEventListener("DOMContentLoaded", () => {
         },
     };
 
+    const targetsH = {
+        delta_h_pca: {
+            img: document.getElementById("diagnostics-h-delta-img"),
+            caption: document.getElementById("diagnostics-h-delta-caption"),
+            header: document.getElementById("diagnostics-h-delta-header"),
+            title: "Delta-h PCA",
+            label: "vis_delta_h_pca",
+        },
+        action_alignment_detail_h: {
+            img: document.getElementById("diagnostics-h-align-img"),
+            caption: document.getElementById("diagnostics-h-align-caption"),
+            header: document.getElementById("diagnostics-h-align-header"),
+            title: "Action alignment (H)",
+            label: "action alignment (H)",
+        },
+        self_distance_h: {
+            img: document.getElementById("diagnostics-h-self-img"),
+            caption: document.getElementById("diagnostics-h-self-caption"),
+            header: document.getElementById("diagnostics-h-self-header"),
+            title: "Self-distance (H)",
+            label: "self_distance_h",
+        },
+        cycle_error_h: {
+            img: document.getElementById("diagnostics-h-cycle-img"),
+            caption: document.getElementById("diagnostics-h-cycle-caption"),
+            header: document.getElementById("diagnostics-h-cycle-header"),
+            title: "Cycle error (H)",
+            label: "vis_cycle_error_h",
+        },
+    };
+
     function resolveUrl(diagMap, diagKey, step) {
         const perDiag = diagMap[diagKey] || {};
         return perDiag[step] || perDiag[String(step)] || null;
@@ -378,6 +466,7 @@ document.addEventListener("DOMContentLoaded", () => {
             label.textContent = step ?? "—";
         });
         updateTargets(step, targetsZ, diagnosticsZ);
+        updateTargets(step, targetsH, diagnosticsH);
         updateTargets(step, targetsS, diagnosticsS);
     }
 

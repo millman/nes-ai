@@ -18,17 +18,6 @@ from jepa_world_model.vis_odometry import (
 )
 
 
-def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
-    """Concatenate current and prior actions for predictor conditioning."""
-    if actions.ndim != 3:
-        raise ValueError("Actions must have shape [B, T, action_dim].")
-    if actions.shape[1] == 0:
-        return actions.new_zeros((actions.shape[0], 0, actions.shape[2] * 2))
-    zeros = actions.new_zeros((actions.shape[0], 1, actions.shape[2]))
-    prev = torch.cat([zeros, actions[:, :-1]], dim=1)
-    return torch.cat([actions, prev], dim=-1)
-
-
 def _rollout_hidden_states(
     model,
     embeddings: torch.Tensor,
@@ -39,11 +28,10 @@ def _rollout_hidden_states(
     h_states = embeddings.new_zeros((b, t, model.state_dim))
     if t < 2:
         return h_states
-    paired_actions = _pair_actions(actions)
     h_t = embeddings.new_zeros((b, model.state_dim))
     for step in range(t - 1):
         z_t = embeddings[:, step]
-        act_t = paired_actions[:, step]
+        act_t = actions[:, step]
         h_next = model.predictor(z_t, h_t, act_t)
         h_states[:, step + 1] = h_next
         h_t = h_next

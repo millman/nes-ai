@@ -416,7 +416,7 @@ class LossWeights:
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 1.3
+    recon_multi_box: float = 1.0
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
     pixel_delta: float = 1.0
@@ -607,7 +607,7 @@ class JEPAWorldModel(nn.Module):
         self.predictor = BeliefUpdate(
             self.embedding_dim,
             cfg.hidden_dim,
-            cfg.action_dim * 2,
+            cfg.action_dim,
             cfg.predictor_film_layers,
             cfg.state_dim,
             cfg.predictor_layers,
@@ -662,17 +662,6 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
-def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
-    """Concatenate current and prior actions for predictor conditioning."""
-    if actions.ndim != 3:
-        raise ValueError("Actions must have shape [B, T, action_dim].")
-    if actions.shape[1] == 0:
-        return actions.new_zeros((actions.shape[0], 0, actions.shape[2] * 2))
-    zeros = actions.new_zeros((actions.shape[0], 1, actions.shape[2]))
-    prev = torch.cat([zeros, actions[:, :-1]], dim=1)
-    return torch.cat([actions, prev], dim=-1)
-
-
 def _predictor_rollout(
     model: JEPAWorldModel, embeddings: torch.Tensor, actions: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -688,11 +677,10 @@ def _predictor_rollout(
     preds = []
     h_preds = []
     h_states = [embeddings.new_zeros(b, model.state_dim, device=embeddings.device)]
-    paired_actions = _pair_actions(actions)
     for step in range(t - 1):
         z_t = embeddings[:, step]
         h_t = h_states[-1]
-        act_t = paired_actions[:, step]
+        act_t = actions[:, step]
         h_next = model.predictor(z_t, h_t, act_t)
         z_pred = model.h_to_z(h_next)
         preds.append(z_pred)
@@ -816,10 +804,10 @@ def geometry_rank_loss(
     model: JEPAWorldModel,
     h_states: torch.Tensor,
     cfg: LossGeometryConfig,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if h_states.numel() == 0:
         zero = h_states.new_tensor(0.0)
-        return zero, zero
+        return zero, zero, zero
     s_geom = model.h2s(h_states.detach())
     return geometry_ranking_loss(s_geom, cfg)
 
@@ -982,6 +970,7 @@ def _compute_losses_and_metrics(
     # s (Geometry) losses
     loss_geometry_rank = x_frames.new_tensor(0.0)
     geometry_rank_accuracy = x_frames.new_tensor(0.0)
+    geometry_rank_pairs = x_frames.new_tensor(0.0)
 
     # -------------------------------------------------------------------------
     # Calculate required inputs
@@ -1055,7 +1044,7 @@ def _compute_losses_and_metrics(
 
     # s (Geometry)
     if weights.geometry_rank > 0:
-        loss_geometry_rank, geometry_rank_accuracy = geometry_rank_loss(model, h_states, cfg.geometry)
+        loss_geometry_rank, geometry_rank_accuracy, geometry_rank_pairs = geometry_rank_loss(model, h_states, cfg.geometry)
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
@@ -1129,6 +1118,7 @@ def _compute_losses_and_metrics(
         "loss_delta_z": loss_delta_z.item(),
         "loss_geometry_rank": loss_geometry_rank.item(),
         "geometry_rank_accuracy": geometry_rank_accuracy.item(),
+        "geometry_rank_pairs": geometry_rank_pairs.item(),
         "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
         "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
         "loss_world": world_loss.item(),
@@ -1223,6 +1213,7 @@ def log_metrics(
     if weights.geometry_rank <= 0:
         filtered.pop("loss_geometry_rank", None)
         filtered.pop("geometry_rank_accuracy", None)
+        filtered.pop("geometry_rank_pairs", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1259,6 +1250,7 @@ LOSS_COLUMNS = [
     "loss_delta_z",
     "loss_geometry_rank",
     "geometry_rank_accuracy",
+    "geometry_rank_pairs",
     "loss_inverse_dynamics_z",
     "loss_inverse_dynamics_h",
     "grad_world",
@@ -1289,6 +1281,7 @@ class LossHistory:
     delta_z: List[float] = field(default_factory=list)
     geometry_rank: List[float] = field(default_factory=list)
     geometry_rank_accuracy: List[float] = field(default_factory=list)
+    geometry_rank_pairs: List[float] = field(default_factory=list)
     inverse_dynamics_z: List[float] = field(default_factory=list)
     inverse_dynamics_h: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
@@ -1316,6 +1309,7 @@ class LossHistory:
         self.delta_z.append(metrics.get("loss_delta_z", 0.0))
         self.geometry_rank.append(metrics.get("loss_geometry_rank", 0.0))
         self.geometry_rank_accuracy.append(metrics.get("geometry_rank_accuracy", 0.0))
+        self.geometry_rank_pairs.append(metrics.get("geometry_rank_pairs", 0.0))
         self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
         self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
         self.grad_world.append(metrics["grad_world"])
@@ -1354,6 +1348,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.delta_z,
             history.geometry_rank,
             history.geometry_rank_accuracy,
+            history.geometry_rank_pairs,
             history.inverse_dynamics_z,
             history.inverse_dynamics_h,
             history.grad_world,
@@ -1425,6 +1420,29 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.tight_layout()
     plt.savefig(out_dir / "loss_curves.png", dpi=200)
     plt.close()
+
+    has_rank_acc = any(val != 0.0 for val in history.geometry_rank_accuracy)
+    has_rank_loss = any(val != 0.0 for val in history.geometry_rank)
+    if has_rank_acc or has_rank_loss:
+        fig, ax1 = plt.subplots(figsize=(7, 4))
+        if has_rank_acc:
+            ax1.plot(history.steps, history.geometry_rank_accuracy, label="geometry_rank_accuracy", color=_color(3))
+        ax1.set_xlabel("Step")
+        ax1.set_ylabel("Ranking accuracy")
+        ax1.set_ylim(0.0, 1.0)
+        ax1.grid(True, alpha=0.3)
+        if has_rank_loss:
+            ax2 = ax1.twinx()
+            ax2.plot(history.steps, history.geometry_rank, label="loss_geometry_rank", color=_color(4))
+            ax2.set_ylabel("Ranking loss")
+            ax2.set_yscale("log")
+        pair_values = [val for val in history.geometry_rank_pairs if val > 0]
+        pair_count = int(round(pair_values[-1])) if pair_values else 0
+        title = f"Geometry Ranking Accuracy (pairs/batch: {pair_count})" if pair_count else "Geometry Ranking Accuracy"
+        fig.suptitle(title, fontsize=11)
+        fig.tight_layout()
+        fig.savefig(out_dir / "ranking_accuracy.png", dpi=200)
+        plt.close(fig)
 
 
 def grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
@@ -1595,8 +1613,8 @@ def _prepare_graph_diagnostics(
 ) -> "GraphDiagnosticsBatch":
     if graph_frames.shape[1] < 3:
         raise AssertionError("Graph diagnostics require sequences with at least three frames.")
+    assert torch.is_grad_enabled()
     with torch.no_grad():
-        assert not torch.is_grad_enabled()
         graph_frames_device = graph_frames.to(device)
         graph_actions_device = graph_actions.to(device)
         graph_embeddings = model.encode_sequence(graph_frames_device)["embeddings"]
@@ -1719,11 +1737,10 @@ def _build_visualization_sequences(
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
     frame_paths = batch_cpu[2]
+    assert torch.is_grad_enabled()
     with torch.no_grad():
-        assert not torch.is_grad_enabled()
         vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
         decoded_frames = decoder(vis_embeddings)
-        paired_actions = _pair_actions(vis_actions)
     assert torch.is_grad_enabled()
     if vis_frames.shape[0] == 0:
         raise ValueError("Visualization batch must include at least one sequence.")
@@ -1768,14 +1785,14 @@ def _build_visualization_sequences(
             action_idx = min(start_idx + offset, vis_actions.shape[1] - 1)
             row_actions.append(describe_action_tensor(vis_actions[idx, action_idx]))
         row_rollout: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
+        assert torch.is_grad_enabled()
         with torch.no_grad():
-            assert not torch.is_grad_enabled()
             current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
             current_hidden = current_embed.new_zeros(1, model.state_dim)
             prev_pred_frame = decoded_frames[idx, start_idx].detach()
             current_frame = prev_pred_frame
             for step in range(1, max_window):
-                action = paired_actions[idx, start_idx + step - 1].unsqueeze(0)
+                action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
                 prev_embed = current_embed
                 h_next = model.predictor(current_embed, current_hidden, action)
                 next_embed = model.h_to_z(h_next)
@@ -2039,11 +2056,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     pca_s_dir = run_dir / "pca_s"
     diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
     diagnostics_delta_s_dir = run_dir / "vis_delta_s_pca"
+    diagnostics_delta_h_dir = run_dir / "vis_delta_h_pca"
     diagnostics_alignment_dir = run_dir / "vis_action_alignment_z"
     diagnostics_alignment_s_dir = run_dir / "vis_action_alignment_s"
     diagnostics_alignment_h_dir = run_dir / "vis_action_alignment_h"
     diagnostics_cycle_dir = run_dir / "vis_cycle_error_z"
     diagnostics_cycle_s_dir = run_dir / "vis_cycle_error_s"
+    diagnostics_cycle_h_dir = run_dir / "vis_cycle_error_h"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
@@ -2054,10 +2073,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     pair_vis_dir = run_dir / "vis_pairs"
     vis_self_distance_z_dir = run_dir / "vis_self_distance_z"
     vis_self_distance_s_dir = run_dir / "vis_self_distance_s"
+    vis_self_distance_h_dir = run_dir / "vis_self_distance_h"
     vis_state_embedding_dir = run_dir / "vis_state_embedding"
     vis_odometry_dir = run_dir / "vis_odometry"
     self_distance_z_dir = run_dir / "self_distance_z"
     self_distance_s_dir = run_dir / "self_distance_s"
+    self_distance_h_dir = run_dir / "self_distance_h"
     checkpoints_dir = run_dir / "checkpoints"
 
     print(f"[run] Writing outputs to {run_dir}")
@@ -2068,11 +2089,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if cfg.diagnostics.enabled:
         diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_delta_s_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_delta_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_s_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_cycle_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -2083,10 +2106,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_s_dir.mkdir(parents=True, exist_ok=True)
+    vis_self_distance_h_dir.mkdir(parents=True, exist_ok=True)
     vis_state_embedding_dir.mkdir(parents=True, exist_ok=True)
     vis_odometry_dir.mkdir(parents=True, exist_ok=True)
     self_distance_z_dir.mkdir(parents=True, exist_ok=True)
     self_distance_s_dir.mkdir(parents=True, exist_ok=True)
+    self_distance_h_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     debug_vis = cfg.debug_visualization
@@ -2345,8 +2370,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             and global_step % debug_vis.input_vis_every_steps == 0
         ):
             recon_vis: torch.Tensor
+            assert torch.is_grad_enabled()
             with torch.no_grad():
-                assert not torch.is_grad_enabled()
                 was_training = model.training
                 decoder_was_training = decoder.training
                 model.eval()
@@ -2416,8 +2441,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 global_step,
             )
 
+            assert torch.is_grad_enabled()
             with torch.no_grad():
-                assert not torch.is_grad_enabled()
                 embed_frames = embedding_batch_cpu[0].to(device)
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
@@ -2452,10 +2477,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.hard_example.vis_rows,
                     dataset.image_hw,
                 )
+            assert torch.is_grad_enabled()
             with torch.no_grad():
-                assert not torch.is_grad_enabled()
                 self_dist_frames = self_distance_inputs.frames.to(device)
-                self_dist_embeddings = model.encode_sequence(self_dist_frames)["embeddings"][0]
+                self_dist_actions = torch.from_numpy(self_distance_inputs.actions).unsqueeze(0).to(device)
+                self_dist_embeddings_full = model.encode_sequence(self_dist_frames)["embeddings"]
+                self_dist_embeddings = self_dist_embeddings_full[0]
+                self_dist_h_states = _rollout_hidden_states(model, self_dist_embeddings_full, self_dist_actions)
             assert torch.is_grad_enabled()
             write_self_distance_outputs(
                 self_dist_embeddings,
@@ -2467,6 +2495,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 title_prefix="Self-distance (Z)",
                 file_prefix="self_distance_z",
                 cosine_prefix="self_distance_z_cosine",
+            )
+            write_self_distance_outputs(
+                self_dist_h_states,
+                self_distance_inputs,
+                self_distance_h_dir,
+                vis_self_distance_h_dir,
+                global_step,
+                embedding_label="h",
+                title_prefix="Self-distance (H)",
+                file_prefix="self_distance_h",
+                cosine_prefix="self_distance_h_cosine",
             )
             hist_frames = rolling_batch_cpu[0]
             hist_actions = rolling_batch_cpu[1]
@@ -2489,8 +2528,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 if not (diag_frames.shape[0] > 0 and diag_frames.shape[1] >= 2):
                     raise AssertionError("Diagnostics require at least one sequence with two frames.")
 
+                assert torch.is_grad_enabled()
                 with torch.no_grad():
-                    assert not torch.is_grad_enabled()
                     diag_frames_device = diag_frames.to(device)
                     diag_actions_device = diag_actions.to(device)
                     diag_embeddings = model.encode_sequence(diag_frames_device)["embeddings"]
@@ -2572,6 +2611,27 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.diagnostics.top_k_components,
                     diag_paths,
                 )
+                save_delta_pca_plot(
+                    diagnostics_delta_h_dir / f"delta_h_pca_{global_step:07d}.png",
+                    motion_h.variance_ratio,
+                    motion_h.delta_proj,
+                    motion_h.proj_flat,
+                    motion_h.action_ids,
+                    motion_h.action_dim,
+                    "h",
+                )
+                save_variance_spectrum_plot(
+                    motion_h.variance_ratio,
+                    diagnostics_delta_h_dir,
+                    global_step,
+                    "h",
+                )
+                write_variance_report(
+                    motion_h.variance_ratio,
+                    diagnostics_delta_h_dir,
+                    global_step,
+                    "h",
+                )
                 alignment_stats_h = compute_action_alignment_stats(
                     motion_h.delta_proj,
                     motion_h.action_ids,
@@ -2588,6 +2648,42 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     alignment_debug_h,
                     cfg.diagnostics.cosine_high_threshold,
                     motion_h.action_dim,
+                )
+                cycle_errors_h, cycle_per_action_h = compute_cycle_errors(
+                    motion_h.proj_sequences,
+                    motion_h.actions_seq,
+                    inverse_map,
+                    include_synthetic=cfg.diagnostics.synthesize_cycle_samples,
+                )
+                save_cycle_error_plot(
+                    diagnostics_cycle_h_dir / f"cycle_error_{global_step:07d}.png",
+                    [e[1] for e in cycle_errors_h],
+                    cycle_per_action_h,
+                    motion_h.action_dim,
+                )
+                write_delta_variance_csv(
+                    diagnostics_delta_h_dir,
+                    global_step,
+                    motion_h.variance_ratio,
+                    "h",
+                )
+                write_delta_samples_csv(
+                    diagnostics_delta_h_dir,
+                    global_step,
+                    motion_h.paths,
+                    "h",
+                )
+                write_cycle_error_values_csv(
+                    diagnostics_cycle_h_dir,
+                    global_step,
+                    motion_h.action_dim,
+                    cycle_errors_h,
+                )
+                write_cycle_error_summary_csv(
+                    diagnostics_cycle_h_dir,
+                    global_step,
+                    motion_h.action_dim,
+                    cycle_per_action_h,
                 )
                 cycle_errors_z, cycle_per_action_z = compute_cycle_errors(
                     motion_z.proj_sequences,

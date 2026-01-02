@@ -1290,6 +1290,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 experiments=[],
                 experiment=None,
                 diagnostics_map_z={},
+                diagnostics_map_h={},
                 diagnostics_map_s={},
                 diagnostic_steps=[],
                 figure=None,
@@ -1374,8 +1375,24 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             if per_step:
                 diagnostics_map_s["self_distance_s"] = per_step
 
+        diagnostics_map_h: Dict[str, Dict[int, str]] = {}
+        diagnostics_map_h["delta_h_pca"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_delta_h_pca", "delta_h_pca_*.png", "delta_h_pca_"
+        )
+        diagnostics_map_h["action_alignment_detail_h"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_action_alignment_h", "action_alignment_detail_*.png", "action_alignment_detail_"
+        )
+        diagnostics_map_h["cycle_error_h"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_cycle_error_h", "cycle_error_*.png", "cycle_error_"
+        )
+        diagnostics_map_h["self_distance_h"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"
+        )
+
         step_set: set[int] = set()
         for per_step in diagnostics_map_z.values():
+            step_set.update(per_step.keys())
+        for per_step in diagnostics_map_h.values():
             step_set.update(per_step.keys())
         for per_step in diagnostics_map_s.values():
             step_set.update(per_step.keys())
@@ -1384,7 +1401,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         _log_timing(
             "diagnostics_zvs.build_maps",
             build_maps_start,
-            images=sum(len(v) for v in diagnostics_map_z.values()) + sum(len(v) for v in diagnostics_map_s.values()),
+            images=(
+                sum(len(v) for v in diagnostics_map_z.values())
+                + sum(len(v) for v in diagnostics_map_h.values())
+                + sum(len(v) for v in diagnostics_map_s.values())
+            ),
         )
         _log_timing("diagnostics_zvs.total", route_start, selected=selected.id)
         return render_template(
@@ -1392,6 +1413,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             experiments=[],
             experiment=selected,
             diagnostics_map_z=diagnostics_map_z,
+            diagnostics_map_h=diagnostics_map_h,
             diagnostics_map_s=diagnostics_map_s,
             diagnostic_steps=diagnostic_steps,
             figure=figure,

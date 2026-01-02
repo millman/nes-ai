@@ -71,15 +71,15 @@
                         {% if active_experiment_id %}
                         <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics_z', exp_id=active_experiment_id) }}">Z</a>
                         <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_s' else '' }}" href="{{ url_for('diagnostics_s', exp_id=active_experiment_id) }}">S</a>
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_zvs' else '' }}" href="{{ url_for('diagnostics_zvs', exp_id=active_experiment_id) }}">ZvS</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_zvs' else '' }}" href="{{ url_for('diagnostics_zvs', exp_id=active_experiment_id) }}">ZvHvS</a>
                         {% elif first_experiment_id %}
                         <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics_z', exp_id=first_experiment_id) }}">Z</a>
                         <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_s' else '' }}" href="{{ url_for('diagnostics_s', exp_id=first_experiment_id) }}">S</a>
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_zvs' else '' }}" href="{{ url_for('diagnostics_zvs', exp_id=first_experiment_id) }}">ZvS</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'diagnostics_zvs' else '' }}" href="{{ url_for('diagnostics_zvs', exp_id=first_experiment_id) }}">ZvHvS</a>
                         {% else %}
                         <span class="nav-link disabled text-secondary px-1">Z</span>
                         <span class="nav-link disabled text-secondary px-1">S</span>
-                        <span class="nav-link disabled text-secondary px-1">ZvS</span>
+                        <span class="nav-link disabled text-secondary px-1">ZvHvS</span>
                         {% endif %}
                     </li>
                     <li class="nav-item d-none d-lg-block text-white-50">|</li>

@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from jepa_world_model.vis import _annotate_with_text, tensor_to_uint8_image
+from jepa_world_model.vis import _annotate_with_text, delta_to_uint8_image, tensor_to_uint8_image
 from jepa_world_model.vis_rollout import VisualizationSequence
 
 
@@ -19,7 +19,7 @@ def save_rollout_visualization(
     seq_cols = len(sequence.labels)
     if seq_cols == 0:
         return
-    row_block = 4
+    row_block = 6
     fig, axes = plt.subplots(
         row_block,
         seq_cols,
@@ -47,6 +47,8 @@ def save_rollout_visualization(
         "Rollout Prediction",
         grad_label,
         "Direct Reconstruction",
+        "Delta Target",
+        "Delta Recon",
     ]
 
     for row_idx in range(row_block):
@@ -65,6 +67,8 @@ def save_rollout_visualization(
         rollout_ax = axes[1, col]
         grad_ax = axes[2, col]
         recon_ax = axes[3, col]
+        delta_target_ax = axes[4, col]
+        delta_recon_ax = axes[5, col]
         gt_img = tensor_to_uint8_image(sequence.ground_truth[col])
         if sequence.actions and col < len(sequence.actions):
             gt_img = _annotate_with_text(gt_img, sequence.actions[col])
@@ -83,6 +87,14 @@ def save_rollout_visualization(
             _imshow_array(grad_ax, blank)
         else:
             _imshow_array(grad_ax, grad_map)
+        if col == 0:
+            _imshow_array(delta_target_ax, blank)
+            _imshow_array(delta_recon_ax, blank)
+        else:
+            delta_target = sequence.ground_truth[col] - sequence.ground_truth[col - 1]
+            delta_recon = sequence.reconstructions[col] - sequence.reconstructions[col - 1]
+            _imshow_array(delta_target_ax, delta_to_uint8_image(delta_target))
+            _imshow_array(delta_recon_ax, delta_to_uint8_image(delta_recon))
     fig.suptitle("JEPA Rollout Visualization", fontsize=12)
     fig.tight_layout(rect=(0.08, 0.02, 1.0, 0.95))
     out_path.parent.mkdir(parents=True, exist_ok=True)
