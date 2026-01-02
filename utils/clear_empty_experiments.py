@@ -11,7 +11,9 @@ Experiments with 0 or 1 total steps are eligible for removal when --delete is se
 from __future__ import annotations
 
 import argparse
+import os
 import re
+from collections import deque
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,8 +52,9 @@ def parse_args() -> argparse.Namespace:
         help="Root directories that contain experiment subdirectories.",
     )
     parser.add_argument(
-        "--delete",
+        "--DELETE",
         action="store_true",
+        dest="delete",
         default=False,
         help=(
             "Actually delete experiments at or below the configured step threshold. "
@@ -114,6 +117,7 @@ def summarize_experiment(
     loss_csv = exp_dir / "metrics" / "loss.csv"
     error: Optional[str] = None
     csv_max: Optional[int] = None
+    decision_source = "file-scan"
     if loss_csv.exists():
         try:
             csv_max = get_max_step(loss_csv)
@@ -125,11 +129,13 @@ def summarize_experiment(
         max_steps = csv_steps
         max_step_source = loss_csv if csv_steps > 0 else None
         remove_candidate = False
-    elif not verbose and csv_steps > max_delete_steps:
+        decision_source = "loss.csv error"
+    elif csv_max is not None:
         file_steps = 0
         max_steps = csv_steps
         max_step_source = loss_csv
-        remove_candidate = False
+        remove_candidate = max_steps <= max_delete_steps
+        decision_source = "loss.csv"
     else:
         stop_above = None if verbose else max_delete_steps
         file_max, file_path, early_exit = scan_file_steps(exp_dir, stop_above)
@@ -144,6 +150,9 @@ def summarize_experiment(
         remove_candidate = max_steps <= max_delete_steps
         if early_exit:
             remove_candidate = False
+    if verbose:
+        decision = "remove" if remove_candidate else "keep"
+        print(f"Processing {exp_dir} ({decision_source}: {decision})")
     return ExperimentSummary(
         path=exp_dir,
         csv_steps=csv_steps,
@@ -185,14 +194,25 @@ def iter_experiment_dirs(root: Path) -> Iterable[Path]:
         yield root
         return
     seen: set[Path] = set()
-    for metadata_file in root.rglob("metadata.txt"):
-        exp_dir = metadata_file.parent
-        if exp_dir in seen:
+    queue = deque([root])
+    while queue:
+        current = queue.popleft()
+        try:
+            with os.scandir(current) as it:
+                entries = list(it)
+        except OSError:
             continue
-        if not _is_experiment_dir(exp_dir):
+        has_metadata = any(
+            entry.is_file() and entry.name == "metadata.txt" for entry in entries
+        )
+        if has_metadata:
+            if _is_experiment_dir(current) and current not in seen:
+                seen.add(current)
+                yield current
             continue
-        seen.add(exp_dir)
-        yield exp_dir
+        for entry in entries:
+            if entry.is_dir():
+                queue.append(Path(entry.path))
 
 
 def render_root_summary(
@@ -202,8 +222,9 @@ def render_root_summary(
     if not summaries:
         print("  (no matching experiments)")
         return
-    last_index = len(summaries) - 1
-    for idx, summary in enumerate(summaries):
+    ordered = sorted(summaries, key=lambda summary: str(summary.path))
+    last_index = len(ordered) - 1
+    for idx, summary in enumerate(ordered):
         branch = "\\--" if idx == last_index else "|--"
         print(f"  {branch} {format_summary(summary, delete_mode)}")
 
@@ -230,9 +251,7 @@ def main() -> None:
             summarize_experiment(exp_dir, args.max_delete_steps, args.verbose)
             for exp_dir in exp_dirs
         ]
-        summaries = all_summaries
-        if not args.verbose:
-            summaries = [summary for summary in summaries if summary.remove_candidate]
+        summaries = [summary for summary in all_summaries if summary.remove_candidate]
         render_root_summary(root, summaries, delete_mode)
         total_experiments += len(all_summaries)
         total_remove += sum(summary.remove_candidate for summary in all_summaries)
@@ -250,7 +269,7 @@ def main() -> None:
         f"{'removed' if delete_mode else 'would remove'} {total_remove}"
     )
     if not delete_mode:
-        print("No experiments were deleted. Re-run with --delete to apply removals.")
+        print("No experiments were deleted. Re-run with --DELETE to apply removals.")
 
 
 if __name__ == "__main__":
