@@ -9,9 +9,9 @@
 {% block body %}
 <style>
 .self-distance-plot {
-    height: 300px;
-    min-height: 300px;
-    max-height: 320px;
+    height: 240px;
+    min-height: 240px;
+    max-height: 260px;
 }
 
 .plot-pin-wrapper {
@@ -60,14 +60,41 @@
     border-color: #0a58ca;
     color: #fff;
 }
+
+.self-distance-info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3949ab;
+    font-size: 12px;
+    border: 1px solid #c5cae9;
+    cursor: pointer;
+}
+
+.self-distance-step-label {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.75rem;
+    color: #6c757d;
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-left: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: right;
+    white-space: nowrap;
+}
 </style>
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div>
         {% if experiment %}
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
-        <h3 class="mb-1">Self-distance (Z vs S)</h3>
-        <div class="text-muted small">No experiments with self-distance (Z vs S) outputs.</div>
+        <h3 class="mb-1">Self-distance (Z vs H vs S)</h3>
+        <div class="text-muted small">No experiments with self-distance (Z vs H vs S) outputs.</div>
         {% endif %}
     </div>
     {% if experiment %}
@@ -81,7 +108,7 @@
 <div class="text-muted fst-italic">No matching self-distance outputs found.</div>
 {% else %}
 <div class="small text-muted mb-2">
-    Loaded from {{ experiment.self_distance_csv.name }} and {{ experiment.state_embedding_csv.name }}.
+    Loaded from {{ experiment.self_distance_csv.name }}, {{ self_distance_h_csv.name }}, and {{ experiment.state_embedding_csv.name }}.
 </div>
 <div class="row gy-1 gx-3 mt-3">
     <div class="col-12 col-lg-6">
@@ -89,6 +116,14 @@
     </div>
     <div class="col-12 col-lg-6">
         <div id="self-distance-z-prior-cos" class="plot-area self-distance-plot"></div>
+    </div>
+</div>
+<div class="row gy-1 gx-3 mt-1">
+    <div class="col-12 col-lg-6">
+        <div id="self-distance-h-first-cos" class="plot-area self-distance-plot"></div>
+    </div>
+    <div class="col-12 col-lg-6">
+        <div id="self-distance-h-prior-cos" class="plot-area self-distance-plot"></div>
     </div>
 </div>
 <div class="row gy-1 gx-3 mt-1">
@@ -150,21 +185,39 @@
     <div id="self-distance-loss-plot" class="plot-pin-plot"></div>
 </div>
 <div class="row g-3 mt-3">
-    <div class="col-12 col-lg-6">
+    <div class="col-12 col-lg-4">
         <div class="card h-100">
-            <div class="card-header py-2">Self-distance image (Z)</div>
+            <div class="card-header py-2 d-flex align-items-center gap-2">
+                <span>Self-distance image (Z)</span>
+                <span class="self-distance-step-label" id="self-distance-step-path-z">—</span>
+                <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance Z image over steps. Read: smoother trends mean stable latent dynamics. Good: consistent scale with few abrupt spikes or drift.">i</span>
+            </div>
             <div class="card-body d-flex flex-column gap-2 align-items-start">
                 <img id="self-distance-step-img-z" class="img-fluid rounded border d-none" alt="Self-distance Z step">
-                <div class="text-muted small font-monospace" id="self-distance-step-path-z"></div>
             </div>
         </div>
     </div>
-    <div class="col-12 col-lg-6">
+    <div class="col-12 col-lg-4">
         <div class="card h-100">
-            <div class="card-header py-2">Self-distance image (S)</div>
+            <div class="card-header py-2 d-flex align-items-center gap-2">
+                <span>Self-distance image (H)</span>
+                <span class="self-distance-step-label" id="self-distance-step-path-h">—</span>
+                <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance H image over steps. Read: smoother trends mean stable dynamics state. Good: consistent scale with few abrupt spikes or drift.">i</span>
+            </div>
+            <div class="card-body d-flex flex-column gap-2 align-items-start">
+                <img id="self-distance-step-img-h" class="img-fluid rounded border d-none" alt="Self-distance H step">
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex align-items-center gap-2">
+                <span>Self-distance image (S)</span>
+                <span class="self-distance-step-label" id="self-distance-step-path-s">—</span>
+                <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance S image over steps. Read: smoother trends mean stable geometry. Good: consistent scale with few abrupt spikes or drift.">i</span>
+            </div>
             <div class="card-body d-flex flex-column gap-2 align-items-start">
                 <img id="self-distance-step-img-s" class="img-fluid rounded border d-none" alt="Self-distance S step">
-                <div class="text-muted small font-monospace" id="self-distance-step-path-s"></div>
             </div>
         </div>
     </div>
@@ -184,10 +237,13 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
     }
     const zCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.self_distance_csv.relative_to(experiment.path)) }}";
+    const hCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_h_csv.relative_to(experiment.path)) }}";
     const sCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.state_embedding_csv.relative_to(experiment.path)) }}";
     const plotConfig = buildPlotlyConfig({});
     const zFirstPlot = document.getElementById("self-distance-z-first-cos");
     const zPriorPlot = document.getElementById("self-distance-z-prior-cos");
+    const hFirstPlot = document.getElementById("self-distance-h-first-cos");
+    const hPriorPlot = document.getElementById("self-distance-h-prior-cos");
     const sFirstPlot = document.getElementById("self-distance-s-first-cos");
     const sPriorPlot = document.getElementById("self-distance-s-prior-cos");
     const firstImg = document.getElementById("self-distance-first-img");
@@ -201,6 +257,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const currentAction = document.getElementById("self-distance-current-action");
     const stepImgZ = document.getElementById("self-distance-step-img-z");
     const stepPathZ = document.getElementById("self-distance-step-path-z");
+    const stepImgH = document.getElementById("self-distance-step-img-h");
+    const stepPathH = document.getElementById("self-distance-step-path-h");
     const stepImgS = document.getElementById("self-distance-step-img-s");
     const stepPathS = document.getElementById("self-distance-step-path-s");
     const diagLossPlot = document.getElementById("self-distance-loss-plot");
@@ -243,6 +301,22 @@ document.addEventListener("DOMContentLoaded", () => {
     {% endif %}
     const selfDistanceStepsZ = Object.keys(selfDistanceMapZ).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
 
+    const selfDistanceMapH = {};
+    {% if self_distance_h_images %}
+    {% for img in self_distance_h_images %}
+    {% if "cosine" not in img.stem %}
+    {% set rel_img = img.relative_to(experiment.path) %}
+    {% set stem = img.stem.split('_')|last %}
+    {% set step = stem|int %}
+    selfDistanceMapH[{{ step }}] = {
+        url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
+        path: "{{ rel_img }}",
+    };
+    {% endif %}
+    {% endfor %}
+    {% endif %}
+    const selfDistanceStepsH = Object.keys(selfDistanceMapH).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+
     const selfDistanceMapS = {};
     {% if experiment.state_embedding_images %}
     {% for img in experiment.state_embedding_images %}
@@ -279,6 +353,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (nearest === null || !map[nearest]) {
             imgEl.classList.add("d-none");
             pathEl.textContent = `No self-distance image (${label}) available.`;
+            pathEl.setAttribute("title", `No self-distance image (${label}) available.`);
             return;
         }
         const entry = map[nearest];
@@ -286,6 +361,7 @@ document.addEventListener("DOMContentLoaded", () => {
         imgEl.alt = `Self-distance ${label} step ${nearest}`;
         imgEl.classList.remove("d-none");
         pathEl.textContent = `${entry.path} (step ${nearest})`;
+        pathEl.setAttribute("title", `${entry.path} (step ${nearest})`);
     };
 
     const buildActionMap = (rows) => {
@@ -346,6 +422,7 @@ document.addEventListener("DOMContentLoaded", () => {
             setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, priorActionText);
             setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
             updateSelfDistanceImage(step, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+            updateSelfDistanceImage(step, selfDistanceMapH, selfDistanceStepsH, stepImgH, stepPathH, "H");
             updateSelfDistanceImage(step, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
         });
     };
@@ -375,7 +452,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const layoutBase = {
             margin: { t: 32, r: 16, l: 50, b: 50 },
             template: "plotly_white",
-            height: 300,
+            height: 240,
             title: { font: { size: 12 } },
             font: { size: 11 },
         };
@@ -465,11 +542,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (!Number.isFinite(step)) return;
                 lastHoverStep = step;
                 updateSelfDistanceImage(step, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+                updateSelfDistanceImage(step, selfDistanceMapH, selfDistanceStepsH, stepImgH, stepPathH, "H");
                 updateSelfDistanceImage(step, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
             });
             diagLossPlot.on("plotly_unhover", () => {
                 if (lastHoverStep === null) return;
                 updateSelfDistanceImage(lastHoverStep, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+                updateSelfDistanceImage(lastHoverStep, selfDistanceMapH, selfDistanceStepsH, stepImgH, stepPathH, "H");
                 updateSelfDistanceImage(lastHoverStep, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
             });
         });
@@ -486,12 +565,20 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
 
-    Promise.all([loadCsv(zCsvUrl), loadCsv(sCsvUrl)]).then(([zRows, sRows]) => {
+    Promise.all([loadCsv(zCsvUrl), loadCsv(hCsvUrl), loadCsv(sCsvUrl)]).then(([zRows, hRows, sRows]) => {
         buildCosinePlots(zRows, zFirstPlot, zPriorPlot, "self_distance_z.csv", "z", "Z ·");
+        buildCosinePlots(hRows, hFirstPlot, hPriorPlot, "self_distance_h.csv", "h", "H ·");
         buildCosinePlots(sRows, sFirstPlot, sPriorPlot, "self_distance_s.csv", "s", "S ·");
         const initialStep = zRows.length ? Number(zRows[zRows.length - 1].timestep) : 0;
         updateSelfDistanceImage(initialStep, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepPathZ, "Z");
+        updateSelfDistanceImage(initialStep, selfDistanceMapH, selfDistanceStepsH, stepImgH, stepPathH, "H");
         updateSelfDistanceImage(initialStep, selfDistanceMapS, selfDistanceStepsS, stepImgS, stepPathS, "S");
+    });
+    const tooltipTriggerList = Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.forEach((el) => {
+        if (window.bootstrap) {
+            new bootstrap.Tooltip(el);
+        }
     });
 });
 </script>

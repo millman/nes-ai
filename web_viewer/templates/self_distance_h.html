@@ -8,7 +8,7 @@
 
 {% block body %}
 <style>
-.state-embedding-plot {
+.self-distance-plot {
     height: 300px;
     min-height: 300px;
     max-height: 320px;
@@ -87,15 +87,15 @@
     text-align: right;
     white-space: nowrap;
 }
-</style>
 
+</style>
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div>
         {% if experiment %}
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
-        <h3 class="mb-1">{{ page_title if page_title is defined else "State embedding" }}</h3>
-        <div class="text-muted small">No experiments with self_distance_s.csv</div>
+        <h3 class="mb-1">{{ page_title if page_title is defined else "Self-distance (H)" }}</h3>
+        <div class="text-muted small">No experiments with self_distance_h.csv</div>
         {% endif %}
     </div>
     {% if experiment %}
@@ -106,41 +106,41 @@
 </div>
 
 {% if not experiment %}
-<div class="text-muted fst-italic">No self_distance_s.csv found in any experiments.</div>
+<div class="text-muted fst-italic">No self_distance_h.csv found in any experiments.</div>
 {% else %}
 <div class="small text-muted mb-2">
-    Loaded from {{ experiment.state_embedding_csv.name }}{% if experiment.state_embedding_images %}, latest PNG in vis_self_distance_s{% endif %}.
+    Loaded from {{ self_distance_h_csv.name }}{% if self_distance_h_images %}, latest PNG in vis_self_distance_h{% endif %}.
 </div>
 <div class="row gy-1 gx-3 mt-3">
     <div class="col-12 col-lg-4">
-        <div id="state-embedding-first-plot" class="plot-area state-embedding-plot"></div>
+        <div id="self-distance-first-plot" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="state-embedding-prior-plot" class="plot-area state-embedding-plot"></div>
+        <div id="self-distance-prior-plot" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="state-embedding-scatter-plot" class="plot-area state-embedding-plot"></div>
+        <div id="self-distance-scatter-plot" class="plot-area self-distance-plot"></div>
     </div>
 </div>
 <div class="row gy-1 gx-3 mt-1">
     <div class="col-12 col-lg-4">
-        <div id="state-embedding-first-plot-cos" class="plot-area state-embedding-plot"></div>
+        <div id="self-distance-first-plot-cos" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="state-embedding-prior-plot-cos" class="plot-area state-embedding-plot"></div>
+        <div id="self-distance-prior-plot-cos" class="plot-area self-distance-plot"></div>
     </div>
     <div class="col-12 col-lg-4">
-        <div id="state-embedding-scatter-plot-cos" class="plot-area state-embedding-plot"></div>
+        <div id="self-distance-scatter-plot-cos" class="plot-area self-distance-plot"></div>
     </div>
 </div>
-<div class="row g-3 mt-3" id="state-embedding-frame-row">
+<div class="row g-3 mt-3" id="self-distance-frame-row">
     <div class="col-12 col-md-4">
         <div class="card h-100">
             <div class="card-header py-2">First frame</div>
             <div class="card-body d-flex flex-column align-items-center">
-                <img id="state-embedding-first-img" class="img-fluid rounded border d-none" alt="First frame preview">
-                <div class="text-muted small mt-2" id="state-embedding-first-label"></div>
-                <div class="text-muted small" id="state-embedding-first-action"></div>
+                <img id="self-distance-first-img" class="img-fluid rounded border d-none" alt="First frame preview">
+                <div class="text-muted small mt-2" id="self-distance-first-label"></div>
+                <div class="text-muted small" id="self-distance-first-action"></div>
             </div>
         </div>
     </div>
@@ -148,9 +148,9 @@
         <div class="card h-100">
             <div class="card-header py-2">Prior frame</div>
             <div class="card-body d-flex flex-column align-items-center">
-                <img id="state-embedding-prior-img" class="img-fluid rounded border d-none" alt="Prior frame preview">
-                <div class="text-muted small mt-2" id="state-embedding-prior-label"></div>
-                <div class="text-muted small" id="state-embedding-prior-action"></div>
+                <img id="self-distance-prior-img" class="img-fluid rounded border d-none" alt="Prior frame preview">
+                <div class="text-muted small mt-2" id="self-distance-prior-label"></div>
+                <div class="text-muted small" id="self-distance-prior-action"></div>
             </div>
         </div>
     </div>
@@ -158,9 +158,9 @@
         <div class="card h-100">
             <div class="card-header py-2">Current frame</div>
             <div class="card-body d-flex flex-column align-items-center">
-                <img id="state-embedding-current-img" class="img-fluid rounded border d-none" alt="Current frame preview">
-                <div class="text-muted small mt-2" id="state-embedding-current-label"></div>
-                <div class="text-muted small" id="state-embedding-current-action"></div>
+                <img id="self-distance-current-img" class="img-fluid rounded border d-none" alt="Current frame preview">
+                <div class="text-muted small mt-2" id="self-distance-current-label"></div>
+                <div class="text-muted small" id="self-distance-current-action"></div>
             </div>
         </div>
     </div>
@@ -168,11 +168,11 @@
 <div class="d-flex align-items-center justify-content-between mb-2 mt-4">
     <h6 class="mb-0">Training metrics (loss)</h6>
 </div>
-<div class="plot-pin-wrapper mb-3" id="state-embedding-loss-wrapper">
+<div class="plot-pin-wrapper mb-3" id="self-distance-loss-wrapper">
     <button
         type="button"
         class="plot-pin-btn"
-        id="state-embedding-loss-pin"
+        id="self-distance-loss-pin"
         aria-pressed="false"
         aria-label="Pin training metrics plot"
         title="Pin training metrics plot"
@@ -181,32 +181,16 @@
             <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
         </svg>
     </button>
-    <div id="state-embedding-loss-plot" class="plot-pin-plot"></div>
+    <div id="self-distance-loss-plot" class="plot-pin-plot"></div>
 </div>
-<div class="row g-3 mt-3">
-    <div class="col-12 col-lg-6">
-        <div class="card h-100">
-            <div class="card-header py-2 d-flex align-items-center gap-2">
-                <span>Self-distance image (S)</span>
-                <span class="self-distance-step-label" id="state-embedding-step-path">—</span>
-                <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance S image over steps. Read: smoother trends mean stable geometry. Good: consistent scale with few abrupt spikes or drift.">i</span>
-            </div>
-            <div class="card-body d-flex flex-column gap-2 align-items-start">
-                <img id="state-embedding-step-img" class="img-fluid rounded border d-none" alt="State embedding step">
-            </div>
-        </div>
+<div class="card mt-3">
+    <div class="card-header py-2 d-flex align-items-center gap-2">
+        <span>Self-distance image</span>
+        <span class="self-distance-step-label" id="self-distance-step-path">—</span>
+        <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance image summary across steps. Read: distances to first/prior should change smoothly. Good: stable scale with few sharp spikes or sudden drift.">i</span>
     </div>
-    <div class="col-12 col-lg-6">
-        <div class="card h-100">
-            <div class="card-header py-2 d-flex align-items-center gap-2">
-                <span>State embedding norm histogram</span>
-                <span class="self-distance-step-label" id="state-embedding-hist-path">—</span>
-                <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="State embedding norm histogram over steps. Read: stable spread without collapse or runaway norms. Good: consistent scale with few sudden shifts.">i</span>
-            </div>
-            <div class="card-body d-flex flex-column gap-2 align-items-start">
-                <img id="state-embedding-hist-img" class="img-fluid rounded border d-none" alt="State embedding norm histogram">
-            </div>
-        </div>
+    <div class="card-body d-flex flex-column gap-2 align-items-start">
+        <img id="self-distance-step-img" class="img-fluid rounded border d-none" alt="Self-distance step">
     </div>
 </div>
 {% endif %}
@@ -215,42 +199,50 @@
 {% block extra_scripts %}
 {% if experiment %}
 <script>
+document.addEventListener("DOMContentLoaded", () => {
+    const select = document.getElementById("self-distance-select");
+    if (select) {
+        select.addEventListener("change", () => {
+            const id = select.value;
+            window.location.href = "{{ url_for('self_distance_h') }}/" + encodeURIComponent(id);
+        });
+    }
+});
+</script>
+<script>
     document.addEventListener("DOMContentLoaded", () => {
         if (typeof Plotly === "undefined") {
-            const firstPlot = document.getElementById("state-embedding-first-plot");
+            const firstPlot = document.getElementById("self-distance-first-plot");
             if (firstPlot) {
                 firstPlot.innerHTML = "<p class='text-danger small'>Plotly failed to load.</p>";
             }
             return;
         }
-        const csvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.state_embedding_csv.relative_to(experiment.path)) }}";
+        const csvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_h_csv.relative_to(experiment.path)) }}";
         const plotConfig = buildPlotlyConfig({});
-        const firstPlot = document.getElementById("state-embedding-first-plot");
-        const priorPlot = document.getElementById("state-embedding-prior-plot");
-        const scatterPlot = document.getElementById("state-embedding-scatter-plot");
-        const firstPlotCos = document.getElementById("state-embedding-first-plot-cos");
-        const priorPlotCos = document.getElementById("state-embedding-prior-plot-cos");
-        const scatterPlotCos = document.getElementById("state-embedding-scatter-plot-cos");
-        const firstImg = document.getElementById("state-embedding-first-img");
-        const priorImg = document.getElementById("state-embedding-prior-img");
-        const currentImg = document.getElementById("state-embedding-current-img");
-        const firstLabel = document.getElementById("state-embedding-first-label");
-        const priorLabel = document.getElementById("state-embedding-prior-label");
-        const currentLabel = document.getElementById("state-embedding-current-label");
-        const firstAction = document.getElementById("state-embedding-first-action");
-        const priorAction = document.getElementById("state-embedding-prior-action");
-        const currentAction = document.getElementById("state-embedding-current-action");
-        const frameRow = document.getElementById("state-embedding-frame-row");
-        const stepImg = document.getElementById("state-embedding-step-img");
-        const stepPath = document.getElementById("state-embedding-step-path");
-        const histImg = document.getElementById("state-embedding-hist-img");
-        const histPath = document.getElementById("state-embedding-hist-path");
-        const diagLossPlot = document.getElementById("state-embedding-loss-plot");
-        const diagLossWrapper = document.getElementById("state-embedding-loss-wrapper");
-        const diagLossPin = document.getElementById("state-embedding-loss-pin");
+        const firstPlot = document.getElementById("self-distance-first-plot");
+        const priorPlot = document.getElementById("self-distance-prior-plot");
+        const scatterPlot = document.getElementById("self-distance-scatter-plot");
+        const firstPlotCos = document.getElementById("self-distance-first-plot-cos");
+        const priorPlotCos = document.getElementById("self-distance-prior-plot-cos");
+        const scatterPlotCos = document.getElementById("self-distance-scatter-plot-cos");
+        const firstImg = document.getElementById("self-distance-first-img");
+        const priorImg = document.getElementById("self-distance-prior-img");
+        const currentImg = document.getElementById("self-distance-current-img");
+        const firstLabel = document.getElementById("self-distance-first-label");
+        const priorLabel = document.getElementById("self-distance-prior-label");
+        const currentLabel = document.getElementById("self-distance-current-label");
+        const firstAction = document.getElementById("self-distance-first-action");
+        const priorAction = document.getElementById("self-distance-prior-action");
+        const currentAction = document.getElementById("self-distance-current-action");
+        const frameRow = document.getElementById("self-distance-frame-row");
+        const stepImg = document.getElementById("self-distance-step-img");
+        const stepPath = document.getElementById("self-distance-step-path");
+        const diagLossPlot = document.getElementById("self-distance-loss-plot");
+        const diagLossWrapper = document.getElementById("self-distance-loss-wrapper");
+        const diagLossPin = document.getElementById("self-distance-loss-pin");
         const diagFigure = {{ figure | tojson if figure else 'null' }};
         let diagLossPinned = false;
-        let lastHoveredStep = null;
 
         const assetPath = (rel) => `/assets/{{ experiment.id }}/${rel.replace(/^\/+/, "")}`;
         const setImage = (imgEl, labelEl, actionEl, relPath, labelText, actionText) => {
@@ -282,128 +274,92 @@
             }
         };
 
-        const stateEmbeddingMap = {};
-        {% if experiment.state_embedding_images %}
-        {% for img in experiment.state_embedding_images %}
-        {% if "hist" not in img.stem and "cosine" not in img.stem %}
+        const selfDistanceMap = {};
+        {% if self_distance_h_images %}
+        {% for img in self_distance_h_images %}
+        {% if "cosine" not in img.stem %}
         {% set rel_img = img.relative_to(experiment.path) %}
         {% set stem = img.stem.split('_')|last %}
         {% set step = stem|int %}
-        stateEmbeddingMap[{{ step }}] = {
+        selfDistanceMap[{{ step }}] = {
             url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
             path: "{{ rel_img }}",
         };
         {% endif %}
         {% endfor %}
         {% endif %}
-        const stateEmbeddingSteps = Object.keys(stateEmbeddingMap)
-            .map((k) => Number(k))
-            .filter((n) => !Number.isNaN(n))
-            .sort((a, b) => a - b);
+        const selfDistanceSteps = Object.keys(selfDistanceMap).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
 
-        const stateEmbeddingHistMap = {};
-        {% if experiment.state_embedding_images %}
-        {% for img in experiment.state_embedding_images %}
-        {% if "hist" in img.stem %}
-        {% set rel_img = img.relative_to(experiment.path) %}
-        {% set stem = img.stem.split('_')|last %}
-        {% set step = stem|int %}
-        stateEmbeddingHistMap[{{ step }}] = {
-            url: "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ rel_img) }}",
-            path: "{{ rel_img }}",
-        };
-        {% endif %}
-        {% endfor %}
-        {% endif %}
-
-        const nearestStateStep = (step) => {
-            if (!stateEmbeddingSteps.length) return null;
-            let best = stateEmbeddingSteps[0];
-            let bestDiff = Math.abs(step - stateEmbeddingSteps[0]);
-            for (let i = 1; i < stateEmbeddingSteps.length; i++) {
-                const diff = Math.abs(step - stateEmbeddingSteps[i]);
+        const nearestSelfStep = (step) => {
+            if (!selfDistanceSteps.length) return null;
+            let best = selfDistanceSteps[0];
+            let bestDiff = Math.abs(step - selfDistanceSteps[0]);
+            for (let i = 1; i < selfDistanceSteps.length; i++) {
+                const diff = Math.abs(step - selfDistanceSteps[i]);
                 if (diff < bestDiff) {
                     bestDiff = diff;
-                    best = stateEmbeddingSteps[i];
+                    best = selfDistanceSteps[i];
                 }
             }
             return best;
         };
 
-        const updateStateEmbeddingImages = (step, { updateLastHovered = true } = {}) => {
-            if (step === null || step === undefined) return;
-            if (updateLastHovered) {
-                lastHoveredStep = step;
-            }
-            const nearest = nearestStateStep(step);
-            if (nearest === null) {
-                if (stepImg) stepImg.classList.add("d-none");
-                if (stepPath) {
-                    stepPath.textContent = "No self-distance image available.";
-                    stepPath.setAttribute("title", "No self-distance image available.");
-                }
-                if (histImg) histImg.classList.add("d-none");
-                if (histPath) {
-                    histPath.textContent = "No histogram available.";
-                    histPath.setAttribute("title", "No histogram available.");
-                }
+        const updateSelfDistanceImage = (step) => {
+            if (!stepImg || !stepPath) return;
+            const nearest = nearestSelfStep(step);
+            if (nearest === null || !selfDistanceMap[nearest]) {
+                stepImg.classList.add("d-none");
+                stepPath.textContent = "No self-distance image available.";
+                stepPath.setAttribute("title", "No self-distance image available.");
                 return;
             }
-            const stateEntry = stateEmbeddingMap[nearest];
-            if (stepImg) {
-                if (stateEntry) {
-                    stepImg.src = stateEntry.url;
-                    stepImg.classList.remove("d-none");
-                    if (stepPath) {
-                        stepPath.textContent = `${stateEntry.path} (step ${nearest})`;
-                        stepPath.setAttribute("title", `${stateEntry.path} (step ${nearest})`);
-                    }
-                } else {
-                    stepImg.classList.add("d-none");
-                    if (stepPath) {
-                        stepPath.textContent = "No self-distance image available.";
-                        stepPath.setAttribute("title", "No self-distance image available.");
-                    }
-                }
-            }
-            const histEntry = stateEmbeddingHistMap[nearest];
-            if (histImg) {
-                if (histEntry) {
-                    histImg.src = histEntry.url;
-                    histImg.classList.remove("d-none");
-                    if (histPath) {
-                        histPath.textContent = `${histEntry.path} (step ${nearest})`;
-                        histPath.setAttribute("title", `${histEntry.path} (step ${nearest})`);
-                    }
-                } else {
-                    histImg.classList.add("d-none");
-                    if (histPath) {
-                        histPath.textContent = "No histogram available.";
-                        histPath.setAttribute("title", "No histogram available.");
-                    }
-                }
-            }
+            const entry = selfDistanceMap[nearest];
+            stepImg.src = entry.url;
+            stepImg.alt = `Self-distance step ${nearest}`;
+            stepImg.classList.remove("d-none");
+            stepPath.textContent = `${entry.path} (step ${nearest})`;
+            stepPath.setAttribute("title", `${entry.path} (step ${nearest})`);
         };
 
-        const applyStickyLossPlot = (enableSticky) => {
-            if (!diagLossWrapper || !diagLossPin) return;
-            if (enableSticky) {
-                diagLossWrapper.classList.add("sticky-active");
-                diagLossPin.classList.add("active");
-                diagLossPin.setAttribute("aria-pressed", "true");
-            } else {
-                diagLossWrapper.classList.remove("sticky-active");
-                diagLossPin.classList.remove("active");
-                diagLossPin.setAttribute("aria-pressed", "false");
-            }
-        };
-
-        if (diagLossPin) {
-            diagLossPin.addEventListener("click", () => {
-                diagLossPinned = !diagLossPinned;
-                applyStickyLossPlot(diagLossPinned);
+        const buildActionMap = (rows) => {
+            const map = {};
+            rows.forEach((row) => {
+                const trajectory = row.trajectory || row.trajectory_label || "trajectory";
+                const step = Number(row.timestep);
+                if (!Number.isFinite(step)) return;
+                const actionLabel = row.action_label || "";
+                if (!map[trajectory]) {
+                    map[trajectory] = { firstStep: step, firstAction: actionLabel, actions: {} };
+                }
+                map[trajectory].actions[step] = actionLabel;
+                if (step < map[trajectory].firstStep) {
+                    map[trajectory].firstStep = step;
+                    map[trajectory].firstAction = actionLabel;
+                }
             });
-        }
+            return map;
+        };
+
+        let actionByTrajectory = {};
+
+        const getFirstAction = (trajectory, fallback) => {
+            const entry = actionByTrajectory[trajectory];
+            if (entry && entry.firstAction) return entry.firstAction;
+            return fallback || "";
+        };
+
+        const getPriorAction = (trajectory, step, fallback) => {
+            const entry = actionByTrajectory[trajectory];
+            if (!entry) return fallback || "";
+            const priorStep = Number(step) - 1;
+            if (Number.isFinite(priorStep) && entry.actions && entry.actions[priorStep]) {
+                return entry.actions[priorStep];
+            }
+            if (Number.isFinite(entry.firstStep) && Number.isFinite(step) && step <= entry.firstStep) {
+                return entry.firstAction || fallback || "";
+            }
+            return fallback || "";
+        };
 
         const attachHover = (plotEl, mode) => {
             plotEl.on("plotly_hover", (event) => {
@@ -416,12 +372,14 @@
                 const firstPath = payload[3];
                 const priorPath = payload[4];
                 const frameLabelText = payload[5] || `t=${step}`;
-                const headerText = `${trajectory} - t=${step}`;
+                const headerText = `${trajectory} • t=${step}`;
                 const actionText = payload[6] || "";
+                const firstActionText = getFirstAction(trajectory, actionText);
+                const priorActionText = getPriorAction(trajectory, step, actionText);
 
                 if (mode === "first") {
                     updateFrameVisibility(false);
-                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
                     setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                     if (priorImg && priorLabel) {
                         priorImg.classList.add("d-none");
@@ -430,13 +388,13 @@
                     }
                 } else if (mode === "prior") {
                     updateFrameVisibility(true);
-                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
-                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, priorActionText);
                     setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                 } else {
                     updateFrameVisibility(true);
-                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, actionText);
-                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
+                    setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, priorActionText);
                     setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
                 }
             });
@@ -444,7 +402,7 @@
 
         const buildPlots = (rows) => {
             if (!rows.length) {
-                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance_s.csv.</p>";
+                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance_h.csv.</p>";
                 if (priorPlot) priorPlot.innerHTML = "";
                 if (scatterPlot) scatterPlot.innerHTML = "";
                 if (firstPlotCos) firstPlotCos.innerHTML = "";
@@ -504,8 +462,8 @@
                 ],
                 {
                     ...layoutLineChart,
-                    title: "Distance to first state",
-                    yaxis: { title: "||s0 - s_t||" },
+                    title: "Distance to first H latent",
+                    yaxis: { title: "||h0 - ht||" },
                 },
                 plotConfig,
             ).then(() => attachHover(firstPlot, "first"));
@@ -526,8 +484,8 @@
                 ],
                 {
                     ...layoutLineChart,
-                    title: "Distance to prior state",
-                    yaxis: { title: "||s(t-1) - s_t||" },
+                    title: "Distance to prior H latent",
+                    yaxis: { title: "||h(t-1) - ht||" },
                 },
                 plotConfig,
             ).then(() => attachHover(priorPlot, "prior"));
@@ -554,9 +512,9 @@
                 {
                     ...layoutBase,
                     hovermode: "closest",
-                    title: "Distance vs first vs prior",
-                    xaxis: { title: "||s0 - s_t||" },
-                    yaxis: { title: "||s(t-1) - s_t||" },
+                    title: "Distance vs first vs prior (H)",
+                    xaxis: { title: "||h0 - ht||" },
+                    yaxis: { title: "||h(t-1) - ht||" },
                 },
                 plotConfig,
             ).then(() => attachHover(scatterPlot, "scatter"));
@@ -577,8 +535,8 @@
                 ],
                 {
                     ...layoutLineChart,
-                    title: "Cosine distance to first state",
-                    yaxis: { title: "1 - cos(s0, s_t)" },
+                    title: "Cosine distance to first H latent",
+                    yaxis: { title: "1 - cos(h0, ht)" },
                 },
                 plotConfig,
             ).then(() => attachHover(firstPlotCos, "first"));
@@ -599,8 +557,8 @@
                 ],
                 {
                     ...layoutLineChart,
-                    title: "Cosine distance to prior state",
-                    yaxis: { title: "1 - cos(s(t-1), s_t)" },
+                    title: "Cosine distance to prior H latent",
+                    yaxis: { title: "1 - cos(h(t-1), ht)" },
                 },
                 plotConfig,
             ).then(() => attachHover(priorPlotCos, "prior"));
@@ -627,9 +585,9 @@
                 {
                     ...layoutBase,
                     hovermode: "closest",
-                    title: "Cosine distance: first vs prior",
-                    xaxis: { title: "1 - cos(s0, s_t)" },
-                    yaxis: { title: "1 - cos(s(t-1), s_t)" },
+                    title: "Cosine distance: first vs prior (H)",
+                    xaxis: { title: "1 - cos(h0, ht)" },
+                    yaxis: { title: "1 - cos(h(t-1), ht)" },
                 },
                 plotConfig,
             ).then(() => attachHover(scatterPlotCos, "scatter"));
@@ -638,33 +596,63 @@
         Papa.parse(csvUrl, {
             download: true,
             header: true,
-            dynamicTyping: false,
             skipEmptyLines: true,
             complete: (results) => {
-                buildPlots(results.data || []);
+                const rows = results.data;
+                actionByTrajectory = buildActionMap(rows);
+                buildPlots(rows);
+                if (rows.length) {
+                    const firstRow = rows[0];
+                    const trajectory = firstRow.trajectory || firstRow.trajectory_label || "trajectory";
+                    const step = Number(firstRow.timestep);
+                    const actionText = firstRow.action_label || "";
+                    const firstActionText = getFirstAction(trajectory, actionText);
+                    const priorActionText = getPriorAction(trajectory, step, actionText);
+                    setImage(firstImg, firstLabel, firstAction, firstRow.first_frame_path, `first: ${firstRow.frame_label || "t=0"}`, firstActionText);
+                    setImage(priorImg, priorLabel, priorAction, firstRow.prior_frame_path, "prior: t=0", priorActionText);
+                    setImage(currentImg, currentLabel, currentAction, firstRow.frame_path, `t=${firstRow.timestep}`, actionText);
+                    updateFrameVisibility(true);
+                }
             },
-            error: () => {
-                if (firstPlot) firstPlot.innerHTML = "<p class='text-danger small'>Failed to load state embedding CSV.</p>";
+            error: (err) => {
+                if (firstPlot) {
+                    firstPlot.innerHTML = `<p class="text-danger small">Error loading self_distance_h.csv: ${err.message}</p>`;
+                }
             }
         });
 
-        if (diagFigure && diagLossPlot) {
-            Plotly.newPlot(diagLossPlot, diagFigure.data, diagFigure.layout, buildPlotlyConfig({displayModeBar: false})).then(() => {
-                diagLossPlot.on("plotly_hover", (eventData) => {
-                    if (!eventData || !eventData.points || !eventData.points.length) return;
-                    const point = eventData.points[0];
-                    const step = Number(point.x);
-                    updateStateEmbeddingImages(step);
+        const initialStep = {{ experiment.rollout_steps[-1] if experiment.rollout_steps else 0 }};
+        updateSelfDistanceImage(initialStep);
+
+        const setLossPinned = (pinned) => {
+            if (!diagLossWrapper || !diagLossPin) return;
+            diagLossPinned = pinned;
+            diagLossWrapper.classList.toggle("sticky-active", pinned);
+            diagLossPin.classList.toggle("active", pinned);
+            diagLossPin.setAttribute("aria-pressed", pinned ? "true" : "false");
+            diagLossPin.setAttribute("title", pinned ? "Unpin training metrics plot" : "Pin training metrics plot");
+        };
+
+        if (diagLossPlot && diagFigure && diagFigure.data && diagFigure.layout) {
+            const diagLayout = {
+                ...diagFigure.layout,
+                height: 220,
+                margin: { ...(diagFigure.layout?.margin || {}), t: 30, b: 50, l: 50, r: 10 },
+            };
+            Plotly.react(diagLossPlot, diagFigure.data, diagLayout, buildPlotlyConfig(diagFigure.config || {})).then(() => {
+                diagLossPlot.on("plotly_hover", (event) => {
+                    const point = event?.points?.[0];
+                    if (!point || typeof point.x === "undefined") return;
+                    updateSelfDistanceImage(point.x);
                 });
-                diagLossPlot.on("plotly_unhover", () => {
-                    if (lastHoveredStep !== null) {
-                        updateStateEmbeddingImages(lastHoveredStep, { updateLastHovered: false });
-                    }
-                });
-                if (stateEmbeddingSteps.length) updateStateEmbeddingImages(stateEmbeddingSteps[stateEmbeddingSteps.length - 1]);
             });
-        } else if (stateEmbeddingSteps.length) {
-            updateStateEmbeddingImages(stateEmbeddingSteps[stateEmbeddingSteps.length - 1]);
+        }
+
+        if (diagLossPin && diagLossWrapper) {
+            diagLossPin.addEventListener("click", () => {
+                setLossPinned(!diagLossPinned);
+            });
+            setLossPinned(true);
         }
         const tooltipTriggerList = Array.from(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
         tooltipTriggerList.forEach((el) => {

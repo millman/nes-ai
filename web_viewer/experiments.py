@@ -126,6 +126,9 @@ class Experiment:
     graph_diagnostics_images: Dict[str, List[Path]]
     graph_diagnostics_steps: List[int]
     graph_diagnostics_csvs: Dict[str, List[Path]]
+    graph_diagnostics_h_images: Dict[str, List[Path]]
+    graph_diagnostics_h_steps: List[int]
+    graph_diagnostics_h_csvs: Dict[str, List[Path]]
     graph_diagnostics_s_images: Dict[str, List[Path]]
     graph_diagnostics_s_steps: List[int]
     graph_diagnostics_s_csvs: Dict[str, List[Path]]
@@ -201,6 +204,7 @@ def load_experiment(
     include_state_embedding: bool = False,
     include_odometry: bool = False,
     include_graph_diagnostics_s: bool = False,
+    include_graph_diagnostics_h: bool = False,
     include_last_modified: bool = False,
     include_rollout_steps: bool = False,
     include_max_step: bool = False,
@@ -295,6 +299,9 @@ def load_experiment(
     graph_diagnostics_images: Dict[str, List[Path]] = {}
     graph_diagnostics_steps: List[int] = []
     graph_diagnostics_csvs: Dict[str, List[Path]] = {}
+    graph_diagnostics_h_images: Dict[str, List[Path]] = {}
+    graph_diagnostics_h_steps: List[int] = []
+    graph_diagnostics_h_csvs: Dict[str, List[Path]] = {}
     graph_diagnostics_s_images: Dict[str, List[Path]] = {}
     graph_diagnostics_s_steps: List[int] = []
     graph_diagnostics_s_csvs: Dict[str, List[Path]] = {}
@@ -304,6 +311,12 @@ def load_experiment(
         graph_diagnostics_csvs = _collect_graph_diagnostics_csvs(path)
     else:
         graph_diagnostics_steps = [0] if _graph_diagnostics_exists(path) else []
+    if include_graph_diagnostics_h:
+        graph_diagnostics_h_images = _collect_graph_diagnostics_images(path, folder_name="graph_diagnostics_h")
+        graph_diagnostics_h_steps = _collect_graph_diagnostics_steps(graph_diagnostics_h_images)
+        graph_diagnostics_h_csvs = _collect_graph_diagnostics_csvs(path, folder_name="graph_diagnostics_h")
+    else:
+        graph_diagnostics_h_steps = [0] if _graph_diagnostics_exists(path, folder_name="graph_diagnostics_h") else []
     if include_graph_diagnostics_s:
         graph_diagnostics_s_images = _collect_graph_diagnostics_images(path, folder_name="graph_diagnostics_s")
         graph_diagnostics_s_steps = _collect_graph_diagnostics_steps(graph_diagnostics_s_images)
@@ -331,6 +344,9 @@ def load_experiment(
         graph_images=sum(len(v) for v in graph_diagnostics_images.values()),
         graph_steps=len(graph_diagnostics_steps),
         graph_csvs=sum(len(v) for v in graph_diagnostics_csvs.values()),
+        graph_h_images=sum(len(v) for v in graph_diagnostics_h_images.values()),
+        graph_h_steps=len(graph_diagnostics_h_steps),
+        graph_h_csvs=sum(len(v) for v in graph_diagnostics_h_csvs.values()),
         graph_s_images=sum(len(v) for v in graph_diagnostics_s_images.values()),
         graph_s_steps=len(graph_diagnostics_s_steps),
         graph_s_csvs=sum(len(v) for v in graph_diagnostics_s_csvs.values()),
@@ -429,6 +445,9 @@ def load_experiment(
         graph_diagnostics_images=graph_diagnostics_images,
         graph_diagnostics_steps=graph_diagnostics_steps,
         graph_diagnostics_csvs=graph_diagnostics_csvs,
+        graph_diagnostics_h_images=graph_diagnostics_h_images,
+        graph_diagnostics_h_steps=graph_diagnostics_h_steps,
+        graph_diagnostics_h_csvs=graph_diagnostics_h_csvs,
         graph_diagnostics_s_images=graph_diagnostics_s_images,
         graph_diagnostics_s_steps=graph_diagnostics_s_steps,
         graph_diagnostics_s_csvs=graph_diagnostics_s_csvs,
@@ -850,16 +869,20 @@ VIS_STEP_SPECS = [
     ("samples_hard", "samples_hard", "hard_*.png", "hard_"),
     ("vis_self_distance_z", "vis_self_distance_z", "self_distance_z_*.png", "self_distance_z_"),
     ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),
+    ("vis_self_distance_h", "vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"),
     ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
     ("vis_delta_s_pca", "vis_delta_s_pca", "delta_s_pca_*.png", "delta_s_pca_"),
+    ("vis_delta_h_pca", "vis_delta_h_pca", "delta_h_pca_*.png", "delta_h_pca_"),
     ("vis_odometry_current_z", "vis_odometry", "odometry_z_*.png", "odometry_z_"),
     ("vis_odometry_current_s", "vis_odometry", "odometry_s_*.png", "odometry_s_"),
     ("vis_odometry_z_vs_z_hat", "vis_odometry", "z_vs_z_hat_*.png", "z_vs_z_hat_"),
     ("vis_odometry_s_vs_s_hat", "vis_odometry", "s_vs_s_hat_*.png", "s_vs_s_hat_"),
     ("vis_action_alignment_detail", "vis_action_alignment_z", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_action_alignment_detail_s", "vis_action_alignment_s", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_action_alignment_detail_h", "vis_action_alignment_h", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_cycle_error", "vis_cycle_error_z", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
+    ("vis_cycle_error_h", "vis_cycle_error_h", "cycle_error_*.png", "cycle_error_"),
     ("vis_graph_rank1_cdf_z", "graph_diagnostics_z", "rank1_cdf_*.png", "rank1_cdf_"),
     ("vis_graph_rank2_cdf_z", "graph_diagnostics_z", "rank2_cdf_*.png", "rank2_cdf_"),
     ("vis_graph_neff_violin_z", "graph_diagnostics_z", "neff_violin_*.png", "neff_violin_"),
@@ -874,10 +897,13 @@ VIS_STEP_SPECS = [
     ("vis_graph_metrics_history_s", "graph_diagnostics_s", "metrics_history_*.png", "metrics_history_"),
     ("vis_ctrl_smoothness_z", "vis_vis_ctrl", "smoothness_z_*.png", "smoothness_z_"),
     ("vis_ctrl_smoothness_s", "vis_vis_ctrl", "smoothness_s_*.png", "smoothness_s_"),
+    ("vis_ctrl_smoothness_h", "vis_vis_ctrl", "smoothness_h_*.png", "smoothness_h_"),
     ("vis_ctrl_composition_z", "vis_vis_ctrl", "composition_error_z_*.png", "composition_error_z_"),
     ("vis_ctrl_composition_s", "vis_vis_ctrl", "composition_error_s_*.png", "composition_error_s_"),
+    ("vis_ctrl_composition_h", "vis_vis_ctrl", "composition_error_h_*.png", "composition_error_h_"),
     ("vis_ctrl_stability_z", "vis_vis_ctrl", "stability_z_*.png", "stability_z_"),
     ("vis_ctrl_stability_s", "vis_vis_ctrl", "stability_s_*.png", "stability_s_"),
+    ("vis_ctrl_stability_h", "vis_vis_ctrl", "stability_h_*.png", "stability_h_"),
 ]
 
 
