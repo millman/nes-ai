@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from math import ceil
 
 from flask import (
@@ -22,6 +22,7 @@ from flask import (
 from werkzeug.utils import safe_join
 
 from .config import ViewerConfig
+from .csv_utils import get_max_step
 from .diffing import diff_metadata
 from .experiments import (
     Experiment,
@@ -68,6 +69,15 @@ def _format_last_modified(dt: Optional[datetime]) -> str:
     else:
         # Different day - show date
         return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _safe_get_max_step(loss_csv: Optional[Path]) -> Optional[Union[int, str]]:
+    if loss_csv is None or not loss_csv.exists():
+        return None
+    try:
+        return get_max_step(loss_csv)
+    except Exception:
+        return "ERR"
 
 
 def create_app(config: Optional[ViewerConfig] = None) -> Flask:
@@ -256,11 +266,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             exp = load_experiment(
                 row.path,
                 include_odometry=True,
-                include_max_step=True,
+                include_max_step=False,
                 include_model_diff=True,
                 include_model_diff_generation=True,
             )
             if exp is not None:
+                exp.max_step = _safe_get_max_step(exp.loss_csv)
                 starred_experiments.append(exp)
             _log_timing("dashboard.experiment", exp_start, exp_id=row.id)
 
@@ -271,11 +282,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             exp = load_experiment(
                 cfg.output_dir / exp_id,
                 include_odometry=True,
-                include_max_step=True,
+                include_max_step=False,
                 include_model_diff=True,
                 include_model_diff_generation=True,
             )
             if exp is not None:
+                exp.max_step = _safe_get_max_step(exp.loss_csv)
                 experiments.append(exp)
             load_times.append((exp_id, (time.perf_counter() - exp_start) * 1000.0))
             _log_timing("dashboard.experiment", exp_start, exp_id=exp_id)
@@ -2189,6 +2201,9 @@ def _build_comparison_rows(experiments: List[Experiment]):
         if idx > 0:
             diff_text = diff_metadata(base_metadata, exp.metadata_text)
         viz_steps = _collect_visualization_steps(exp.path)
+        max_step = exp.max_step
+        if max_step is None:
+            max_step = _safe_get_max_step(exp.loss_csv)
         rows.append(
             {
                 "id": exp.id,
@@ -2198,6 +2213,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "tags": exp.tags,
                 "rollout_steps": exp.rollout_steps,
                 "visualization_steps": viz_steps,
+                "max_step": max_step,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
                 "git_metadata": exp.git_metadata_text,

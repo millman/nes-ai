@@ -7,12 +7,14 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import csv
 import re
 import tomli
 import tomli_w
+
+from .csv_utils import get_max_step
 
 ALL_ZERO_EPS = 1e-12
 PROFILE_ENABLED = os.environ.get("VIEWER_PROFILE", "").lower() in {"1", "true", "yes", "on"}
@@ -103,7 +105,7 @@ class Experiment:
     loss_image: Optional[Path]
     loss_csv: Optional[Path]
     rollout_steps: List[int]
-    max_step: Optional[int]
+    max_step: Optional[Union[int, str]]
     last_modified: Optional[datetime]
     total_params: Optional[int]
     flops_per_step: Optional[int]
@@ -367,7 +369,7 @@ def load_experiment(
     section_start = time.perf_counter()
 
     rollout_steps = _collect_rollout_steps(path) if include_rollout_steps else []
-    max_step = _get_max_step(loss_csv) if include_max_step and loss_csv and loss_csv.exists() else None
+    max_step = get_max_step(loss_csv) if include_max_step and loss_csv and loss_csv.exists() else None
     last_modified = _get_last_modified(path) if include_last_modified else _quick_last_modified(path)
     total_params, flops_per_step = _read_model_metadata(metadata_model_path)
     _profile(
@@ -1401,71 +1403,6 @@ def _graph_diagnostics_exists(root: Path, folder_name: str = "graph_diagnostics_
     if folder is None:
         return False
     return _folder_has_any_file(folder, (".png", ".csv"))
-
-
-def _get_max_step(csv_path: Path) -> Optional[int]:
-    """Get the maximum step value from the loss CSV file."""
-    if not csv_path.exists():
-        return None
-    try:
-        with csv_path.open("r", newline="") as handle:
-            header = handle.readline()
-        if not header:
-            return None
-        header_fields = next(csv.reader([header]))
-        if "step" not in header_fields:
-            return None
-        step_idx = header_fields.index("step")
-        last_line = _read_last_non_empty_line(csv_path)
-        if last_line:
-            try:
-                row = next(csv.reader([last_line]))
-                if step_idx < len(row):
-                    return int(float(row[step_idx]))
-            except (ValueError, TypeError, csv.Error):
-                pass
-        with csv_path.open("r", newline="") as handle:
-            reader = csv.DictReader(handle)
-            if not reader.fieldnames or "step" not in reader.fieldnames:
-                return None
-            max_step = None
-            for row in reader:
-                try:
-                    step = int(float(row.get("step", 0)))
-                    if max_step is None or step > max_step:
-                        max_step = step
-                except (ValueError, TypeError):
-                    continue
-            return max_step
-    except (OSError, csv.Error):
-        return None
-
-
-def _read_last_non_empty_line(path: Path, chunk_size: int = 8192) -> str:
-    """Read the last non-empty line from a file without scanning it all."""
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            end_pos = handle.tell()
-            if end_pos == 0:
-                return ""
-            buffer = b""
-            pos = end_pos
-            while pos > 0:
-                read_size = min(chunk_size, pos)
-                pos -= read_size
-                handle.seek(pos)
-                buffer = handle.read(read_size) + buffer
-                if b"\n" in buffer or pos == 0:
-                    lines = buffer.splitlines()
-                    for raw in reversed(lines):
-                        if raw.strip():
-                            return raw.decode("utf-8", errors="replace")
-                    if pos == 0:
-                        return ""
-            return ""
-    except OSError:
-        return ""
 
 
 def _folder_has_any_file(folder: Path, suffixes: Tuple[str, ...]) -> bool:

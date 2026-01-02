@@ -431,7 +431,9 @@
             </div>
             <div class="cell steps small" role="cell" data-exp-id="{{ exp.id }}">
                 <div class="cell-scroll">
-                {% if exp.max_step is not none %}
+                {% if exp.max_step == "ERR" %}
+                <span class="text-danger">ERR</span>
+                {% elif exp.max_step is not none %}
                 <span class="d-inline-block text-end font-monospace" style="min-width: 6ch;">{{ "{:,}".format(exp.max_step) }}</span>
                 {% else %}
                 <span class="text-muted">—</span>
