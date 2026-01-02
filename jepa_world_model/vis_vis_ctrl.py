@@ -317,12 +317,24 @@ def write_vis_ctrl_metrics_csv(
     global_step: int,
     metrics_z: VisCtrlMetrics,
     metrics_s: VisCtrlMetrics,
+    metrics_h: VisCtrlMetrics | None = None,
 ) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    knn_ks = sorted({int(k) for k in metrics_z.knn_mean_distances.keys()} | {int(k) for k in metrics_s.knn_mean_distances.keys()})
-    jac_ks = sorted({int(k) for k in metrics_z.jaccard_means.keys()} | {int(k) for k in metrics_s.jaccard_means.keys()})
+    knn_ks = sorted(
+        {int(k) for k in metrics_z.knn_mean_distances.keys()}
+        | {int(k) for k in metrics_s.knn_mean_distances.keys()}
+        | ({int(k) for k in metrics_h.knn_mean_distances.keys()} if metrics_h else set())
+    )
+    jac_ks = sorted(
+        {int(k) for k in metrics_z.jaccard_means.keys()}
+        | {int(k) for k in metrics_s.jaccard_means.keys()}
+        | ({int(k) for k in metrics_h.jaccard_means.keys()} if metrics_h else set())
+    )
     fieldnames = ["step"]
-    for prefix in ("z", "s"):
+    prefixes = [("z", metrics_z), ("s", metrics_s)]
+    if metrics_h is not None:
+        prefixes.append(("h", metrics_h))
+    for prefix, _ in prefixes:
         for k in knn_ks:
             fieldnames.append(f"{prefix}_knn_mean_k{k}")
         fieldnames.append(f"{prefix}_global_variance")
@@ -330,7 +342,7 @@ def write_vis_ctrl_metrics_csv(
         for k in jac_ks:
             fieldnames.append(f"{prefix}_jaccard_k{k}")
     row: Dict[str, float | int] = {"step": int(global_step)}
-    for prefix, metrics in (("z", metrics_z), ("s", metrics_s)):
+    for prefix, metrics in prefixes:
         for k in knn_ks:
             row[f"{prefix}_knn_mean_k{k}"] = float(metrics.knn_mean_distances.get(k, float("nan")))
         row[f"{prefix}_global_variance"] = float(metrics.global_variance)

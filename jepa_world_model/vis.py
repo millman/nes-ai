@@ -45,6 +45,12 @@ def tensor_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
     return (array * 255.0).round().astype(np.uint8)
 
 
+def delta_to_uint8_image(frame: torch.Tensor) -> np.ndarray:
+    scaled = frame.detach().cpu().clamp(-1, 1)
+    scaled = (scaled * 0.5 + 0.5).permute(1, 2, 0).numpy()
+    return (scaled * 255.0).round().astype(np.uint8)
+
+
 def _annotate_with_text(image: np.ndarray, text: str) -> np.ndarray:
     if not text:
         return image
@@ -126,9 +132,13 @@ def save_input_batch_visualization(
     frames: torch.Tensor,
     actions: torch.Tensor,
     rows: int,
+    recon: Optional[torch.Tensor] = None,
+    include_deltas: bool = False,
 ) -> None:
     frames = frames.detach().cpu()
     actions = actions.detach().cpu()
+    if recon is not None:
+        recon = recon.detach().cpu()
     batch_size, seq_len = frames.shape[0], frames.shape[1]
     num_rows = min(rows, batch_size)
     if num_rows <= 0:
@@ -143,40 +153,23 @@ def save_input_batch_visualization(
             columns.append(frame_img)
         row_image = np.concatenate(columns, axis=1)
         grid_rows.append(row_image)
-    grid = np.concatenate(grid_rows, axis=0)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(grid).save(out_path)
-
-
-def save_adjacency_input_visualization(
-    out_path: Path,
-    clean_frames: torch.Tensor,
-    noisy_frames: torch.Tensor,
-    rows: int,
-    max_steps: int | None = None,
-) -> None:
-    """Visualize clean vs. noisy pairs used for adjacency supervision."""
-    if clean_frames.shape != noisy_frames.shape:
-        raise ValueError("Clean and noisy frames must share shape for adjacency visualization.")
-    clean = clean_frames.detach().cpu()
-    noisy = noisy_frames.detach().cpu()
-    batch_size, seq_len = clean.shape[0], clean.shape[1]
-    steps = seq_len if max_steps is None else max(1, min(seq_len, int(max_steps)))
-    num_rows = min(rows, batch_size)
-    if num_rows <= 0 or steps <= 0:
-        return
-    grid_rows: list[np.ndarray] = []
-    for row_idx in range(num_rows):
-        columns: list[np.ndarray] = []
-        for step in range(steps):
-            clean_img = tensor_to_uint8_image(clean[row_idx, step])
-            noisy_img = tensor_to_uint8_image(noisy[row_idx, step])
-            clean_img = _annotate_with_text(clean_img, f"t{step} clean")
-            noisy_img = _annotate_with_text(noisy_img, f"t{step} noisy")
-            columns.append(clean_img)
-            columns.append(noisy_img)
-        row_image = np.concatenate(columns, axis=1)
-        grid_rows.append(row_image)
+        if include_deltas and recon is not None and seq_len > 1:
+            delta_target = frames[row_idx, 1:] - frames[row_idx, :-1]
+            delta_recon = recon[row_idx, 1:] - recon[row_idx, :-1]
+            delta_rows = []
+            delta_recon_rows = []
+            zero = np.zeros_like(tensor_to_uint8_image(frames[row_idx, 0]))
+            delta_rows.append(_annotate_with_text(zero, "delta_tgt"))
+            delta_recon_rows.append(_annotate_with_text(zero, "delta_rec"))
+            for step in range(seq_len - 1):
+                delta_img = delta_to_uint8_image(delta_target[step])
+                delta_img = _annotate_with_text(delta_img, f"t{step+1}")
+                delta_rows.append(delta_img)
+                delta_rec_img = delta_to_uint8_image(delta_recon[step])
+                delta_rec_img = _annotate_with_text(delta_rec_img, f"t{step+1}")
+                delta_recon_rows.append(delta_rec_img)
+            grid_rows.append(np.concatenate(delta_rows, axis=1))
+            grid_rows.append(np.concatenate(delta_recon_rows, axis=1))
     grid = np.concatenate(grid_rows, axis=0)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(grid).save(out_path)
@@ -284,7 +277,6 @@ __all__ = [
     "save_embedding_projection",
     "save_temporal_pair_visualization",
     "save_input_batch_visualization",
-    "save_adjacency_input_visualization",
     "save_rollout_visualization",
     "save_rollout_sequence_batch",
 ]

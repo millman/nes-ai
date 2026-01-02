@@ -858,7 +858,6 @@ VIS_STEP_SPECS = [
     ("vis_action_alignment_detail_s", "vis_action_alignment_s", "action_alignment_detail_*.png", "action_alignment_detail_"),
     ("vis_cycle_error", "vis_cycle_error_z", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
-    ("vis_adjacency", "vis_adjacency", "adjacency_*.png", "adjacency_"),
     ("vis_graph_rank1_cdf_z", "graph_diagnostics_z", "rank1_cdf_*.png", "rank1_cdf_"),
     ("vis_graph_rank2_cdf_z", "graph_diagnostics_z", "rank2_cdf_*.png", "rank2_cdf_"),
     ("vis_graph_neff_violin_z", "graph_diagnostics_z", "neff_violin_*.png", "neff_violin_"),
@@ -1284,10 +1283,13 @@ def _collect_vis_ctrl_images(root: Path) -> Dict[str, List[Path]]:
     specs = [
         ("smoothness_z", "smoothness_z_*.png"),
         ("smoothness_s", "smoothness_s_*.png"),
+        ("smoothness_h", "smoothness_h_*.png"),
         ("composition_z", "composition_error_z_*.png"),
         ("composition_s", "composition_error_s_*.png"),
+        ("composition_h", "composition_error_h_*.png"),
         ("stability_z", "stability_z_*.png"),
         ("stability_s", "stability_s_*.png"),
+        ("stability_h", "stability_h_*.png"),
     ]
     if vis_dir.exists():
         for name, pattern in specs:

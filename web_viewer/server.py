@@ -142,10 +142,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         knn_by_prefix = {
             "z": [key for key in knn_keys if key.startswith("z_")],
             "s": [key for key in knn_keys if key.startswith("s_")],
+            "h": [key for key in knn_keys if key.startswith("h_")],
         }
         jaccard_by_prefix = {
             "z": [key for key in jaccard_keys if key.startswith("z_")],
             "s": [key for key in jaccard_keys if key.startswith("s_")],
+            "h": [key for key in jaccard_keys if key.startswith("h_")],
         }
 
         def mean_values(values: List[float]) -> float:
@@ -178,6 +180,14 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 "name": "s_combined",
                 "x": steps,
                 "y": combined_series("s"),
+                "hovertemplate": "%{y}<extra></extra>",
+            },
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "name": "h_combined",
+                "x": steps,
+                "y": combined_series("h"),
                 "hovertemplate": "%{y}<extra></extra>",
             },
         ]
@@ -1843,6 +1853,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 steps=[],
                 vis_ctrl_map_z={},
                 vis_ctrl_map_s={},
+                vis_ctrl_map_h={},
                 csv_url=None,
                 cfg=cfg,
                 active_nav="vis_ctrl",
@@ -1857,11 +1868,16 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if selected is None:
             abort(404, "Experiment not found for Vis v Ctrl outputs.")
 
-        def _build_vis_ctrl_map(paths_by_name: Dict[str, List[Path]]) -> Tuple[Dict[str, Dict[int, str]], Dict[str, Dict[int, str]]]:
+        def _build_vis_ctrl_map(
+            paths_by_name: Dict[str, List[Path]]
+        ) -> Tuple[Dict[str, Dict[int, str]], Dict[str, Dict[int, str]], Dict[str, Dict[int, str]]]:
             map_z: Dict[str, Dict[int, str]] = {}
             map_s: Dict[str, Dict[int, str]] = {}
+            map_h: Dict[str, Dict[int, str]] = {}
             for name, paths in paths_by_name.items():
-                target = map_z if name.endswith("_z") else map_s if name.endswith("_s") else None
+                target = (
+                    map_z if name.endswith("_z") else map_s if name.endswith("_s") else map_h if name.endswith("_h") else None
+                )
                 if target is None:
                     continue
                 per_step: Dict[int, str] = {}
@@ -1879,9 +1895,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                     per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
                 if per_step:
                     target[name] = per_step
-            return map_z, map_s
+            return map_z, map_s, map_h
 
-        vis_ctrl_map_z, vis_ctrl_map_s = _build_vis_ctrl_map(selected.vis_ctrl_images)
+        vis_ctrl_map_z, vis_ctrl_map_s, vis_ctrl_map_h = _build_vis_ctrl_map(selected.vis_ctrl_images)
         steps = selected.vis_ctrl_steps
         csv_url: Optional[str] = None
         history_rows: List[Dict[str, float]] = []
@@ -1902,6 +1918,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             steps=steps,
             vis_ctrl_map_z=vis_ctrl_map_z,
             vis_ctrl_map_s=vis_ctrl_map_s,
+            vis_ctrl_map_h=vis_ctrl_map_h,
             csv_url=csv_url,
             history=history_rows,
             figure=figure,

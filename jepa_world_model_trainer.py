@@ -39,15 +39,14 @@ from recon.data import list_trajectories, load_frame_as_tensor, short_traj_state
 from utils.device_utils import pick_device
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder, VisualizationDecoder as ConvVisualizationDecoder
 from jepa_world_model.loss import FocalL1Loss, HardnessWeightedL1Loss, HardnessWeightedMSELoss, HardnessWeightedMedianLoss
-from jepa_world_model.loss_adjacency import AdjacencyConfig, adjacency_losses, gaussian_augment
 from jepa_world_model.loss_sigreg import sigreg_loss
 from jepa_world_model.loss_patch_recon import patch_recon_loss
+from jepa_world_model.loss_geometry import GeometryLossConfig, geometry_ranking_loss
 from jepa_world_model.metadata import write_run_metadata, write_git_metadata
 from jepa_world_model.vis import (
     describe_action_tensor,
     save_embedding_projection,
     save_input_batch_visualization,
-    save_adjacency_input_visualization,
     save_rollout_sequence_batch,
     save_temporal_pair_visualization,
     tensor_to_uint8_image,
@@ -217,23 +216,52 @@ class HiddenToDeltaProjector(nn.Module):
         return delta.view(*original_shape, delta.shape[-1])
 
 
-class ActionDeltaHead(nn.Module):
-    """Predict controller actions from latent deltas to avoid action-conditioning leakage."""
+class HiddenActionDeltaProjector(nn.Module):
+    """Predict state delta from hidden state and action."""
 
-    def __init__(self, latent_dim: int, hidden_dim: int, action_dim: int) -> None:
+    def __init__(self, h_dim: int, action_dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.LayerNorm(latent_dim),
-            nn.Linear(latent_dim, hidden_dim),
+            nn.LayerNorm(h_dim + action_dim),
+            nn.Linear(h_dim + action_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, h_dim),
+        )
+        self.h_dim = h_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+
+    def forward(self, h: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        if h.shape[:-1] != actions.shape[:-1]:
+            raise ValueError("Hidden state and actions must share leading dimensions.")
+        original_shape = h.shape[:-1]
+        h_flat = h.reshape(-1, h.shape[-1])
+        act_flat = actions.reshape(-1, actions.shape[-1])
+        delta = self.net(torch.cat([h_flat, act_flat], dim=-1))
+        return delta.view(*original_shape, delta.shape[-1])
+
+
+class InverseDynamicsHead(nn.Module):
+    """Predict action from consecutive observation embeddings."""
+
+    def __init__(self, z_dim: int, hidden_dim: int, action_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(z_dim * 2),
+            nn.Linear(z_dim * 2, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, action_dim),
         )
 
-    def forward(self, delta: torch.Tensor) -> torch.Tensor:
-        original_shape = delta.shape[:-1]
-        flat = delta.reshape(-1, delta.shape[-1])
+    def forward(self, z_t: torch.Tensor, z_next: torch.Tensor) -> torch.Tensor:
+        if z_t.shape != z_next.shape:
+            raise ValueError("z_t and z_next must have matching shapes.")
+        original_shape = z_t.shape[:-1]
+        flat = torch.cat([z_t, z_next], dim=-1).reshape(-1, z_t.shape[-1] * 2)
         logits = self.net(flat)
         return logits.view(*original_shape, logits.shape[-1])
 
@@ -290,8 +318,7 @@ class ActionFiLM(nn.Module):
 
 RECON_LOSS = HardnessWeightedL1Loss()
 JEPA_LOSS = nn.MSELoss()
-SIGREG_LOSS = nn.MSELoss()
-ACTION_RECON_LOSS = nn.BCEWithLogitsLoss()
+INVERSE_DYNAMICS_LOSS = nn.BCEWithLogitsLoss()
 
 
 # ------------------------------------------------------------
@@ -313,8 +340,6 @@ class ModelConfig:
             ├→ h2z_pred(ĥ_{t+1}) → ẑ_{t+1}
             ├→ h2z(h_t) → ẑ_t (projection head)
             ├→ h2s(h_t) → s_t (planning embedding)
-            ├→ ActionDeltaHead(z_{t+1} - z_t) → action logits (action_z)
-            ├→ ActionDeltaHead_s(s_{t+1} - s_t) → action logits (action_s)
             └→ Decoder(decoder_schedule → image reconstruction from z)
 
     Notes:
@@ -377,10 +402,9 @@ class LossWeights:
         * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
         * Purpose: advance the observable latent consistent with the next encoded frame.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
-    - loss_h2z_2hop: hidden->z projection at t+2; extra weight on multi-step belief alignment.
-    - loss_z_rollout: rollout z predictions over multiple steps against z targets.
-    - loss_s_rollout: rollout s predictions over multiple steps against s targets.
-    Other losses (recon, rollout, etc.) behave as before.
+    - loss_h2z_2hop: 2-hop composability (arbitrary action sequence) via predicted h-delta composition.
+    - loss_pixel_delta: pixel delta reconstruction on decoded frames.
+    Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
     """
     # Latent transition supervision: ẑ_{t+1} (from predictor) vs detached z_{t+1}; shapes encoder+predictor via z_t.
     jepa: float = 1.0
@@ -392,41 +416,29 @@ class LossWeights:
     recon_multi_gauss: float = 0.0
     recon_multi_box: float = 0.3
 
-    # Action controller input reconstruction
-    action_z: float = 0.0
-    # Action prediction from consecutive s pairs (state embedding).
-    action_s: float = 1.0
+    # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
+    pixel_delta: float = 0.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 0.0
-    # Project hidden→z for t+2 targets; separate weight for multi-step alignment.
+    # 2-hop composability (arbitrary actions): enforce predicted h-delta composition across two steps.
     h2z_2hop: float = 0.0
 
-    # Rollout s with predicted z; compare to teacher-forced s targets.
-    s_rollout: float = 0.0
-    # Rollout z predictions against future z targets.
-    z_rollout: float = 0.0
     # Auxiliary delta prediction from hidden state to z.
     delta_z: float = 0.0
-    # Auxiliary delta prediction from hidden state to s.
-    delta_s: float = 0.0
 
-    consistency: float = 0.0
+    # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
+    inverse_dynamics_z: float = 0.0
+    # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
+    inverse_dynamics_h: float = 0.1
 
-    # Adjacency: adj0 enforces invariance between clean/noisy state embeddings (s) at same timestep.
-    adj0: float = 0.0
-    # Adjacency: adj1 aligns predicted next s with next targets via transport.
-    adj1: float = 0.0
-    # Adjacency: adj2 enforces two-hop composition in s-space toward s_{t+2}.
-    adj2: float = 0.0
-
-@dataclass
-class LossRolloutConfig:
-    horizon: int = 8
+    # Goal-conditioned ranking loss on s = g(stopgrad(h)).
+    geometry_rank: float = 0.0
 
 @dataclass
 class LossSigRegConfig:
     projections: int = 64
+
 
 @dataclass
 class LossReconPatchConfig:
@@ -580,9 +592,8 @@ class TrainConfig:
     detach_decoder: bool = False
 
     # Specific losses
-    adjacency: AdjacencyConfig = field(default_factory=AdjacencyConfig)
-    rollout: LossRolloutConfig = field(default_factory=LossRolloutConfig)
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
+    geometry: GeometryLossConfig = field(default_factory=GeometryLossConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
     recon_multi_gauss: LossMultiScaleGaussReconConfig = field(default_factory=LossMultiScaleGaussReconConfig)
     recon_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
@@ -608,30 +619,6 @@ class SelfDistanceInputs:
     actions: np.ndarray  # [T, action_dim]
     action_labels: List[str]
     action_dim: int
-
-
-def _assert_adjacency_requirements(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights) -> None:
-    warmup_frames = max(getattr(model_cfg, "state_warmup_frames", 0), 0)
-    warmup = max(min(warmup_frames, cfg.seq_len - 1), 0)
-    remaining = cfg.seq_len - warmup
-    if weights.adj0 > 0 and remaining < 2:
-        raise AssertionError(
-            "adj0 requires at least 2 frames after warmup, "
-            f"got seq_len={cfg.seq_len} with state_warmup_frames={warmup_frames} "
-            f"(remaining={remaining})."
-        )
-    if weights.adj1 > 0 and remaining < 2:
-        raise AssertionError(
-            "adj1 requires at least 2 frames after warmup, "
-            f"got seq_len={cfg.seq_len} with state_warmup_frames={warmup_frames} "
-            f"(remaining={remaining})."
-        )
-    if weights.adj2 > 0 and remaining < 3:
-        raise AssertionError(
-            "adj2 requires at least 3 frames after warmup, "
-            f"got seq_len={cfg.seq_len} with state_warmup_frames={warmup_frames} "
-            f"(remaining={remaining})."
-        )
 
 
 class JEPAWorldModel(nn.Module):
@@ -670,18 +657,18 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
         )
-        self.h_to_delta_s = HiddenToDeltaProjector(
+        self.h_to_delta_h = HiddenActionDeltaProjector(
             cfg.state_dim,
-            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            cfg.action_dim,
             cfg.hidden_dim,
         )
-        self.action_delta_head = ActionDeltaHead(
+        self.inverse_dynamics_z = InverseDynamicsHead(
             self.embedding_dim,
             cfg.hidden_dim,
             cfg.action_dim,
         )
-        self.action_delta_head_s = ActionDeltaHead(
-            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+        self.inverse_dynamics_h = InverseDynamicsHead(
+            cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
         )
@@ -748,92 +735,15 @@ def _predictor_rollout(
 
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """JEPA loss plus action logits, using predictor conditioned on z, h, and action."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """JEPA loss using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
     preds, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
-        logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
-        return zero, logits, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
+        return zero, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
-    delta_true = embeddings[:, 1:] - embeddings[:, :-1]
-    action_logits = model.action_delta_head(delta_true)
-    return JEPA_LOSS(preds, target), action_logits, preds, h_preds, h_states
-
-
-def z_rollout_loss(
-    model: JEPAWorldModel,
-    embeddings: torch.Tensor,
-    actions: torch.Tensor,
-    h_states: torch.Tensor,
-    rollout_horizon: int,
-    warmup_frames: int,
-) -> torch.Tensor:
-    if rollout_horizon <= 1:
-        return embeddings.new_tensor(0.0)
-    b, t, d = embeddings.shape
-    if t < 2:
-        return embeddings.new_tensor(0.0)
-    total = embeddings.new_tensor(0.0)
-    steps = 0
-    warmup = max(min(warmup_frames, t - 1), 0)
-    paired_actions = _pair_actions(actions)
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        h_current = h_states[:, start]
-        for offset in range(max_h):
-            act = paired_actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            z_pred = model.h_to_z(h_next)
-            target_step = embeddings[:, start + offset + 1].detach()
-            total = total + JEPA_LOSS(z_pred, target_step)
-            steps += 1
-            current = z_pred
-            h_current = h_next
-    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
-
-
-def s_rollout_loss(
-    model: JEPAWorldModel,
-    embeddings: torch.Tensor,
-    actions: torch.Tensor,
-    h_states: torch.Tensor,
-    s_targets: torch.Tensor,
-    rollout_horizon: int,
-    warmup_frames: int,
-) -> torch.Tensor:
-    if rollout_horizon <= 1:
-        return embeddings.new_tensor(0.0)
-    b, t, _ = embeddings.shape
-    if t < 2:
-        return embeddings.new_tensor(0.0)
-    total = embeddings.new_tensor(0.0)
-    steps = 0
-    warmup = max(min(warmup_frames, t - 1), 0)
-    paired_actions = _pair_actions(actions)
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        h_current = h_states[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        for offset in range(max_h):
-            act = paired_actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            s_pred = model.h2s(h_next)
-            s_target = s_targets[:, start + offset + 1].detach()
-            total = total + F.mse_loss(s_pred, s_target)
-            steps += 1
-            current = model.h_to_z(h_next).detach()
-            h_current = h_next
-    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
-
-
-def latent_consistency_loss(embeddings: torch.Tensor) -> torch.Tensor:
-    if embeddings.shape[1] < 2:
-        return embeddings.new_tensor(0.0)
-    diffs = embeddings[:, 1:] - embeddings[:, :-1]
-    return diffs.abs().mean()
+    return JEPA_LOSS(preds, target), preds, h_preds, h_states
 
 
 def multi_scale_recon_loss_gauss(
@@ -880,6 +790,100 @@ def multi_scale_recon_loss_box(
         cfg.max_weight,
     )
     return loss_raw
+
+
+def h2z_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    h_states: torch.Tensor,
+    start: int,
+) -> torch.Tensor:
+    if h_states.numel() == 0 or embeddings.shape[1] - start <= 0:
+        return embeddings.new_tensor(0.0)
+    h_stack = h_states[:, start:]
+    z_hat_from_h = model.h_to_z(h_stack)
+    return F.mse_loss(z_hat_from_h, embeddings[:, start:].detach())
+
+
+def h2z_2hop_composability_loss(
+    model: JEPAWorldModel,
+    h_states: torch.Tensor,
+    actions: torch.Tensor,
+    start: int,
+) -> torch.Tensor:
+    if h_states.numel() == 0 or h_states.shape[1] - start <= 2:
+        return h_states.new_tensor(0.0)
+    # Compare sequential predictor rollout vs composed deltas from a separate delta head.
+    h0 = h_states[:, start:-2]
+    h1 = h_states[:, start + 1 : -1]
+    h2 = h_states[:, start + 2 :]
+    a0 = actions[:, start:-2]
+    a1 = actions[:, start + 1 : -1]
+    delta0 = model.h_to_delta_h(h0, a0)
+    h1_alt = h0 + delta0
+    delta1 = model.h_to_delta_h(h1_alt, a1)
+    h2_alt = h1_alt + delta1
+    return F.mse_loss(h2_alt, h2)
+
+
+def delta_z_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    h_states: torch.Tensor,
+    start: int,
+) -> torch.Tensor:
+    if h_states.numel() == 0 or embeddings.shape[1] - start <= 1:
+        return embeddings.new_tensor(0.0)
+    h_stack_delta = h_states[:, start:-1]
+    delta_hat = model.h_to_delta_z(h_stack_delta)
+    delta_target = (embeddings[:, start + 1 :] - embeddings[:, start:-1]).detach()
+    return F.mse_loss(delta_hat, delta_target)
+
+
+def geometry_rank_loss(
+    model: JEPAWorldModel,
+    h_states: torch.Tensor,
+    cfg: LossGeometryConfig,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if h_states.numel() == 0:
+        zero = h_states.new_tensor(0.0)
+        return zero, zero
+    s_geom = model.h2s(h_states.detach())
+    return geometry_ranking_loss(s_geom, cfg)
+
+
+def pixel_delta_loss(recon: torch.Tensor, frames: torch.Tensor) -> torch.Tensor:
+    if frames.shape[1] <= 1:
+        return frames.new_tensor(0.0)
+    delta_target = frames[:, 1:] - frames[:, :-1]
+    delta_pred = recon[:, 1:] - recon[:, :-1]
+    return RECON_LOSS(delta_pred, delta_target)
+
+
+def inverse_dynamics_z_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+) -> torch.Tensor:
+    if embeddings.shape[1] <= 1:
+        raise AssertionError("inverse_dynamics_z requires seq_len > 1.")
+    z_t = embeddings[:, :-1]
+    z_next = embeddings[:, 1:]
+    logits_z = model.inverse_dynamics_z(z_t, z_next)
+    return INVERSE_DYNAMICS_LOSS(logits_z, actions[:, :-1].float())
+
+
+def inverse_dynamics_h_loss(
+    model: JEPAWorldModel,
+    h_states: torch.Tensor,
+    actions: torch.Tensor,
+) -> torch.Tensor:
+    if h_states.shape[1] <= 1:
+        raise AssertionError("inverse_dynamics_h requires seq_len > 1.")
+    h_t = h_states[:, :-1]
+    h_next = h_states[:, 1:]
+    logits_h = model.inverse_dynamics_h(h_t, h_next)
+    return INVERSE_DYNAMICS_LOSS(logits_h, actions[:, :-1].float())
 
 
 # ------------------------------------------------------------
@@ -961,165 +965,125 @@ def _compute_losses_and_metrics(
     loss_norm_decay: float = 0.99,
     update_loss_norm: bool = True,
 ) -> Tuple[Dict[str, float], Optional[BatchDifficultyInfo], torch.Tensor, Tuple[float, float]]:
-    images, actions = batch[0], batch[1]
+    # Losses below assume at least one timestep; guard early for clarity.
+    if batch[0].shape[1] <= 0:
+        raise AssertionError("Sequence length must be positive.")
+    if batch[0].shape[0] <= 0:
+        raise AssertionError("Batch size must be positive.")
+
+    # Naming guide:
+    # x: raw pixel frames (B, T, C, H, W) used for recon and pixel-space losses.
+    # z: per-frame encoder embeddings used for JEPA and z-space auxiliaries.
+    # h: hidden/belief state produced by the dynamics predictor.
+    # s: geometry/planning head derived from h for ranking/geometry losses.
+    x_frames, a_seq = batch[0], batch[1]
     batch_paths = batch[2] if len(batch) > 2 else None
     batch_indices = batch[3] if len(batch) > 3 else None
     device = next(model.parameters()).device
-    images = images.to(device)
-    actions = actions.to(device)
+    x_frames = x_frames.to(device)
+    a_seq = a_seq.to(device)
 
-    outputs = model.encode_sequence(images)
+    # -------------------------------------------------------------------------
+    # Initialization
+    # -------------------------------------------------------------------------
 
-    need_recon = (
-        weights.recon > 0
-        or track_hard_examples
-        or weights.recon_multi_gauss > 0
-        or weights.recon_multi_box > 0
-        or weights.recon_patch > 0
-    )
-    recon: Optional[torch.Tensor] = None
-    if need_recon:
-        decoder_embeddings = outputs["embeddings"].detach() if cfg.detach_decoder else outputs["embeddings"]
-        recon = decoder(decoder_embeddings)
+    # Core JEPA losses
+    loss_jepa = x_frames.new_tensor(0.0)
+    loss_sigreg = x_frames.new_tensor(0.0)
 
-    loss_jepa_raw, action_logits, _, h_preds, h_states = jepa_loss(model, outputs, actions)
+    # z (Recon) losses
+    loss_recon = x_frames.new_tensor(0.0)
+    loss_recon_multi_gauss = x_frames.new_tensor(0.0)
+    loss_recon_multi_box = x_frames.new_tensor(0.0)
+    loss_recon_patch = x_frames.new_tensor(0.0)
+
+    # z (Auxiliary) losses
+    loss_pixel_delta = x_frames.new_tensor(0.0)
+    loss_delta_z = x_frames.new_tensor(0.0)
+    loss_inverse_dynamics_z = x_frames.new_tensor(0.0)
+
+    # h (Hidden) losses
+    loss_h2z = x_frames.new_tensor(0.0)
+    loss_h2z_2hop = x_frames.new_tensor(0.0)
+    loss_inverse_dynamics_h = x_frames.new_tensor(0.0)
+
+    # s (Geometry) losses
+    loss_geometry_rank = x_frames.new_tensor(0.0)
+    geometry_rank_accuracy = x_frames.new_tensor(0.0)
+
+    # -------------------------------------------------------------------------
+    # Calculate required inputs
+    # -------------------------------------------------------------------------
+
+    # NOTE: We may not actually need each of these inputs, but it majorly simplifies the
+    #   conditionals, since some inputs are needed in multiple branches.
+
+    encode_outputs = model.encode_sequence(x_frames)
+    z_embeddings = encode_outputs["embeddings"]
+    loss_jepa_raw, _, h_preds, h_states = jepa_loss(model, encode_outputs, a_seq)
+
+    z_for_decoder = z_embeddings.detach() if cfg.detach_decoder else z_embeddings
+    x_recon = decoder(z_for_decoder)
+
+    seq_len = z_embeddings.shape[1]
+    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
+
+    # Warmup before applying hidden-state losses to avoid cold-start transients.
+    start_frame = max(min(warmup_frames, seq_len - 1), 0)
+
+    # -------------------------------------------------------------------------
+    # Losses
+    # -------------------------------------------------------------------------
+
+    # Core JEPA losses
     if weights.jepa > 0:
         loss_jepa = loss_jepa_raw
-    else:
-        loss_jepa = images.new_tensor(0.0)
 
-    prev_actions = actions[:, :-1]
-    if weights.action_z > 0 and prev_actions.numel() > 0:
-        loss_action_z = ACTION_RECON_LOSS(action_logits, prev_actions)
-    else:
-        loss_action_z = images.new_tensor(0.0)
+    if weights.sigreg > 0:
+        loss_sigreg = sigreg_loss(z_embeddings, cfg.sigreg.projections)
 
-    s_states: Optional[torch.Tensor] = None
-    if (weights.action_s > 0 or weights.s_rollout > 0 or weights.delta_s > 0) and h_states.numel() > 0:
-        s_states = model.h2s(h_states)
+    # z (Recon) Reconstruction and pixel-space losses
+    if weights.recon > 0:
+        loss_recon = RECON_LOSS(x_recon, x_frames)
 
-    if weights.action_s > 0 and prev_actions.numel() > 0 and s_states is not None:
-        s_delta_true = s_states[:, 1:] - s_states[:, :-1]
-        action_logits_s = model.action_delta_head_s(s_delta_true)
-        loss_action_s = ACTION_RECON_LOSS(action_logits_s, prev_actions)
-    else:
-        loss_action_s = images.new_tensor(0.0)
+    if weights.recon_multi_gauss > 0:
+        loss_recon_multi_gauss = multi_scale_recon_loss_gauss(x_recon, x_frames, cfg.recon_multi_gauss)
 
-    with torch.no_grad():
-        if prev_actions.numel() > 0:
-            action_probs = torch.sigmoid(action_logits)
-            action_pred = (action_probs >= 0.5).float()
-            action_target = prev_actions.float()
-            action_accuracy_bit = (action_pred == action_target).float().mean()
-            action_accuracy_all = (action_pred == action_target).all(dim=-1).float().mean()
-        else:
-            action_accuracy_bit = images.new_tensor(0.0)
-            action_accuracy_all = images.new_tensor(0.0)
+    if weights.recon_multi_box > 0:
+        loss_recon_multi_box = multi_scale_recon_loss_box(x_recon, x_frames, cfg.recon_multi_box)
 
-    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
-    loss_z_rollout = (
-        z_rollout_loss(
-            model,
-            outputs["embeddings"],
-            actions,
-            h_states,
-            cfg.rollout.horizon,
-            warmup_frames,
-        )
-        if weights.z_rollout > 0
-        else images.new_tensor(0.0)
-    )
-    loss_consistency = (
-        latent_consistency_loss(outputs["embeddings"])
-        if weights.consistency > 0
-        else images.new_tensor(0.0)
-    )
-    loss_sigreg = (
-        sigreg_loss(outputs["embeddings"], cfg.sigreg.projections, loss_fn=SIGREG_LOSS)
-        if weights.sigreg > 0
-        else images.new_tensor(0.0)
-    )
-    # Hidden-state dynamics and cross-projection losses
-    loss_h2z = images.new_tensor(0.0)
-    loss_h2z_2hop = images.new_tensor(0.0)
-    loss_s_rollout = images.new_tensor(0.0)
-    loss_delta_z = images.new_tensor(0.0)
-    loss_delta_s = images.new_tensor(0.0)
-    need_hidden = (
-        weights.h2z > 0
-        or weights.h2z_2hop > 0
-        or weights.s_rollout > 0
-        or weights.delta_z > 0
-        or weights.delta_s > 0
-    )
-    if need_hidden:
-        seq_len = outputs["embeddings"].shape[1]
-        if h_states.numel() > 0 and seq_len > 0:
-            start = max(min(warmup_frames, seq_len - 1), 0)
-            if weights.h2z > 0 and seq_len - start > 0:
-                h_stack = h_states[:, start:]
-                z_hat_from_h = model.h_to_z(h_stack)
-                loss_h2z = F.mse_loss(z_hat_from_h, outputs["embeddings"][:, start:].detach())
-            if weights.h2z_2hop > 0 and seq_len - start > 2:
-                h_stack_2 = h_states[:, start + 2 :]
-                z_hat_from_h2 = model.h_to_z(h_stack_2)
-                loss_h2z_2hop = F.mse_loss(z_hat_from_h2, outputs["embeddings"][:, start + 2 :].detach())
-            if weights.delta_z > 0 and seq_len - start > 1:
-                h_stack_delta = h_states[:, start:-1]
-                delta_hat = model.h_to_delta_z(h_stack_delta)
-                delta_target = (
-                    outputs["embeddings"][:, start + 1 :] - outputs["embeddings"][:, start:-1]
-                ).detach()
-                loss_delta_z = F.mse_loss(delta_hat, delta_target)
-            if weights.s_rollout > 0 and s_states is not None:
-                loss_s_rollout = s_rollout_loss(
-                    model,
-                    outputs["embeddings"],
-                    actions,
-                    h_states,
-                    s_states,
-                    cfg.rollout.horizon,
-                    warmup_frames,
-                )
-            if weights.delta_s > 0 and s_states is not None and seq_len - start > 1:
-                h_stack_delta = h_states[:, start:-1]
-                delta_hat_s = model.h_to_delta_s(h_stack_delta)
-                delta_target_s = (s_states[:, start + 1 :] - s_states[:, start:-1]).detach()
-                loss_delta_s = F.mse_loss(delta_hat_s, delta_target_s)
-
-    if weights.recon > 0 and recon is not None:
-        loss_recon = RECON_LOSS(recon, images)
-    else:
-        loss_recon = images.new_tensor(0.0)
-
-    if weights.recon_multi_gauss > 0 and recon is not None:
-        loss_recon_multi_gauss = multi_scale_recon_loss_gauss(recon, images, cfg.recon_multi_gauss)
-    else:
-        loss_recon_multi_gauss = images.new_tensor(0.0)
-
-    if weights.recon_multi_box > 0 and recon is not None:
-        loss_recon_multi_box = multi_scale_recon_loss_box(recon, images, cfg.recon_multi_box)
-    else:
-        loss_recon_multi_box = images.new_tensor(0.0)
-
-    if weights.recon_patch > 0 and recon is not None:
+    if weights.recon_patch > 0:
         loss_recon_patch = patch_recon_loss(
-            recon,
-            images,
+            x_recon,
+            x_frames,
             cfg.patch_recon.patch_sizes,
             loss_fn=RECON_LOSS,
         )
-    else:
-        loss_recon_patch = images.new_tensor(0.0)
 
-    loss_adj0, loss_adj1, loss_adj2, adj_entropy, adj_hit, adj2_hit = adjacency_losses(
-        model=model,
-        embeddings=outputs["embeddings"],
-        actions=actions,
-        images=images,
-        weights=weights,
-        cfg=cfg.adjacency,
-    )
+    if weights.pixel_delta > 0:
+        loss_pixel_delta = pixel_delta_loss(x_recon, x_frames)
+
+    # z (Auxiliary) losses
+    if weights.inverse_dynamics_z > 0:
+        loss_inverse_dynamics_z = inverse_dynamics_z_loss(model, z_embeddings, a_seq)
+
+    if weights.delta_z > 0:
+        loss_delta_z = delta_z_loss(model, z_embeddings, h_states, start_frame)
+
+    # h (Hidden) Hidden-state dynamics and cross-projection losses
+    if weights.h2z > 0:
+        loss_h2z = h2z_loss(model, z_embeddings, h_states, start_frame)
+
+    if weights.h2z_2hop > 0:
+        loss_h2z_2hop = h2z_2hop_composability_loss(model, h_states, a_seq, start_frame)
+
+    # h (Auxiliary)
+    if weights.inverse_dynamics_h > 0:
+        loss_inverse_dynamics_h = inverse_dynamics_h_loss(model, h_states, a_seq)
+
+    # s (Geometry)
+    if weights.geometry_rank > 0:
+        loss_geometry_rank, geometry_rank_accuracy = geometry_rank_loss(model, h_states, cfg.geometry)
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
@@ -1140,22 +1104,17 @@ def _compute_losses_and_metrics(
     world_loss = (
         weights.jepa * _scaled("loss_jepa", loss_jepa)
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
-        + weights.z_rollout * _scaled("loss_z_rollout", loss_z_rollout)
-        + weights.consistency * _scaled("loss_consistency", loss_consistency)
-        + weights.action_z * _scaled("loss_action_z", loss_action_z)
-        + weights.action_s * _scaled("loss_action_s", loss_action_s)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
         + weights.h2z_2hop * _scaled("loss_h2z_2hop", loss_h2z_2hop)
-        + weights.s_rollout * _scaled("loss_s_rollout", loss_s_rollout)
         + weights.delta_z * _scaled("loss_delta_z", loss_delta_z)
-        + weights.delta_s * _scaled("loss_delta_s", loss_delta_s)
+        + weights.geometry_rank * _scaled("loss_geometry_rank", loss_geometry_rank)
+        + weights.inverse_dynamics_z * _scaled("loss_inverse_dynamics_z", loss_inverse_dynamics_z)
+        + weights.inverse_dynamics_h * _scaled("loss_inverse_dynamics_h", loss_inverse_dynamics_h)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
         + weights.recon_patch * _scaled("loss_recon_patch", loss_recon_patch)
-        + weights.adj0 * _scaled("loss_adj0", loss_adj0)
-        + weights.adj1 * _scaled("loss_adj1", loss_adj1)
-        + weights.adj2 * _scaled("loss_adj2", loss_adj2)
+        + weights.pixel_delta * _scaled("loss_pixel_delta", loss_pixel_delta)
     )
 
     world_grad_norm = 0.0
@@ -1170,12 +1129,12 @@ def _compute_losses_and_metrics(
     difficulty_info: Optional[BatchDifficultyInfo] = None
     if (
         track_hard_examples
-        and recon is not None
+        and x_recon is not None
         and batch_paths is not None
         and batch_indices is not None
-        and len(batch_paths) == images.shape[0]
+        and len(batch_paths) == x_frames.shape[0]
     ):
-        per_frame_errors = (recon.detach() - images.detach()).abs().mean(dim=(2, 3, 4))
+        per_frame_errors = (x_recon.detach() - x_frames.detach()).abs().mean(dim=(2, 3, 4))
         sample_scores, hardest_frames = torch.max(per_frame_errors, dim=1)
         difficulty_info = BatchDifficultyInfo(
             indices=batch_indices.detach().cpu().tolist(),
@@ -1187,28 +1146,19 @@ def _compute_losses_and_metrics(
     metrics = {
         "loss_jepa": loss_jepa.item(),
         "loss_sigreg": loss_sigreg.item(),
-        "loss_z_rollout": loss_z_rollout.item(),
-        "loss_consistency": loss_consistency.item(),
         "loss_recon": loss_recon.item(),
         "loss_recon_multi_gauss": loss_recon_multi_gauss.item(),
         "loss_recon_multi_box": loss_recon_multi_box.item(),
         "loss_recon_patch": loss_recon_patch.item(),
-        "loss_action_z": loss_action_z.item(),
-        "loss_action_s": loss_action_s.item(),
+        "loss_pixel_delta": loss_pixel_delta.item(),
         "loss_h2z": loss_h2z.item(),
         "loss_h2z_2hop": loss_h2z_2hop.item(),
-        "loss_s_rollout": loss_s_rollout.item(),
         "loss_delta_z": loss_delta_z.item(),
-        "loss_delta_s": loss_delta_s.item(),
+        "loss_geometry_rank": loss_geometry_rank.item(),
+        "geometry_rank_accuracy": geometry_rank_accuracy.item(),
+        "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
+        "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
         "loss_world": world_loss.item(),
-        "action_accuracy_bit": action_accuracy_bit.item(),
-        "action_accuracy_all": action_accuracy_all.item(),
-        "loss_adj0": loss_adj0.item(),
-        "loss_adj1": loss_adj1.item(),
-        "loss_adj2": loss_adj2.item(),
-        "adj_entropy": adj_entropy.item(),
-        "adj_hit": adj_hit.item(),
-        "adj2_hit": adj2_hit.item(),
     }
     if for_training:
         metrics["grad_world"] = world_grad_norm
@@ -1273,10 +1223,6 @@ def log_metrics(
         filtered.pop("loss_jepa", None)
     if weights.sigreg <= 0:
         filtered.pop("loss_sigreg", None)
-    if weights.z_rollout <= 0:
-        filtered.pop("loss_z_rollout", None)
-    if weights.consistency <= 0:
-        filtered.pop("loss_consistency", None)
     if weights.recon <= 0:
         filtered.pop("loss_recon", None)
     if weights.recon_multi_gauss <= 0:
@@ -1285,16 +1231,8 @@ def log_metrics(
         filtered.pop("loss_recon_multi_box", None)
     if weights.recon_patch <= 0:
         filtered.pop("loss_recon_patch", None)
-    if weights.adj0 <= 0:
-        filtered.pop("loss_adj0", None)
-    if weights.adj1 <= 0:
-        filtered.pop("loss_adj1", None)
-    if weights.adj2 <= 0:
-        filtered.pop("loss_adj2", None)
-        filtered.pop("adj2_hit", None)
-    if weights.adj1 <= 0 and weights.adj2 <= 0:
-        filtered.pop("adj_hit", None)
-        filtered.pop("adj_entropy", None)
+    if weights.pixel_delta <= 0:
+        filtered.pop("loss_pixel_delta", None)
     # Always show val loss if present
     if "loss_val_world" in metrics:
         filtered["loss_val_world"] = metrics["loss_val_world"]
@@ -1306,20 +1244,19 @@ def log_metrics(
         filtered["loss_val_recon_multi_box"] = metrics["loss_val_recon_multi_box"]
     if "loss_val_recon_patch" in metrics:
         filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
-    if weights.action_z <= 0:
-        filtered.pop("loss_action_z", None)
-    if weights.action_s <= 0:
-        filtered.pop("loss_action_s", None)
     if weights.h2z <= 0:
         filtered.pop("loss_h2z", None)
     if weights.h2z_2hop <= 0:
         filtered.pop("loss_h2z_2hop", None)
-    if weights.s_rollout <= 0:
-        filtered.pop("loss_s_rollout", None)
     if weights.delta_z <= 0:
         filtered.pop("loss_delta_z", None)
-    if weights.delta_s <= 0:
-        filtered.pop("loss_delta_s", None)
+    if weights.inverse_dynamics_z <= 0:
+        filtered.pop("loss_inverse_dynamics_z", None)
+    if weights.inverse_dynamics_h <= 0:
+        filtered.pop("loss_inverse_dynamics_h", None)
+    if weights.geometry_rank <= 0:
+        filtered.pop("loss_geometry_rank", None)
+        filtered.pop("geometry_rank_accuracy", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1347,27 +1284,18 @@ LOSS_COLUMNS = [
     "loss_val_recon_patch",
     "loss_jepa",
     "loss_sigreg",
-    "loss_z_rollout",
-    "loss_consistency",
     "loss_recon",
     "loss_recon_multi_gauss",
     "loss_recon_multi_box",
     "loss_recon_patch",
-    "loss_action_z",
-    "loss_action_s",
+    "loss_pixel_delta",
     "loss_h2z",
     "loss_h2z_2hop",
-    "loss_s_rollout",
     "loss_delta_z",
-    "loss_delta_s",
-    "loss_adj0",
-    "loss_adj1",
-    "loss_adj2",
-    "adj_hit",
-    "adj2_hit",
-    "adj_entropy",
-    "action_accuracy_bit",
-    "action_accuracy_all",
+    "loss_geometry_rank",
+    "geometry_rank_accuracy",
+    "loss_inverse_dynamics_z",
+    "loss_inverse_dynamics_h",
     "grad_world",
     "grad_decoder",
 ]
@@ -1386,29 +1314,20 @@ class LossHistory:
     val_recon_patch: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
-    z_rollout: List[float] = field(default_factory=list)
-    consistency: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     recon_multi_gauss: List[float] = field(default_factory=list)
     recon_multi_box: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
-    action_z: List[float] = field(default_factory=list)
-    action_s: List[float] = field(default_factory=list)
+    pixel_delta: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
     h2z_2hop: List[float] = field(default_factory=list)
-    s_rollout: List[float] = field(default_factory=list)
     delta_z: List[float] = field(default_factory=list)
-    delta_s: List[float] = field(default_factory=list)
-    action_acc_bit: List[float] = field(default_factory=list)
-    action_acc_all: List[float] = field(default_factory=list)
+    geometry_rank: List[float] = field(default_factory=list)
+    geometry_rank_accuracy: List[float] = field(default_factory=list)
+    inverse_dynamics_z: List[float] = field(default_factory=list)
+    inverse_dynamics_h: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
-    adj0: List[float] = field(default_factory=list)
-    adj1: List[float] = field(default_factory=list)
-    adj2: List[float] = field(default_factory=list)
-    adj_hit: List[float] = field(default_factory=list)
-    adj2_hit: List[float] = field(default_factory=list)
-    adj_entropy: List[float] = field(default_factory=list)
 
     def append(self, step: float, elapsed: float, cumulative_flops: float, metrics: Dict[str, float]) -> None:
         self.steps.append(step)
@@ -1422,27 +1341,18 @@ class LossHistory:
         self.val_recon_patch.append(metrics.get("loss_val_recon_patch", 0.0))
         self.jepa.append(metrics["loss_jepa"])
         self.sigreg.append(metrics["loss_sigreg"])
-        self.z_rollout.append(metrics["loss_z_rollout"])
-        self.consistency.append(metrics["loss_consistency"])
         self.recon.append(metrics["loss_recon"])
         self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
         self.recon_patch.append(metrics["loss_recon_patch"])
-        self.action_z.append(metrics["loss_action_z"])
-        self.action_s.append(metrics["loss_action_s"])
+        self.pixel_delta.append(metrics.get("loss_pixel_delta", 0.0))
         self.h2z.append(metrics["loss_h2z"])
         self.h2z_2hop.append(metrics["loss_h2z_2hop"])
-        self.s_rollout.append(metrics["loss_s_rollout"])
         self.delta_z.append(metrics.get("loss_delta_z", 0.0))
-        self.delta_s.append(metrics.get("loss_delta_s", 0.0))
-        self.adj0.append(metrics.get("loss_adj0", 0.0))
-        self.adj1.append(metrics.get("loss_adj1", 0.0))
-        self.adj2.append(metrics.get("loss_adj2", 0.0))
-        self.adj_hit.append(metrics.get("adj_hit", 0.0))
-        self.adj2_hit.append(metrics.get("adj2_hit", 0.0))
-        self.adj_entropy.append(metrics.get("adj_entropy", 0.0))
-        self.action_acc_bit.append(metrics.get("action_accuracy_bit", 0.0))
-        self.action_acc_all.append(metrics.get("action_accuracy_all", 0.0))
+        self.geometry_rank.append(metrics.get("loss_geometry_rank", 0.0))
+        self.geometry_rank_accuracy.append(metrics.get("geometry_rank_accuracy", 0.0))
+        self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
+        self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
 
@@ -1469,27 +1379,18 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.val_recon_patch,
             history.jepa,
             history.sigreg,
-            history.z_rollout,
-            history.consistency,
             history.recon,
             history.recon_multi_gauss,
             history.recon_multi_box,
             history.recon_patch,
-            history.action_z,
-            history.action_s,
+            history.pixel_delta,
             history.h2z,
             history.h2z_2hop,
-            history.s_rollout,
             history.delta_z,
-            history.delta_s,
-            history.adj0,
-            history.adj1,
-            history.adj2,
-            history.adj_hit,
-            history.adj2_hit,
-            history.adj_entropy,
-            history.action_acc_bit,
-            history.action_acc_all,
+            history.geometry_rank,
+            history.geometry_rank_accuracy,
+            history.inverse_dynamics_z,
+            history.inverse_dynamics_h,
             history.grad_world,
             history.grad_decoder,
         ):
@@ -1512,12 +1413,10 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         "jepa": _color(1),
         "sigreg": _color(2),
         "recon": _color(3),
-        "z_rollout": _color(4),
-        "consistency": _color(5),
-        "action_z": _color(6),
-        "action_s": _color(7),
         "h2z_2hop": _color(16),
-        "s_rollout": _color(17),
+        "geometry_rank_accuracy": _color(17),
+        "inverse_dynamics_z": _color(18),
+        "inverse_dynamics_h": _color(19),
     }
     plt.plot(history.steps, history.world, label="world", color=color_map["world"])
     if any(val != 0.0 for val in history.val_world):
@@ -1533,18 +1432,19 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
     plt.plot(history.steps, history.sigreg, label="sigreg", color=color_map["sigreg"])
     plt.plot(history.steps, history.recon, label="recon", color=color_map["recon"])
-    if any(val != 0.0 for val in history.z_rollout):
-        plt.plot(history.steps, history.z_rollout, label="z_rollout", color=color_map["z_rollout"])
-    if any(val != 0.0 for val in history.consistency):
-        plt.plot(history.steps, history.consistency, label="consistency", color=color_map["consistency"])
-    if any(val != 0.0 for val in history.action_z):
-        plt.plot(history.steps, history.action_z, label="action_z", color=color_map["action_z"])
-    if any(val != 0.0 for val in history.action_s):
-        plt.plot(history.steps, history.action_s, label="action_s", color=color_map["action_s"])
     if any(val != 0.0 for val in history.h2z_2hop):
         plt.plot(history.steps, history.h2z_2hop, label="h2z_2hop", color=color_map["h2z_2hop"])
-    if any(val != 0.0 for val in history.s_rollout):
-        plt.plot(history.steps, history.s_rollout, label="s_rollout", color=color_map["s_rollout"])
+    if any(val != 0.0 for val in history.geometry_rank_accuracy):
+        plt.plot(
+            history.steps,
+            history.geometry_rank_accuracy,
+            label="geometry_rank_accuracy",
+            color=color_map["geometry_rank_accuracy"],
+        )
+    if any(val != 0.0 for val in history.inverse_dynamics_z):
+        plt.plot(history.steps, history.inverse_dynamics_z, label="inverse_dynamics_z", color=color_map["inverse_dynamics_z"])
+    if any(val != 0.0 for val in history.inverse_dynamics_h):
+        plt.plot(history.steps, history.inverse_dynamics_h, label="inverse_dynamics_h", color=color_map["inverse_dynamics_h"])
     if any(val != 0.0 for val in history.recon_patch):
         plt.plot(history.steps, history.recon_patch, label="recon_patch", color=_color(8))
     if any(val != 0.0 for val in history.recon_multi_gauss):
@@ -3039,8 +2939,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     training_vis_generator = torch.Generator()
     training_vis_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
 
-    _assert_adjacency_requirements(cfg, model_cfg, weights)
-
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = cfg.output_dir / timestamp
     metrics_dir = run_dir / "metrics"
@@ -3058,7 +2956,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
     vis_ctrl_dir = run_dir / "vis_vis_ctrl"
-    adjacency_vis_dir = run_dir / "vis_adjacency"
     samples_hard_dir = run_dir / "samples_hard"
     samples_hard_val_dir = run_dir / "samples_hard_val"
     inputs_vis_dir = run_dir / "vis_inputs"
@@ -3089,7 +2986,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         graph_diagnostics_s_dir.mkdir(parents=True, exist_ok=True)
     if cfg.vis_ctrl.enabled:
         vis_ctrl_dir.mkdir(parents=True, exist_ok=True)
-    adjacency_vis_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
@@ -3414,11 +3310,26 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             debug_vis.input_vis_every_steps > 0
             and global_step % debug_vis.input_vis_every_steps == 0
         ):
+            recon_vis: Optional[torch.Tensor] = None
+            with torch.no_grad():
+                was_training = model.training
+                decoder_was_training = decoder.training
+                model.eval()
+                decoder.eval()
+                vis_frames = rolling_batch_cpu[0].to(device)
+                vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
+                recon_vis = decoder(vis_embeddings).cpu()
+                if was_training:
+                    model.train()
+                if decoder_was_training:
+                    decoder.train()
             save_input_batch_visualization(
                 inputs_vis_dir / f"inputs_{global_step:07d}.png",
                 rolling_batch_cpu[0],
                 rolling_batch_cpu[1],
                 debug_vis.input_vis_rows,
+                recon=recon_vis,
+                include_deltas=True,
             )
         if (
             debug_vis.pair_vis_every_steps > 0
@@ -3541,16 +3452,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         hist_frames_cpu=hist_frames,
                         hist_actions_cpu=hist_actions,
                     )
-                if (weights.adj0 > 0) or (weights.adj1 > 0) or (weights.adj2 > 0):
-                    sigma_adj = max(cfg.adjacency.sigma_aug, 0.0)
-                    noisy_batch = gaussian_augment(rolling_batch_cpu[0], sigma_adj)
-                    save_adjacency_input_visualization(
-                        adjacency_vis_dir / f"adjacency_{global_step:07d}.png",
-                        rolling_batch_cpu[0],
-                        noisy_batch,
-                        rows=cfg.vis.rows,
-                        max_steps=cfg.vis.columns,
-                    )
                 if cfg.diagnostics.enabled:
                     diag_frames = diagnostics_batch_cpu[0] if diagnostics_batch_cpu is not None else rolling_batch_cpu[0]
                     diag_actions = diagnostics_batch_cpu[1] if diagnostics_batch_cpu is not None else rolling_batch_cpu[1]
@@ -3596,6 +3497,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         cfg.vis_ctrl.stability_delta,
                         cfg.vis_ctrl.knn_chunk_size,
                     )
+                    metrics_h = compute_vis_ctrl_metrics(
+                        vis_h_states,
+                        vis_actions,
+                        cfg.vis_ctrl.knn_k_values,
+                        warmup_frames,
+                        cfg.vis_ctrl.min_action_count,
+                        cfg.vis_ctrl.stability_delta,
+                        cfg.vis_ctrl.knn_chunk_size,
+                    )
                     save_smoothness_plot(
                         vis_ctrl_dir / f"smoothness_z_{global_step:07d}.png",
                         metrics_z,
@@ -3605,6 +3515,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         vis_ctrl_dir / f"smoothness_s_{global_step:07d}.png",
                         metrics_s,
                         "s",
+                    )
+                    save_smoothness_plot(
+                        vis_ctrl_dir / f"smoothness_h_{global_step:07d}.png",
+                        metrics_h,
+                        "h",
                     )
                     save_composition_error_plot(
                         vis_ctrl_dir / f"composition_error_z_{global_step:07d}.png",
@@ -3616,6 +3531,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         metrics_s,
                         "s",
                     )
+                    save_composition_error_plot(
+                        vis_ctrl_dir / f"composition_error_h_{global_step:07d}.png",
+                        metrics_h,
+                        "h",
+                    )
                     save_stability_plot(
                         vis_ctrl_dir / f"stability_z_{global_step:07d}.png",
                         metrics_z,
@@ -3626,11 +3546,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         metrics_s,
                         "s",
                     )
+                    save_stability_plot(
+                        vis_ctrl_dir / f"stability_h_{global_step:07d}.png",
+                        metrics_h,
+                        "h",
+                    )
                     write_vis_ctrl_metrics_csv(
                         metrics_dir / "vis_ctrl_metrics.csv",
                         global_step,
                         metrics_z,
                         metrics_s,
+                        metrics_h,
                     )
                 if cfg.graph_diagnostics.enabled:
                     graph_frames = graph_diag_batch_cpu[0] if graph_diag_batch_cpu is not None else rolling_batch_cpu[0]

@@ -123,7 +123,7 @@
         <strong>Vis v Ctrl metrics</strong>
         <span class="text-muted small">hover to scrub steps</span>
         <span class="ms-auto text-muted small">Step: <span id="vis-ctrl-step-label" class="vis-ctrl-step-label">—</span></span>
-        <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Z vs S are combined aggregates of three signals: local smoothness (mean kNN distance across k), two-step composition error, and neighborhood stability (mean Jaccard across k). Each combined value is the mean of those three components at the current step, letting you compare overall Z vs S consistency in one line. Formula: combined = (mean_k knn_mean_k + composition_error + mean_k jaccard_k) / 3.">i</span>
+        <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Z vs S vs H are combined aggregates of three signals: local smoothness (mean kNN distance across k), two-step composition error, and neighborhood stability (mean Jaccard across k). Each combined value is the mean of those three components at the current step, letting you compare overall consistency in one line. Formula: combined = (mean_k knn_mean_k + composition_error + mean_k jaccard_k) / 3.">i</span>
     </div>
     <div class="card-body">
         <div id="vis-ctrl-metrics-plot" style="height: 260px;"></div>
@@ -183,6 +183,19 @@
             <div class="text-muted small" id="vis-ctrl-smooth-s-caption"></div>
         </div>
     </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Local smoothness (H)</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="vis-ctrl-step-label">—</span></span>
+                <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="kNN distance raincloud and variance spectrum in H. Read: lower kNN distances imply smoother local dynamics; the spectrum shows how variance is distributed. Good: tight, low-distance distribution with a stable, non-exploding spectrum.">i</span>
+            </div>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-smooth-h-img" class="img-fluid d-none" alt="Local smoothness (H)">
+            <div class="text-muted small" id="vis-ctrl-smooth-h-caption"></div>
+        </div>
+    </div>
 </div>
 
 <div class="vis-ctrl-grid-quad mb-3">
@@ -227,6 +240,19 @@
     </div>
     <div class="card vis-ctrl-card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Two-step composition error (H)</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="vis-ctrl-step-label">—</span></span>
+                <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Error between observed 2-step delta and mean action-direction composition in H. Read: histogram shows error spread; mean line summarizes typical mismatch. Good: low mean error with a tight distribution.">i</span>
+            </div>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-comp-h-img" class="img-fluid d-none" alt="Two-step composition error (H)">
+            <div class="text-muted small" id="vis-ctrl-comp-h-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>Neighborhood stability (S)</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="vis-ctrl-step-label">—</span></span>
@@ -236,6 +262,19 @@
         <div class="card-body d-flex flex-column gap-2">
             <img id="vis-ctrl-stability-s-img" class="img-fluid d-none" alt="Neighborhood stability (S)">
             <div class="text-muted small" id="vis-ctrl-stability-s-caption"></div>
+        </div>
+    </div>
+    <div class="card vis-ctrl-card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Neighborhood stability (H)</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="vis-ctrl-step-label">—</span></span>
+                <span class="vis-ctrl-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Jaccard overlap of kNN sets across time for H. Read: higher values mean neighborhoods persist; low values mean rapid drift. Good: high mean/median with a compact spread.">i</span>
+            </div>
+        </div>
+        <div class="card-body d-flex flex-column gap-2">
+            <img id="vis-ctrl-stability-h-img" class="img-fluid d-none" alt="Neighborhood stability (H)">
+            <div class="text-muted small" id="vis-ctrl-stability-h-caption"></div>
         </div>
     </div>
 </div>
@@ -249,6 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const steps = {{ steps | tojson }};
     const mapZ = {{ vis_ctrl_map_z | tojson }};
     const mapS = {{ vis_ctrl_map_s | tojson }};
+    const mapH = {{ vis_ctrl_map_h | tojson }};
     const history = {{ history | tojson }};
     const figure = {{ figure | tojson if figure else 'null' }};
     const stepLabels = document.querySelectorAll(".vis-ctrl-step-label");
@@ -262,10 +302,13 @@ document.addEventListener("DOMContentLoaded", () => {
         { key: "alignment_s", img: "vis-ctrl-align-s-img", caption: "vis-ctrl-align-s-caption", map: mapS },
         { key: "smoothness_z", img: "vis-ctrl-smooth-z-img", caption: "vis-ctrl-smooth-z-caption", map: mapZ },
         { key: "smoothness_s", img: "vis-ctrl-smooth-s-img", caption: "vis-ctrl-smooth-s-caption", map: mapS },
+        { key: "smoothness_h", img: "vis-ctrl-smooth-h-img", caption: "vis-ctrl-smooth-h-caption", map: mapH },
         { key: "composition_z", img: "vis-ctrl-comp-z-img", caption: "vis-ctrl-comp-z-caption", map: mapZ },
         { key: "composition_s", img: "vis-ctrl-comp-s-img", caption: "vis-ctrl-comp-s-caption", map: mapS },
+        { key: "composition_h", img: "vis-ctrl-comp-h-img", caption: "vis-ctrl-comp-h-caption", map: mapH },
         { key: "stability_z", img: "vis-ctrl-stability-z-img", caption: "vis-ctrl-stability-z-caption", map: mapZ },
         { key: "stability_s", img: "vis-ctrl-stability-s-img", caption: "vis-ctrl-stability-s-caption", map: mapS },
+        { key: "stability_h", img: "vis-ctrl-stability-h-img", caption: "vis-ctrl-stability-h-caption", map: mapH },
     ];
 
     const pickClosest = (entries, step) => {

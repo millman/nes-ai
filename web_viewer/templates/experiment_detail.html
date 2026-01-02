@@ -33,13 +33,15 @@
                     { value: "vis_action_alignment_detail_s", label: "Diagnostics:Action alignment (S)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_s" },
                     { value: "vis_ctrl_smoothness_z", label: "Vis v Ctrl:Local smoothness (Z)", prefix: "smoothness_z_", folder: "vis_vis_ctrl" },
                     { value: "vis_ctrl_smoothness_s", label: "Vis v Ctrl:Local smoothness (S)", prefix: "smoothness_s_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_smoothness_h", label: "Vis v Ctrl:Local smoothness (H)", prefix: "smoothness_h_", folder: "vis_vis_ctrl" },
                     { value: "vis_ctrl_composition_z", label: "Vis v Ctrl:Two-step composition error (Z)", prefix: "composition_error_z_", folder: "vis_vis_ctrl" },
                     { value: "vis_ctrl_composition_s", label: "Vis v Ctrl:Two-step composition error (S)", prefix: "composition_error_s_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_composition_h", label: "Vis v Ctrl:Two-step composition error (H)", prefix: "composition_error_h_", folder: "vis_vis_ctrl" },
                     { value: "vis_ctrl_stability_z", label: "Vis v Ctrl:Neighborhood stability (Z)", prefix: "stability_z_", folder: "vis_vis_ctrl" },
                     { value: "vis_ctrl_stability_s", label: "Vis v Ctrl:Neighborhood stability (S)", prefix: "stability_s_", folder: "vis_vis_ctrl" },
+                    { value: "vis_ctrl_stability_h", label: "Vis v Ctrl:Neighborhood stability (H)", prefix: "stability_h_", folder: "vis_vis_ctrl" },
                     { value: "vis_cycle_error", label: "Diagnostics:Cycle error (Z)", prefix: "cycle_error_", folder: "vis_cycle_error_z" },
                     { value: "vis_cycle_error_s", label: "Diagnostics:Cycle error (S)", prefix: "cycle_error_", folder: "vis_cycle_error_s" },
-                    { value: "vis_adjacency", label: "Adjacency:Graph", prefix: "adjacency_", folder: "vis_adjacency" },
                     { value: "vis_graph_rank1_cdf_z", label: "Graph Diagnostics:Rank-1 CDF (Z)", prefix: "rank1_cdf_", folder: "graph_diagnostics_z" },
                     { value: "vis_graph_rank2_cdf_z", label: "Graph Diagnostics:Rank-2 CDF (Z)", prefix: "rank2_cdf_", folder: "graph_diagnostics_z" },
                     { value: "vis_graph_neff_violin_z", label: "Graph Diagnostics:Neighborhood size (Z)", prefix: "neff_violin_", folder: "graph_diagnostics_z" },
@@ -304,7 +306,6 @@
             <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
                 <label class="form-label mb-0 small text-muted" for="detail-folder-select">Image folder:</label>
                 <select id="detail-folder-select" class="form-select form-select-sm" style="width: auto;">
-                    <option value="vis_adjacency">Adjacency:Graph</option>
                     <option value="vis_action_alignment_detail_s">Diagnostics:Action alignment (S)</option>
                     <option value="vis_action_alignment_detail">Diagnostics:Action alignment (Z)</option>
                     <option value="vis_cycle_error_s">Diagnostics:Cycle error (S)</option>
@@ -315,10 +316,13 @@
                     <option value="pca_z">Diagnostics:PCA (Z)</option>
                     <option value="vis_ctrl_smoothness_z">Vis v Ctrl:Local smoothness (Z)</option>
                     <option value="vis_ctrl_smoothness_s">Vis v Ctrl:Local smoothness (S)</option>
+                    <option value="vis_ctrl_smoothness_h">Vis v Ctrl:Local smoothness (H)</option>
                     <option value="vis_ctrl_composition_z">Vis v Ctrl:Two-step composition error (Z)</option>
                     <option value="vis_ctrl_composition_s">Vis v Ctrl:Two-step composition error (S)</option>
+                    <option value="vis_ctrl_composition_h">Vis v Ctrl:Two-step composition error (H)</option>
                     <option value="vis_ctrl_stability_z">Vis v Ctrl:Neighborhood stability (Z)</option>
                     <option value="vis_ctrl_stability_s">Vis v Ctrl:Neighborhood stability (S)</option>
+                    <option value="vis_ctrl_stability_h">Vis v Ctrl:Neighborhood stability (H)</option>
                     <option value="vis_graph_edge_consistency_s">Graph Diagnostics:Edge consistency (S)</option>
                     <option value="vis_graph_edge_consistency_z">Graph Diagnostics:Edge consistency (Z)</option>
                     <option value="vis_graph_in_degree_hist_s">Graph Diagnostics:In-degree (S)</option>
