@@ -419,23 +419,23 @@ class LossWeights:
     recon_multi_box: float = 0.3
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
-    pixel_delta: float = 1.0
+    pixel_delta: float = 0.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
-    h2z: float = 1.0
+    h2z: float = 0.0
     # 2-hop composability (arbitrary actions): enforce predicted h-delta composition across two steps.
-    h2z_2hop: float = 1.0
+    h2z_2hop: float = 0.0
 
     # Auxiliary delta prediction from hidden state to z.
-    delta_z: float = 1.0
+    delta_z: float = 0.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 1.0
+    inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 1.0
+    inverse_dynamics_h: float = 0.0
 
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
-    geometry_rank: float = 1.0
+    geometry_rank: float = 0.0
 
 @dataclass
 class LossSigRegConfig:
