@@ -2,8 +2,20 @@
 """Model configuration dataclass for the JEPA world model."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
+
+
+@dataclass
+class LayerNormConfig:
+    """LayerNorm toggles for debugging latent stability."""
+
+    h2z_projector: bool = False
+    h2s_projector: bool = False
+    delta_projector: bool = False
+    action_delta_projector: bool = False
+    inverse_dynamics: bool = False
+    h_next: bool = False
 
 
 @dataclass
@@ -35,7 +47,6 @@ class ModelConfig:
     encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
     action_dim: int = 8
-    predictor_film_layers: int = 2
     # Number of linear layers in the predictor trunk (including in_proj).
     predictor_layers: int = 2
     state_dim: int = 256
@@ -43,6 +54,8 @@ class ModelConfig:
     # If None, defaults to state_dim so h and s share dimensionality.
     state_embed_dim: Optional[int] = None
     state_embed_unit_norm: bool = False
+    # LayerNorm toggles for debugging.
+    layer_norms: LayerNormConfig = field(default_factory=LayerNormConfig)
     state_warmup_frames: int = 4
 
     @property

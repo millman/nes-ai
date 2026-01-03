@@ -65,21 +65,15 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     predictor_flops = 0
     emb_dim = cfg.embedding_dim
     hidden_dim = cfg.hidden_dim
-    action_dim = cfg.action_dim * 2
+    action_dim = cfg.action_dim
 
-    # in_proj: emb_dim -> hidden_dim
-    predictor_flops += _linear_flops(emb_dim, hidden_dim)
-    # action_embed: action_dim -> hidden_dim (2 layers)
-    predictor_flops += _linear_flops(action_dim, hidden_dim)
-    predictor_flops += _linear_flops(hidden_dim, hidden_dim)
-    # FiLM layers (applied twice, each has gamma/beta projections)
-    for _ in range(cfg.predictor_film_layers * 2):
-        predictor_flops += _linear_flops(hidden_dim, hidden_dim) * 2  # gamma + beta
+    # in_proj: (emb + h + action) -> hidden_dim
+    predictor_flops += _linear_flops(emb_dim + action_dim + cfg.state_dim, hidden_dim)
     # hidden layers after in_proj
     for _ in range(max(cfg.predictor_layers - 1, 0)):
         predictor_flops += _linear_flops(hidden_dim, hidden_dim)
-    # out_proj
-    predictor_flops += _linear_flops(hidden_dim, emb_dim)
+    # h_out projection
+    predictor_flops += _linear_flops(hidden_dim, cfg.state_dim)
 
     num_predictions = batch_size * (seq_len - 1)
     predictor_total = predictor_flops * num_predictions

@@ -164,18 +164,31 @@ LegacyVisualizationDecoder = ConvVisualizationDecoder
 class HiddenToSProjector(nn.Module):
     """Project hidden state to a planning/state embedding."""
 
-    def __init__(self, h_dim: int, s_dim: int, hidden_dim: int, unit_norm: bool) -> None:
+    def __init__(
+        self,
+        h_dim: int,
+        s_dim: int,
+        hidden_dim: int,
+        unit_norm: bool,
+        use_layer_norm: bool = True,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(h_dim),
-            nn.Linear(h_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, s_dim),
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(h_dim))
+        layers.extend(
+            [
+                nn.Linear(h_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, s_dim),
+            ]
         )
+        self.net = nn.Sequential(*layers)
         self.h_dim = h_dim
         self.s_dim = s_dim
         self.hidden_dim = hidden_dim
         self.unit_norm = unit_norm
+        self.use_layer_norm = use_layer_norm
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         original_shape = h.shape[:-1]
@@ -192,9 +205,9 @@ class BeliefUpdate(nn.Module):
         embedding_dim: int,
         hidden_dim: int,
         action_dim: int,
-        film_layers: int,
         state_dim: int,
         predictor_layers: int,
+        use_h_next_layer_norm: bool = False,
     ) -> None:
         super().__init__()
         if predictor_layers < 1:
@@ -205,12 +218,14 @@ class BeliefUpdate(nn.Module):
         )
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
+        self.h_next_norm = nn.LayerNorm(state_dim) if use_h_next_layer_norm else None
         self.activation = nn.SiLU(inplace=True)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.predictor_layers = predictor_layers
+        self.use_h_next_layer_norm = use_h_next_layer_norm
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
@@ -226,6 +241,8 @@ class BeliefUpdate(nn.Module):
             hidden = self.activation(layer(hidden))
         h_delta = self.h_out(hidden)
         h_next = h_delta + h_flat
+        if self.h_next_norm is not None:
+            h_next = self.h_next_norm(h_next)
         h_next = h_next.view(*original_shape, h_next.shape[-1])
         return h_next
 
@@ -244,17 +261,23 @@ class BeliefUpdate(nn.Module):
 class HiddenToZProjector(nn.Module):
     """Project hidden state to an image-anchored embedding prediction."""
 
-    def __init__(self, h_dim: int, z_dim: int, hidden_dim: int) -> None:
+    def __init__(self, h_dim: int, z_dim: int, hidden_dim: int, use_layer_norm: bool = True) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(h_dim),
-            nn.Linear(h_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, z_dim),
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(h_dim))
+        layers.extend(
+            [
+                nn.Linear(h_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, z_dim),
+            ]
         )
+        self.net = nn.Sequential(*layers)
         self.h_dim = h_dim
         self.z_dim = z_dim
         self.hidden_dim = hidden_dim
+        self.use_layer_norm = use_layer_norm
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         original_shape = h.shape[:-1]
@@ -266,17 +289,29 @@ class HiddenToZProjector(nn.Module):
 class HiddenToDeltaProjector(nn.Module):
     """Project hidden state to a delta in the target latent space."""
 
-    def __init__(self, h_dim: int, target_dim: int, hidden_dim: int) -> None:
+    def __init__(
+        self,
+        h_dim: int,
+        target_dim: int,
+        hidden_dim: int,
+        use_layer_norm: bool = True,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(h_dim),
-            nn.Linear(h_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, target_dim),
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(h_dim))
+        layers.extend(
+            [
+                nn.Linear(h_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, target_dim),
+            ]
         )
+        self.net = nn.Sequential(*layers)
         self.h_dim = h_dim
         self.target_dim = target_dim
         self.hidden_dim = hidden_dim
+        self.use_layer_norm = use_layer_norm
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         original_shape = h.shape[:-1]
@@ -288,19 +323,31 @@ class HiddenToDeltaProjector(nn.Module):
 class HiddenActionDeltaProjector(nn.Module):
     """Predict state delta from hidden state and action."""
 
-    def __init__(self, h_dim: int, action_dim: int, hidden_dim: int) -> None:
+    def __init__(
+        self,
+        h_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        use_layer_norm: bool = True,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(h_dim + action_dim),
-            nn.Linear(h_dim + action_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, h_dim),
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(h_dim + action_dim))
+        layers.extend(
+            [
+                nn.Linear(h_dim + action_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, h_dim),
+            ]
         )
+        self.net = nn.Sequential(*layers)
         self.h_dim = h_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
+        self.use_layer_norm = use_layer_norm
 
     def forward(self, h: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         if h.shape[:-1] != actions.shape[:-1]:
@@ -315,16 +362,22 @@ class HiddenActionDeltaProjector(nn.Module):
 class InverseDynamicsHead(nn.Module):
     """Predict action from consecutive observation embeddings."""
 
-    def __init__(self, z_dim: int, hidden_dim: int, action_dim: int) -> None:
+    def __init__(self, z_dim: int, hidden_dim: int, action_dim: int, use_layer_norm: bool = True) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(z_dim * 2),
-            nn.Linear(z_dim * 2, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, action_dim),
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(z_dim * 2))
+        layers.extend(
+            [
+                nn.Linear(z_dim * 2, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, action_dim),
+            ]
         )
+        self.net = nn.Sequential(*layers)
+        self.use_layer_norm = use_layer_norm
 
     def forward(self, z_t: torch.Tensor, z_next: torch.Tensor) -> torch.Tensor:
         if z_t.shape != z_next.shape:
@@ -356,14 +409,15 @@ class ActionEmbedding(nn.Module):
 class FiLMLayer(nn.Module):
     """Single FiLM modulation layer."""
 
-    def __init__(self, hidden_dim: int, action_dim: int) -> None:
+    def __init__(self, hidden_dim: int, action_dim: int, use_layer_norm: bool = True) -> None:
         super().__init__()
         self.gamma = nn.Linear(action_dim, hidden_dim)
         self.beta = nn.Linear(action_dim, hidden_dim)
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim) if use_layer_norm else None
+        self.use_layer_norm = use_layer_norm
 
     def forward(self, hidden: torch.Tensor, action_embed: torch.Tensor) -> torch.Tensor:
-        conditioned = self.norm(hidden)
+        conditioned = self.norm(hidden) if self.norm is not None else hidden
         gamma = self.gamma(action_embed)
         beta = self.beta(action_embed)
         return conditioned * (1.0 + gamma) + beta
@@ -372,9 +426,11 @@ class FiLMLayer(nn.Module):
 class ActionFiLM(nn.Module):
     """Stack multiple FiLM layers for action conditioning."""
 
-    def __init__(self, hidden_dim: int, action_dim: int, layers: int) -> None:
+    def __init__(self, hidden_dim: int, action_dim: int, layers: int, use_layer_norm: bool = True) -> None:
         super().__init__()
-        self.layers = nn.ModuleList([FiLMLayer(hidden_dim, action_dim) for _ in range(layers)])
+        self.layers = nn.ModuleList(
+            [FiLMLayer(hidden_dim, action_dim, use_layer_norm=use_layer_norm) for _ in range(layers)]
+        )
         self.act = nn.GELU()
 
     def forward(self, hidden: torch.Tensor, action_embed: torch.Tensor) -> torch.Tensor:
@@ -562,6 +618,7 @@ class TrainConfig:
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
     detach_decoder: bool = False
+    delta_z_detach_target: bool = False
 
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
@@ -608,9 +665,9 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
             cfg.action_dim,
-            cfg.predictor_film_layers,
             cfg.state_dim,
             cfg.predictor_layers,
+            use_h_next_layer_norm=cfg.layer_norms.h_next,
         )
         self.state_dim = cfg.state_dim
         self.h2s = HiddenToSProjector(
@@ -618,31 +675,37 @@ class JEPAWorldModel(nn.Module):
             cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.state_embed_unit_norm,
+            use_layer_norm=cfg.layer_norms.h2s_projector,
         )
         self.h_to_z = HiddenToZProjector(
             cfg.state_dim,
             self.embedding_dim,
             cfg.hidden_dim,
+            use_layer_norm=cfg.layer_norms.h2z_projector,
         )
         self.h_to_delta_z = HiddenToDeltaProjector(
             cfg.state_dim,
             self.embedding_dim,
             cfg.hidden_dim,
+            use_layer_norm=cfg.layer_norms.delta_projector,
         )
         self.h_to_delta_h = HiddenActionDeltaProjector(
             cfg.state_dim,
             cfg.action_dim,
             cfg.hidden_dim,
+            use_layer_norm=cfg.layer_norms.action_delta_projector,
         )
         self.inverse_dynamics_z = InverseDynamicsHead(
             self.embedding_dim,
             cfg.hidden_dim,
             cfg.action_dim,
+            use_layer_norm=cfg.layer_norms.inverse_dynamics,
         )
         self.inverse_dynamics_h = InverseDynamicsHead(
             cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
+            use_layer_norm=cfg.layer_norms.inverse_dynamics,
         )
 
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -791,12 +854,15 @@ def delta_z_loss(
     embeddings: torch.Tensor,
     h_states: torch.Tensor,
     start: int,
+    detach_target: bool,
 ) -> torch.Tensor:
     if h_states.numel() == 0 or embeddings.shape[1] - start <= 1:
         return embeddings.new_tensor(0.0)
     h_stack_delta = h_states[:, start:-1]
     delta_hat = model.h_to_delta_z(h_stack_delta)
-    delta_target = (embeddings[:, start + 1 :] - embeddings[:, start:-1]).detach()
+    delta_target = embeddings[:, start + 1 :] - embeddings[:, start:-1]
+    if detach_target:
+        delta_target = delta_target.detach()
     return F.mse_loss(delta_hat, delta_target)
 
 
@@ -992,6 +1058,22 @@ def _compute_losses_and_metrics(
     # Warmup before applying hidden-state losses to avoid cold-start transients.
     start_frame = max(min(warmup_frames, seq_len - 1), 0)
 
+    def _norm_stats(tensor: torch.Tensor) -> Tuple[float, float, float]:
+        if tensor.numel() == 0:
+            return 0.0, 0.0, 0.0
+        norms = tensor.norm(dim=-1)
+        return (
+            norms.mean().item(),
+            norms.std(unbiased=False).item(),
+            norms.max().item(),
+        )
+
+    with torch.no_grad():
+        z_norm_mean, z_norm_std, z_norm_max = _norm_stats(z_embeddings)
+        h_norm_mean, h_norm_std, h_norm_max = _norm_stats(h_states)
+        s_embeddings = model.h2s(h_states.detach())
+        s_norm_mean, s_norm_std, s_norm_max = _norm_stats(s_embeddings)
+
     # -------------------------------------------------------------------------
     # Losses
     # -------------------------------------------------------------------------
@@ -1029,7 +1111,13 @@ def _compute_losses_and_metrics(
         loss_inverse_dynamics_z = inverse_dynamics_z_loss(model, z_embeddings, a_seq)
 
     if weights.delta_z > 0:
-        loss_delta_z = delta_z_loss(model, z_embeddings, h_states, start_frame)
+        loss_delta_z = delta_z_loss(
+            model,
+            z_embeddings,
+            h_states,
+            start_frame,
+            detach_target=cfg.delta_z_detach_target,
+        )
 
     # h (Hidden) Hidden-state dynamics and cross-projection losses
     if weights.h2z > 0:
@@ -1121,6 +1209,15 @@ def _compute_losses_and_metrics(
         "geometry_rank_pairs": geometry_rank_pairs.item(),
         "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
         "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
+        "z_norm_mean": z_norm_mean,
+        "z_norm_std": z_norm_std,
+        "z_norm_max": z_norm_max,
+        "h_norm_mean": h_norm_mean,
+        "h_norm_std": h_norm_std,
+        "h_norm_max": h_norm_max,
+        "s_norm_mean": s_norm_mean,
+        "s_norm_std": s_norm_std,
+        "s_norm_max": s_norm_max,
         "loss_world": world_loss.item(),
     }
     if for_training:
@@ -1253,6 +1350,15 @@ LOSS_COLUMNS = [
     "geometry_rank_pairs",
     "loss_inverse_dynamics_z",
     "loss_inverse_dynamics_h",
+    "z_norm_mean",
+    "z_norm_std",
+    "z_norm_max",
+    "h_norm_mean",
+    "h_norm_std",
+    "h_norm_max",
+    "s_norm_mean",
+    "s_norm_std",
+    "s_norm_max",
     "grad_world",
     "grad_decoder",
 ]
@@ -1284,6 +1390,15 @@ class LossHistory:
     geometry_rank_pairs: List[float] = field(default_factory=list)
     inverse_dynamics_z: List[float] = field(default_factory=list)
     inverse_dynamics_h: List[float] = field(default_factory=list)
+    z_norm_mean: List[float] = field(default_factory=list)
+    z_norm_std: List[float] = field(default_factory=list)
+    z_norm_max: List[float] = field(default_factory=list)
+    h_norm_mean: List[float] = field(default_factory=list)
+    h_norm_std: List[float] = field(default_factory=list)
+    h_norm_max: List[float] = field(default_factory=list)
+    s_norm_mean: List[float] = field(default_factory=list)
+    s_norm_std: List[float] = field(default_factory=list)
+    s_norm_max: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
 
@@ -1312,6 +1427,15 @@ class LossHistory:
         self.geometry_rank_pairs.append(metrics.get("geometry_rank_pairs", 0.0))
         self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
         self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
+        self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
+        self.z_norm_std.append(metrics.get("z_norm_std", 0.0))
+        self.z_norm_max.append(metrics.get("z_norm_max", 0.0))
+        self.h_norm_mean.append(metrics.get("h_norm_mean", 0.0))
+        self.h_norm_std.append(metrics.get("h_norm_std", 0.0))
+        self.h_norm_max.append(metrics.get("h_norm_max", 0.0))
+        self.s_norm_mean.append(metrics.get("s_norm_mean", 0.0))
+        self.s_norm_std.append(metrics.get("s_norm_std", 0.0))
+        self.s_norm_max.append(metrics.get("s_norm_max", 0.0))
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
 
@@ -1351,6 +1475,15 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.geometry_rank_pairs,
             history.inverse_dynamics_z,
             history.inverse_dynamics_h,
+            history.z_norm_mean,
+            history.z_norm_std,
+            history.z_norm_max,
+            history.h_norm_mean,
+            history.h_norm_std,
+            history.h_norm_max,
+            history.s_norm_mean,
+            history.s_norm_std,
+            history.s_norm_max,
             history.grad_world,
             history.grad_decoder,
         ):

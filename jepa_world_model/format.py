@@ -81,8 +81,7 @@ def format_shape_summary(
     - raw_shape: (height, width, channels) of the raw input frame.
     - encoder_info: dict with keys "input" (H, W, C), "stages" (list of dicts with "stage", "in", "out"),
       and "latent_dim" (int).
-    - predictor_info: dict with keys "latent_dim", "hidden_dim", "action_dim", and optional "conditioning" or
-      "film_layers".
+    - predictor_info: dict with keys "latent_dim", "hidden_dim", "action_dim", and optional "conditioning".
     - decoder_info: dict with keys "latent_dim", "projection" (H, W, C), "upsample" (list of dicts with
       "stage", "in", "out"), "pre_resize" (H, W, C), "final_target" (H, W, C), and "needs_resize" (bool).
     - encoder_schedule: sequence of encoder channel sizes (ints).
@@ -103,12 +102,7 @@ def format_shape_summary(
     lines.append("")
     lines.append("Predictor:")
     conditioning = predictor_info.get("conditioning")
-    film_layers = predictor_info.get("film_layers")
-    cond_text = (
-        f"conditioning={conditioning}"
-        if conditioning is not None
-        else f"FiLM layers={film_layers}" if film_layers is not None else "conditioning=unknown"
-    )
+    cond_text = f"conditioning={conditioning}" if conditioning is not None else "conditioning=unknown"
     lines.append(
         f"  latent {predictor_info['latent_dim']} → hidden {predictor_info['hidden_dim']} "
         f"(action_dim={predictor_info['action_dim']}, {cond_text})"
