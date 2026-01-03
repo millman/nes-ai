@@ -45,7 +45,6 @@ class ModelConfig:
     encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
     action_dim: int = 8
-    predictor_film_layers: int = 2
     state_dim: int = 256
     # Optional separate dimension for the projected planning embedding s (h2s).
     # If None, defaults to state_dim so h and s share dimensionality.

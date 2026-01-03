@@ -161,7 +161,7 @@ LegacyEncoder = ConvEncoder
 LegacyVisualizationDecoder = ConvVisualizationDecoder
 
 
-class StateEmbeddingProjector(nn.Module):
+class HiddenToSProjector(nn.Module):
     """Project hidden state to a planning/state embedding."""
 
     def __init__(
@@ -205,7 +205,6 @@ class PredictorNetwork(nn.Module):
         embedding_dim: int,
         hidden_dim: int,
         action_dim: int,
-        film_layers: int,
         state_dim: int,
     ) -> None:
         super().__init__()
@@ -285,34 +284,6 @@ class HiddenToZProjector(nn.Module):
         return z_hat.view(*original_shape, z_hat.shape[-1])
 
 
-class ActionDeltaHead(nn.Module):
-    """Predict controller actions from latent deltas to avoid action-conditioning leakage."""
-
-    def __init__(self, latent_dim: int, hidden_dim: int, action_dim: int, use_layer_norm: bool = True) -> None:
-        super().__init__()
-        layers = []
-        if use_layer_norm:
-            layers.append(nn.LayerNorm(latent_dim))
-        layers.extend(
-            [
-                nn.Linear(latent_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, action_dim),
-            ]
-        )
-        self.net = nn.Sequential(*layers)
-        self.latent_dim = latent_dim
-        self.hidden_dim = hidden_dim
-        self.action_dim = action_dim
-        self.use_layer_norm = use_layer_norm
-
-    def forward(self, delta: torch.Tensor) -> torch.Tensor:
-        original_shape = delta.shape[:-1]
-        flat = delta.reshape(-1, delta.shape[-1])
-        logits = self.net(flat)
-        return logits.view(*original_shape, logits.shape[-1])
 
 
 class HiddenToDeltaProjector(nn.Module):
@@ -389,16 +360,16 @@ class HiddenActionDeltaProjector(nn.Module):
 
 
 class InverseDynamicsHead(nn.Module):
-    """Predict action from consecutive observation embeddings."""
+    """Predict action from consecutive observation embeddings using their delta."""
 
     def __init__(self, z_dim: int, hidden_dim: int, action_dim: int, use_layer_norm: bool = True) -> None:
         super().__init__()
         layers = []
         if use_layer_norm:
-            layers.append(nn.LayerNorm(z_dim * 2))
+            layers.append(nn.LayerNorm(z_dim))
         layers.extend(
             [
-                nn.Linear(z_dim * 2, hidden_dim),
+                nn.Linear(z_dim, hidden_dim),
                 nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.GELU(),
@@ -411,8 +382,9 @@ class InverseDynamicsHead(nn.Module):
     def forward(self, z_t: torch.Tensor, z_next: torch.Tensor) -> torch.Tensor:
         if z_t.shape != z_next.shape:
             raise ValueError("z_t and z_next must have matching shapes.")
-        original_shape = z_t.shape[:-1]
-        flat = torch.cat([z_t, z_next], dim=-1).reshape(-1, z_t.shape[-1] * 2)
+        delta = z_next - z_t
+        original_shape = delta.shape[:-1]
+        flat = delta.reshape(-1, delta.shape[-1])
         logits = self.net(flat)
         return logits.view(*original_shape, logits.shape[-1])
 
@@ -507,8 +479,6 @@ class LossWeights:
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
-
-
 
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
     geometry_rank: float = 0.0
@@ -685,11 +655,10 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
             cfg.action_dim * 2,
-            cfg.predictor_film_layers,
             cfg.state_dim,
         )
         self.state_dim = cfg.state_dim
-        self.state_head = StateEmbeddingProjector(
+        self.h2s = HiddenToSProjector(
             cfg.state_dim,
             cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
@@ -702,13 +671,13 @@ class JEPAWorldModel(nn.Module):
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.h2z_projector,
         )
-        self.action_delta_head = ActionDeltaHead(
+        self.inverse_dynamics_z = InverseDynamicsHead(
             self.embedding_dim,
             cfg.hidden_dim,
             cfg.action_dim,
             use_layer_norm=cfg.layer_norms.inverse_dynamics,
         )
-        self.action_delta_head_s = ActionDeltaHead(
+        self.inverse_dynamics_s = InverseDynamicsHead(
             cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
@@ -790,8 +759,7 @@ def jepa_loss(
         delta = embeddings.new_zeros(embeddings[:, :-1].shape)
         return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
-    delta_true = embeddings[:, 1:] - embeddings[:, :-1]
-    action_logits = model.action_delta_head(delta_true)
+    action_logits = model.inverse_dynamics_z(embeddings[:, :-1], embeddings[:, 1:])
     return JEPA_LOSS(preds, target), action_logits, delta_pred, preds, h_preds, h_states
 
 
@@ -910,7 +878,7 @@ def geometry_rank_loss(
     if h_states.numel() == 0:
         zero = h_states.new_tensor(0.0)
         return zero, zero, zero
-    s_geom = model.state_head(h_states.detach())
+    s_geom = model.h2s(h_states.detach())
     return geometry_ranking_loss(s_geom, cfg)
 
 
@@ -1079,7 +1047,7 @@ def _compute_losses_and_metrics(
     with torch.no_grad():
         z_norm_mean, z_norm_std, z_norm_max = _norm_stats(z_embeddings)
         h_norm_mean, h_norm_std, h_norm_max = _norm_stats(h_states)
-        s_embeddings = model.state_head(h_states.detach())
+        s_embeddings = model.h2s(h_states.detach())
         s_norm_mean, s_norm_std, s_norm_max = _norm_stats(s_embeddings)
 
     # -------------------------------------------------------------------------
@@ -1744,13 +1712,13 @@ def _run_graph_diag(
     ema_h_states: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if embedding_kind == "s":
-        s_targets = model.state_head(graph_h_states)
+        s_targets = model.h2s(graph_h_states)
         s_hat_full = torch.cat(
-            [model.state_head(graph_h_preds), model.state_head(graph_h_states[:, -1:, :])],
+            [model.h2s(graph_h_preds), model.h2s(graph_h_states[:, -1:, :])],
             dim=1,
         )
         if graph_cfg.use_ema_targets and ema_model is not None and ema_h_states is not None:
-            targets = ema_model.state_head(ema_h_states)
+            targets = ema_model.h2s(ema_h_states)
         else:
             targets = s_targets
         z_flat = s_targets.reshape(-1, s_targets.shape[-1])
@@ -2545,7 +2513,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
                 h_states = _rollout_hidden_states(model, embed_outputs["embeddings"], embed_actions)
-                s_embeddings = model.state_head(h_states)
+                s_embeddings = model.h2s(h_states)
             assert torch.is_grad_enabled()
             save_embedding_projection(
                 embed_outputs["embeddings"],
@@ -2641,7 +2609,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         diag_embeddings,
                         diag_actions_device,
                     )
-                    diag_s_embeddings = model.state_head(diag_h_states)
+                    diag_s_embeddings = model.h2s(diag_h_states)
                 assert torch.is_grad_enabled()
 
                 inverse_map = build_action_inverse_map(diag_actions.detach().cpu().numpy())
@@ -2991,7 +2959,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_actions = vis_ctrl_batch_cpu[1].to(device)
                 vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
                 _, _, _, vis_h_states = _predictor_rollout(model, vis_embeddings, vis_actions)
-                vis_s_embeddings = model.state_head(vis_h_states)
+                vis_s_embeddings = model.h2s(vis_h_states)
                 warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
                 metrics_z = compute_vis_ctrl_metrics(
                     vis_embeddings,
