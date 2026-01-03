@@ -69,9 +69,10 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
 
     # in_proj: (emb + h + action) -> hidden_dim
     predictor_flops += _linear_flops(emb_dim + action_dim + cfg.state_dim, hidden_dim)
-    # hidden layers after in_proj
-    for _ in range(max(cfg.predictor_layers - 1, 0)):
-        predictor_flops += _linear_flops(hidden_dim, hidden_dim)
+    # hidden_proj: hidden -> hidden
+    predictor_flops += _linear_flops(hidden_dim, hidden_dim)
+    # out_proj: hidden -> emb
+    predictor_flops += _linear_flops(hidden_dim, emb_dim)
     # h_out projection
     predictor_flops += _linear_flops(hidden_dim, cfg.state_dim)
 

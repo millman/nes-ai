@@ -27,13 +27,16 @@ def _rollout_predictions(
         return embeddings.new_zeros((b, 0, embeddings.shape[-1]))
     preds = []
     h_t = embeddings.new_zeros((b, model.state_dim))
+    prev_action = embeddings.new_zeros((b, actions.shape[-1]))
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = actions[:, step]
-        h_next = model.predictor(z_t, h_t, act_t)
+        paired_action = torch.cat([act_t, prev_action], dim=-1)
+        pred, delta, h_next = model.predictor(z_t, h_t, paired_action)
         z_pred = model.h_to_z(h_next)
         preds.append(z_pred)
         h_t = h_next
+        prev_action = act_t
     return torch.stack(preds, dim=1)
 
 
@@ -49,13 +52,16 @@ def _rollout_open_loop(
     h_t = embeddings.new_zeros((b, model.state_dim))
     z_t = embeddings[:, 0]
     h_preds = []
+    prev_action = embeddings.new_zeros((b, actions.shape[-1]))
     for step in range(t - 1):
         act_t = actions[:, step]
-        h_next = model.predictor(z_t, h_t, act_t)
+        paired_action = torch.cat([act_t, prev_action], dim=-1)
+        pred, delta, h_next = model.predictor(z_t, h_t, paired_action)
         z_next = model.h_to_z(h_next)
         h_preds.append(h_next)
         z_t = z_next
         h_t = h_next
+        prev_action = act_t
     return torch.stack(h_preds, dim=1)
 
 

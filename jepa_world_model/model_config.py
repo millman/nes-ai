@@ -26,18 +26,16 @@ class ModelConfig:
             └─ Encoder(encoder_schedule → pool → z_dim = encoder_schedule[-1])
             ▼
         z_t ────────────────────────────────┐
-                        ├─ BeliefUpdate([z_t, h_t, action_t]) → ĥ_{t+1}
+                        ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}, ŝ_{t+1}
         h_t (state_dim) ─────────────────────┘
             │
-            ├→ h2z_pred(ĥ_{t+1}) → ẑ_{t+1}
-            ├→ h2z(h_t) → ẑ_t (projection head)
-            ├→ h2s(h_t) → s_t (planning embedding)
+            ├→ StateHead(h_t) → s_t (planning embedding)
             └→ Decoder(decoder_schedule → image reconstruction from z)
 
     Notes:
     • image_size must be divisible by 2**len(encoder_schedule) and 2**len(decoder_schedule) (if provided).
     • encoder_schedule[-1] defines embedding_dim (z_dim); state_dim defines h dimensionality.
-    • hidden_dim is the belief update internal width; action_dim is the controller space size.
+    • hidden_dim is the predictor's internal width; action_dim is the controller space size.
     • decoder_schedule defaults to encoder_schedule if not set.
     """
 
@@ -47,8 +45,7 @@ class ModelConfig:
     encoder_schedule: Tuple[int, ...] = (32, 64, 128, 256)
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
     action_dim: int = 8
-    # Number of linear layers in the predictor trunk (including in_proj).
-    predictor_layers: int = 2
+    predictor_film_layers: int = 2
     state_dim: int = 256
     # Optional separate dimension for the projected planning embedding s (h2s).
     # If None, defaults to state_dim so h and s share dimensionality.
