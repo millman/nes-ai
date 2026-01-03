@@ -568,25 +568,40 @@ function setupInlineHoverExpansion(group, input) {
       overflowRoot.classList.remove("inline-hover-active");
     }
   };
+  const setHeaderSticky = (enabled) => {
+    if (!overflowRoot) return;
+    const headers = overflowRoot.querySelectorAll(".cell.header");
+    headers.forEach((header) => {
+      if (enabled) {
+        header.classList.add("header-sticky");
+      } else {
+        header.classList.remove("header-sticky");
+      }
+    });
+  };
   group.addEventListener("mouseenter", () => {
     hovering = true;
     expand();
+    setHeaderSticky(false);
   });
   group.addEventListener("mouseleave", () => {
     hovering = false;
     if (!focused) {
       collapse();
     }
+    setHeaderSticky(!hovering && !focused);
   });
   input.addEventListener("focus", () => {
     focused = true;
     expand();
+    setHeaderSticky(false);
   });
   input.addEventListener("blur", () => {
     focused = false;
     if (!hovering) {
       collapse();
     }
+    setHeaderSticky(!hovering && !focused);
   });
   input.addEventListener("input", () => {
     if (hovering || focused) {

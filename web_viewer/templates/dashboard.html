@@ -6,6 +6,9 @@
   .dashboard-dataset-value {
     font-family: var(--bs-font-monospace, monospace);
     font-size: 0.8125rem;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .dashboard-model-diff-content {
     display: inline-flex;
@@ -90,6 +93,12 @@
     background: #fff;
     z-index: 1;
   }
+  .header.header-sticky {
+    position: sticky;
+  }
+  .runs-grid.inline-hover-active .header:not(.header-sticky) {
+    position: static;
+  }
   .nowrap {
     white-space: nowrap;
   }
@@ -106,6 +115,9 @@
   }
   .title,
   .dataset {
+    overflow: hidden;
+  }
+  .title {
     overflow: visible;
   }
   .tags {
