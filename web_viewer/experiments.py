@@ -697,8 +697,8 @@ def _read_metadata(path: Path) -> tuple[str, str, bool, bool]:
         return "Untitled", "", False, False
     try:
         data = tomli.loads(path.read_text())
-    except (tomli.TOMLDecodeError, OSError):
-        return "Untitled", "", False, False
+    except (tomli.TOMLDecodeError, OSError) as exc:
+        raise ValueError(f"Invalid metadata file: {path}") from exc
     raw_title = data.get("title")
     raw_tags = data.get("tags")
     title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else "Untitled"
@@ -746,8 +746,8 @@ def _write_metadata(
             parsed = tomli.loads(path.read_text())
             if isinstance(parsed, dict):
                 existing_data = dict(parsed)
-        except (tomli.TOMLDecodeError, OSError):
-            existing_data = {}
+        except (tomli.TOMLDecodeError, OSError) as exc:
+            raise ValueError(f"Invalid metadata file: {path}") from exc
     next_title = title.strip() if isinstance(title, str) else None
     next_tags = tags.strip() if isinstance(tags, str) else None
     next_starred = current_starred if starred is None else _coerce_bool(starred)
@@ -775,8 +775,8 @@ def _extract_data_root_from_metadata(metadata_text: str) -> Optional[str]:
     """Return the first data_root value found within a TOML metadata blob."""
     try:
         parsed = tomli.loads(metadata_text)
-    except (tomli.TOMLDecodeError, OSError):
-        return None
+    except (tomli.TOMLDecodeError, OSError) as exc:
+        raise ValueError("Invalid metadata.txt TOML") from exc
 
     def _walk(node):
         if isinstance(node, dict):
@@ -816,8 +816,8 @@ def _read_model_metadata(path: Path) -> Tuple[Optional[int], Optional[int]]:
         return None, None
     try:
         data = tomli.loads(path.read_text())
-    except (tomli.TOMLDecodeError, OSError):
-        return None, None
+    except (tomli.TOMLDecodeError, OSError) as exc:
+        raise ValueError(f"Invalid metadata_model.txt TOML: {path}") from exc
     total_params = None
     flops_per_step = None
     params_section = data.get("parameters")

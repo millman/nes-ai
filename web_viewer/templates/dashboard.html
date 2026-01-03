@@ -38,6 +38,10 @@
     white-space: nowrap;
     max-width: none;
   }
+  .zvhvs-letter-missing {
+    color: #6c757d;
+    opacity: var(--bs-btn-disabled-opacity);
+  }
   .runs-grid {
     display: grid;
     grid-template-columns:
@@ -533,9 +537,9 @@
                                     class="btn btn-outline-primary btn-sm"
                                     aria-label="Diagnostics (ZvHvS)"
                                     title="Diagnostics (ZvHvS)"
-                                ><span class="{% if not has_diag_z %}text-muted{% endif %}">Z</span>v<span class="{% if not has_diag_h %}text-muted{% endif %}">H</span>v<span class="{% if not has_diag_s %}text-muted{% endif %}">S</span></a>
+                                ><span class="{% if not has_diag_z %}zvhvs-letter-missing{% endif %}">Z</span>v<span class="{% if not has_diag_h %}zvhvs-letter-missing{% endif %}">H</span>v<span class="{% if not has_diag_s %}zvhvs-letter-missing{% endif %}">S</span></a>
                             {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics (ZvHvS)" title="diagnostics outputs missing"><span class="text-muted">Z</span>v<span class="text-muted">H</span>v<span class="text-muted">S</span></button>
+                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics (ZvHvS)" title="diagnostics outputs missing"><span class="zvhvs-letter-missing">Z</span>v<span class="zvhvs-letter-missing">H</span>v<span class="zvhvs-letter-missing">S</span></button>
                                 {% endif %}
                             </div>
                         </div>
@@ -583,9 +587,9 @@
                                     class="btn btn-outline-primary btn-sm"
                                     aria-label="Self-distance (ZvHvS)"
                                     title="Self-distance (ZvHvS)"
-                                ><span class="{% if not has_self_z %}text-muted{% endif %}">Z</span>v<span class="{% if not has_self_h %}text-muted{% endif %}">H</span>v<span class="{% if not has_self_s %}text-muted{% endif %}">S</span></a>
+                                ><span class="{% if not has_self_z %}zvhvs-letter-missing{% endif %}">Z</span>v<span class="{% if not has_self_h %}zvhvs-letter-missing{% endif %}">H</span>v<span class="{% if not has_self_s %}zvhvs-letter-missing{% endif %}">S</span></a>
                                 {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance (ZvHvS)" title="self-distance outputs missing"><span class="text-muted">Z</span>v<span class="text-muted">H</span>v<span class="text-muted">S</span></button>
+                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance (ZvHvS)" title="self-distance outputs missing"><span class="zvhvs-letter-missing">Z</span>v<span class="zvhvs-letter-missing">H</span>v<span class="zvhvs-letter-missing">S</span></button>
                                 {% endif %}
                             </div>
                         </div>
@@ -633,9 +637,9 @@
                                     class="btn btn-outline-primary btn-sm"
                                     aria-label="Graph Diagnostics (ZvHvS)"
                                     title="Graph Diagnostics (ZvHvS)"
-                                ><span class="{% if not has_graph_z %}text-muted{% endif %}">Z</span>v<span class="{% if not has_graph_h %}text-muted{% endif %}">H</span>v<span class="{% if not has_graph_s %}text-muted{% endif %}">S</span></a>
+                                ><span class="{% if not has_graph_z %}zvhvs-letter-missing{% endif %}">Z</span>v<span class="{% if not has_graph_h %}zvhvs-letter-missing{% endif %}">H</span>v<span class="{% if not has_graph_s %}zvhvs-letter-missing{% endif %}">S</span></a>
                                 {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics (ZvHvS)" title="graph diagnostics outputs missing"><span class="text-muted">Z</span>v<span class="text-muted">H</span>v<span class="text-muted">S</span></button>
+                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics (ZvHvS)" title="graph diagnostics outputs missing"><span class="zvhvs-letter-missing">Z</span>v<span class="zvhvs-letter-missing">H</span>v<span class="zvhvs-letter-missing">S</span></button>
                                 {% endif %}
                             </div>
                         </div>
