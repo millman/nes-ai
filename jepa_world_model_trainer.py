@@ -480,6 +480,13 @@ class LossWeights:
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
 
+    # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
+    inverse_dynamics_z: float = 1.0
+    # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
+    inverse_dynamics_h: float = 0.0
+    # Inverse dynamics from consecutive h pairs (s_t, s_{t+1}).
+    inverse_dynamics_s: float = 0.0
+
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
     geometry_rank: float = 0.0
 
@@ -677,6 +684,12 @@ class JEPAWorldModel(nn.Module):
             cfg.action_dim,
             use_layer_norm=cfg.layer_norms.inverse_dynamics,
         )
+        self.inverse_dynamics_h = InverseDynamicsHead(
+            cfg.state_dim,
+            cfg.hidden_dim,
+            cfg.action_dim,
+            use_layer_norm=cfg.layer_norms.inverse_dynamics,
+        )
         self.inverse_dynamics_s = InverseDynamicsHead(
             cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
@@ -749,18 +762,16 @@ def _predictor_rollout(
 
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """JEPA loss plus action logits, using predictor conditioned on z, h, and action."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """JEPA loss using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
     preds, delta_pred, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
-        logits = embeddings.new_zeros((*embeddings.shape[:2], actions.shape[-1]))
         delta = embeddings.new_zeros(embeddings[:, :-1].shape)
-        return zero, logits, delta, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
+        return zero, delta, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
-    action_logits = model.inverse_dynamics_z(embeddings[:, :-1], embeddings[:, 1:])
-    return JEPA_LOSS(preds, target), action_logits, delta_pred, preds, h_preds, h_states
+    return JEPA_LOSS(preds, target), delta_pred, preds, h_preds, h_states
 
 
 def delta_prediction_loss(
@@ -1014,6 +1025,11 @@ def _compute_losses_and_metrics(
     geometry_rank_accuracy = x_frames.new_tensor(0.0)
     geometry_rank_pairs = x_frames.new_tensor(0.0)
 
+    # Inverse dynamics losses
+    loss_inverse_dynamics_z = x_frames.new_tensor(0.0)
+    loss_inverse_dynamics_h = x_frames.new_tensor(0.0)
+    loss_inverse_dynamics_s = x_frames.new_tensor(0.0)
+
     # -------------------------------------------------------------------------
     # Calculate required inputs
     # -------------------------------------------------------------------------
@@ -1023,7 +1039,7 @@ def _compute_losses_and_metrics(
 
     encode_outputs = model.encode_sequence(x_frames)
     z_embeddings = encode_outputs["embeddings"]
-    loss_jepa_raw, action_logits, delta_pred, preds, h_preds, h_states = jepa_loss(model, encode_outputs, a_seq)
+    loss_jepa_raw, delta_pred, preds, h_preds, h_states = jepa_loss(model, encode_outputs, a_seq)
 
     z_for_decoder = z_embeddings.detach() if cfg.detach_decoder else z_embeddings
     x_recon = decoder(z_for_decoder)
@@ -1093,6 +1109,23 @@ def _compute_losses_and_metrics(
     if weights.geometry_rank > 0:
         loss_geometry_rank, geometry_rank_accuracy, geometry_rank_pairs = geometry_rank_loss(model, h_states, cfg.geometry)
 
+    # Inverse dynamics
+    if weights.inverse_dynamics_z > 0:
+        assert z_embeddings.shape[1] >= 2
+        action_logits_z = model.inverse_dynamics_z(z_embeddings[:, :-1], z_embeddings[:, 1:])
+        loss_inverse_dynamics_z = INVERSE_DYNAMICS_LOSS(action_logits_z, a_seq[:, :-1])
+
+    if weights.inverse_dynamics_h > 0:
+        assert h_states.shape[1] >= 2
+        action_logits_h = model.inverse_dynamics_h(h_states[:, :-1], h_states[:, 1:])
+        loss_inverse_dynamics_h = INVERSE_DYNAMICS_LOSS(action_logits_h, a_seq[:, :-1])
+
+    if weights.inverse_dynamics_s > 0:
+        assert h_states.shape[1] >= 2
+        s_for_inverse = model.h2s(h_states)
+        action_logits_s = model.inverse_dynamics_s(s_for_inverse[:, :-1], s_for_inverse[:, 1:])
+        loss_inverse_dynamics_s = INVERSE_DYNAMICS_LOSS(action_logits_s, a_seq[:, :-1])
+
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
             return loss_tensor
@@ -1119,6 +1152,9 @@ def _compute_losses_and_metrics(
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
         + weights.recon_patch * _scaled("loss_recon_patch", loss_recon_patch)
         + weights.pixel_delta * _scaled("loss_pixel_delta", loss_pixel_delta)
+        + weights.inverse_dynamics_z * _scaled("loss_inverse_dynamics_z", loss_inverse_dynamics_z)
+        + weights.inverse_dynamics_h * _scaled("loss_inverse_dynamics_h", loss_inverse_dynamics_h)
+        + weights.inverse_dynamics_s * _scaled("loss_inverse_dynamics_s", loss_inverse_dynamics_s)
     )
 
     world_grad_norm = 0.0
@@ -1160,6 +1196,9 @@ def _compute_losses_and_metrics(
         "loss_geometry_rank": loss_geometry_rank.item(),
         "geometry_rank_accuracy": geometry_rank_accuracy.item(),
         "geometry_rank_pairs": geometry_rank_pairs.item(),
+        "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
+        "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
+        "loss_inverse_dynamics_s": loss_inverse_dynamics_s.item(),
         "z_norm_mean": z_norm_mean,
         "z_norm_std": z_norm_std,
         "z_norm_max": z_norm_max,
@@ -1254,6 +1293,12 @@ def log_metrics(
         filtered.pop("loss_geometry_rank", None)
         filtered.pop("geometry_rank_accuracy", None)
         filtered.pop("geometry_rank_pairs", None)
+    if weights.inverse_dynamics_z <= 0:
+        filtered.pop("loss_inverse_dynamics_z", None)
+    if weights.inverse_dynamics_h <= 0:
+        filtered.pop("loss_inverse_dynamics_h", None)
+    if weights.inverse_dynamics_s <= 0:
+        filtered.pop("loss_inverse_dynamics_s", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1289,6 +1334,9 @@ LOSS_COLUMNS = [
     "loss_geometry_rank",
     "geometry_rank_accuracy",
     "geometry_rank_pairs",
+    "loss_inverse_dynamics_z",
+    "loss_inverse_dynamics_h",
+    "loss_inverse_dynamics_s",
     "z_norm_mean",
     "z_norm_std",
     "z_norm_max",
@@ -1325,6 +1373,9 @@ class LossHistory:
     geometry_rank: List[float] = field(default_factory=list)
     geometry_rank_accuracy: List[float] = field(default_factory=list)
     geometry_rank_pairs: List[float] = field(default_factory=list)
+    inverse_dynamics_z: List[float] = field(default_factory=list)
+    inverse_dynamics_h: List[float] = field(default_factory=list)
+    inverse_dynamics_s: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
     z_norm_std: List[float] = field(default_factory=list)
     z_norm_max: List[float] = field(default_factory=list)
@@ -1358,6 +1409,9 @@ class LossHistory:
         self.geometry_rank.append(metrics.get("loss_geometry_rank", 0.0))
         self.geometry_rank_accuracy.append(metrics.get("geometry_rank_accuracy", 0.0))
         self.geometry_rank_pairs.append(metrics.get("geometry_rank_pairs", 0.0))
+        self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
+        self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
+        self.inverse_dynamics_s.append(metrics.get("loss_inverse_dynamics_s", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
         self.z_norm_std.append(metrics.get("z_norm_std", 0.0))
         self.z_norm_max.append(metrics.get("z_norm_max", 0.0))
@@ -1402,6 +1456,9 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.geometry_rank,
             history.geometry_rank_accuracy,
             history.geometry_rank_pairs,
+            history.inverse_dynamics_z,
+            history.inverse_dynamics_h,
+            history.inverse_dynamics_s,
             history.z_norm_mean,
             history.z_norm_std,
             history.z_norm_max,
