@@ -472,26 +472,26 @@ class LossWeights:
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 1.0
+    recon_multi_box: float = 0.3
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
-    pixel_delta: float = 1.0
+    pixel_delta: float = 0.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
     # 2-hop composability (arbitrary actions): enforce predicted h-delta composition across two steps.
-    h2z_2hop: float = 1.0
+    h2z_2hop: float = 0.0
 
     # Auxiliary delta prediction from hidden state to z.
-    delta_z: float = 1.0
+    delta_z: float = 0.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
     inverse_dynamics_z: float = 1.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 1.0
+    inverse_dynamics_h: float = 0.0
 
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
-    geometry_rank: float = 1.0
+    geometry_rank: float = 0.0
 
 @dataclass
 class LossSigRegConfig:
@@ -617,7 +617,7 @@ class TrainConfig:
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
-    detach_decoder: bool = False
+    detach_decoder: bool = True
     delta_z_detach_target: bool = False
 
     # Specific losses
@@ -1806,6 +1806,14 @@ def _run_graph_diag(
         z_flat = s_targets.reshape(-1, s_targets.shape[-1])
         target_flat = targets.reshape(-1, targets.shape[-1])
         zhat_full = s_hat_full.reshape(-1, s_hat_full.shape[-1])
+    elif embedding_kind == "h":
+        targets = ema_h_states if graph_cfg.use_ema_targets and ema_h_states is not None else graph_h_states
+        z_flat = graph_h_states.reshape(-1, graph_h_states.shape[-1])
+        target_flat = targets.reshape(-1, targets.shape[-1])
+        zhat_full = torch.cat(
+            [graph_h_preds, graph_h_states[:, -1:, :]],
+            dim=1,
+        ).reshape(-1, graph_h_states.shape[-1])
     else:
         targets = ema_embeddings if graph_cfg.use_ema_targets and ema_embeddings is not None else graph_embeddings
         z_flat = graph_embeddings.reshape(-1, graph_embeddings.shape[-1])
@@ -2187,6 +2195,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_vis_dir = run_dir / "vis_rolling"
     pca_z_dir = run_dir / "pca_z"
     pca_s_dir = run_dir / "pca_s"
+    pca_h_dir = run_dir / "pca_h"
     diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
     diagnostics_delta_s_dir = run_dir / "vis_delta_s_pca"
     diagnostics_delta_h_dir = run_dir / "vis_delta_h_pca"
@@ -2199,6 +2208,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
+    graph_diagnostics_h_dir = run_dir / "graph_diagnostics_h"
     vis_ctrl_dir = run_dir / "vis_vis_ctrl"
     samples_hard_dir = run_dir / "samples_hard"
     samples_hard_val_dir = run_dir / "samples_hard_val"
@@ -2219,6 +2229,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     metrics_dir.mkdir(parents=True, exist_ok=True)
     pca_z_dir.mkdir(parents=True, exist_ok=True)
     pca_s_dir.mkdir(parents=True, exist_ok=True)
+    pca_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.diagnostics.enabled:
         diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_delta_s_dir.mkdir(parents=True, exist_ok=True)
@@ -2233,6 +2244,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
         graph_diagnostics_s_dir.mkdir(parents=True, exist_ok=True)
+        graph_diagnostics_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.vis_ctrl.enabled:
         vis_ctrl_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
@@ -2591,6 +2603,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 s_embeddings,
                 pca_s_dir / f"pca_s_{global_step:07d}.png",
                 "PCA s",
+            )
+            save_embedding_projection(
+                h_states,
+                pca_h_dir / f"pca_h_{global_step:07d}.png",
+                "PCA h",
             )
             if hard_reservoir is not None:
                 hard_samples = hard_reservoir.topk(cfg.hard_example.vis_rows * cfg.hard_example.vis_columns)
@@ -3167,6 +3184,60 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     stats_z,
                     global_step,
                     metrics_dir / "graph_diagnostics_z.csv",
+                )
+                h_queries, h_targets, h_predictions = _run_graph_diag(
+                    embedding_kind="h",
+                    graph_cfg=cfg.graph_diagnostics,
+                    model=model,
+                    ema_model=ema_model,
+                    graph_embeddings=graph_diag.graph_embeddings,
+                    graph_preds=graph_diag.graph_preds,
+                    graph_h_preds=graph_diag.graph_h_preds,
+                    graph_h_states=graph_diag.graph_h_states,
+                    ema_embeddings=graph_diag.ema_embeddings,
+                    ema_h_states=graph_diag.ema_h_states,
+                )
+                stats_h = compute_graph_diagnostics_stats(
+                    h_queries,
+                    h_targets,
+                    h_predictions,
+                    graph_diag.next_index,
+                    graph_diag.next2_index,
+                    graph_diag.chunk_ids,
+                    cfg.graph_diagnostics,
+                    global_step,
+                )
+                save_rank_cdf_plot(
+                    graph_diagnostics_h_dir / f"rank1_cdf_{global_step:07d}.png",
+                    stats_h.ranks1,
+                    stats_h.k,
+                    "1-step rank CDF",
+                )
+                save_rank_cdf_plot(
+                    graph_diagnostics_h_dir / f"rank2_cdf_{global_step:07d}.png",
+                    stats_h.ranks2,
+                    stats_h.k,
+                    "2-hop rank CDF",
+                )
+                save_neff_violin_plot(
+                    graph_diagnostics_h_dir / f"neff_violin_{global_step:07d}.png",
+                    stats_h.neff1,
+                    stats_h.neff2,
+                )
+                save_in_degree_hist_plot(
+                    graph_diagnostics_h_dir / f"in_degree_hist_{global_step:07d}.png",
+                    stats_h.in_degree,
+                )
+                save_edge_consistency_hist_plot(
+                    graph_diagnostics_h_dir / f"edge_consistency_{global_step:07d}.png",
+                    stats_h.edge_errors,
+                    embedding_label="h",
+                )
+                update_graph_diagnostics_history(
+                    graph_diagnostics_h_dir,
+                    stats_h,
+                    global_step,
+                    metrics_dir / "graph_diagnostics_h.csv",
                 )
                 s_queries, s_targets, s_predictions = _run_graph_diag(
                     embedding_kind="s",

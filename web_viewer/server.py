@@ -978,6 +978,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         pca_s_dir = selected.path / "pca_s"
         if pca_s_dir.exists():
             extra_paths.extend((path, "pca_s", "pca_s_") for path in pca_s_dir.glob("pca_s_*.png"))
+        pca_h_dir = selected.path / "pca_h"
+        if pca_h_dir.exists():
+            extra_paths.extend((path, "pca_h", "pca_h_") for path in pca_h_dir.glob("pca_h_*.png"))
         for path in selected.odometry_images:
             extra_paths.append((path, None, None))
 
@@ -996,12 +999,18 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 elif stem.startswith("odometry_s_"):
                     label = "odometry_s"
                     prefix = "odometry_s_"
+                elif stem.startswith("odometry_h_"):
+                    label = "odometry_h"
+                    prefix = "odometry_h_"
                 elif stem.startswith("z_vs_z_hat_"):
                     label = "z_vs_z_hat"
                     prefix = "z_vs_z_hat_"
                 elif stem.startswith("s_vs_s_hat_"):
                     label = "s_vs_s_hat"
                     prefix = "s_vs_s_hat_"
+                elif stem.startswith("h_vs_h_hat_"):
+                    label = "h_vs_h_hat"
+                    prefix = "h_vs_h_hat_"
             if label is None or prefix is None:
                 continue
             suffix = stem[len(prefix) :]

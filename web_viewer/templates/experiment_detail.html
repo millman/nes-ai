@@ -20,6 +20,7 @@
                     { value: "vis_rolling_1", label: "Rollouts:Rolling 1", prefix: "rollout_", folder: "vis_rolling_1" },
                     { value: "pca_z", label: "Diagnostics:PCA (Z)", prefix: "pca_z_", folder: "pca_z", legacyPrefix: "embeddings_", legacyFolder: "embeddings" },
                     { value: "pca_s", label: "Diagnostics:PCA (S)", prefix: "pca_s_", folder: "pca_s" },
+                    { value: "pca_h", label: "Diagnostics:PCA (H)", prefix: "pca_h_", folder: "pca_h" },
                     { value: "samples_hard", label: "Samples:Hard", prefix: "hard_", folder: "samples_hard" },
                     { value: "vis_self_distance_z", label: "Self-distance:Distance (Z)", prefix: "self_distance_z_", folder: "vis_self_distance_z" },
                     { value: "vis_self_distance_s", label: "Self-distance:Distance (S)", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
@@ -29,8 +30,10 @@
                     { value: "vis_delta_h_pca", label: "Diagnostics:Delta-h PCA", prefix: "delta_h_pca_", folder: "vis_delta_h_pca" },
                     { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
                     { value: "vis_odometry_current_s", label: "Odometry:Cumulative sum of Δs PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
+                    { value: "vis_odometry_current_h", label: "Odometry:Cumulative sum of Δh PCA/ICA/t-SNE", prefix: "odometry_h_", folder: "vis_odometry" },
                     { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
                     { value: "vis_odometry_s_vs_s_hat", label: "Odometry:||s - s_hat|| + scatter", prefix: "s_vs_s_hat_", folder: "vis_odometry" },
+                    { value: "vis_odometry_h_vs_h_hat", label: "Odometry:||h - h_hat|| + scatter", prefix: "h_vs_h_hat_", folder: "vis_odometry" },
                     { value: "vis_action_alignment_detail", label: "Diagnostics:Action alignment (Z)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_z" },
                     { value: "vis_action_alignment_detail_s", label: "Diagnostics:Action alignment (S)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_s" },
                     { value: "vis_action_alignment_detail_h", label: "Diagnostics:Action alignment (H)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_h" },
@@ -52,6 +55,12 @@
                     { value: "vis_graph_in_degree_hist_z", label: "Graph Diagnostics:In-degree (Z)", prefix: "in_degree_hist_", folder: "graph_diagnostics_z" },
                     { value: "vis_graph_edge_consistency_z", label: "Graph Diagnostics:Edge consistency (Z)", prefix: "edge_consistency_", folder: "graph_diagnostics_z" },
                     { value: "vis_graph_metrics_history_z", label: "Graph Diagnostics:Metrics history (Z)", prefix: "metrics_history_", folder: "graph_diagnostics_z" },
+                    { value: "vis_graph_rank1_cdf_h", label: "Graph Diagnostics:Rank-1 CDF (H)", prefix: "rank1_cdf_", folder: "graph_diagnostics_h" },
+                    { value: "vis_graph_rank2_cdf_h", label: "Graph Diagnostics:Rank-2 CDF (H)", prefix: "rank2_cdf_", folder: "graph_diagnostics_h" },
+                    { value: "vis_graph_neff_violin_h", label: "Graph Diagnostics:Neighborhood size (H)", prefix: "neff_violin_", folder: "graph_diagnostics_h" },
+                    { value: "vis_graph_in_degree_hist_h", label: "Graph Diagnostics:In-degree (H)", prefix: "in_degree_hist_", folder: "graph_diagnostics_h" },
+                    { value: "vis_graph_edge_consistency_h", label: "Graph Diagnostics:Edge consistency (H)", prefix: "edge_consistency_", folder: "graph_diagnostics_h" },
+                    { value: "vis_graph_metrics_history_h", label: "Graph Diagnostics:Metrics history (H)", prefix: "metrics_history_", folder: "graph_diagnostics_h" },
                     { value: "vis_graph_rank1_cdf_s", label: "Graph Diagnostics:Rank-1 CDF (S)", prefix: "rank1_cdf_", folder: "graph_diagnostics_s" },
                     { value: "vis_graph_rank2_cdf_s", label: "Graph Diagnostics:Rank-2 CDF (S)", prefix: "rank2_cdf_", folder: "graph_diagnostics_s" },
                     { value: "vis_graph_neff_violin_s", label: "Graph Diagnostics:Neighborhood size (S)", prefix: "neff_violin_", folder: "graph_diagnostics_s" },
@@ -318,6 +327,7 @@
                     <option value="vis_delta_z_pca">Diagnostics:Delta-z PCA</option>
                     <option value="vis_delta_h_pca">Diagnostics:Delta-h PCA</option>
                     <option value="pca_s">Diagnostics:PCA (S)</option>
+                    <option value="pca_h">Diagnostics:PCA (H)</option>
                     <option value="pca_z">Diagnostics:PCA (Z)</option>
                     <option value="vis_action_alignment_detail_h">Diagnostics:Action alignment (H)</option>
                     <option value="vis_ctrl_smoothness_z">Vis v Ctrl:Local smoothness (Z)</option>
@@ -330,20 +340,28 @@
                     <option value="vis_ctrl_stability_s">Vis v Ctrl:Neighborhood stability (S)</option>
                     <option value="vis_ctrl_stability_h">Vis v Ctrl:Neighborhood stability (H)</option>
                     <option value="vis_cycle_error_h">Diagnostics:Cycle error (H)</option>
+                    <option value="vis_graph_edge_consistency_h">Graph Diagnostics:Edge consistency (H)</option>
                     <option value="vis_graph_edge_consistency_s">Graph Diagnostics:Edge consistency (S)</option>
                     <option value="vis_graph_edge_consistency_z">Graph Diagnostics:Edge consistency (Z)</option>
+                    <option value="vis_graph_in_degree_hist_h">Graph Diagnostics:In-degree (H)</option>
                     <option value="vis_graph_in_degree_hist_s">Graph Diagnostics:In-degree (S)</option>
                     <option value="vis_graph_in_degree_hist_z">Graph Diagnostics:In-degree (Z)</option>
+                    <option value="vis_graph_metrics_history_h">Graph Diagnostics:Metrics history (H)</option>
                     <option value="vis_graph_metrics_history_s">Graph Diagnostics:Metrics history (S)</option>
                     <option value="vis_graph_metrics_history_z">Graph Diagnostics:Metrics history (Z)</option>
+                    <option value="vis_graph_neff_violin_h">Graph Diagnostics:Neighborhood size (H)</option>
                     <option value="vis_graph_neff_violin_s">Graph Diagnostics:Neighborhood size (S)</option>
                     <option value="vis_graph_neff_violin_z">Graph Diagnostics:Neighborhood size (Z)</option>
+                    <option value="vis_graph_rank1_cdf_h">Graph Diagnostics:Rank-1 CDF (H)</option>
                     <option value="vis_graph_rank1_cdf_s">Graph Diagnostics:Rank-1 CDF (S)</option>
                     <option value="vis_graph_rank1_cdf_z">Graph Diagnostics:Rank-1 CDF (Z)</option>
+                    <option value="vis_graph_rank2_cdf_h">Graph Diagnostics:Rank-2 CDF (H)</option>
                     <option value="vis_graph_rank2_cdf_s">Graph Diagnostics:Rank-2 CDF (S)</option>
                     <option value="vis_graph_rank2_cdf_z">Graph Diagnostics:Rank-2 CDF (Z)</option>
+                    <option value="vis_odometry_current_h">Odometry:Cumulative sum of Δh PCA/ICA/t-SNE</option>
                     <option value="vis_odometry_current_s">Odometry:Cumulative sum of Δs PCA/ICA/t-SNE</option>
                     <option value="vis_odometry_current_z">Odometry:Cumulative sum of Δz PCA/ICA/t-SNE</option>
+                    <option value="vis_odometry_h_vs_h_hat">Odometry:||h - h_hat|| + scatter</option>
                     <option value="vis_odometry_s_vs_s_hat">Odometry:||s - s_hat|| + scatter</option>
                     <option value="vis_odometry_z_vs_z_hat">Odometry:||z - z_hat|| + scatter</option>
                     <option value="vis_fixed_0">Rollouts:Fixed 0</option>

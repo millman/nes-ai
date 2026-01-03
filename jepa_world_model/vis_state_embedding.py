@@ -130,6 +130,17 @@ def write_state_embedding_outputs(
                 "Cumulative sum of Δs",
             )
 
+        h_np = h_states[0].detach().cpu().numpy()
+        h_seq = h_np[warmup:] if warmup > 0 else h_np
+        if h_seq.shape[0] >= 2:
+            delta_h = h_seq[1:] - h_seq[:-1]
+            current_h = np.cumsum(delta_h, axis=0)
+            _plot_odometry_embeddings(
+                odometry_plot_dir / f"odometry_h_{global_step:07d}.png",
+                current_h,
+                "Cumulative sum of Δh",
+            )
+
         z_hat = _rollout_predictions(model, embeddings, actions)[0].detach().cpu().numpy()
         if z_hat.shape[0] >= 1:
             z_next = z[1 + warmup :]
@@ -156,6 +167,17 @@ def write_state_embedding_outputs(
                     s_next_trim[:min_len],
                     s_hat_trim[:min_len],
                     "s",
+                )
+            h_hat = h_hat_open[0].detach().cpu().numpy()
+            h_next = h_seq[1:]
+            h_hat_trim = h_hat[warmup:] if warmup > 0 else h_hat
+            min_len = min(h_next.shape[0], h_hat_trim.shape[0])
+            if min_len >= 2:
+                _plot_latent_prediction_comparison(
+                    odometry_plot_dir / f"h_vs_h_hat_{global_step:07d}.png",
+                    h_next[:min_len],
+                    h_hat_trim[:min_len],
+                    "h",
                 )
 
     hist_frames = hist_frames_cpu if hist_frames_cpu is not None else traj_inputs.frames

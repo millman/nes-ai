@@ -9,7 +9,7 @@
 <style>
 .odometry-grid {
     display: grid;
-    grid-template-columns: repeat(8, minmax(110px, 1fr));
+    grid-template-columns: repeat(12, minmax(110px, 1fr));
     gap: 1rem;
 }
 .odometry-span-3 {
@@ -240,6 +240,62 @@
             {% endif %}
         </div>
     </div>
+    <div class="card h-100">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>PCA h</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="PCA projection of h embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
+                >i</span>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No PCA images found in experiment {{ experiment.id }}.
+                {% else %}
+                No PCA images found in any experiments.
+                {% endif %}
+            </div>
+            {% else %}
+            <img id="odometry-pca-h-img" class="odometry-card-img d-none" alt="PCA h">
+            <div class="text-muted small" id="odometry-pca-h-caption"></div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card h-100 odometry-span-3">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>Cumulative sum of Δh PCA/ICA/t-SNE</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Trajectory of cumulative delta-h over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
+                >i</span>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No vis_odometry images found in experiment {{ experiment.id }}.
+                {% else %}
+                No vis_odometry images found in any experiments.
+                {% endif %}
+            </div>
+            {% else %}
+            <img id="odometry-h-img" class="odometry-card-img d-none" alt="odometry h">
+            <div class="text-muted small" id="odometry-h-caption"></div>
+            {% endif %}
+        </div>
+    </div>
     <div class="card h-100 odometry-span-4">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
             <span>||z - z_hat|| + scatter</span>
@@ -296,6 +352,34 @@
             {% endif %}
         </div>
     </div>
+    <div class="card h-100 odometry-span-4">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+            <span>||h - h_hat|| + scatter</span>
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span
+                    class="odometry-info-icon"
+                    data-bs-toggle="tooltip"
+                    data-bs-placement="left"
+                    title="Predictor error norm over time plus an h vs. h_hat scatter view. Read: the line shows ||h - h_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
+                >i</span>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if not odometry_steps %}
+            <div class="text-muted fst-italic small">
+                {% if experiment %}
+                No vis_odometry images found in experiment {{ experiment.id }}.
+                {% else %}
+                No vis_odometry images found in any experiments.
+                {% endif %}
+            </div>
+            {% else %}
+            <img id="odometry-hhat-img" class="odometry-card-img d-none" alt="h vs h_hat">
+            <div class="text-muted small" id="odometry-hhat-caption"></div>
+            {% endif %}
+        </div>
+    </div>
 </div>
 {% endif %}
 {% endblock %}
@@ -327,8 +411,11 @@ document.addEventListener("DOMContentLoaded", () => {
         odometry_z: {img: document.getElementById("odometry-z-img"), caption: document.getElementById("odometry-z-caption")},
         pca_s: {img: document.getElementById("odometry-pca-s-img"), caption: document.getElementById("odometry-pca-s-caption")},
         odometry_s: {img: document.getElementById("odometry-s-img"), caption: document.getElementById("odometry-s-caption")},
+        pca_h: {img: document.getElementById("odometry-pca-h-img"), caption: document.getElementById("odometry-pca-h-caption")},
+        odometry_h: {img: document.getElementById("odometry-h-img"), caption: document.getElementById("odometry-h-caption")},
         z_vs_z_hat: {img: document.getElementById("odometry-zhat-img"), caption: document.getElementById("odometry-zhat-caption")},
         s_vs_s_hat: {img: document.getElementById("odometry-shat-img"), caption: document.getElementById("odometry-shat-caption")},
+        h_vs_h_hat: {img: document.getElementById("odometry-hhat-img"), caption: document.getElementById("odometry-hhat-caption")},
     };
     let pinnedStep = steps.length ? steps[steps.length - 1] : null;
 
