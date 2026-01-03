@@ -284,8 +284,6 @@ class HiddenToZProjector(nn.Module):
         return z_hat.view(*original_shape, z_hat.shape[-1])
 
 
-
-
 class HiddenToDeltaProjector(nn.Module):
     """Project hidden state to a delta in the target latent space."""
 
@@ -661,7 +659,7 @@ class JEPAWorldModel(nn.Module):
         self.predictor = PredictorNetwork(
             self.embedding_dim,
             cfg.hidden_dim,
-            cfg.action_dim * 2,
+            cfg.action_dim,
             cfg.state_dim,
         )
         self.state_dim = cfg.state_dim
@@ -714,15 +712,6 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 
-def _pair_actions(actions: torch.Tensor) -> torch.Tensor:
-    """Concatenate current and prior actions for predictor conditioning."""
-    if actions.ndim != 3:
-        raise ValueError("Actions must have shape [B, T, action_dim].")
-    if actions.shape[1] == 0:
-        return actions.new_zeros((actions.shape[0], 0, actions.shape[2] * 2))
-    zeros = actions.new_zeros((actions.shape[0], 1, actions.shape[2]))
-    prev = torch.cat([zeros, actions[:, :-1]], dim=1)
-    return torch.cat([actions, prev], dim=-1)
 
 
 def _predictor_rollout(
@@ -742,11 +731,10 @@ def _predictor_rollout(
     deltas = []
     h_preds = []
     h_states = [embeddings.new_zeros(b, model.state_dim, device=embeddings.device)]
-    paired_actions = _pair_actions(actions)
     for step in range(t - 1):
         z_t = embeddings[:, step]
         h_t = h_states[-1]
-        act_t = paired_actions[:, step]
+        act_t = actions[:, step]
         pred, delta, h_next = model.predictor(z_t, h_t, act_t)
         preds.append(pred)
         deltas.append(delta)
@@ -804,13 +792,12 @@ def rollout_loss(
     total = embeddings.new_tensor(0.0)
     steps = 0
     warmup = max(min(warmup_frames, t - 1), 0)
-    paired_actions = _pair_actions(actions)
     for start in range(warmup, t - 1):
         current = embeddings[:, start]
         max_h = min(rollout_horizon, t - start - 1)
         h_current = h_states[:, start]
         for offset in range(max_h):
-            act = paired_actions[:, start + offset]
+            act = actions[:, start + offset]
             pred, _, h_next = model.predictor(current, h_current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
@@ -1907,12 +1894,10 @@ def _build_visualization_sequences(
             current_hidden = current_embed.new_zeros(1, model.state_dim)
             prev_pred_frame = decoded_frames[idx, start_idx].detach()
             current_frame = prev_pred_frame
-            prev_action = current_embed.new_zeros(1, vis_actions.shape[-1])
             for step in range(1, max_window):
                 action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
-                paired_action = torch.cat([action, prev_action], dim=-1)
                 prev_embed = current_embed
-                pred, delta, h_next = model.predictor(current_embed, current_hidden, paired_action)
+                pred, delta, h_next = model.predictor(current_embed, current_hidden, action)
                 next_embed = model.h_to_z(h_next)
                 decoded_next = decoder(next_embed)[0]
                 current_frame = decoded_next.clamp(0, 1)
@@ -1931,7 +1916,6 @@ def _build_visualization_sequences(
                 prev_pred_frame = current_frame.detach()
                 current_embed = next_embed
                 current_hidden = h_next
-                prev_action = action
         assert torch.is_grad_enabled()
         action_texts.append(row_actions)
         rollout_frames.append(row_rollout)

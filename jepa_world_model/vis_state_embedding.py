@@ -29,15 +29,12 @@ def _rollout_hidden_states(
     if t < 2:
         return h_states
     h_t = embeddings.new_zeros((b, model.state_dim))
-    prev_action = embeddings.new_zeros((b, actions.shape[-1]))
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = actions[:, step]
-        paired_action = torch.cat([act_t, prev_action], dim=-1)
-        pred, delta, h_next = model.predictor(z_t, h_t, paired_action)
+        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
         h_states[:, step + 1] = h_next
         h_t = h_next
-        prev_action = act_t
     return h_states
 
 
