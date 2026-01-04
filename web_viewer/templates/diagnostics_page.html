@@ -1,162 +1,25 @@
 {% extends "base.html" %}
 
 {% set frame_steps = frame_map.keys()|list|sort if frame_map is defined else [] %}
-{% set steps = experiment.diagnostics_steps if experiment and experiment.diagnostics_steps else frame_steps %}
+{% set steps = diagnostic_steps if diagnostic_steps is defined else (experiment.diagnostics_steps if experiment and experiment.diagnostics_steps else frame_steps) %}
 {% set step_count = steps|length %}
+{% set view_label = view_label if view_label is defined else "" %}
 
 {% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='diagnostics_common.js') }}"></script>
 {% endblock %}
 
 {% block body %}
-<style>
-.diagnostic-frame-img {
-    min-width: 224px;
-    min-height: 224px;
-    width: 100%;
-    max-width: 420px;
-    height: auto;
-    object-fit: contain;
-    background-color: #f8f9fa;
-}
-
-.diagnostic-grid-top,
-.diagnostic-grid-bottom {
-    display: grid;
-    grid-auto-rows: 1fr;
-    gap: 0.75rem;
-}
-
-.diagnostic-grid-top {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.diagnostic-grid-bottom {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.diag-delta {
-    grid-column: 1 / span 2;
-    grid-row: 1 / span 2;
-}
-
-.diag-align-detail {
-    grid-column: 3 / span 2;
-    grid-row: 1 / span 2;
-}
-
-.diag-self-distance {
-    grid-column: 1 / span 1;
-}
-
-.diag-cycle {
-    grid-column: 2 / span 1;
-}
-
-.diagnostics-loss-wrapper {
-    position: relative;
-}
-
-.diagnostics-loss-plot {
-    height: 220px;
-}
-
-.diagnostics-pin-btn {
-    position: absolute;
-    bottom: 10px;
-    right: 10px;
-    width: 32px;
-    height: 32px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background-color: rgba(255, 255, 255, 0.9);
-    border: 1px solid #ced4da;
-    color: #6c757d;
-    z-index: 5;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
-    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
-}
-
-.diagnostics-pin-btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
-}
-
-.diagnostics-pin-btn.active {
-    background-color: #0d6efd;
-    border-color: #0a58ca;
-    color: #fff;
-}
-
-.diagnostics-loss-wrapper.sticky-active {
-    position: sticky;
-    top: 0;
-    z-index: 1030;
-    background: #fff;
-    border-radius: 0.5rem;
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
-}
-
-.diagnostic-subtitle {
-    font-size: 0.88em;
-    color: #6c757d;
-    font-weight: 400;
-    margin-left: 4px;
- }
-
-.diagnostic-info-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 999px;
-    background: #eef2ff;
-    color: #3949ab;
-    font-size: 12px;
-    border: 1px solid #c5cae9;
-    cursor: pointer;
-}
-
-@media (max-width: 991.98px) {
-    .diagnostic-grid-top,
-    .diagnostic-grid-bottom {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .diag-delta,
-    .diag-align-detail,
-    .diag-self-distance {
-        grid-column: 1 / span 2;
-        grid-row: auto;
-    }
-    .diag-cycle {
-        grid-column: span 1;
-    }
-}
-
-@media (max-width: 575.98px) {
-    .diagnostic-grid {
-        grid-template-columns: 1fr;
-    }
-    .diag-delta,
-    .diag-align-detail,
-    .diag-self-distance,
-    .diag-cycle {
-        grid-column: 1;
-        grid-row: auto;
-    }
-}
-</style>
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
     <div class="d-flex align-items-center gap-2 flex-wrap">
         {% if experiment %}
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
-        <h3 class="mb-1">Diagnostics</h3>
-        <div class="text-muted small">No experiments with diagnostics outputs.</div>
+        <h3 class="mb-1">{{ page_title if page_title is defined else "Diagnostics" }}</h3>
+        <div class="text-muted small">{{ no_experiment_message if no_experiment_message is defined else "No experiments with diagnostics outputs." }}</div>
         {% endif %}
     </div>
     {% if experiment %}
@@ -200,19 +63,19 @@
     <div class="diagnostic-grid-top mb-3">
         <div class="card h-100 diag-delta">
             <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-delta-header">
-                <span class="diagnostic-title">Delta-z PCA</span>
+                <span class="diagnostic-title">Delta-{{ view_label }} PCA</span>
                 <div class="d-flex align-items-center gap-2">
                     <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
                     <span
                         class="diagnostic-info-icon"
                         data-bs-toggle="tooltip"
                         data-bs-placement="left"
-                        title="PCA of delta-z steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct motions. Good: clear, separated clusters with minimal overlap."
+                        title="PCA of delta-{{ view_label }} steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct motions. Good: clear, separated clusters with minimal overlap."
                     >i</span>
                 </div>
             </div>
             <div class="card-body d-flex flex-column gap-2">
-                <img id="diagnostics-delta-img" class="img-fluid rounded border d-none" alt="Delta-z PCA diagnostic">
+                <img id="diagnostics-delta-img" class="img-fluid rounded border d-none" alt="Delta-{{ view_label }} PCA diagnostic">
                 <div class="text-muted small" id="diagnostics-delta-caption"></div>
             </div>
         </div>
@@ -225,7 +88,7 @@
                         class="diagnostic-info-icon"
                         data-bs-toggle="tooltip"
                         data-bs-placement="left"
-                        title="Per-action cosine alignment of delta-z directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers."
+                        title="Per-action cosine alignment of delta-{{ view_label }} directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers."
                     >i</span>
                 </div>
             </div>
@@ -239,7 +102,7 @@
 <div class="diagnostic-grid-bottom mb-3">
     <div class="card h-100 diag-self-distance">
         <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-self-distance-header">
-            <span class="diagnostic-title">Self-distance (Z)</span>
+            <span class="diagnostic-title">Self-distance ({{ view_label|upper }})</span>
             <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
         </div>
         <div class="card-body d-flex flex-column gap-2">
@@ -249,7 +112,7 @@
     </div>
     <div class="card h-100 diag-cycle">
         <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-cycle-header">
-            <span class="diagnostic-title">Cycle error (Z)</span>
+            <span class="diagnostic-title">Cycle error ({{ view_label|upper }})</span>
             <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
         </div>
         <div class="card-body d-flex flex-column gap-2">
@@ -328,330 +191,51 @@ document.addEventListener("DOMContentLoaded", () => {
 {% if experiment and step_count %}
 <script>
 document.addEventListener("DOMContentLoaded", () => {
-    const steps = {{ steps | tojson }};
-    const diagnostics = {{ diagnostics_map | tojson }};
-    const frameMap = {{ frame_map | tojson }};
-    const diagSummary = {{ diagnostics_summary | tojson if diagnostics_summary is not none else 'null' }};
-    const frameSteps = Object.keys(frameMap || {}).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
-    const stepLabels = document.querySelectorAll(".diagnostics-step-label");
-    const lossPlot = document.getElementById("diagnostics-loss-plot");
-    const lossWrapper = document.getElementById("diagnostics-loss-wrapper");
-    const lossPinButton = document.getElementById("diagnostics-loss-pin");
-    const figure = {{ figure | tojson if figure else 'null' }};
-    const topGrid = document.getElementById("diagnostics-top-grid");
-    const toggleBtn = document.getElementById("diagnostics-toggle-btn");
-    const targets = {
-        delta_z_pca: {
-            img: document.getElementById("diagnostics-delta-img"),
-            caption: document.getElementById("diagnostics-delta-caption"),
-            header: document.getElementById("diagnostics-delta-header"),
-            title: "Delta-z PCA",
-            label: "vis_delta_z_pca",
+    const DIAGNOSTICS_CONFIG = {
+        targets: {
+            delta_z_pca: {
+                img: document.getElementById("diagnostics-delta-img"),
+                caption: document.getElementById("diagnostics-delta-caption"),
+                header: document.getElementById("diagnostics-delta-header"),
+                title: "Delta-z PCA",
+                label: "vis_delta_z_pca",
+            },
+            action_alignment_detail: {
+                img: document.getElementById("diagnostics-alignment-detail-img"),
+                caption: document.getElementById("diagnostics-alignment-detail-caption"),
+                header: document.getElementById("diagnostics-alignment-detail-header"),
+                title: "Action alignment",
+                label: "action alignment",
+            },
+            cycle_error: {
+                img: document.getElementById("diagnostics-cycle-img"),
+                caption: document.getElementById("diagnostics-cycle-caption"),
+                header: document.getElementById("diagnostics-cycle-header"),
+                title: "Cycle error (Z)",
+                label: "vis_cycle_error_z",
+            },
+            self_distance: {
+                img: document.getElementById("diagnostics-self-distance-img"),
+                caption: document.getElementById("diagnostics-self-distance-caption"),
+                header: document.getElementById("diagnostics-self-distance-header"),
+                title: "Self-distance (Z)",
+                label: "self_distance",
+            },
         },
-        action_alignment_detail: {
-            img: document.getElementById("diagnostics-alignment-detail-img"),
-            caption: document.getElementById("diagnostics-alignment-detail-caption"),
-            header: document.getElementById("diagnostics-alignment-detail-header"),
-            title: "Action alignment",
-            label: "action alignment",
-        },
-        cycle_error: {
-            img: document.getElementById("diagnostics-cycle-img"),
-            caption: document.getElementById("diagnostics-cycle-caption"),
-            header: document.getElementById("diagnostics-cycle-header"),
-            title: "Cycle error (Z)",
-            label: "vis_cycle_error_z",
-        },
-        self_distance: {
-            img: document.getElementById("diagnostics-self-distance-img"),
-            caption: document.getElementById("diagnostics-self-distance-caption"),
-            header: document.getElementById("diagnostics-self-distance-header"),
-            title: "Self-distance (Z)",
-            label: "self_distance",
-        },
+        hasAlignmentSummary: true,
+        hasFrameSteps: true,
+        hasCsvLinks: true,
     };
-    const frameSlider = document.getElementById("diagnostics-frame");
-    const frameCount = document.getElementById("diagnostics-frame-count");
-    const frameLabel = document.getElementById("diagnostics-frame-label");
-    const frameImg = document.getElementById("diagnostics-frame-img");
-    const framePath = document.getElementById("diagnostics-frame-path");
-    const frameAction = document.getElementById("diagnostics-frame-action");
-    const frameDimensions = document.getElementById("diagnostics-frame-dimensions");
-    const summaryWrapper = document.getElementById("diagnostics-summary-wrapper");
-    const summaryBody = document.getElementById("diagnostics-summary-body");
-    const summaryStep = document.getElementById("diagnostics-summary-step");
-    const summaryLinks = document.getElementById("diagnostics-summary-links");
-    const summaryCaption = document.getElementById("diagnostics-summary-caption");
-    let hasHover = false;
-    let currentFrames = [];
-    let lossPinned = false;
 
-    // Update CSV links for the selected step if present (no-op fallback).
-    function populateCsvLinks(step) {
-        const csvLink = document.getElementById("diagnostics-csv-link");
-        if (!csvLink || !diagnostics?.csv_base_url) return;
-        const nearest = nearestStepAtOrBelow(step);
-        const resolvedStep = nearest !== null ? nearest : step;
-        csvLink.href = `${diagnostics.csv_base_url}/${resolvedStep}.csv`;
-        csvLink.classList.remove("d-none");
-    }
+    const serverData = {
+        steps: {{ steps | tojson }},
+        diagnostics: {{ diagnostics_map | tojson }},
+        frameMap: {{ frame_map | tojson }},
+        diagSummary: {{ diagnostics_summary | tojson if diagnostics_summary is not none else 'null' }},
+        figure: {{ figure | tojson if figure else 'null' }},
+    };
 
-    function resolveUrl(diagKey, step) {
-        const perDiag = diagnostics[diagKey] || {};
-        return perDiag[step] || perDiag[String(step)] || null;
-    }
-
-    function updateFrameForIndex(idx) {
-        if (!frameImg || !frameLabel || !currentFrames.length) return;
-        const clamped = Math.min(Math.max(idx, 0), currentFrames.length - 1);
-        const frame = currentFrames[clamped];
-        frameImg.src = frame.url;
-        frameImg.classList.remove("d-none");
-        frameLabel.textContent = `Frame ${clamped + 1} / ${currentFrames.length}`;
-        if (frameAction) {
-            const label = frame.action || (frame.action_id ? `action ${frame.action_id}` : "");
-            frameAction.textContent = label ? `Action: ${label}` : "Action: (unknown)";
-        }
-        if (framePath) {
-            framePath.textContent = frame.source || "Unknown source path";
-        }
-        if (frameDimensions) {
-            frameDimensions.textContent = frameImg.naturalWidth && frameImg.naturalHeight
-                ? `Image size: ${frameImg.naturalWidth}×${frameImg.naturalHeight}px`
-                : "Loading dimensions…";
-        }
-    }
-
-    function updateFrameSlider(step) {
-        if (!frameSlider || !frameCount || !frameLabel || !frameImg) return;
-        const frames = frameMap[step] || frameMap[String(step)] || [];
-        currentFrames = frames;
-        if (!frames.length) {
-            frameSlider.disabled = true;
-            frameSlider.max = 0;
-            frameSlider.value = 0;
-            frameCount.textContent = "0";
-            frameLabel.textContent = "No frames for this step";
-            frameImg.classList.add("d-none");
-            if (framePath) {
-                framePath.textContent = "";
-            }
-            if (frameAction) {
-                frameAction.textContent = "";
-            }
-            if (frameDimensions) {
-                frameDimensions.textContent = "";
-            }
-            return;
-        }
-        frameSlider.disabled = false;
-        frameSlider.max = frames.length - 1;
-        const newVal = Math.min(Number(frameSlider.value || 0), frames.length - 1);
-        frameSlider.value = newVal;
-        frameCount.textContent = String(frames.length);
-        updateFrameForIndex(newVal);
-    }
-
-    function formatNumber(value, decimals = 3, multiplier = 1) {
-        if (value === null || value === undefined) return "—";
-        const num = Number(value);
-        if (!Number.isFinite(num)) return "—";
-        return (num * multiplier).toFixed(decimals);
-    }
-
-    function renderAlignmentSummary(summary) {
-        if (!summaryWrapper) return;
-        if (!summary || !Array.isArray(summary.rows) || summary.rows.length === 0) {
-            summaryWrapper.classList.add("d-none");
-            return;
-        }
-        summaryWrapper.classList.remove("d-none");
-        if (summaryStep) {
-            summaryStep.textContent = summary.step !== null && summary.step !== undefined ? `Step ${summary.step}` : "Latest";
-        }
-        if (summaryBody) {
-            summaryBody.innerHTML = "";
-            const rows = summary.rows.slice(0, 12);
-            rows.forEach((row) => {
-                const tr = document.createElement("tr");
-                const notes = [row.note, row.strength_note].filter((n) => n && n.trim());
-                const cells = [
-                    row.label || `Action ${row.action_id}`,
-                    row.count ?? "—",
-                    formatNumber(row.mean, 3),
-                    `${formatNumber(row.pct_high, 1, 100)}%`,
-                    formatNumber(row.delta_norm_median, 4),
-                    formatNumber(row.delta_norm_p90, 4),
-                    formatNumber(row.strength_ratio ?? row.mean_dir_norm, 3),
-                    notes.length ? notes.join("; ") : "",
-                ];
-                cells.forEach((value) => {
-                    const td = document.createElement("td");
-                    td.textContent = value === undefined ? "—" : value;
-                    tr.appendChild(td);
-                });
-                summaryBody.appendChild(tr);
-            });
-        }
-        if (summaryLinks) {
-            const links = [];
-            if (summary.report_url) {
-                const label = summary.report_name || "Report";
-                links.push(`<a href="${summary.report_url}" target="_blank" rel="noreferrer">${label}</a>`);
-            }
-            if (summary.strength_url && summary.strength_url !== summary.report_url) {
-                const label = summary.strength_name || "Strength";
-                links.push(`<a href="${summary.strength_url}" target="_blank" rel="noreferrer">${label}</a>`);
-            }
-            const extras = [];
-            if (!summary.report_url && summary.report_name) {
-                extras.push(summary.report_name);
-            }
-            if (!summary.strength_url && summary.strength_name) {
-                extras.push(summary.strength_name);
-            }
-            const extraText = extras.length ? extras.join(" · ") : "";
-            const linkText = links.length ? links.join(" · ") : "";
-            const combined = [linkText, extraText].filter(Boolean).join(" · ");
-            summaryLinks.innerHTML = combined ? `Sources: ${combined}` : "";
-        }
-        if (summaryCaption) {
-            summaryCaption.textContent = "Parsed from the latest action_alignment_report and action_alignment_strength outputs.";
-        }
-    }
-
-    function nearestStepAtOrBelow(target) {
-        if (!steps.length) return null;
-        let best = null;
-        for (let i = 0; i < steps.length; i++) {
-            const step = steps[i];
-            if (step > target) {
-                continue;
-            }
-            if (best === null || step > best) {
-                best = step;
-            }
-        }
-        return best;
-    }
-
-    function updateForStep(stepValue) {
-        const nearest = nearestStepAtOrBelow(stepValue);
-        const step = nearest !== null ? nearest : steps[steps.length - 1];
-        stepLabels.forEach((label) => {
-            label.textContent = step ?? "—";
-        });
-        Object.entries(targets).forEach(([key, refs]) => {
-            if (!refs.img || !refs.caption) return;
-            const url = resolveUrl(key, step);
-            const headerText = refs.title ? refs.title : "";
-            if (url) {
-                refs.img.src = url;
-                refs.img.classList.remove("d-none");
-                if (refs.header && refs.title) {
-                    const headerTitle = refs.header.querySelector(".diagnostic-title");
-                    if (headerTitle) {
-                        headerTitle.textContent = headerText;
-                    }
-                }
-                refs.caption.textContent = "";
-            } else {
-                refs.img.classList.add("d-none");
-                refs.caption.textContent = `No image for step ${step} in ${refs.label}`;
-            }
-        });
-        populateCsvLinks(step);
-        updateFrameSlider(step);
-        renderAlignmentSummary(diagSummary);
-    }
-
-    function renderLossPlot() {
-        if (!lossPlot) return;
-        if (typeof Plotly === "undefined") {
-            return;
-        }
-        if (!figure || !figure.data || !figure.layout) {
-            return;
-        }
-        const layout = {
-            ...figure.layout,
-            height: 220,
-            margin: { ...(figure.layout?.margin || {}), t: 30, b: 50, l: 50, r: 10 },
-        };
-        const config = buildPlotlyConfig(figure.config || {});
-        Plotly.react(lossPlot, figure.data, layout, config).then(() => {
-            lossPlot.on("plotly_hover", (event) => {
-                const point = event?.points?.[0];
-                if (!point || typeof point.x === "undefined") return;
-                updateForStep(point.x);
-            });
-        });
-    }
-
-    // Toggle sticky positioning for the diagnostics loss plot.
-    function setLossPinned(pinned) {
-        if (!lossWrapper || !lossPinButton) return;
-        lossPinned = pinned;
-        lossWrapper.classList.toggle("sticky-active", pinned);
-        lossPinButton.classList.toggle("active", pinned);
-        lossPinButton.setAttribute("aria-pressed", pinned ? "true" : "false");
-        lossPinButton.setAttribute("title", pinned ? "Unpin diagnostics plot" : "Pin diagnostics plot");
-    }
-
-    // Ensure initial state is rendered.
-    setLossPinned(true);
-
-    if (frameSlider) {
-        frameSlider.addEventListener("input", (ev) => {
-            updateFrameForIndex(Number(ev.target.value));
-        });
-        frameSlider.addEventListener("pointermove", (ev) => {
-            if (!currentFrames.length || frameSlider.disabled) return;
-            const rect = frameSlider.getBoundingClientRect();
-            if (!rect || rect.width === 0) return;
-            const ratio = Math.min(Math.max((ev.clientX - rect.left) / rect.width, 0), 1);
-            const idx = Math.round(ratio * (currentFrames.length - 1));
-            frameSlider.value = String(idx);
-            updateFrameForIndex(idx);
-        });
-    }
-    if (frameImg && frameDimensions) {
-        frameImg.addEventListener("load", () => {
-            if (!frameImg.naturalWidth || !frameImg.naturalHeight) {
-                frameDimensions.textContent = "";
-                return;
-            }
-            frameDimensions.textContent = `Image size: ${frameImg.naturalWidth}×${frameImg.naturalHeight}px`;
-        });
-    }
-
-    renderLossPlot();
-    const initialStep = steps.length ? steps[steps.length - 1] : (frameSteps.length ? frameSteps[frameSteps.length - 1] : null);
-    const initialFrameStep = frameSteps.length ? frameSteps[0] : initialStep;
-    if (initialFrameStep !== null) {
-        updateFrameSlider(initialFrameStep);
-    }
-    if (initialStep !== null) {
-        updateForStep(initialStep);
-    } else {
-        renderAlignmentSummary(diagSummary);
-    }
-
-    if (toggleBtn && topGrid) {
-        topGrid.addEventListener("shown.bs.collapse", () => {
-            toggleBtn.textContent = "Collapse Delta/Alignment";
-            toggleBtn.setAttribute("aria-expanded", "true");
-        });
-        topGrid.addEventListener("hidden.bs.collapse", () => {
-            toggleBtn.textContent = "Expand Delta/Alignment";
-            toggleBtn.setAttribute("aria-expanded", "false");
-        });
-    }
-    if (lossPinButton && lossWrapper) {
-        lossPinButton.addEventListener("click", () => {
-            setLossPinned(!lossPinned);
-        });
-    }
+    initializeDiagnosticsPage(DIAGNOSTICS_CONFIG, serverData);
 });
 </script>
 {% endif %}

@@ -810,10 +810,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function updateCompareLink() {
     if (!compareLink) return;
-    const params = new URLSearchParams();
-    selectionOrder.forEach((id) => params.append("ids", id));
     const baseUrl = "{{ url_for('comparison') }}";
-    compareLink.href = params.toString() ? `${baseUrl}?${params.toString()}` : baseUrl;
+    if (selectionOrder.length === 0) {
+      compareLink.href = baseUrl;
+    } else {
+      compareLink.href = `${baseUrl}?ids=${selectionOrder.join(",")}`;
+    }
   }
 
   function postJson(url, payload) {

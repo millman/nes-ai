@@ -1,0 +1,175 @@
+/* Common styles shared across compare, diagnostics, and self-distance pages */
+
+/* Pin button styles - used for pinning plots to top of viewport */
+.compare-pin-btn,
+.diagnostics-pin-btn,
+.plot-pin-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ced4da;
+    color: #6c757d;
+    z-index: 5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+
+.compare-pin-btn:hover,
+.diagnostics-pin-btn:hover,
+.plot-pin-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.compare-pin-btn.active,
+.diagnostics-pin-btn.active,
+.plot-pin-btn.active {
+    background-color: #0d6efd;
+    border-color: #0a58ca;
+    color: #fff;
+}
+
+/* Sticky wrapper styles - used for pinned content */
+.compare-loss-wrapper,
+.diagnostics-loss-wrapper,
+.plot-pin-wrapper {
+    position: relative;
+}
+
+.compare-loss-wrapper.sticky-active,
+.diagnostics-loss-wrapper.sticky-active,
+.plot-pin-wrapper.sticky-active {
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+    background: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
+}
+
+.plot-pin-wrapper.sticky-active {
+    padding-bottom: 0.5rem;
+}
+
+/* Info icon styles - used for tooltips */
+.diagnostic-info-icon,
+.self-distance-info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3949ab;
+    font-size: 12px;
+    border: 1px solid #c5cae9;
+    cursor: pointer;
+}
+
+/* Diagnostics page specific styles */
+.diagnostics-loss-plot {
+    height: 220px;
+}
+
+/* Compare page specific styles */
+.compare-loss-plot {
+    height: 250px;
+}
+
+.diagnostic-subtitle {
+    font-size: 0.88em;
+    color: #6c757d;
+    font-weight: 400;
+    margin-left: 4px;
+}
+
+.diagnostic-frame-img {
+    min-width: 224px;
+    min-height: 224px;
+    width: 100%;
+    max-width: 420px;
+    height: auto;
+    object-fit: contain;
+    background-color: #f8f9fa;
+}
+
+.diagnostic-grid-top,
+.diagnostic-grid-bottom {
+    display: grid;
+    grid-auto-rows: 1fr;
+    gap: 0.75rem;
+}
+
+.diagnostic-grid-top {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.diagnostic-grid-bottom {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.diag-delta {
+    grid-column: 1 / span 2;
+    grid-row: 1 / span 2;
+}
+
+.diag-align-detail {
+    grid-column: 3 / span 2;
+    grid-row: 1 / span 2;
+}
+
+.diag-self-distance {
+    grid-column: 1 / span 1;
+}
+
+.diag-cycle {
+    grid-column: 2 / span 1;
+}
+
+@media (max-width: 991.98px) {
+    .diagnostic-grid-top,
+    .diagnostic-grid-bottom {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .diag-delta,
+    .diag-align-detail,
+    .diag-self-distance {
+        grid-column: 1 / span 2;
+        grid-row: auto;
+    }
+    .diag-cycle {
+        grid-column: span 1;
+    }
+}
+
+/* Self-distance page specific styles */
+.self-distance-plot {
+    height: 300px;
+    min-height: 300px;
+    max-height: 320px;
+}
+
+.plot-pin-plot {
+    height: 220px;
+}
+
+.self-distance-step-label {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.75rem;
+    color: #6c757d;
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-left: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: right;
+    white-space: nowrap;
+}

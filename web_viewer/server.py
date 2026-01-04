@@ -323,7 +323,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def experiments_index():
         experiments = _load_all()
         return render_template(
-            "experiments.html",
+            "experiments_grid.html",
             experiments=experiments,
             cfg=cfg,
             active_nav="experiments",
@@ -335,10 +335,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         index_rows = build_experiment_index(cfg.output_dir)
         row_by_id = {row.id: row for row in index_rows}
 
-        raw_ids = request.args.getlist("ids")
-        if not raw_ids:
-            ids_param = request.args.get("ids", "")
-            raw_ids = ids_param.split(",") if ids_param else []
+        # Parse comma-separated ids parameter
+        ids_param = request.args.get("ids", "")
+        raw_ids = [id.strip() for id in ids_param.split(",") if id.strip()] if ids_param else []
 
         selected_ids = [exp_id for exp_id in raw_ids if exp_id and exp_id in row_by_id]
         if len(selected_ids) < 2 and len(index_rows) >= 2:
@@ -485,6 +484,198 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             }
         )
 
+    @app.route("/compare_z")
+    def compare_z():
+        index_rows = build_experiment_index(cfg.output_dir)
+        row_by_id = {row.id: row for row in index_rows}
+
+        # Parse comma-separated ids parameter
+        ids_param = request.args.get("ids", "")
+        raw_ids = [id.strip() for id in ids_param.split(",") if id.strip()] if ids_param else []
+
+        selected_ids = [exp_id for exp_id in raw_ids if exp_id and exp_id in row_by_id]
+        if len(selected_ids) < 2 and len(index_rows) >= 2:
+            selected_ids = [row.id for row in sorted(index_rows, key=lambda r: r.last_modified or datetime.min, reverse=True)[:2]]
+
+        experiments: List[Experiment] = []
+        for exp_id in selected_ids:
+            row = row_by_id.get(exp_id)
+            if not row:
+                continue
+            exp = load_experiment(
+                row.path,
+            )
+            if exp is not None:
+                experiments.append(exp)
+
+        selected_map = {exp.id: exp for exp in experiments}
+        selected_ids = [eid for eid in selected_ids if eid in selected_map]
+        return render_template(
+            "compare_page.html",
+            js_file="compare_z.js",
+            experiments=experiments,
+            cfg=cfg,
+            selected_ids=selected_ids,
+            selected_map=selected_map,
+            active_nav="compare_z",
+            first_experiment_id=selected_ids[0] if selected_ids else (index_rows[0].id if index_rows else None),
+        )
+
+    @app.post("/compare_z/data")
+    def compare_z_data():
+        payload = request.get_json(force=True, silent=True) or {}
+        exp_ids = payload.get("ids") or []
+        if not isinstance(exp_ids, list) or len(exp_ids) < 2:
+            abort(400, "Provide at least two experiment ids.")
+        experiments = []
+        for exp_id in exp_ids:
+            exp_path = cfg.output_dir / exp_id
+            if not exp_path.is_dir():
+                abort(404, f"Experiment {exp_id} not found.")
+            exp = load_experiment(
+                exp_path,
+                include_rollout_steps=True,
+            )
+            if exp is None:
+                abort(404, f"Experiment {exp_id} not found.")
+            experiments.append(exp)
+        overlay_data = _build_overlay_data(experiments)
+        comparison_rows = _build_comparison_rows(experiments)
+        return jsonify(
+            {
+                "figure": overlay_data,
+                "experiments": comparison_rows,
+            }
+        )
+
+    @app.route("/compare_h")
+    def compare_h():
+        index_rows = build_experiment_index(cfg.output_dir)
+        row_by_id = {row.id: row for row in index_rows}
+
+        # Parse comma-separated ids parameter
+        ids_param = request.args.get("ids", "")
+        raw_ids = [id.strip() for id in ids_param.split(",") if id.strip()] if ids_param else []
+
+        selected_ids = [exp_id for exp_id in raw_ids if exp_id and exp_id in row_by_id]
+        if len(selected_ids) < 2 and len(index_rows) >= 2:
+            selected_ids = [row.id for row in sorted(index_rows, key=lambda r: r.last_modified or datetime.min, reverse=True)[:2]]
+
+        experiments: List[Experiment] = []
+        for exp_id in selected_ids:
+            row = row_by_id.get(exp_id)
+            if not row:
+                continue
+            exp = load_experiment(
+                row.path,
+            )
+            if exp is not None:
+                experiments.append(exp)
+
+        selected_map = {exp.id: exp for exp in experiments}
+        selected_ids = [eid for eid in selected_ids if eid in selected_map]
+        return render_template(
+            "compare_page.html",
+            js_file="compare_h.js",
+            experiments=experiments,
+            cfg=cfg,
+            selected_ids=selected_ids,
+            selected_map=selected_map,
+            active_nav="compare_h",
+            first_experiment_id=selected_ids[0] if selected_ids else (index_rows[0].id if index_rows else None),
+        )
+
+    @app.post("/compare_h/data")
+    def compare_h_data():
+        payload = request.get_json(force=True, silent=True) or {}
+        exp_ids = payload.get("ids") or []
+        if not isinstance(exp_ids, list) or len(exp_ids) < 2:
+            abort(400, "Provide at least two experiment ids.")
+        experiments = []
+        for exp_id in exp_ids:
+            exp_path = cfg.output_dir / exp_id
+            if not exp_path.is_dir():
+                abort(404, f"Experiment {exp_id} not found.")
+            exp = load_experiment(
+                exp_path,
+                include_rollout_steps=True,
+            )
+            if exp is None:
+                abort(404, f"Experiment {exp_id} not found.")
+            experiments.append(exp)
+        overlay_data = _build_overlay_data(experiments)
+        comparison_rows = _build_comparison_rows(experiments)
+        return jsonify(
+            {
+                "figure": overlay_data,
+                "experiments": comparison_rows,
+            }
+        )
+
+    @app.route("/compare_s")
+    def compare_s():
+        index_rows = build_experiment_index(cfg.output_dir)
+        row_by_id = {row.id: row for row in index_rows}
+
+        # Parse comma-separated ids parameter
+        ids_param = request.args.get("ids", "")
+        raw_ids = [id.strip() for id in ids_param.split(",") if id.strip()] if ids_param else []
+
+        selected_ids = [exp_id for exp_id in raw_ids if exp_id and exp_id in row_by_id]
+        if len(selected_ids) < 2 and len(index_rows) >= 2:
+            selected_ids = [row.id for row in sorted(index_rows, key=lambda r: r.last_modified or datetime.min, reverse=True)[:2]]
+
+        experiments: List[Experiment] = []
+        for exp_id in selected_ids:
+            row = row_by_id.get(exp_id)
+            if not row:
+                continue
+            exp = load_experiment(
+                row.path,
+            )
+            if exp is not None:
+                experiments.append(exp)
+
+        selected_map = {exp.id: exp for exp in experiments}
+        selected_ids = [eid for eid in selected_ids if eid in selected_map]
+        return render_template(
+            "compare_page.html",
+            js_file="compare_s.js",
+            experiments=experiments,
+            cfg=cfg,
+            selected_ids=selected_ids,
+            selected_map=selected_map,
+            active_nav="compare_s",
+            first_experiment_id=selected_ids[0] if selected_ids else (index_rows[0].id if index_rows else None),
+        )
+
+    @app.post("/compare_s/data")
+    def compare_s_data():
+        payload = request.get_json(force=True, silent=True) or {}
+        exp_ids = payload.get("ids") or []
+        if not isinstance(exp_ids, list) or len(exp_ids) < 2:
+            abort(400, "Provide at least two experiment ids.")
+        experiments = []
+        for exp_id in exp_ids:
+            exp_path = cfg.output_dir / exp_id
+            if not exp_path.is_dir():
+                abort(404, f"Experiment {exp_id} not found.")
+            exp = load_experiment(
+                exp_path,
+                include_rollout_steps=True,
+            )
+            if exp is None:
+                abort(404, f"Experiment {exp_id} not found.")
+            experiments.append(exp)
+        overlay_data = _build_overlay_data(experiments)
+        comparison_rows = _build_comparison_rows(experiments)
+        return jsonify(
+            {
+                "figure": overlay_data,
+                "experiments": comparison_rows,
+            }
+        )
+
     @app.route("/self_distance_z", defaults={"exp_id": None})
     @app.route("/self_distance_z/<exp_id>")
     def self_distance_z(exp_id: Optional[str]):
@@ -548,6 +739,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 experiments=[],
                 experiment=None,
                 page_title="Self-distance (Z)",
+                csv_name="self_distance_z.csv",
                 cfg=cfg,
                 active_nav="self_distance_z",
                 active_experiment_id=None,
@@ -570,6 +762,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             experiment=selected,
             figure=figure,
             page_title="Self-distance (Z)",
+            csv_name="self_distance_z.csv",
+            csv_file=selected.self_distance_csv,
+            csv_url=url_for('serve_asset', relative_path=f"{selected.id}/{selected.self_distance_csv.relative_to(selected.path)}"),
+            images_list=selected.self_distance_images,
+            images_folder="vis_self_distance_z",
+            redirect_url_base=url_for('self_distance_z'),
             cfg=cfg,
             active_nav="self_distance_z",
             active_experiment_id=selected.id,
@@ -617,10 +815,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "self_distance_h.html",
+                "self_distance_page.html",
                 experiments=[],
                 experiment=None,
                 page_title="Self-distance (H)",
+                csv_name="self_distance_h.csv",
                 cfg=cfg,
                 active_nav="self_distance_h",
                 active_experiment_id=None,
@@ -642,13 +841,17 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         figure = _build_single_experiment_figure(selected)
 
         return render_template(
-            "self_distance_h.html",
+            "self_distance_page.html",
             experiments=[],
             experiment=selected,
             figure=figure,
-            self_distance_h_csv=latest_h_csv,
-            self_distance_h_images=self_distance_h_images,
             page_title="Self-distance (H)",
+            csv_name="self_distance_h.csv",
+            csv_file=latest_h_csv,
+            csv_url=url_for('serve_asset', relative_path=f"{selected.id}/{latest_h_csv.relative_to(selected.path)}"),
+            images_list=self_distance_h_images,
+            images_folder="vis_self_distance_h",
+            redirect_url_base=url_for('self_distance_h'),
             cfg=cfg,
             active_nav="self_distance_h",
             active_experiment_id=selected.id,
@@ -873,7 +1076,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "self_distance_zs.html",
+                "self_distance_zhs.html",
                 experiments=[],
                 experiment=None,
                 page_title="Self-distance (Z vs H vs S)",
@@ -905,7 +1108,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         figure = _build_single_experiment_figure(selected)
 
         return render_template(
-            "self_distance_zs.html",
+            "self_distance_zhs.html",
             experiments=[],
             experiment=selected,
             figure=figure,
@@ -1073,6 +1276,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if selected_id is None:
             return render_template(
             "diagnostics_page.html",
+            view_label="z",
+            page_title="Diagnostics",
+            no_experiment_message="No experiments with diagnostics outputs.",
             experiments=[],
             experiment=None,
             diagnostics_map={},
@@ -1219,6 +1425,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         _log_timing("diagnostics.total", route_start, selected=selected.id)
         return render_template(
             "diagnostics_page.html",
+            view_label="z",
+            page_title="Diagnostics",
+            no_experiment_message="No experiments with diagnostics outputs.",
             experiments=[],
             experiment=selected,
             diagnostics_map=diagnostics_map,
@@ -1262,7 +1471,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "diagnostics_page_s.html",
+                "diagnostics_page.html",
+                view_label="s",
+                page_title="Diagnostics (S)",
+                no_experiment_message="No experiment selected.",
                 experiments=[],
                 experiment=None,
                 diagnostics_map={},
@@ -1360,9 +1572,13 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         _log_timing("diagnostics_s.total", route_start, selected=selected.id)
         return render_template(
-            "diagnostics_page_s.html",
+            "diagnostics_page.html",
+            view_label="s",
+            page_title="Diagnostics (S)",
+            no_experiment_message="No experiment selected.",
             experiments=[],
             experiment=selected,
+            diagnostic_steps=diagnostics_steps,
             diagnostics_map=diagnostics_map,
             diagnostics_csv_map=diagnostics_csv_map,
             frame_map=frame_map,
@@ -1416,7 +1632,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "diagnostics_page_h.html",
+                "diagnostics_page.html",
+                view_label="h",
+                page_title="Diagnostics (H)",
+                no_experiment_message="No experiment selected.",
                 experiments=[],
                 experiment=None,
                 diagnostics_map={},
@@ -1484,7 +1703,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         _log_timing("diagnostics_h.total", route_start, selected=selected.id)
         return render_template(
-            "diagnostics_page_h.html",
+            "diagnostics_page.html",
+            view_label="h",
+            page_title="Diagnostics (H)",
+            no_experiment_message="No experiment selected.",
             experiments=[],
             experiment=selected,
             diagnostics_map=diagnostics_map,
@@ -1533,7 +1755,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "diagnostics_page_zs.html",
+                "diagnostics_page_zhs.html",
                 experiments=[],
                 experiment=None,
                 diagnostics_map_z={},
@@ -1656,7 +1878,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         _log_timing("diagnostics_zvs.total", route_start, selected=selected.id)
         return render_template(
-            "diagnostics_page_zs.html",
+            "diagnostics_page_zhs.html",
             experiments=[],
             experiment=selected,
             diagnostics_map_z=diagnostics_map_z,
@@ -2085,7 +2307,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "graph_diagnostics_zs.html",
+                "graph_diagnostics_zhs.html",
                 experiments=[],
                 experiment=None,
                 graph_map_z={},
@@ -2219,7 +2441,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             history=len(history_rows_z) + len(history_rows_h) + len(history_rows_s),
         )
         return render_template(
-            "graph_diagnostics_zs.html",
+            "graph_diagnostics_zhs.html",
             experiments=[],
             experiment=selected,
             graph_map_z=graph_map_z,

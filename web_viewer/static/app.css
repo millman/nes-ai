@@ -259,3 +259,62 @@
 #comparison-grid .row {
     overflow-x: auto;
 }
+
+/* Pinnable section styles */
+.pinnable-section {
+    transition: box-shadow 0.2s ease-in-out;
+}
+
+.pinnable-section.pinned {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.pin-toggle {
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.25rem 0.5rem;
+}
+
+.pinnable-section:not(.pinned) .pin-icon {
+    opacity: 0.5;
+}
+
+.pinnable-section.pinned .pin-icon {
+    opacity: 1;
+}
+
+.pin-toggle:hover {
+    background-color: #e9ecef;
+}
+
+/* Image row preview styles for compare pages */
+.image-row-preview {
+    margin-bottom: 1rem;
+}
+
+.image-row-preview img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.image-row-title {
+    font-weight: 600;
+    color: #495057;
+}
+
+.image-row-path {
+    font-size: 0.875rem;
+}
+
+.image-row-missing {
+    padding: 2rem;
+    text-align: center;
+    background-color: #f8f9fa;
+    border: 1px dashed #dee2e6;
+    border-radius: 0.25rem;
+}
