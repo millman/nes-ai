@@ -628,11 +628,12 @@ function initializeCompareStickyPlot() {
     const rect = anchor.getBoundingClientRect();
     const shouldStick = rect.bottom <= shrinkHeight;
     if (shouldStick !== isSticky) {
+      // Capture height BEFORE changing sticky state
+      const heightBeforeChange = isSticky ? null : wrapper.getBoundingClientRect().height;
       isSticky = shouldStick;
       wrapper.classList.toggle("sticky-active", isSticky);
       if (isSticky) {
-        const wrapperRect = wrapper.getBoundingClientRect();
-        placeholder.style.height = `${wrapperRect.height}px`;
+        placeholder.style.height = `${heightBeforeChange}px`;
         placeholder.style.display = "block";
       } else {
         placeholder.style.display = "none";
