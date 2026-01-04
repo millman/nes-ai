@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from jepa_world_model.vis_self_distance import write_self_distance_outputs_from_embeddings
-from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
 from jepa_world_model.vis_odometry import (
     _rollout_open_loop,
     _rollout_predictions,
@@ -47,7 +47,11 @@ def write_state_embedding_histogram(
     ax.set_title("State embedding norm distribution")
     apply_square_axes(ax)
     fig_hist.tight_layout()
-    fig_hist.savefig(plot_dir / f"state_embedding_hist_{global_step:07d}.png", dpi=200, bbox_inches="tight")
+    fig_hist.savefig(
+        plot_dir / f"state_embedding_hist_{global_step:07d}.png",
+        dpi=DEFAULT_DPI,
+        bbox_inches="tight",
+    )
     plt.close(fig_hist)
 
 

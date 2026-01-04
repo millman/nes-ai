@@ -114,7 +114,7 @@ from jepa_world_model.plots.plot_variance_report import write_variance_report
 from jepa_world_model.plots.plot_variance_spectrum import (
     save_variance_spectrum_plot,
 )
-from jepa_world_model.plots.plot_layout import figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, figsize_for_grid
 from jepa_world_model.plots.plot_graph_diagnostics import (
     GraphDiagnosticsConfig,
     build_graph_diag_indices,
@@ -1931,7 +1931,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     if len(history) == 0:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=figsize_for_grid(1, 1))
+    plt.figure(figsize=figsize_for_grid(2, 2))
     default_cycle = plt.rcParams.get("axes.prop_cycle")
     color_cycle = default_cycle.by_key().get("color", []) if default_cycle is not None else []
 
@@ -1979,7 +1979,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.grid(True, alpha=0.3)
     plt.legend(ncol=2, fontsize=8)
     plt.tight_layout()
-    plt.savefig(out_dir / "loss_curves.png", dpi=200)
+    plt.savefig(out_dir / "loss_curves.png", dpi=DEFAULT_DPI)
     plt.close()
 
     has_rank_acc = any(val != 0.0 for val in history.geometry_rank_accuracy)
@@ -2002,7 +2002,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         title = f"Geometry Ranking Accuracy (pairs/batch: {pair_count})" if pair_count else "Geometry Ranking Accuracy"
         fig.suptitle(title, fontsize=11)
         fig.tight_layout()
-        fig.savefig(out_dir / "ranking_accuracy.png", dpi=200)
+        fig.savefig(out_dir / "ranking_accuracy.png", dpi=DEFAULT_DPI)
         plt.close(fig)
 
 

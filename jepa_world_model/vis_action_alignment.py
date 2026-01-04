@@ -10,7 +10,7 @@ from matplotlib import colors as mcolors
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import decode_action_id
-from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
 from jepa_world_model.plot_strip_scatter import plot_strip_scatter
 
 
@@ -26,7 +26,7 @@ def save_action_alignment_plot(
         ax.text(0.5, 0.5, "No actions met alignment criteria.", ha="center", va="center")
         ax.axis("off")
         fig.tight_layout()
-        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
         plt.close(fig)
         return
     labels = [decode_action_id(s["action_id"], action_dim) for s in stats]
@@ -52,7 +52,7 @@ def save_action_alignment_plot(
     apply_square_axes(ax)
     apply_square_axes(axes)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -200,5 +200,5 @@ def save_action_alignment_detail_plot(
         ax3.axis("off")
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)

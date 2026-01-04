@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 
 from jepa_world_model.plot_raincloud import plot_raincloud
 from jepa_world_model.vis_vis_ctrl_metrics import VisCtrlMetrics
-from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
 
 
 def save_smoothness_knn_distance_eigenvalue_spectrum_plot(
@@ -43,5 +43,5 @@ def save_smoothness_knn_distance_eigenvalue_spectrum_plot(
         axes[1].axis("off")
     apply_square_axes(axes)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)

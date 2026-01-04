@@ -6,7 +6,7 @@ from typing import Dict, List
 
 import matplotlib.pyplot as plt
 
-from jepa_world_model.plots.plot_layout import figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, figsize_for_grid
 
 def save_graph_history_plot(out_path: Path, history: List[Dict[str, float]], k: int) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,5 +47,5 @@ def save_graph_history_plot(out_path: Path, history: List[Dict[str, float]], k: 
         axes[2].legend()
         axes[2].grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)

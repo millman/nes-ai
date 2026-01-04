@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
 
 def save_rank_cdf_plot(out_path: Path, ranks: np.ndarray, k: int, title: str) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,5 +27,5 @@ def save_rank_cdf_plot(out_path: Path, ranks: np.ndarray, k: int, title: str) ->
     ax.set_title(title)
     apply_square_axes(ax)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)

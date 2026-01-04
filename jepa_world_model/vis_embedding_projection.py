@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
 
 def save_embedding_projection(embeddings: torch.Tensor, path: Path, title: str) -> None:
     flat = embeddings.detach().cpu().numpy()
@@ -36,7 +36,7 @@ def save_embedding_projection(embeddings: torch.Tensor, path: Path, title: str) 
     path.parent.mkdir(parents=True, exist_ok=True)
     apply_square_axes(ax)
     fig.tight_layout()
-    fig.savefig(path, dpi=200)
+    fig.savefig(path, dpi=DEFAULT_DPI)
     plt.close(fig)
 
 

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
-from jepa_world_model.plots.plot_layout import figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, figsize_for_grid
 
 
 def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -164,7 +164,7 @@ def write_self_distance_plots(
     fig.colorbar(sc1, ax=axes[1, 2], label="timestep")
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     out_path = plot_dir / f"{file_prefix}_{global_step:07d}.png"
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)
 
     # Save a cosine-only PNG for quick inspection.
@@ -186,7 +186,7 @@ def write_self_distance_plots(
     fig_cos.tight_layout(rect=[0, 0, 1, 0.93])
     cosine_prefix = cosine_prefix or f"{file_prefix}_cosine"
     out_path_cos = plot_dir / f"{cosine_prefix}_{global_step:07d}.png"
-    fig_cos.savefig(out_path_cos, dpi=200, bbox_inches="tight")
+    fig_cos.savefig(out_path_cos, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig_cos)
 
 

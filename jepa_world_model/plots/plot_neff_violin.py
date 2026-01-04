@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from jepa_world_model.plot_raincloud import plot_raincloud
-from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
 
 
 def save_neff_violin_plot(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) -> None:
@@ -38,5 +38,5 @@ def save_neff_violin_plot(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) 
     ax.set_title("Neighborhood size (exp entropy)")
     apply_square_axes(ax)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)

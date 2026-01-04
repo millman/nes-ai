@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
 try:
     from sklearn.decomposition import FastICA
     from sklearn.manifold import TSNE
@@ -159,7 +159,7 @@ def _plot_odometry_embeddings(
         fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="time")
     apply_square_axes(axes)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -188,5 +188,5 @@ def _plot_latent_prediction_comparison(
     axes[1].set_xlabel(f"{embedding_label}")
     axes[1].set_ylabel(f"{hat_label}")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
     plt.close(fig)

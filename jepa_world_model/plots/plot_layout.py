@@ -4,13 +4,11 @@ from __future__ import annotations
 from typing import Iterable, Iterator
 
 DEFAULT_DPI = 200
-BASE_PX = (800, 500)
+BASE_IN = (4.0, 3.0)
 
 
-def figsize_for_grid(rows: int, cols: int, base_px: tuple[int, int] = BASE_PX, dpi: int = DEFAULT_DPI) -> tuple[float, float]:
-    width_px = base_px[0] * cols
-    height_px = base_px[1] * rows
-    return (width_px / dpi, height_px / dpi)
+def figsize_for_grid(rows: int, cols: int, base_in: tuple[float, float] = BASE_IN) -> tuple[float, float]:
+    return (base_in[0] * cols, base_in[1] * rows)
 
 
 def _iter_axes(axes: object) -> Iterator[object]:
