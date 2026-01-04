@@ -29,22 +29,56 @@
 
 <div class="card mb-4" data-selected-ids="{{ selected_ids|join(',') }}">
     <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
-            <label class="form-label mb-0 small text-muted" for="comparison-xaxis-select">X-axis:</label>
-            <select id="comparison-xaxis-select" class="form-select form-select-sm" style="width: auto;">
-                <option value="steps">Steps</option>
-                <option value="flops">Cumulative FLOPs</option>
-                <option value="elapsed">Elapsed time</option>
-            </select>
-        </div>
         <div class="d-flex flex-column flex-lg-row gap-3">
-            <div class="comparison-image-folder flex-shrink-0">
-                <label class="form-label mb-1 small text-muted" for="comparison-image-folder-select">Image folder:</label>
-                <select id="comparison-image-folder-select" class="form-select form-select-sm w-100" multiple size="8"></select>
-            </div>
             <div class="flex-grow-1">
-                <div id="comparison-plot" class="plot-area">
-                    <p class="text-muted fst-italic">Select experiments to view overlapping loss curves.</p>
+                <div class="compare-plot-controls-row comparison-image-folder-actions">
+                    <div class="comparison-action-group">
+                        <button
+                            type="button"
+                            class="btn btn-outline-primary btn-sm"
+                            data-folder-preset="rollout"
+                        >Rollout</button>
+                    </div>
+                    <div class="comparison-action-group">
+                        <div class="btn-group" role="group" aria-label="Action presets">
+                            <span class="text-muted small comparison-action-label">Action</span>
+                            <button
+                                type="button"
+                                class="btn btn-outline-primary btn-sm comparison-action-first"
+                                data-folder-preset="z"
+                            >Z</button>
+                            <button
+                                type="button"
+                                class="btn btn-outline-primary btn-sm"
+                                data-folder-preset="h"
+                            >H</button>
+                            <button
+                                type="button"
+                                class="btn btn-outline-primary btn-sm"
+                                data-folder-preset="s"
+                            >S</button>
+                        </div>
+                    </div>
+                    <div class="dropdown comparison-folder-dropdown">
+                        <button
+                            class="btn btn-outline-primary btn-sm dropdown-toggle"
+                            type="button"
+                            id="comparison-folder-dropdown"
+                            data-bs-toggle="dropdown"
+                            data-bs-auto-close="outside"
+                            aria-expanded="false"
+                        >+ more</button>
+                        <div
+                            class="dropdown-menu p-2 comparison-folder-menu"
+                            aria-labelledby="comparison-folder-dropdown"
+                            id="comparison-folder-menu"
+                        ></div>
+                    </div>
+                </div>
+                <div class="compare-plot-wrapper">
+                    <div id="comparison-plot" class="plot-area">
+                        <p class="text-muted fst-italic">Select experiments to view overlapping loss curves.</p>
+                    </div>
                 </div>
             </div>
         </div>

@@ -28,6 +28,12 @@ function toggleTraceVisibility(gd, visibility) {
   Plotly.restyle(gd, { visible: visibility }, indices);
 }
 
+function resetLossReconFocusState(gd) {
+  if (gd && gd._lossReconFocusState) {
+    gd._lossReconFocusState = { active: false, disabledIndices: [] };
+  }
+}
+
 function toggleTracesByPattern(gd, pattern) {
   if (!gd || !gd.data || !gd.data.length) {
     return;
@@ -109,7 +115,7 @@ function pickLossReconMetricsByExperiment(gd) {
   return chosen;
 }
 
-function toggleLossReconPerExperiment(gd) {
+function toggleLossReconFocus(gd) {
   if (!gd || !gd.data || !gd.data.length) {
     return;
   }
@@ -119,6 +125,9 @@ function toggleLossReconPerExperiment(gd) {
   }
   const indices = [];
   const visibilities = [];
+  const wasActive = gd._lossReconFocusState && gd._lossReconFocusState.active;
+  const disabledIndices = gd._lossReconFocusState?.disabledIndices || [];
+
   gd.data.forEach((trace, idx) => {
     const metric = extractTraceMetric(trace.name);
     if (!metric) {
@@ -126,13 +135,34 @@ function toggleLossReconPerExperiment(gd) {
     }
     const experiment = extractTraceExperiment(trace.name) || DEFAULT_EXPERIMENT_KEY;
     const targetMetric = selectedByExperiment.get(experiment);
-    if (targetMetric && metric === targetMetric) {
-      indices.push(idx);
-      const currentlyVisible = trace.visible === true || trace.visible === undefined;
-      visibilities.push(currentlyVisible ? "legendonly" : true);
+    const isLossRecon = targetMetric && metric === targetMetric;
+
+    if (wasActive) {
+      if (disabledIndices.includes(idx)) {
+        indices.push(idx);
+        visibilities.push(true);
+      }
+    } else {
+      if (isLossRecon) {
+        indices.push(idx);
+        visibilities.push(true);
+      } else {
+        const currentlyVisible = trace.visible === true || trace.visible === undefined;
+        if (currentlyVisible) {
+          indices.push(idx);
+          visibilities.push("legendonly");
+        }
+      }
     }
   });
+
   if (indices.length > 0) {
+    if (!wasActive) {
+      const hidden = indices.filter((_, i) => visibilities[i] === "legendonly");
+      gd._lossReconFocusState = { active: true, disabledIndices: hidden };
+    } else {
+      gd._lossReconFocusState = { active: false, disabledIndices: [] };
+    }
     Plotly.restyle(gd, { visible: visibilities }, indices);
   }
 }
@@ -143,17 +173,23 @@ function buildPlotlyConfig(baseConfig = {}) {
     {
       name: "Show all traces",
       icon: PLOTLY_SHOW_ICON,
-      click: (gd) => toggleTraceVisibility(gd, true),
+      click: (gd) => {
+        resetLossReconFocusState(gd);
+        toggleTraceVisibility(gd, true);
+      },
     },
     {
       name: "Hide all traces",
       icon: PLOTLY_HIDE_ICON,
-      click: (gd) => toggleTraceVisibility(gd, "legendonly"),
+      click: (gd) => {
+        resetLossReconFocusState(gd);
+        toggleTraceVisibility(gd, "legendonly");
+      },
     },
     {
-      name: "Toggle loss_recon",
+      name: "Focus loss_recon",
       icon: PLOTLY_RECON_ICON,
-      click: (gd) => toggleLossReconPerExperiment(gd),
+      click: (gd) => toggleLossReconFocus(gd),
     },
   ];
   const existingButtons = Array.isArray(clone.modeBarButtonsToAdd) ? clone.modeBarButtonsToAdd : [];

@@ -6,6 +6,7 @@ let pendingInitialPreviewStep = null;
 let currentPreviewMap = {};
 let currentStepsByExp = {};
 let currentExperiments = [];
+let compareStickyInitialized = false;
 
 // Helper to build URL string without encoding commas in ids parameter
 function buildUrlString(url) {
@@ -302,6 +303,7 @@ function setSelectedFolders(nextSelected, { updateUrl = true, syncSelect = true 
       });
     }
   }
+  syncFolderDropdownSelection();
 }
 
 function mergeSelectionOrder(nextSelected) {
@@ -311,6 +313,54 @@ function mergeSelectionOrder(nextSelected) {
   const preservedSet = new Set(preserved);
   const added = normalized.filter((value) => !preservedSet.has(value));
   return preserved.concat(added);
+}
+
+function buildFolderDropdownItems() {
+  return IMAGE_FOLDER_OPTIONS.map((opt) => {
+    const item = document.createElement("label");
+    item.className = "dropdown-item d-flex align-items-center gap-2";
+    item.dataset.value = opt.value;
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "form-check-input m-0";
+    checkbox.value = opt.value;
+    checkbox.checked = selectedImageFolders.includes(opt.value);
+    const text = document.createElement("span");
+    text.className = "small";
+    text.textContent = opt.label;
+    item.appendChild(checkbox);
+    item.appendChild(text);
+    return item;
+  });
+}
+
+function syncFolderDropdownSelection() {
+  const menu = document.getElementById("comparison-folder-menu");
+  if (!menu) {
+    return;
+  }
+  const checkboxes = menu.querySelectorAll('input[type="checkbox"]');
+  checkboxes.forEach((checkbox) => {
+    checkbox.checked = selectedImageFolders.includes(checkbox.value);
+  });
+}
+
+function initializeFolderDropdown() {
+  const menu = document.getElementById("comparison-folder-menu");
+  if (!menu) {
+    return;
+  }
+  menu.innerHTML = "";
+  const items = buildFolderDropdownItems();
+  items.forEach((item) => menu.appendChild(item));
+  menu.addEventListener("change", () => {
+    const nextSelected = Array.from(
+      menu.querySelectorAll('input[type="checkbox"]:checked')
+    ).map((checkbox) => checkbox.value);
+    const ordered = mergeSelectionOrder(nextSelected);
+    setSelectedFolders(ordered, { updateUrl: true, syncSelect: true });
+    updatePreviewRowsForSelection();
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -337,6 +387,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   initializeImageFolderSelector();
+  initializeFolderDropdown();
+  initializeFolderPresetButtons();
   setSelectedFolders(selectedImageFolders, { updateUrl: false, syncSelect: true });
 
   const ids = getIdsFromDataset();
@@ -503,6 +555,7 @@ function renderComparison(payload) {
     const config = buildPlotlyConfig(figure.config);
     Plotly.react(plot, figure.data, figure.layout, config).then(() => {
       applyXAxisMode(currentXAxisMode, { updateUrl: false });
+      initializeCompareStickyPlot();
       if (lastPreviewStep === null && pendingInitialPreviewStep !== null) {
         lastPreviewStep = pendingInitialPreviewStep;
         renderPreviewsAtStep(lastPreviewStep, currentPreviewMap, currentStepsByExp);
@@ -552,6 +605,64 @@ function renderComparison(payload) {
   wireTagsForms(grid);
 }
 
+function initializeCompareStickyPlot() {
+  if (compareStickyInitialized) {
+    return;
+  }
+  const wrapper = document.querySelector(".compare-plot-wrapper");
+  const plot = document.getElementById("comparison-plot");
+  if (!wrapper || !plot) {
+    return;
+  }
+  compareStickyInitialized = true;
+  let isSticky = false;
+  let ticking = false;
+  const shrinkHeight = 240;
+  const placeholder = document.createElement("div");
+  placeholder.style.display = "none";
+  wrapper.parentNode.insertBefore(placeholder, wrapper);
+
+  const updateSticky = () => {
+    ticking = false;
+    const anchor = isSticky ? placeholder : wrapper;
+    const rect = anchor.getBoundingClientRect();
+    const shouldStick = rect.bottom <= shrinkHeight;
+    if (shouldStick !== isSticky) {
+      isSticky = shouldStick;
+      wrapper.classList.toggle("sticky-active", isSticky);
+      if (isSticky) {
+        const wrapperRect = wrapper.getBoundingClientRect();
+        placeholder.style.height = `${wrapperRect.height}px`;
+        placeholder.style.display = "block";
+      } else {
+        placeholder.style.display = "none";
+        placeholder.style.height = "";
+        wrapper.style.left = "";
+        wrapper.style.width = "";
+      }
+      if (window.Plotly && Plotly.Plots && typeof Plotly.Plots.resize === "function") {
+        requestAnimationFrame(() => Plotly.Plots.resize(plot));
+      }
+    }
+    if (isSticky) {
+      wrapper.style.left = `${rect.left}px`;
+      wrapper.style.width = `${rect.width}px`;
+    }
+    wrapper.classList.toggle("sticky-shrink", isSticky);
+  };
+
+  const onScroll = () => {
+    if (!ticking) {
+      ticking = true;
+      requestAnimationFrame(updateSticky);
+    }
+  };
+
+  updateSticky();
+  window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener("resize", onScroll);
+}
+
 function initializeImageFolderSelector() {
   const selector = document.getElementById("comparison-image-folder-select");
   if (!selector) {
@@ -570,11 +681,15 @@ function initializeImageFolderSelector() {
     selector.appendChild(option);
   });
 
-  selector.addEventListener("change", () => {
+  const applySelectorSelection = () => {
     const nextSelected = Array.from(selector.selectedOptions).map((opt) => opt.value);
     const ordered = mergeSelectionOrder(nextSelected);
     setSelectedFolders(ordered, { updateUrl: true, syncSelect: true });
     updatePreviewRowsForSelection();
+  };
+
+  selector.addEventListener("change", () => {
+    applySelectorSelection();
   });
 }
 
@@ -602,6 +717,27 @@ function updatePreviewRowsForSelection() {
   if (lastPreviewStep !== null && lastPreviewStep !== undefined) {
     renderPreviewsAtStep(lastPreviewStep, currentPreviewMap, currentStepsByExp);
   }
+}
+
+function initializeFolderPresetButtons() {
+  const presets = {
+    rollout: ["vis_fixed_0"],
+    z: ["vis_action_alignment_detail", "vis_self_distance_z", "vis_odometry_current_z"],
+    h: ["vis_action_alignment_detail_h", "vis_self_distance_h", "vis_odometry_current_h"],
+    s: ["vis_action_alignment_detail_s", "vis_self_distance_s", "vis_odometry_current_s"],
+  };
+
+  const buttons = document.querySelectorAll("[data-folder-preset]");
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const preset = presets[button.dataset.folderPreset];
+      if (!preset) {
+        return;
+      }
+      setSelectedFolders(preset, { updateUrl: true, syncSelect: true });
+      updatePreviewRowsForSelection();
+    });
+  });
 }
 
 function buildExperimentGrid(experiments) {
