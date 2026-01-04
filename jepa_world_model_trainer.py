@@ -359,17 +359,39 @@ class HiddenActionDeltaProjector(nn.Module):
         return delta.view(*original_shape, delta.shape[-1])
 
 
+class ActionDeltaProjector(nn.Module):
+    """Project action vectors into latent delta prototypes."""
+
+    def __init__(self, action_dim: int, target_dim: int, use_layer_norm: bool = True) -> None:
+        super().__init__()
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(action_dim))
+        layers.append(nn.Linear(action_dim, target_dim, bias=False))
+        self.net = nn.Sequential(*layers)
+        self.action_dim = action_dim
+        self.target_dim = target_dim
+        self.use_layer_norm = use_layer_norm
+
+    def forward(self, actions: torch.Tensor) -> torch.Tensor:
+        original_shape = actions.shape[:-1]
+        flat = actions.reshape(-1, actions.shape[-1])
+        projected = self.net(flat)
+        return projected.view(*original_shape, projected.shape[-1])
+
+
 class InverseDynamicsHead(nn.Module):
-    """Predict action from consecutive observation embeddings using their delta."""
+    """Predict action from consecutive observation embeddings."""
 
     def __init__(self, z_dim: int, hidden_dim: int, action_dim: int, use_layer_norm: bool = True) -> None:
         super().__init__()
         layers = []
+        input_dim = z_dim
         if use_layer_norm:
-            layers.append(nn.LayerNorm(z_dim))
+            layers.append(nn.LayerNorm(input_dim))
         layers.extend(
             [
-                nn.Linear(z_dim, hidden_dim),
+                nn.Linear(input_dim, hidden_dim),
                 nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.GELU(),
@@ -480,15 +502,51 @@ class LossWeights:
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
 
+    # Goal-conditioned ranking loss on s = g(stopgrad(h)).
+    # Keeps s useful for planning geometry while avoiding action algebra constraints.
+    geometry_rank: float = 0.0
+
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 1.0
+    inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
     inverse_dynamics_h: float = 0.0
     # Inverse dynamics from consecutive h pairs (s_t, s_{t+1}).
     inverse_dynamics_s: float = 0.0
 
-    # Goal-conditioned ranking loss on s = g(stopgrad(h)).
-    geometry_rank: float = 0.0
+    # -------------------------------------------------------------------------
+    # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make s algebraic for planning.
+    # -------------------------------------------------------------------------
+    # z: Level 1 fixed translation; weakly anchor action directions without overfitting perception.
+    # h: Level 2 + light Level 3; state-conditioned deltas with short-horizon composition.
+    # s: Level 3; a smoother planning space with consistent multi-step structure.
+
+    # --- Z ---
+    # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
+    # Encourages consistent action directions in z while leaving perception flexible.
+    action_delta_z: float = 0.0
+
+    # k-step rollout consistency in z-space.
+    # Encourages short-horizon compositionality without forcing long-horizon rigidity.
+    rollout_kstep_z: float = 0.0
+
+    # --- H ---
+    # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
+    # Makes action effects locally predictable (supports momentum, contacts, and walls).
+    action_delta_h: float = 0.0
+
+    # Explicit additivity of state deltas across steps.
+    # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
+    additivity_h: float = 0.0
+
+    # --- S ---
+    # State-conditioned delta alignment: s_{t+1} - s_t vs E(s_t, a_t).
+    # Makes s a navigable planning space with consistent action geometry.
+    action_delta_s: float = 0.0
+
+    # Explicit additivity of s deltas across steps.
+    # Encourages compositional planning moves in the abstract space.
+    additivity_s: float = 0.0
+
 
 @dataclass
 class LossSigRegConfig:
@@ -603,6 +661,7 @@ class TrainConfig:
     max_trajectories: Optional[int] = None
     seq_len: int = 8
     batch_size: int = 8
+    rollout_horizon: int = 4
 
     # Optimization
     lr: float = 1e-4
@@ -696,6 +755,23 @@ class JEPAWorldModel(nn.Module):
             cfg.hidden_dim,
             cfg.action_dim,
             use_layer_norm=cfg.layer_norms.inverse_dynamics,
+        )
+        self.h_action_delta_projector = HiddenActionDeltaProjector(
+            cfg.state_dim,
+            cfg.action_dim,
+            cfg.hidden_dim,
+            use_layer_norm=cfg.layer_norms.action_delta_projector,
+        )
+        self.s_action_delta_projector = HiddenActionDeltaProjector(
+            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            cfg.action_dim,
+            cfg.hidden_dim,
+            use_layer_norm=cfg.layer_norms.action_delta_projector,
+        )
+        self.action_delta_projector = ActionDeltaProjector(
+            cfg.action_dim,
+            self.embedding_dim,
+            use_layer_norm=cfg.layer_norms.action_delta_projector,
         )
 
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -982,6 +1058,12 @@ def _compute_losses_and_metrics(
     loss_inverse_dynamics_z = x_frames.new_tensor(0.0)
     loss_inverse_dynamics_h = x_frames.new_tensor(0.0)
     loss_inverse_dynamics_s = x_frames.new_tensor(0.0)
+    loss_action_delta_z = x_frames.new_tensor(0.0)
+    loss_action_delta_h = x_frames.new_tensor(0.0)
+    loss_rollout_kstep_z = x_frames.new_tensor(0.0)
+    loss_additivity_h = x_frames.new_tensor(0.0)
+    loss_action_delta_s = x_frames.new_tensor(0.0)
+    loss_additivity_s = x_frames.new_tensor(0.0)
 
     # -------------------------------------------------------------------------
     # Calculate required inputs
@@ -1062,6 +1144,31 @@ def _compute_losses_and_metrics(
     if weights.geometry_rank > 0:
         loss_geometry_rank, geometry_rank_accuracy, geometry_rank_pairs = geometry_rank_loss(model, h_states, cfg.geometry)
 
+    dh_pred: Optional[torch.Tensor] = None
+    if weights.action_delta_h > 0 or weights.additivity_h > 0:
+        if h_states.shape[1] >= 2:
+            h_curr = h_states[:, start_frame:-1]
+            h_next = h_states[:, start_frame + 1 :]
+            a_curr = a_seq[:, start_frame:-1]
+            if h_curr.numel() > 0:
+                dh_pred = model.h_action_delta_projector(h_curr, a_curr)
+                dh_target = h_next - h_curr
+                if weights.action_delta_h > 0:
+                    loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
+
+    ds_pred: Optional[torch.Tensor] = None
+    if weights.action_delta_s > 0 or weights.additivity_s > 0:
+        if h_states.shape[1] >= 2:
+            s_states = model.h2s(h_states)
+            s_curr = s_states[:, start_frame:-1]
+            s_next = s_states[:, start_frame + 1 :]
+            a_curr = a_seq[:, start_frame:-1]
+            if s_curr.numel() > 0:
+                ds_pred = model.s_action_delta_projector(s_curr, a_curr)
+                ds_target = s_next - s_curr
+                if weights.action_delta_s > 0:
+                    loss_action_delta_s = F.mse_loss(ds_pred, ds_target)
+
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
         assert z_embeddings.shape[1] >= 2
@@ -1078,6 +1185,37 @@ def _compute_losses_and_metrics(
         s_for_inverse = model.h2s(h_states)
         action_logits_s = model.inverse_dynamics_s(s_for_inverse[:, :-1], s_for_inverse[:, 1:])
         loss_inverse_dynamics_s = INVERSE_DYNAMICS_LOSS(action_logits_s, a_seq[:, :-1])
+
+    if weights.action_delta_z > 0:
+        assert z_embeddings.shape[1] >= 2
+        delta_target = z_embeddings[:, 1:] - z_embeddings[:, :-1]
+        delta_proto = model.action_delta_projector(a_seq[:, :-1])
+        loss_action_delta_z = F.mse_loss(delta_target, delta_proto)
+
+    if weights.rollout_kstep_z > 0:
+        loss_rollout_kstep_z = rollout_loss(
+            model,
+            z_embeddings,
+            a_seq,
+            h_states,
+            cfg.rollout_horizon,
+            warmup_frames,
+        )
+
+    if weights.additivity_h > 0 and dh_pred is not None:
+        if dh_pred.shape[1] >= 2:
+            dh_add_pred = dh_pred[:, :-1] + dh_pred[:, 1:]
+            dh_add_target = h_states[:, start_frame + 2 :] - h_states[:, start_frame:-2]
+            if dh_add_pred.numel() > 0:
+                loss_additivity_h = F.mse_loss(dh_add_pred, dh_add_target)
+
+    if weights.additivity_s > 0 and ds_pred is not None:
+        if ds_pred.shape[1] >= 2:
+            ds_add_pred = ds_pred[:, :-1] + ds_pred[:, 1:]
+            s_states = model.h2s(h_states)
+            ds_add_target = s_states[:, start_frame + 2 :] - s_states[:, start_frame:-2]
+            if ds_add_pred.numel() > 0:
+                loss_additivity_s = F.mse_loss(ds_add_pred, ds_add_target)
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
@@ -1108,6 +1246,12 @@ def _compute_losses_and_metrics(
         + weights.inverse_dynamics_z * _scaled("loss_inverse_dynamics_z", loss_inverse_dynamics_z)
         + weights.inverse_dynamics_h * _scaled("loss_inverse_dynamics_h", loss_inverse_dynamics_h)
         + weights.inverse_dynamics_s * _scaled("loss_inverse_dynamics_s", loss_inverse_dynamics_s)
+        + weights.action_delta_z * _scaled("loss_action_delta_z", loss_action_delta_z)
+        + weights.action_delta_h * _scaled("loss_action_delta_h", loss_action_delta_h)
+        + weights.rollout_kstep_z * _scaled("loss_rollout_kstep_z", loss_rollout_kstep_z)
+        + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
+        + weights.action_delta_s * _scaled("loss_action_delta_s", loss_action_delta_s)
+        + weights.additivity_s * _scaled("loss_additivity_s", loss_additivity_s)
     )
 
     world_grad_norm = 0.0
@@ -1152,6 +1296,12 @@ def _compute_losses_and_metrics(
         "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
         "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
         "loss_inverse_dynamics_s": loss_inverse_dynamics_s.item(),
+        "loss_action_delta_z": loss_action_delta_z.item(),
+        "loss_action_delta_h": loss_action_delta_h.item(),
+        "loss_rollout_kstep_z": loss_rollout_kstep_z.item(),
+        "loss_additivity_h": loss_additivity_h.item(),
+        "loss_action_delta_s": loss_action_delta_s.item(),
+        "loss_additivity_s": loss_additivity_s.item(),
         "z_norm_mean": z_norm_mean,
         "z_norm_std": z_norm_std,
         "z_norm_max": z_norm_max,
@@ -1252,6 +1402,18 @@ def log_metrics(
         filtered.pop("loss_inverse_dynamics_h", None)
     if weights.inverse_dynamics_s <= 0:
         filtered.pop("loss_inverse_dynamics_s", None)
+    if weights.action_delta_z <= 0:
+        filtered.pop("loss_action_delta_z", None)
+    if weights.action_delta_h <= 0:
+        filtered.pop("loss_action_delta_h", None)
+    if weights.rollout_kstep_z <= 0:
+        filtered.pop("loss_rollout_kstep_z", None)
+    if weights.additivity_h <= 0:
+        filtered.pop("loss_additivity_h", None)
+    if weights.action_delta_s <= 0:
+        filtered.pop("loss_action_delta_s", None)
+    if weights.additivity_s <= 0:
+        filtered.pop("loss_additivity_s", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -1290,6 +1452,12 @@ LOSS_COLUMNS = [
     "loss_inverse_dynamics_z",
     "loss_inverse_dynamics_h",
     "loss_inverse_dynamics_s",
+    "loss_action_delta_z",
+    "loss_action_delta_h",
+    "loss_rollout_kstep_z",
+    "loss_additivity_h",
+    "loss_action_delta_s",
+    "loss_additivity_s",
     "z_norm_mean",
     "z_norm_std",
     "z_norm_max",
@@ -1329,6 +1497,12 @@ class LossHistory:
     inverse_dynamics_z: List[float] = field(default_factory=list)
     inverse_dynamics_h: List[float] = field(default_factory=list)
     inverse_dynamics_s: List[float] = field(default_factory=list)
+    action_delta_z: List[float] = field(default_factory=list)
+    action_delta_h: List[float] = field(default_factory=list)
+    rollout_kstep_z: List[float] = field(default_factory=list)
+    additivity_h: List[float] = field(default_factory=list)
+    action_delta_s: List[float] = field(default_factory=list)
+    additivity_s: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
     z_norm_std: List[float] = field(default_factory=list)
     z_norm_max: List[float] = field(default_factory=list)
@@ -1365,6 +1539,12 @@ class LossHistory:
         self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
         self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
         self.inverse_dynamics_s.append(metrics.get("loss_inverse_dynamics_s", 0.0))
+        self.action_delta_z.append(metrics.get("loss_action_delta_z", 0.0))
+        self.action_delta_h.append(metrics.get("loss_action_delta_h", 0.0))
+        self.rollout_kstep_z.append(metrics.get("loss_rollout_kstep_z", 0.0))
+        self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
+        self.action_delta_s.append(metrics.get("loss_action_delta_s", 0.0))
+        self.additivity_s.append(metrics.get("loss_additivity_s", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
         self.z_norm_std.append(metrics.get("z_norm_std", 0.0))
         self.z_norm_max.append(metrics.get("z_norm_max", 0.0))
@@ -1412,6 +1592,12 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.inverse_dynamics_z,
             history.inverse_dynamics_h,
             history.inverse_dynamics_s,
+            history.action_delta_z,
+            history.action_delta_h,
+            history.rollout_kstep_z,
+            history.additivity_h,
+            history.action_delta_s,
+            history.additivity_s,
             history.z_norm_mean,
             history.z_norm_std,
             history.z_norm_max,
