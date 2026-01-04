@@ -29,6 +29,8 @@ def _compute_pca(delta_z_centered: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 @dataclass
 class MotionSubspace:
+    delta_embed: np.ndarray
+    delta_centered: np.ndarray
     delta_proj: np.ndarray
     proj_flat: np.ndarray
     proj_sequences: List[np.ndarray]
@@ -78,6 +80,8 @@ def build_motion_subspace(
         proj_sequences.append(proj_flat[offset : offset + seq_len])
         offset += seq_len
     return MotionSubspace(
+        delta_embed=delta_embed,
+        delta_centered=delta_centered,
         delta_proj=delta_proj,
         proj_flat=proj_flat,
         proj_sequences=proj_sequences,

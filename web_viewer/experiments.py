@@ -881,9 +881,30 @@ VIS_STEP_SPECS = [
     ("vis_odometry_z_vs_z_hat", "vis_odometry", "z_vs_z_hat_*.png", "z_vs_z_hat_"),
     ("vis_odometry_s_vs_s_hat", "vis_odometry", "s_vs_s_hat_*.png", "s_vs_s_hat_"),
     ("vis_odometry_h_vs_h_hat", "vis_odometry", "h_vs_h_hat_*.png", "h_vs_h_hat_"),
-    ("vis_action_alignment_detail", "vis_action_alignment_z", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_action_alignment_detail_z", "vis_action_alignment_z", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_action_alignment_detail_raw_z", "vis_action_alignment_z_raw", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    (
+        "vis_action_alignment_detail_centered_z",
+        "vis_action_alignment_z_centered",
+        "action_alignment_detail_*.png",
+        "action_alignment_detail_",
+    ),
     ("vis_action_alignment_detail_s", "vis_action_alignment_s", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_action_alignment_detail_raw_s", "vis_action_alignment_s_raw", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    (
+        "vis_action_alignment_detail_centered_s",
+        "vis_action_alignment_s_centered",
+        "action_alignment_detail_*.png",
+        "action_alignment_detail_",
+    ),
     ("vis_action_alignment_detail_h", "vis_action_alignment_h", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    ("vis_action_alignment_detail_raw_h", "vis_action_alignment_h_raw", "action_alignment_detail_*.png", "action_alignment_detail_"),
+    (
+        "vis_action_alignment_detail_centered_h",
+        "vis_action_alignment_h_centered",
+        "action_alignment_detail_*.png",
+        "action_alignment_detail_",
+    ),
     ("vis_cycle_error", "vis_cycle_error_z", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_h", "vis_cycle_error_h", "cycle_error_*.png", "cycle_error_"),
@@ -967,7 +988,7 @@ def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
                     steps.add(step)
             if steps:
                 step_map["vis_self_distance_s"] = sorted(steps)
-    if "vis_action_alignment_detail" not in step_map:
+    if "vis_action_alignment_detail_z" not in step_map:
         fallback_folder = root / "vis_action_alignment"
         if fallback_folder.exists():
             steps = set()
@@ -976,7 +997,7 @@ def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
                 if step is not None:
                     steps.add(step)
             if steps:
-                step_map["vis_action_alignment_detail"] = sorted(steps)
+                step_map["vis_action_alignment_detail_z"] = sorted(steps)
     if "vis_cycle_error" not in step_map:
         fallback_folder = root / "vis_cycle_error"
         if fallback_folder.exists():

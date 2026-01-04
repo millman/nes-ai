@@ -58,6 +58,7 @@ def save_action_alignment_detail_plot(
     debug_data: Dict[str, Any],
     cosine_high_threshold: float,
     action_dim: int,
+    alignment_label: str = "PCA",
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
@@ -71,6 +72,8 @@ def save_action_alignment_detail_plot(
     pairwise = np.asarray([] if pairwise_raw is None else pairwise_raw, dtype=np.float32)
     actions_sorted: List[int] = list(debug_data.get("actions_sorted") or [])
     per_action_norms: Dict[int, np.ndarray] = debug_data.get("per_action_norms") or {}
+
+    label_suffix = f"{alignment_label.strip()}, " if alignment_label.strip() else ""
 
     # (0,0): per-action cosine strip plot (mirrors cosine alignment view)
     ax0 = axes[0, 0]
@@ -93,7 +96,7 @@ def save_action_alignment_detail_plot(
         ax0.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.8)
         ax0.set_ylabel("cosine alignment")
         ax0.set_ylim(-1.05, 1.05)
-        ax0.set_title("Cosine alignment (per-action strip)")
+        ax0.set_title(f"Cosine alignment ({label_suffix}per-action strip)")
     else:
         ax0.text(0.5, 0.5, "No valid cosine samples.", ha="center", va="center")
         ax0.axis("off")
@@ -149,7 +152,7 @@ def save_action_alignment_detail_plot(
             ax1.set_xscale("log")
         ax1.set_xlabel("delta norm")
         ax1.set_ylabel("cosine alignment")
-        ax1.set_title("Alignment vs. delta magnitude")
+        ax1.set_title(f"Alignment vs. delta magnitude ({alignment_label.strip()})")
     else:
         ax1.text(0.5, 0.5, "Insufficient samples for cosine/norm scatter.", ha="center", va="center")
         ax1.axis("off")
@@ -173,7 +176,7 @@ def save_action_alignment_detail_plot(
         if medians and all(m > 0 for m in medians):
             ax2.set_yscale("log")
         ax2.set_ylabel("delta norm")
-        ax2.set_title("Delta norm by action (scatter/median)")
+        ax2.set_title(f"Delta norm by action ({alignment_label.strip()})")
     else:
         ax2.text(0.5, 0.5, "No usable per-action norms.", ha="center", va="center")
         ax2.axis("off")
@@ -187,7 +190,7 @@ def save_action_alignment_detail_plot(
         ax3.set_yticks(np.arange(len(actions_sorted)))
         ax3.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
         ax3.set_yticklabels(labels, fontsize=8)
-        ax3.set_title("Mean direction similarity (cosine)")
+        ax3.set_title(f"Mean direction similarity ({alignment_label.strip()})")
         fig.colorbar(im, ax=ax3, fraction=0.046, pad=0.04, label="cosine")
     else:
         ax3.text(0.5, 0.5, "Mean direction similarity unavailable.", ha="center", va="center")

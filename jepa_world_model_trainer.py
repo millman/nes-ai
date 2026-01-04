@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from collections import defaultdict
+import json
 import os
 from pathlib import Path
 from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -64,7 +65,7 @@ from jepa_world_model.vis_input_batch import save_input_batch_visualization
 from jepa_world_model.vis_rollout_batch import save_rollout_sequence_batch
 from jepa_world_model.vis_temporal_pairs import save_temporal_pair_visualization
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
-from jepa_world_model.config_diagnostics import DiagnosticsConfig
+from jepa_world_model.config_diagnostics import DiagnosticsConfig, SpikeDiagnosticsConfig
 from jepa_world_model.plots.write_action_alignment_crosscheck import (
     write_action_alignment_crosscheck,
 )
@@ -696,6 +697,7 @@ class TrainConfig:
     hard_example: HardExampleConfig = field(default_factory=HardExampleConfig)
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
+    spike_diagnostics: SpikeDiagnosticsConfig = field(default_factory=SpikeDiagnosticsConfig)
     graph_diagnostics: GraphDiagnosticsConfig = field(default_factory=GraphDiagnosticsConfig)
     vis_ctrl: VisCtrlConfig = field(default_factory=VisCtrlConfig)
 
@@ -1453,6 +1455,204 @@ def _seed_everything(seed: int) -> Tuple[int, random.Random]:
 # ------------------------------------------------------------
 # Logging helpers
 # ------------------------------------------------------------
+
+
+@dataclass
+class SpikeMetricState:
+    mean: float = 0.0
+    var: float = 0.0
+    count: int = 0
+
+
+class SpikeTracker:
+    def __init__(self, cfg: SpikeDiagnosticsConfig) -> None:
+        self.cfg = cfg
+        self.states: Dict[str, SpikeMetricState] = {}
+        self.spike_count = 0
+
+    def detect(self, metrics: Dict[str, float]) -> List[Dict[str, float]]:
+        events: List[Dict[str, float]] = []
+        for metric in self.cfg.metrics:
+            if metric not in metrics:
+                continue
+            value = float(metrics[metric])
+            state = self.states.setdefault(metric, SpikeMetricState())
+            if state.count >= self.cfg.warmup_steps:
+                std = math.sqrt(max(state.var, 1e-12))
+                z = 0.0 if std <= 0 else (value - state.mean) / std
+                ratio = value / state.mean if state.mean > self.cfg.min_reference else float("inf")
+                is_spike = (
+                    value > state.mean + self.cfg.z_threshold * std
+                    or (state.mean > self.cfg.min_reference and value > state.mean * self.cfg.ratio_threshold)
+                )
+                if is_spike and self.spike_count < self.cfg.max_spikes:
+                    events.append(
+                        {
+                            "metric": metric,
+                            "value": value,
+                            "mean": state.mean,
+                            "std": std,
+                            "z": z,
+                            "ratio": ratio,
+                        }
+                    )
+            self._update_state(state, value)
+        if events:
+            self.spike_count += len(events)
+        return events
+
+    def _update_state(self, state: SpikeMetricState, value: float) -> None:
+        if state.count == 0:
+            state.mean = value
+            state.var = 0.0
+            state.count = 1
+            return
+        decay = self.cfg.ema_decay
+        prev_mean = state.mean
+        state.mean = decay * state.mean + (1.0 - decay) * value
+        delta = value - prev_mean
+        state.var = decay * state.var + (1.0 - decay) * delta * delta
+        state.count += 1
+
+
+def _write_spike_event_row(path: Path, step: int, event: Dict[str, float]) -> None:
+    header = ["step", "metric", "value", "mean", "std", "z", "ratio"]
+    exists = path.exists()
+    with path.open("a", newline="") as handle:
+        writer = csv.writer(handle)
+        if not exists:
+            writer.writerow(header)
+        writer.writerow(
+            [
+                step,
+                event["metric"],
+                f"{event['value']:.6f}",
+                f"{event['mean']:.6f}",
+                f"{event['std']:.6f}",
+                f"{event['z']:.6f}",
+                f"{event['ratio']:.6f}",
+            ]
+        )
+
+
+def _compute_spike_batch_stats(frames: torch.Tensor, actions: torch.Tensor) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {}
+    frames_f = frames.float()
+    stats["frame_mean"] = float(frames_f.mean().item())
+    stats["frame_std"] = float(frames_f.std(unbiased=False).item())
+    stats["frame_min"] = float(frames_f.min().item())
+    stats["frame_max"] = float(frames_f.max().item())
+
+    if frames_f.shape[1] >= 2:
+        deltas = (frames_f[:, 1:] - frames_f[:, :-1]).abs().mean(dim=(2, 3, 4))
+        deltas_flat = deltas.reshape(-1)
+        stats["delta_mean"] = float(deltas_flat.mean().item())
+        stats["delta_std"] = float(deltas_flat.std(unbiased=False).item())
+        stats["delta_max"] = float(deltas_flat.max().item())
+        stats["delta_p90"] = float(torch.quantile(deltas_flat, 0.9).item())
+        stats["delta_zero_frac"] = float((deltas_flat < 1e-3).float().mean().item())
+    else:
+        stats["delta_mean"] = 0.0
+        stats["delta_std"] = 0.0
+        stats["delta_max"] = 0.0
+        stats["delta_p90"] = 0.0
+        stats["delta_zero_frac"] = 0.0
+
+    action_ids = compress_actions_to_ids(actions).detach().cpu().numpy().reshape(-1)
+    action_dim = int(actions.shape[-1])
+    counts: Dict[int, int] = {}
+    for aid in action_ids.tolist():
+        counts[int(aid)] = counts.get(int(aid), 0) + 1
+    total = max(len(action_ids), 1)
+    stats["action_distribution"] = [
+        {
+            "action_id": aid,
+            "label": decode_action_id(aid, action_dim),
+            "count": count,
+            "fraction": count / total,
+        }
+        for aid, count in sorted(counts.items())
+    ]
+
+    per_seq_stats: List[Dict[str, Any]] = []
+    action_ids_seq = compress_actions_to_ids(actions).detach().cpu().numpy()
+    for seq_idx, seq_actions in enumerate(action_ids_seq):
+        seq_actions = [int(a) for a in seq_actions.tolist()]
+        unique_actions = len(set(seq_actions))
+        repeats = sum(1 for i in range(1, len(seq_actions)) if seq_actions[i] == seq_actions[i - 1])
+        per_seq_stats.append(
+            {
+                "batch_index": seq_idx,
+                "unique_actions": unique_actions,
+                "repeat_fraction": repeats / max(len(seq_actions) - 1, 1),
+                "noop_fraction": seq_actions.count(0) / max(len(seq_actions), 1),
+            }
+        )
+    stats["per_sequence"] = per_seq_stats
+    return stats
+
+
+def _write_spike_batch(
+    spike_dir: Path,
+    global_step: int,
+    event: Dict[str, float],
+    batch: Tuple[torch.Tensor, torch.Tensor, List[List[str]], torch.Tensor],
+    metrics: Dict[str, float],
+    cfg: SpikeDiagnosticsConfig,
+) -> None:
+    frames = batch[0].detach().cpu()
+    actions = batch[1].detach().cpu()
+    paths = batch[2]
+    indices = batch[3].detach().cpu().tolist()
+
+    event_dir = spike_dir / f"spike_{global_step:07d}_{event['metric']}"
+    event_dir.mkdir(parents=True, exist_ok=True)
+
+    stats = _compute_spike_batch_stats(frames, actions)
+    payload = {
+        "step": global_step,
+        "metric": event["metric"],
+        "value": event["value"],
+        "mean": event["mean"],
+        "std": event["std"],
+        "z": event["z"],
+        "ratio": event["ratio"],
+        "metrics": metrics,
+        "batch_indices": indices,
+    }
+
+    (event_dir / "summary.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
+    (event_dir / "batch_stats.json").write_text(json.dumps(stats, indent=2, sort_keys=True))
+
+    with (event_dir / "batch_frames.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["batch_index", "time_index", "frame_path"])
+        for b_idx, seq_paths in enumerate(paths):
+            for t_idx, frame_path in enumerate(seq_paths):
+                writer.writerow([b_idx, t_idx, frame_path])
+
+    with (event_dir / "batch_actions.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        header = ["batch_index", "time_index", "action_id", "action_label"]
+        header.extend([f"action_{i}" for i in range(actions.shape[-1])])
+        writer.writerow(header)
+        action_ids = compress_actions_to_ids(actions).detach().cpu().numpy()
+        for b_idx in range(actions.shape[0]):
+            for t_idx in range(actions.shape[1]):
+                aid = int(action_ids[b_idx, t_idx])
+                label = decode_action_id(aid, actions.shape[-1])
+                writer.writerow([b_idx, t_idx, aid, label, *actions[b_idx, t_idx].tolist()])
+
+    if cfg.save_visuals:
+        rows = min(4, frames.shape[0])
+        save_input_batch_visualization(
+            event_dir / "batch_inputs.png",
+            frames,
+            actions,
+            rows,
+            recon=None,
+            include_deltas=True,
+        )
 
 
 def log_metrics(
@@ -2424,12 +2624,19 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_delta_s_dir = run_dir / "vis_delta_s_pca"
     diagnostics_delta_h_dir = run_dir / "vis_delta_h_pca"
     diagnostics_alignment_dir = run_dir / "vis_action_alignment_z"
+    diagnostics_alignment_raw_dir = run_dir / "vis_action_alignment_z_raw"
+    diagnostics_alignment_centered_dir = run_dir / "vis_action_alignment_z_centered"
     diagnostics_alignment_s_dir = run_dir / "vis_action_alignment_s"
+    diagnostics_alignment_s_raw_dir = run_dir / "vis_action_alignment_s_raw"
+    diagnostics_alignment_s_centered_dir = run_dir / "vis_action_alignment_s_centered"
     diagnostics_alignment_h_dir = run_dir / "vis_action_alignment_h"
+    diagnostics_alignment_h_raw_dir = run_dir / "vis_action_alignment_h_raw"
+    diagnostics_alignment_h_centered_dir = run_dir / "vis_action_alignment_h_centered"
     diagnostics_cycle_dir = run_dir / "vis_cycle_error_z"
     diagnostics_cycle_s_dir = run_dir / "vis_cycle_error_s"
     diagnostics_cycle_h_dir = run_dir / "vis_cycle_error_h"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
+    spike_diagnostics_dir = run_dir / "spike_diagnostics"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
     graph_diagnostics_h_dir = run_dir / "graph_diagnostics_h"
@@ -2459,12 +2666,20 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_delta_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_delta_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_raw_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_centered_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_s_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_s_raw_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_s_centered_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_h_raw_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_h_centered_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.spike_diagnostics.enabled:
+        spike_diagnostics_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
         graph_diagnostics_s_dir.mkdir(parents=True, exist_ok=True)
@@ -2490,6 +2705,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         pair_vis_dir.mkdir(parents=True, exist_ok=True)
 
     loss_history = LossHistory()
+    spike_tracker = SpikeTracker(cfg.spike_diagnostics) if cfg.spike_diagnostics.enabled else None
+    spike_events_path = metrics_dir / "spike_events.csv"
 
     write_run_metadata(run_dir, cfg, model_cfg, exclude_fields={"title"})
     write_git_metadata(run_dir)
@@ -2668,6 +2885,23 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         train_start = perf_counter()
         metrics, difficulty_info = training_step(model, decoder, optimizer, batch, cfg, weights, loss_norm_ema)
         timing_totals["train"] += perf_counter() - train_start
+
+        if spike_tracker is not None:
+            spike_events = spike_tracker.detect(metrics)
+            for event in spike_events:
+                _write_spike_event_row(spike_events_path, global_step, event)
+                _write_spike_batch(
+                    spike_diagnostics_dir,
+                    global_step,
+                    event,
+                    batch,
+                    metrics,
+                    cfg.spike_diagnostics,
+                )
+                print(
+                    f"[spike] step {global_step} {event['metric']}={event['value']:.4f} "
+                    f"(mean {event['mean']:.4f}, std {event['std']:.4f}, z {event['z']:.2f})"
+                )
 
         # Update hard examples.
         if hard_reservoir is not None and difficulty_info is not None:
@@ -2960,6 +3194,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     alignment_debug_z,
                     cfg.diagnostics.cosine_high_threshold,
                     motion_z.action_dim,
+                    alignment_label="PCA",
                 )
                 write_action_alignment_report(
                     alignment_stats_z,
@@ -2978,6 +3213,82 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     alignment_stats_z,
                     motion_z,
                     diagnostics_alignment_dir,
+                    global_step,
+                )
+                motion_z_raw = replace(motion_z, delta_proj=motion_z.delta_embed)
+                alignment_stats_z_raw = compute_action_alignment_stats(
+                    motion_z_raw.delta_proj,
+                    motion_z_raw.action_ids,
+                    cfg.diagnostics.min_action_count,
+                    cfg.diagnostics.cosine_high_threshold,
+                )
+                alignment_debug_z_raw = build_action_alignment_debug(
+                    alignment_stats_z_raw,
+                    motion_z_raw.delta_proj,
+                    motion_z_raw.action_ids,
+                )
+                save_action_alignment_detail_plot(
+                    diagnostics_alignment_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
+                    alignment_debug_z_raw,
+                    cfg.diagnostics.cosine_high_threshold,
+                    motion_z_raw.action_dim,
+                    alignment_label="raw delta",
+                )
+                write_action_alignment_report(
+                    alignment_stats_z_raw,
+                    motion_z_raw.action_dim,
+                    inverse_map,
+                    diagnostics_alignment_raw_dir,
+                    global_step,
+                )
+                write_action_alignment_strength(
+                    alignment_stats_z_raw,
+                    motion_z_raw.action_dim,
+                    diagnostics_alignment_raw_dir,
+                    global_step,
+                )
+                write_action_alignment_crosscheck(
+                    alignment_stats_z_raw,
+                    motion_z_raw,
+                    diagnostics_alignment_raw_dir,
+                    global_step,
+                )
+                motion_z_centered = replace(motion_z, delta_proj=motion_z.delta_centered)
+                alignment_stats_z_centered = compute_action_alignment_stats(
+                    motion_z_centered.delta_proj,
+                    motion_z_centered.action_ids,
+                    cfg.diagnostics.min_action_count,
+                    cfg.diagnostics.cosine_high_threshold,
+                )
+                alignment_debug_z_centered = build_action_alignment_debug(
+                    alignment_stats_z_centered,
+                    motion_z_centered.delta_proj,
+                    motion_z_centered.action_ids,
+                )
+                save_action_alignment_detail_plot(
+                    diagnostics_alignment_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
+                    alignment_debug_z_centered,
+                    cfg.diagnostics.cosine_high_threshold,
+                    motion_z_centered.action_dim,
+                    alignment_label="centered delta",
+                )
+                write_action_alignment_report(
+                    alignment_stats_z_centered,
+                    motion_z_centered.action_dim,
+                    inverse_map,
+                    diagnostics_alignment_centered_dir,
+                    global_step,
+                )
+                write_action_alignment_strength(
+                    alignment_stats_z_centered,
+                    motion_z_centered.action_dim,
+                    diagnostics_alignment_centered_dir,
+                    global_step,
+                )
+                write_action_alignment_crosscheck(
+                    alignment_stats_z_centered,
+                    motion_z_centered,
+                    diagnostics_alignment_centered_dir,
                     global_step,
                 )
                 motion_h = build_motion_subspace(
@@ -3023,6 +3334,45 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     alignment_debug_h,
                     cfg.diagnostics.cosine_high_threshold,
                     motion_h.action_dim,
+                    alignment_label="PCA",
+                )
+                motion_h_raw = replace(motion_h, delta_proj=motion_h.delta_embed)
+                alignment_stats_h_raw = compute_action_alignment_stats(
+                    motion_h_raw.delta_proj,
+                    motion_h_raw.action_ids,
+                    cfg.diagnostics.min_action_count,
+                    cfg.diagnostics.cosine_high_threshold,
+                )
+                alignment_debug_h_raw = build_action_alignment_debug(
+                    alignment_stats_h_raw,
+                    motion_h_raw.delta_proj,
+                    motion_h_raw.action_ids,
+                )
+                save_action_alignment_detail_plot(
+                    diagnostics_alignment_h_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
+                    alignment_debug_h_raw,
+                    cfg.diagnostics.cosine_high_threshold,
+                    motion_h_raw.action_dim,
+                    alignment_label="raw delta",
+                )
+                motion_h_centered = replace(motion_h, delta_proj=motion_h.delta_centered)
+                alignment_stats_h_centered = compute_action_alignment_stats(
+                    motion_h_centered.delta_proj,
+                    motion_h_centered.action_ids,
+                    cfg.diagnostics.min_action_count,
+                    cfg.diagnostics.cosine_high_threshold,
+                )
+                alignment_debug_h_centered = build_action_alignment_debug(
+                    alignment_stats_h_centered,
+                    motion_h_centered.delta_proj,
+                    motion_h_centered.action_ids,
+                )
+                save_action_alignment_detail_plot(
+                    diagnostics_alignment_h_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
+                    alignment_debug_h_centered,
+                    cfg.diagnostics.cosine_high_threshold,
+                    motion_h_centered.action_dim,
+                    alignment_label="centered delta",
                 )
                 cycle_errors_h, cycle_per_action_h = compute_cycle_errors(
                     motion_h.proj_sequences,
@@ -3108,6 +3458,54 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.diagnostics.cosine_high_threshold,
                     alignment_debug_z,
                 )
+                write_action_alignment_csv(
+                    diagnostics_alignment_raw_dir,
+                    global_step,
+                    motion_z.action_dim,
+                    alignment_stats_z_raw,
+                )
+                write_action_alignment_full_csv(
+                    diagnostics_alignment_raw_dir,
+                    global_step,
+                    motion_z.action_dim,
+                    alignment_stats_z_raw,
+                )
+                write_action_alignment_pairwise_csv(
+                    diagnostics_alignment_raw_dir,
+                    global_step,
+                    motion_z.action_dim,
+                    alignment_debug_z_raw,
+                )
+                write_action_alignment_overview_txt(
+                    diagnostics_alignment_raw_dir,
+                    global_step,
+                    cfg.diagnostics.cosine_high_threshold,
+                    alignment_debug_z_raw,
+                )
+                write_action_alignment_csv(
+                    diagnostics_alignment_centered_dir,
+                    global_step,
+                    motion_z.action_dim,
+                    alignment_stats_z_centered,
+                )
+                write_action_alignment_full_csv(
+                    diagnostics_alignment_centered_dir,
+                    global_step,
+                    motion_z.action_dim,
+                    alignment_stats_z_centered,
+                )
+                write_action_alignment_pairwise_csv(
+                    diagnostics_alignment_centered_dir,
+                    global_step,
+                    motion_z.action_dim,
+                    alignment_debug_z_centered,
+                )
+                write_action_alignment_overview_txt(
+                    diagnostics_alignment_centered_dir,
+                    global_step,
+                    cfg.diagnostics.cosine_high_threshold,
+                    alignment_debug_z_centered,
+                )
                 write_cycle_error_values_csv(
                     diagnostics_cycle_dir,
                     global_step,
@@ -3163,6 +3561,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     alignment_debug_s,
                     cfg.diagnostics.cosine_high_threshold,
                     motion_s.action_dim,
+                    alignment_label="PCA",
                 )
                 write_action_alignment_report(
                     alignment_stats_s,
@@ -3181,6 +3580,82 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     alignment_stats_s,
                     motion_s,
                     diagnostics_alignment_s_dir,
+                    global_step,
+                )
+                motion_s_raw = replace(motion_s, delta_proj=motion_s.delta_embed)
+                alignment_stats_s_raw = compute_action_alignment_stats(
+                    motion_s_raw.delta_proj,
+                    motion_s_raw.action_ids,
+                    cfg.diagnostics.min_action_count,
+                    cfg.diagnostics.cosine_high_threshold,
+                )
+                alignment_debug_s_raw = build_action_alignment_debug(
+                    alignment_stats_s_raw,
+                    motion_s_raw.delta_proj,
+                    motion_s_raw.action_ids,
+                )
+                save_action_alignment_detail_plot(
+                    diagnostics_alignment_s_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
+                    alignment_debug_s_raw,
+                    cfg.diagnostics.cosine_high_threshold,
+                    motion_s_raw.action_dim,
+                    alignment_label="raw delta",
+                )
+                write_action_alignment_report(
+                    alignment_stats_s_raw,
+                    motion_s_raw.action_dim,
+                    inverse_map,
+                    diagnostics_alignment_s_raw_dir,
+                    global_step,
+                )
+                write_action_alignment_strength(
+                    alignment_stats_s_raw,
+                    motion_s_raw.action_dim,
+                    diagnostics_alignment_s_raw_dir,
+                    global_step,
+                )
+                write_action_alignment_crosscheck(
+                    alignment_stats_s_raw,
+                    motion_s_raw,
+                    diagnostics_alignment_s_raw_dir,
+                    global_step,
+                )
+                motion_s_centered = replace(motion_s, delta_proj=motion_s.delta_centered)
+                alignment_stats_s_centered = compute_action_alignment_stats(
+                    motion_s_centered.delta_proj,
+                    motion_s_centered.action_ids,
+                    cfg.diagnostics.min_action_count,
+                    cfg.diagnostics.cosine_high_threshold,
+                )
+                alignment_debug_s_centered = build_action_alignment_debug(
+                    alignment_stats_s_centered,
+                    motion_s_centered.delta_proj,
+                    motion_s_centered.action_ids,
+                )
+                save_action_alignment_detail_plot(
+                    diagnostics_alignment_s_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
+                    alignment_debug_s_centered,
+                    cfg.diagnostics.cosine_high_threshold,
+                    motion_s_centered.action_dim,
+                    alignment_label="centered delta",
+                )
+                write_action_alignment_report(
+                    alignment_stats_s_centered,
+                    motion_s_centered.action_dim,
+                    inverse_map,
+                    diagnostics_alignment_s_centered_dir,
+                    global_step,
+                )
+                write_action_alignment_strength(
+                    alignment_stats_s_centered,
+                    motion_s_centered.action_dim,
+                    diagnostics_alignment_s_centered_dir,
+                    global_step,
+                )
+                write_action_alignment_crosscheck(
+                    alignment_stats_s_centered,
+                    motion_s_centered,
+                    diagnostics_alignment_s_centered_dir,
                     global_step,
                 )
                 cycle_errors_s, cycle_per_action_s = compute_cycle_errors(
@@ -3230,6 +3705,54 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     global_step,
                     cfg.diagnostics.cosine_high_threshold,
                     alignment_debug_s,
+                )
+                write_action_alignment_csv(
+                    diagnostics_alignment_s_raw_dir,
+                    global_step,
+                    motion_s.action_dim,
+                    alignment_stats_s_raw,
+                )
+                write_action_alignment_full_csv(
+                    diagnostics_alignment_s_raw_dir,
+                    global_step,
+                    motion_s.action_dim,
+                    alignment_stats_s_raw,
+                )
+                write_action_alignment_pairwise_csv(
+                    diagnostics_alignment_s_raw_dir,
+                    global_step,
+                    motion_s.action_dim,
+                    alignment_debug_s_raw,
+                )
+                write_action_alignment_overview_txt(
+                    diagnostics_alignment_s_raw_dir,
+                    global_step,
+                    cfg.diagnostics.cosine_high_threshold,
+                    alignment_debug_s_raw,
+                )
+                write_action_alignment_csv(
+                    diagnostics_alignment_s_centered_dir,
+                    global_step,
+                    motion_s.action_dim,
+                    alignment_stats_s_centered,
+                )
+                write_action_alignment_full_csv(
+                    diagnostics_alignment_s_centered_dir,
+                    global_step,
+                    motion_s.action_dim,
+                    alignment_stats_s_centered,
+                )
+                write_action_alignment_pairwise_csv(
+                    diagnostics_alignment_s_centered_dir,
+                    global_step,
+                    motion_s.action_dim,
+                    alignment_debug_s_centered,
+                )
+                write_action_alignment_overview_txt(
+                    diagnostics_alignment_s_centered_dir,
+                    global_step,
+                    cfg.diagnostics.cosine_high_threshold,
+                    alignment_debug_s_centered,
                 )
                 write_cycle_error_values_csv(
                     diagnostics_cycle_s_dir,

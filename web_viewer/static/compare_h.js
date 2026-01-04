@@ -18,10 +18,22 @@ const COMPARE_CONFIG = {
     { value: "vis_odometry_current_h", label: "Odometry:Cumulative sum of Δh PCA/ICA/t-SNE", prefix: "odometry_h_", folder: "vis_odometry" },
     { value: "vis_odometry_h_vs_h_hat", label: "Odometry:||h - h_hat|| + scatter", prefix: "h_vs_h_hat_", folder: "vis_odometry" },
     {
-      value: "vis_action_alignment_detail",
-      label: "Diagnostics:Action alignment (H)",
+      value: "vis_action_alignment_detail_h",
+      label: "Diagnostics:Action alignment of PCA (H)",
       prefix: "action_alignment_detail_",
       folder: "vis_action_alignment_h",
+    },
+    {
+      value: "vis_action_alignment_detail_raw_h",
+      label: "Diagnostics:Action alignment of raw delta (H)",
+      prefix: "action_alignment_detail_",
+      folder: "vis_action_alignment_h_raw",
+    },
+    {
+      value: "vis_action_alignment_detail_centered_h",
+      label: "Diagnostics:Action alignment of centered delta (H)",
+      prefix: "action_alignment_detail_",
+      folder: "vis_action_alignment_h_centered",
     },
     { value: "vis_ctrl_smoothness_h", label: "Vis v Ctrl:Local smoothness (H)", prefix: "smoothness_h_", folder: "vis_vis_ctrl" },
     {
