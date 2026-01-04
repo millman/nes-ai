@@ -43,173 +43,179 @@
     <div id="diagnostics-loss-plot" class="diagnostics-loss-plot"></div>
 </div>
 
-<div class="diagnostic-row-grid mb-3">
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-delta-header">
-            <span class="diagnostic-title">Delta-z PCA</span>
-            <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-                <span
-                    class="diagnostic-info-icon"
-                    data-bs-toggle="tooltip"
-                    data-bs-placement="left"
-                    title="PCA of delta-z steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct motions. Good: clear, separated clusters with minimal overlap."
-                >i</span>
+<div class="diagnostic-zhs-grid mb-3">
+    <div class="diagnostic-zhs-col">
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-delta-header">
+                <span class="diagnostic-title">Delta-z PCA</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                    <span
+                        class="diagnostic-info-icon"
+                        data-bs-toggle="tooltip"
+                        data-bs-placement="left"
+                        title="PCA of delta-z steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct motions. Good: clear, separated clusters with minimal overlap."
+                    >i</span>
+                </div>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-z-delta-img" class="img-fluid rounded border d-none" alt="Delta-z PCA diagnostic">
+                <div class="text-muted small" id="diagnostics-z-delta-caption"></div>
             </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-z-delta-img" class="img-fluid rounded border d-none" alt="Delta-z PCA diagnostic">
-            <div class="text-muted small" id="diagnostics-z-delta-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-delta-header">
-            <span class="diagnostic-title">Delta-h PCA</span>
-            <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-                <span
-                    class="diagnostic-info-icon"
-                    data-bs-toggle="tooltip"
-                    data-bs-placement="left"
-                    title="PCA of delta-h steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct dynamics modes."
-                >i</span>
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-align-header">
+                <span class="diagnostic-title">Action alignment</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                    <span
+                        class="diagnostic-info-icon"
+                        data-bs-toggle="tooltip"
+                        data-bs-placement="left"
+                        title="Per-action cosine alignment of delta-z directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers."
+                    >i</span>
+                </div>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-z-align-img" class="img-fluid rounded border d-none" alt="Alignment detail diagnostic">
+                <div class="text-muted small" id="diagnostics-z-align-caption"></div>
             </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-h-delta-img" class="img-fluid rounded border d-none" alt="Delta-h PCA diagnostic">
-            <div class="text-muted small" id="diagnostics-h-delta-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-delta-header">
-            <span class="diagnostic-title">Delta-s PCA</span>
-            <div class="d-flex align-items-center gap-2">
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-self-header">
+                <span class="diagnostic-title">Self-distance (Z)</span>
                 <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-                <span
-                    class="diagnostic-info-icon"
-                    data-bs-toggle="tooltip"
-                    data-bs-placement="left"
-                    title="PCA of delta-s steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct motions. Good: clear, separated clusters with minimal overlap."
-                >i</span>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-z-self-img" class="img-fluid rounded border d-none" alt="Self-distance (Z) diagnostic">
+                <div class="text-muted small" id="diagnostics-z-self-caption"></div>
             </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-s-delta-img" class="img-fluid rounded border d-none" alt="Delta-s PCA diagnostic">
-            <div class="text-muted small" id="diagnostics-s-delta-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-align-header">
-            <span class="diagnostic-title">Action alignment</span>
-            <div class="d-flex align-items-center gap-2">
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-cycle-header">
+                <span class="diagnostic-title">Cycle error (Z)</span>
                 <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-                <span
-                    class="diagnostic-info-icon"
-                    data-bs-toggle="tooltip"
-                    data-bs-placement="left"
-                    title="Per-action cosine alignment of delta-z directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers."
-                >i</span>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-z-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (Z) diagnostic">
+                <div class="text-muted small" id="diagnostics-z-cycle-caption"></div>
             </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-z-align-img" class="img-fluid rounded border d-none" alt="Alignment detail diagnostic">
-            <div class="text-muted small" id="diagnostics-z-align-caption"></div>
-        </div>
     </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-align-header">
-            <span class="diagnostic-title">Action alignment (H)</span>
-            <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-                <span
-                    class="diagnostic-info-icon"
-                    data-bs-toggle="tooltip"
-                    data-bs-placement="left"
-                    title="Per-action cosine alignment of delta-h directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment."
-                >i</span>
+    <div class="diagnostic-zhs-col">
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-delta-header">
+                <span class="diagnostic-title">Delta-h PCA</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                    <span
+                        class="diagnostic-info-icon"
+                        data-bs-toggle="tooltip"
+                        data-bs-placement="left"
+                        title="PCA of delta-h steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct dynamics modes."
+                    >i</span>
+                </div>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-h-delta-img" class="img-fluid rounded border d-none" alt="Delta-h PCA diagnostic">
+                <div class="text-muted small" id="diagnostics-h-delta-caption"></div>
             </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-h-align-img" class="img-fluid rounded border d-none" alt="Alignment detail (H) diagnostic">
-            <div class="text-muted small" id="diagnostics-h-align-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-align-header">
-            <span class="diagnostic-title">Action alignment (S)</span>
-            <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-                <span
-                    class="diagnostic-info-icon"
-                    data-bs-toggle="tooltip"
-                    data-bs-placement="left"
-                    title="Per-action cosine alignment of delta-s directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers."
-                >i</span>
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-align-header">
+                <span class="diagnostic-title">Action alignment (H)</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                    <span
+                        class="diagnostic-info-icon"
+                        data-bs-toggle="tooltip"
+                        data-bs-placement="left"
+                        title="Per-action cosine alignment of delta-h directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment."
+                    >i</span>
+                </div>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-h-align-img" class="img-fluid rounded border d-none" alt="Alignment detail (H) diagnostic">
+                <div class="text-muted small" id="diagnostics-h-align-caption"></div>
             </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-s-align-img" class="img-fluid rounded border d-none" alt="Alignment detail (S) diagnostic">
-            <div class="text-muted small" id="diagnostics-s-align-caption"></div>
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-self-header">
+                <span class="diagnostic-title">Self-distance (H)</span>
+                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-h-self-img" class="img-fluid rounded border d-none" alt="Self-distance (H) diagnostic">
+                <div class="text-muted small" id="diagnostics-h-self-caption"></div>
+            </div>
+        </div>
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-cycle-header">
+                <span class="diagnostic-title">Cycle error (H)</span>
+                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-h-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (H) diagnostic">
+                <div class="text-muted small" id="diagnostics-h-cycle-caption"></div>
+            </div>
         </div>
     </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-self-header">
-            <span class="diagnostic-title">Self-distance (Z)</span>
-            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+    <div class="diagnostic-zhs-col">
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-delta-header">
+                <span class="diagnostic-title">Delta-s PCA</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                    <span
+                        class="diagnostic-info-icon"
+                        data-bs-toggle="tooltip"
+                        data-bs-placement="left"
+                        title="PCA of delta-s steps across the batch. Read: spokes or clusters correspond to action directions; separation shows distinct motions. Good: clear, separated clusters with minimal overlap."
+                    >i</span>
+                </div>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-s-delta-img" class="img-fluid rounded border d-none" alt="Delta-s PCA diagnostic">
+                <div class="text-muted small" id="diagnostics-s-delta-caption"></div>
+            </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-z-self-img" class="img-fluid rounded border d-none" alt="Self-distance (Z) diagnostic">
-            <div class="text-muted small" id="diagnostics-z-self-caption"></div>
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-align-header">
+                <span class="diagnostic-title">Action alignment (S)</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+                    <span
+                        class="diagnostic-info-icon"
+                        data-bs-toggle="tooltip"
+                        data-bs-placement="left"
+                        title="Per-action cosine alignment of delta-s directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers."
+                    >i</span>
+                </div>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-s-align-img" class="img-fluid rounded border d-none" alt="Alignment detail (S) diagnostic">
+                <div class="text-muted small" id="diagnostics-s-align-caption"></div>
+            </div>
         </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-self-header">
-            <span class="diagnostic-title">Self-distance (H)</span>
-            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-self-header">
+                <span class="diagnostic-title">Self-distance (S)</span>
+                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-s-self-img" class="img-fluid rounded border d-none" alt="Self-distance (S) diagnostic">
+                <div class="text-muted small" id="diagnostics-s-self-caption"></div>
+            </div>
         </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-h-self-img" class="img-fluid rounded border d-none" alt="Self-distance (H) diagnostic">
-            <div class="text-muted small" id="diagnostics-h-self-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-self-header">
-            <span class="diagnostic-title">Self-distance (S)</span>
-            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-        </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-s-self-img" class="img-fluid rounded border d-none" alt="Self-distance (S) diagnostic">
-            <div class="text-muted small" id="diagnostics-s-self-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-cycle-header">
-            <span class="diagnostic-title">Cycle error (Z)</span>
-            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-        </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-z-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (Z) diagnostic">
-            <div class="text-muted small" id="diagnostics-z-cycle-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-h-cycle-header">
-            <span class="diagnostic-title">Cycle error (H)</span>
-            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-        </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-h-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (H) diagnostic">
-            <div class="text-muted small" id="diagnostics-h-cycle-caption"></div>
-        </div>
-    </div>
-    <div class="card h-100">
-        <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-cycle-header">
-            <span class="diagnostic-title">Cycle error (S)</span>
-            <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
-        </div>
-        <div class="card-body d-flex flex-column gap-2">
-            <img id="diagnostics-s-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (S) diagnostic">
-            <div class="text-muted small" id="diagnostics-s-cycle-caption"></div>
+        <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-s-cycle-header">
+                <span class="diagnostic-title">Cycle error (S)</span>
+                <span class="text-muted small">Step: <span class="diagnostics-step-label">—</span></span>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-s-cycle-img" class="img-fluid rounded border d-none" alt="Cycle error (S) diagnostic">
+                <div class="text-muted small" id="diagnostics-s-cycle-caption"></div>
+            </div>
         </div>
     </div>
 </div>
