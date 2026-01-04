@@ -37,7 +37,7 @@ function initializeSelfDistancePage(config, serverData) {
     const currentAction = document.getElementById("self-distance-current-action");
     const frameRow = document.getElementById("self-distance-frame-row");
     const stepImg = document.getElementById("self-distance-step-img");
-    const stepPath = document.getElementById("self-distance-step-path");
+    const stepLabel = document.getElementById("self-distance-step-label");
     const diagLossPlot = document.getElementById("self-distance-loss-plot");
     const diagLossWrapper = document.getElementById("self-distance-loss-wrapper");
     const diagLossPin = document.getElementById("self-distance-loss-pin");
@@ -91,15 +91,15 @@ function initializeSelfDistancePage(config, serverData) {
     };
 
     const updateSelfDistanceImage = (step) => {
-        if (!stepImg || !stepPath) return;
+        if (!stepImg || !stepLabel) return;
         const matched = nearestSelfStep(step);
         if (matched !== null && selfDistanceMap[matched]) {
             stepImg.src = selfDistanceMap[matched].url;
             stepImg.classList.remove("d-none");
-            stepPath.textContent = selfDistanceMap[matched].path;
+            stepLabel.textContent = matched;
         } else {
             stepImg.classList.add("d-none");
-            stepPath.textContent = `No self-distance image for step ${step}`;
+            stepLabel.textContent = "—";
         }
     };
 

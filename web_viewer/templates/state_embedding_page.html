@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
@@ -12,80 +13,6 @@
     height: 300px;
     min-height: 300px;
     max-height: 320px;
-}
-
-.plot-pin-wrapper {
-    position: relative;
-}
-
-.plot-pin-plot {
-    height: 220px;
-}
-
-.plot-pin-wrapper.sticky-active {
-    position: sticky;
-    top: 0;
-    z-index: 1030;
-    background: #fff;
-    border-radius: 0.5rem;
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
-    padding-bottom: 0.5rem;
-}
-
-.plot-pin-btn {
-    position: absolute;
-    bottom: 10px;
-    right: 10px;
-    width: 32px;
-    height: 32px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background-color: rgba(255, 255, 255, 0.9);
-    border: 1px solid #ced4da;
-    color: #6c757d;
-    z-index: 5;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
-    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
-}
-
-.plot-pin-btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
-}
-
-.plot-pin-btn.active {
-    background-color: #0d6efd;
-    border-color: #0a58ca;
-    color: #fff;
-}
-
-.self-distance-info-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 999px;
-    background: #eef2ff;
-    color: #3949ab;
-    font-size: 12px;
-    border: 1px solid #c5cae9;
-    cursor: pointer;
-}
-
-.self-distance-step-label {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: 0.75rem;
-    color: #6c757d;
-    flex: 1 1 auto;
-    min-width: 0;
-    margin-left: auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: right;
-    white-space: nowrap;
 }
 </style>
 
@@ -186,10 +113,12 @@
 <div class="row g-3 mt-3">
     <div class="col-12 col-lg-6">
         <div class="card h-100">
-            <div class="card-header py-2 d-flex align-items-center gap-2">
-                <span>Self-distance image (S)</span>
-                <span class="self-distance-step-label" id="state-embedding-step-path">—</span>
-                <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance S image over steps. Read: smoother trends mean stable geometry. Good: consistent scale with few abrupt spikes or drift.">i</span>
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                <span class="image-preview-card-title">Self-distance image (S)</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="step-label-value" id="state-embedding-step-label">—</span></span>
+                    <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance S image over steps. Read: smoother trends mean stable geometry. Good: consistent scale with few abrupt spikes or drift.">i</span>
+                </div>
             </div>
             <div class="card-body d-flex flex-column gap-2 align-items-start">
                 <img id="state-embedding-step-img" class="img-fluid rounded border d-none" alt="State embedding step">
@@ -198,10 +127,12 @@
     </div>
     <div class="col-12 col-lg-6">
         <div class="card h-100">
-            <div class="card-header py-2 d-flex align-items-center gap-2">
-                <span>State embedding norm histogram</span>
-                <span class="self-distance-step-label" id="state-embedding-hist-path">—</span>
-                <span class="self-distance-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="State embedding norm histogram over steps. Read: stable spread without collapse or runaway norms. Good: consistent scale with few sudden shifts.">i</span>
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                <span class="image-preview-card-title">State embedding norm histogram</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="step-label-value" id="state-embedding-hist-label">—</span></span>
+                    <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="State embedding norm histogram over steps. Read: stable spread without collapse or runaway norms. Good: consistent scale with few sudden shifts.">i</span>
+                </div>
             </div>
             <div class="card-body d-flex flex-column gap-2 align-items-start">
                 <img id="state-embedding-hist-img" class="img-fluid rounded border d-none" alt="State embedding norm histogram">
@@ -242,9 +173,9 @@
         const currentAction = document.getElementById("state-embedding-current-action");
         const frameRow = document.getElementById("state-embedding-frame-row");
         const stepImg = document.getElementById("state-embedding-step-img");
-        const stepPath = document.getElementById("state-embedding-step-path");
+        const stepLabel = document.getElementById("state-embedding-step-label");
         const histImg = document.getElementById("state-embedding-hist-img");
-        const histPath = document.getElementById("state-embedding-hist-path");
+        const histLabel = document.getElementById("state-embedding-hist-label");
         const diagLossPlot = document.getElementById("state-embedding-loss-plot");
         const diagLossWrapper = document.getElementById("state-embedding-loss-wrapper");
         const diagLossPin = document.getElementById("state-embedding-loss-pin");
@@ -338,15 +269,9 @@
             const nearest = nearestStateStep(step);
             if (nearest === null) {
                 if (stepImg) stepImg.classList.add("d-none");
-                if (stepPath) {
-                    stepPath.textContent = "No self-distance image available.";
-                    stepPath.setAttribute("title", "No self-distance image available.");
-                }
+                if (stepLabel) stepLabel.textContent = "—";
                 if (histImg) histImg.classList.add("d-none");
-                if (histPath) {
-                    histPath.textContent = "No histogram available.";
-                    histPath.setAttribute("title", "No histogram available.");
-                }
+                if (histLabel) histLabel.textContent = "—";
                 return;
             }
             const stateEntry = stateEmbeddingMap[nearest];
@@ -354,16 +279,10 @@
                 if (stateEntry) {
                     stepImg.src = stateEntry.url;
                     stepImg.classList.remove("d-none");
-                    if (stepPath) {
-                        stepPath.textContent = `${stateEntry.path} (step ${nearest})`;
-                        stepPath.setAttribute("title", `${stateEntry.path} (step ${nearest})`);
-                    }
+                    if (stepLabel) stepLabel.textContent = nearest;
                 } else {
                     stepImg.classList.add("d-none");
-                    if (stepPath) {
-                        stepPath.textContent = "No self-distance image available.";
-                        stepPath.setAttribute("title", "No self-distance image available.");
-                    }
+                    if (stepLabel) stepLabel.textContent = "—";
                 }
             }
             const histEntry = stateEmbeddingHistMap[nearest];
@@ -371,16 +290,10 @@
                 if (histEntry) {
                     histImg.src = histEntry.url;
                     histImg.classList.remove("d-none");
-                    if (histPath) {
-                        histPath.textContent = `${histEntry.path} (step ${nearest})`;
-                        histPath.setAttribute("title", `${histEntry.path} (step ${nearest})`);
-                    }
+                    if (histLabel) histLabel.textContent = nearest;
                 } else {
                     histImg.classList.add("d-none");
-                    if (histPath) {
-                        histPath.textContent = "No histogram available.";
-                        histPath.setAttribute("title", "No histogram available.");
-                    }
+                    if (histLabel) histLabel.textContent = "—";
                 }
             }
         };

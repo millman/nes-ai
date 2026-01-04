@@ -34,13 +34,13 @@
                         {% endif %}
                         <span class="nav-link px-1"> </span>
                         {% if selected_ids is defined and selected_ids|length >= 2 %}
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'compare_z' else '' }}" href="{{ url_for('compare_z') }}?ids={{ selected_ids|join(',') }}">Z</a>
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'compare_h' else '' }}" href="{{ url_for('compare_h') }}?ids={{ selected_ids|join(',') }}">H</a>
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'compare_s' else '' }}" href="{{ url_for('compare_s') }}?ids={{ selected_ids|join(',') }}">S</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'comparison' else '' }}" href="{{ url_for('comparison') }}?ids={{ selected_ids|join(',') }}&folder_group=diags_z">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'comparison' else '' }}" href="{{ url_for('comparison') }}?ids={{ selected_ids|join(',') }}&folder_group=diags_h">H</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'comparison' else '' }}" href="{{ url_for('comparison') }}?ids={{ selected_ids|join(',') }}&folder_group=diags_s">S</a>
                         {% else %}
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'compare_z' else '' }}" href="{{ url_for('compare_z') }}">Z</a>
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'compare_h' else '' }}" href="{{ url_for('compare_h') }}">H</a>
-                        <a class="nav-link px-1 {{ 'active' if current_nav == 'compare_s' else '' }}" href="{{ url_for('compare_s') }}">S</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'comparison' else '' }}" href="{{ url_for('comparison') }}?folder_group=diags_z">Z</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'comparison' else '' }}" href="{{ url_for('comparison') }}?folder_group=diags_h">H</a>
+                        <a class="nav-link px-1 {{ 'active' if current_nav == 'comparison' else '' }}" href="{{ url_for('comparison') }}?folder_group=diags_s">S</a>
                         {% endif %}
                     </li>
                     <li class="nav-item d-none d-lg-block text-white-50">|</li>

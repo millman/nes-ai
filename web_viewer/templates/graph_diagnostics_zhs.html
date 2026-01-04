@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
 {% endblock %}
@@ -9,7 +10,7 @@
 <style>
 .graph-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 1rem;
 }
 .graph-card-img {
@@ -22,58 +23,8 @@
 .graph-summary-table td {
     padding: 0.2rem 0.4rem;
 }
-.graph-loss-wrapper {
-    position: relative;
-}
 .graph-loss-plot {
     height: 220px;
-}
-.graph-loss-wrapper.sticky-active {
-    position: sticky;
-    top: 0;
-    z-index: 1030;
-    background: #fff;
-    border-radius: 0.5rem;
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
-}
-.graph-pin-btn {
-    position: absolute;
-    bottom: 10px;
-    right: 10px;
-    width: 32px;
-    height: 32px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background-color: rgba(255, 255, 255, 0.9);
-    border: 1px solid #ced4da;
-    color: #6c757d;
-    z-index: 5;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
-    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
-}
-.graph-pin-btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
-}
-.graph-pin-btn.active {
-    background-color: #0d6efd;
-    border-color: #0a58ca;
-    color: #fff;
-}
-.graph-info-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 999px;
-    background: #eef2ff;
-    color: #3949ab;
-    font-size: 12px;
-    border: 1px solid #c5cae9;
-    cursor: pointer;
 }
 </style>
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
@@ -99,10 +50,10 @@
 {% if not experiment %}
 <div class="text-muted fst-italic">No graph diagnostics found.</div>
 {% else %}
-<div class="card mb-3 graph-loss-wrapper sticky-active" id="graph-loss-wrapper">
+<div class="card mb-3 plot-pin-wrapper sticky-active" id="graph-loss-wrapper">
     <button
         type="button"
-        class="graph-pin-btn active"
+        class="plot-pin-btn active"
         id="graph-loss-pin"
         aria-pressed="true"
         aria-label="Pin training metrics plot"
@@ -115,7 +66,7 @@
     <div class="card-header py-2 d-flex align-items-center gap-2">
         <strong>Training metrics</strong>
         <span class="text-muted small">hover to scrub steps</span>
-        <span class="ms-auto text-muted small">Step: <span id="graph-step-label" class="graph-step-label" data-step-scope="all">—</span></span>
+        <span class="ms-auto text-muted small">Step: <span id="step-label-value" class="step-label-value" data-step-scope="all">—</span></span>
     </div>
     <div class="card-body">
         <div id="graph-loss-plot" class="graph-loss-plot"></div>
@@ -128,10 +79,10 @@
         <div class="graph-grid mb-3">
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>1-step rank CDF</span>
+                    <span class="image-preview-card-title">1-step rank CDF</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="z">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Read: curves closer to top-left imply higher hit@K; flat/slow curves mean poor retrieval. Good: steep curve with high hit@K.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="z">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Read: curves closer to top-left imply higher hit@K; flat/slow curves mean poor retrieval. Good: steep curve with high hit@K.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -141,10 +92,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>Neighborhood size</span>
+                    <span class="image-preview-card-title">Neighborhood size</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="z">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Read: Neff2 should be moderately above Neff1; huge spread suggests diffusion/shortcuts, tiny values mean overly sharp edges. Good: moderate Neff2/Neff1 with tight spread.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="z">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Read: Neff2 should be moderately above Neff1; huge spread suggests diffusion/shortcuts, tiny values mean overly sharp edges. Good: moderate Neff2/Neff1 with tight spread.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -154,10 +105,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>Edge consistency</span>
+                    <span class="image-preview-card-title">Edge consistency</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="z">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error for sampled top-K edges. Read: lower errors and shorter tails mean more consistent edges. Good: low mean with minimal long tail.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="z">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error for sampled top-K edges. Read: lower errors and shorter tails mean more consistent edges. Good: low mean with minimal long tail.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -167,10 +118,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>2-hop rank CDF</span>
+                    <span class="image-preview-card-title">2-hop rank CDF</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="z">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Read: compare to 1-step; big drop indicates poor composability. Good: similar curve to 1-step.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="z">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Read: compare to 1-step; big drop indicates poor composability. Good: similar curve to 1-step.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -180,10 +131,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>In-degree / hubness</span>
+                    <span class="image-preview-card-title">In-degree / hubness</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="z">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Read: balanced degrees are healthy; very high max/top-1% indicates hub collapse. Good: bounded max/top-1% with broad but not spiky distribution.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="z">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Read: balanced degrees are healthy; very high max/top-1% indicates hub collapse. Good: bounded max/top-1% with broad but not spiky distribution.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -193,10 +144,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>History</span>
+                    <span class="image-preview-card-title">History</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="z">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Read: stable or improving hit@K with moderate Neff growth and low long-gap. Good: steady mutual, bounded max in-degree, and improving hit@K.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="z">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Read: stable or improving hit@K with moderate Neff growth and low long-gap. Good: steady mutual, bounded max in-degree, and improving hit@K.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -214,10 +165,10 @@
         <div class="graph-grid mb-3">
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>1-step rank CDF</span>
+                    <span class="image-preview-card-title">1-step rank CDF</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="h">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Read: curves closer to top-left imply higher hit@K; flat/slow curves mean poor retrieval. Good: steep curve with high hit@K.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="h">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Read: curves closer to top-left imply higher hit@K; flat/slow curves mean poor retrieval. Good: steep curve with high hit@K.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -227,10 +178,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>Neighborhood size</span>
+                    <span class="image-preview-card-title">Neighborhood size</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="h">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Read: Neff2 should be moderately above Neff1; huge spread suggests diffusion/shortcuts, tiny values mean overly sharp edges. Good: moderate Neff2/Neff1 with tight spread.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="h">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Read: Neff2 should be moderately above Neff1; huge spread suggests diffusion/shortcuts, tiny values mean overly sharp edges. Good: moderate Neff2/Neff1 with tight spread.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -240,10 +191,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>Edge consistency</span>
+                    <span class="image-preview-card-title">Edge consistency</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="h">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error for sampled top-K edges. Read: lower errors and shorter tails mean more consistent edges. Good: low mean with minimal long tail.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="h">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error for sampled top-K edges. Read: lower errors and shorter tails mean more consistent edges. Good: low mean with minimal long tail.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -253,10 +204,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>2-hop rank CDF</span>
+                    <span class="image-preview-card-title">2-hop rank CDF</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="h">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Read: compare to 1-step; big drop indicates poor composability. Good: similar curve to 1-step.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="h">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Read: compare to 1-step; big drop indicates poor composability. Good: similar curve to 1-step.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -266,10 +217,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>In-degree / hubness</span>
+                    <span class="image-preview-card-title">In-degree / hubness</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="h">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Read: balanced degrees are healthy; very high max/top-1% indicates hub collapse. Good: bounded max/top-1% with broad but not spiky distribution.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="h">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Read: balanced degrees are healthy; very high max/top-1% indicates hub collapse. Good: bounded max/top-1% with broad but not spiky distribution.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -279,10 +230,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>History</span>
+                    <span class="image-preview-card-title">History</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="h">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Read: stable or improving hit@K with moderate Neff growth and low long-gap. Good: steady mutual, bounded max in-degree, and improving hit@K.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="h">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Read: stable or improving hit@K with moderate Neff growth and low long-gap. Good: steady mutual, bounded max in-degree, and improving hit@K.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -300,10 +251,10 @@
         <div class="graph-grid mb-3">
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>1-step rank CDF</span>
+                    <span class="image-preview-card-title">1-step rank CDF</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="s">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Read: curves closer to top-left imply higher hit@K; flat/slow curves mean poor retrieval. Good: steep curve with high hit@K.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="s">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the true next state under P. Read: curves closer to top-left imply higher hit@K; flat/slow curves mean poor retrieval. Good: steep curve with high hit@K.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -313,10 +264,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>Neighborhood size</span>
+                    <span class="image-preview-card-title">Neighborhood size</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="s">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Read: Neff2 should be moderately above Neff1; huge spread suggests diffusion/shortcuts, tiny values mean overly sharp edges. Good: moderate Neff2/Neff1 with tight spread.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="s">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Effective neighborhood sizes exp(H). Read: Neff2 should be moderately above Neff1; huge spread suggests diffusion/shortcuts, tiny values mean overly sharp edges. Good: moderate Neff2/Neff1 with tight spread.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -326,10 +277,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>Edge consistency</span>
+                    <span class="image-preview-card-title">Edge consistency</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="s">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error for sampled top-K edges. Read: lower errors and shorter tails mean more consistent edges. Good: low mean with minimal long tail.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="s">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Predictor-edge error for sampled top-K edges. Read: lower errors and shorter tails mean more consistent edges. Good: low mean with minimal long tail.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -339,10 +290,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>2-hop rank CDF</span>
+                    <span class="image-preview-card-title">2-hop rank CDF</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="s">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Read: compare to 1-step; big drop indicates poor composability. Good: similar curve to 1-step.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="s">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Rank of the t+2 state under P². Read: compare to 1-step; big drop indicates poor composability. Good: similar curve to 1-step.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -352,10 +303,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>In-degree / hubness</span>
+                    <span class="image-preview-card-title">In-degree / hubness</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="s">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Read: balanced degrees are healthy; very high max/top-1% indicates hub collapse. Good: bounded max/top-1% with broad but not spiky distribution.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="s">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="In-degree of the top-K graph. Read: balanced degrees are healthy; very high max/top-1% indicates hub collapse. Good: bounded max/top-1% with broad but not spiky distribution.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -365,10 +316,10 @@
             </div>
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span>History</span>
+                    <span class="image-preview-card-title">History</span>
                     <div class="d-flex align-items-center gap-2">
-                        <span class="text-muted small">Step: <span class="graph-step-label" data-step-scope="s">—</span></span>
-                        <span class="graph-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Read: stable or improving hit@K with moderate Neff growth and low long-gap. Good: steady mutual, bounded max in-degree, and improving hit@K.">i</span>
+                        <span class="text-muted small">Step: <span class="step-label-value" data-step-scope="s">—</span></span>
+                        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Trends of hit@K, Neff, long-gap, mutual kNN, and hubness vs. step. Read: stable or improving hit@K with moderate Neff growth and low long-gap. Good: steady mutual, bounded max in-degree, and improving hit@K.">i</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -470,7 +421,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const historyH = {{ history_h | tojson }};
     const historyS = {{ history_s | tojson }};
     const figure = {{ figure | tojson if figure else 'null' }};
-    const stepLabels = document.querySelectorAll(".graph-step-label");
+    const stepLabels = document.querySelectorAll(".step-label-value");
     const lossPlot = document.getElementById("graph-loss-plot");
     const lossWrapper = document.getElementById("graph-loss-wrapper");
     const lossPinButton = document.getElementById("graph-loss-pin");

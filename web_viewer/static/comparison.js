@@ -1,5 +1,4 @@
 let hasRenderedPlot = false;
-let selectedImageFolders = ["vis_fixed_0"];
 let currentXAxisMode = "steps";
 let lastPreviewStep = null;
 let pendingInitialPreviewStep = null;
@@ -7,6 +6,7 @@ let currentPreviewMap = {};
 let currentStepsByExp = {};
 let currentExperiments = [];
 let compareStickyInitialized = false;
+let folderSelector = null;
 
 // Helper to build URL string without encoding commas in ids parameter
 function buildUrlString(url) {
@@ -21,149 +21,14 @@ let cumulativeFlops = [];
 let elapsedSeconds = [];
 let hasElapsedSeconds = false;
 
-const IMAGE_FOLDER_OPTIONS = [
-  { value: "vis_fixed_0", label: "Rollouts:Fixed 0", prefix: "rollout_", folder: "vis_fixed_0" },
-  { value: "vis_fixed_1", label: "Rollouts:Fixed 1", prefix: "rollout_", folder: "vis_fixed_1" },
-  { value: "vis_rolling_0", label: "Rollouts:Rolling 0", prefix: "rollout_", folder: "vis_rolling_0" },
-  { value: "vis_rolling_1", label: "Rollouts:Rolling 1", prefix: "rollout_", folder: "vis_rolling_1" },
-  {
-    value: "pca_z",
-    label: "Diagnostics:PCA (Z)",
-    prefix: "pca_z_",
-    folder: "pca_z",
-    legacyPrefix: "embeddings_",
-    legacyFolder: "embeddings",
-  },
-  { value: "pca_s", label: "Diagnostics:PCA (S)", prefix: "pca_s_", folder: "pca_s" },
-  { value: "pca_h", label: "Diagnostics:PCA (H)", prefix: "pca_h_", folder: "pca_h" },
-  { value: "samples_hard", label: "Samples:Hard", prefix: "hard_", folder: "samples_hard" },
-  { value: "vis_self_distance_z", label: "Self-distance:Distance (Z)", prefix: "self_distance_z_", folder: "vis_self_distance_z" },
-  { value: "vis_self_distance_s", label: "Self-distance:Distance (S)", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
-  { value: "vis_self_distance_h", label: "Self-distance:Distance (H)", prefix: "self_distance_h_", folder: "vis_self_distance_h" },
-  { value: "vis_delta_z_pca", label: "Diagnostics:Delta-z PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
-  { value: "vis_delta_s_pca", label: "Diagnostics:Delta-s PCA", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
-  { value: "vis_delta_h_pca", label: "Diagnostics:Delta-h PCA", prefix: "delta_h_pca_", folder: "vis_delta_h_pca" },
-  { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
-  { value: "vis_odometry_current_s", label: "Odometry:Cumulative sum of Δs PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
-  { value: "vis_odometry_current_h", label: "Odometry:Cumulative sum of Δh PCA/ICA/t-SNE", prefix: "odometry_h_", folder: "vis_odometry" },
-  { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
-  { value: "vis_odometry_s_vs_s_hat", label: "Odometry:||s - s_hat|| + scatter", prefix: "s_vs_s_hat_", folder: "vis_odometry" },
-  { value: "vis_odometry_h_vs_h_hat", label: "Odometry:||h - h_hat|| + scatter", prefix: "h_vs_h_hat_", folder: "vis_odometry" },
-  {
-    value: "vis_action_alignment_detail_z",
-    label: "Diagnostics:Action alignment of PCA (Z)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_z",
-  },
-  {
-    value: "vis_action_alignment_detail_raw_z",
-    label: "Diagnostics:Action alignment of raw delta (Z)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_z_raw",
-  },
-  {
-    value: "vis_action_alignment_detail_centered_z",
-    label: "Diagnostics:Action alignment of centered delta (Z)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_z_centered",
-  },
-  {
-    value: "vis_action_alignment_detail_s",
-    label: "Diagnostics:Action alignment of PCA (S)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_s",
-  },
-  {
-    value: "vis_action_alignment_detail_raw_s",
-    label: "Diagnostics:Action alignment of raw delta (S)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_s_raw",
-  },
-  {
-    value: "vis_action_alignment_detail_centered_s",
-    label: "Diagnostics:Action alignment of centered delta (S)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_s_centered",
-  },
-  {
-    value: "vis_action_alignment_detail_h",
-    label: "Diagnostics:Action alignment of PCA (H)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_h",
-  },
-  {
-    value: "vis_action_alignment_detail_raw_h",
-    label: "Diagnostics:Action alignment of raw delta (H)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_h_raw",
-  },
-  {
-    value: "vis_action_alignment_detail_centered_h",
-    label: "Diagnostics:Action alignment of centered delta (H)",
-    prefix: "action_alignment_detail_",
-    folder: "vis_action_alignment_h_centered",
-  },
-  { value: "vis_ctrl_smoothness_z", label: "Vis v Ctrl:Local smoothness (Z)", prefix: "smoothness_z_", folder: "vis_vis_ctrl" },
-  { value: "vis_ctrl_smoothness_s", label: "Vis v Ctrl:Local smoothness (S)", prefix: "smoothness_s_", folder: "vis_vis_ctrl" },
-  { value: "vis_ctrl_smoothness_h", label: "Vis v Ctrl:Local smoothness (H)", prefix: "smoothness_h_", folder: "vis_vis_ctrl" },
-  {
-    value: "vis_ctrl_composition_z",
-    label: "Vis v Ctrl:Two-step composition error (Z)",
-    prefix: "composition_error_z_",
-    folder: "vis_vis_ctrl",
-  },
-  {
-    value: "vis_ctrl_composition_s",
-    label: "Vis v Ctrl:Two-step composition error (S)",
-    prefix: "composition_error_s_",
-    folder: "vis_vis_ctrl",
-  },
-  {
-    value: "vis_ctrl_composition_h",
-    label: "Vis v Ctrl:Two-step composition error (H)",
-    prefix: "composition_error_h_",
-    folder: "vis_vis_ctrl",
-  },
-  { value: "vis_ctrl_stability_z", label: "Vis v Ctrl:Neighborhood stability (Z)", prefix: "stability_z_", folder: "vis_vis_ctrl" },
-  { value: "vis_ctrl_stability_s", label: "Vis v Ctrl:Neighborhood stability (S)", prefix: "stability_s_", folder: "vis_vis_ctrl" },
-  { value: "vis_ctrl_stability_h", label: "Vis v Ctrl:Neighborhood stability (H)", prefix: "stability_h_", folder: "vis_vis_ctrl" },
-  { value: "vis_cycle_error", label: "Diagnostics:Cycle error (Z)", prefix: "cycle_error_", folder: "vis_cycle_error_z" },
-  { value: "vis_cycle_error_s", label: "Diagnostics:Cycle error (S)", prefix: "cycle_error_", folder: "vis_cycle_error_s" },
-  { value: "vis_cycle_error_h", label: "Diagnostics:Cycle error (H)", prefix: "cycle_error_", folder: "vis_cycle_error_h" },
-  { value: "vis_graph_rank1_cdf_z", label: "Graph Diagnostics:Rank-1 CDF (Z)", prefix: "rank1_cdf_", folder: "graph_diagnostics_z" },
-  { value: "vis_graph_rank2_cdf_z", label: "Graph Diagnostics:Rank-2 CDF (Z)", prefix: "rank2_cdf_", folder: "graph_diagnostics_z" },
-  { value: "vis_graph_neff_violin_z", label: "Graph Diagnostics:Neighborhood size (Z)", prefix: "neff_violin_", folder: "graph_diagnostics_z" },
-  { value: "vis_graph_in_degree_hist_z", label: "Graph Diagnostics:In-degree (Z)", prefix: "in_degree_hist_", folder: "graph_diagnostics_z" },
-  { value: "vis_graph_edge_consistency_z", label: "Graph Diagnostics:Edge consistency (Z)", prefix: "edge_consistency_", folder: "graph_diagnostics_z" },
-  { value: "vis_graph_metrics_history_z", label: "Graph Diagnostics:Metrics history (Z)", prefix: "metrics_history_", folder: "graph_diagnostics_z" },
-  { value: "vis_graph_rank1_cdf_h", label: "Graph Diagnostics:Rank-1 CDF (H)", prefix: "rank1_cdf_", folder: "graph_diagnostics_h" },
-  { value: "vis_graph_rank2_cdf_h", label: "Graph Diagnostics:Rank-2 CDF (H)", prefix: "rank2_cdf_", folder: "graph_diagnostics_h" },
-  { value: "vis_graph_neff_violin_h", label: "Graph Diagnostics:Neighborhood size (H)", prefix: "neff_violin_", folder: "graph_diagnostics_h" },
-  { value: "vis_graph_in_degree_hist_h", label: "Graph Diagnostics:In-degree (H)", prefix: "in_degree_hist_", folder: "graph_diagnostics_h" },
-  { value: "vis_graph_edge_consistency_h", label: "Graph Diagnostics:Edge consistency (H)", prefix: "edge_consistency_", folder: "graph_diagnostics_h" },
-  { value: "vis_graph_metrics_history_h", label: "Graph Diagnostics:Metrics history (H)", prefix: "metrics_history_", folder: "graph_diagnostics_h" },
-  { value: "vis_graph_rank1_cdf_s", label: "Graph Diagnostics:Rank-1 CDF (S)", prefix: "rank1_cdf_", folder: "graph_diagnostics_s" },
-  { value: "vis_graph_rank2_cdf_s", label: "Graph Diagnostics:Rank-2 CDF (S)", prefix: "rank2_cdf_", folder: "graph_diagnostics_s" },
-  { value: "vis_graph_neff_violin_s", label: "Graph Diagnostics:Neighborhood size (S)", prefix: "neff_violin_", folder: "graph_diagnostics_s" },
-  { value: "vis_graph_in_degree_hist_s", label: "Graph Diagnostics:In-degree (S)", prefix: "in_degree_hist_", folder: "graph_diagnostics_s" },
-  { value: "vis_graph_edge_consistency_s", label: "Graph Diagnostics:Edge consistency (S)", prefix: "edge_consistency_", folder: "graph_diagnostics_s" },
-  { value: "vis_graph_metrics_history_s", label: "Graph Diagnostics:Metrics history (S)", prefix: "metrics_history_", folder: "graph_diagnostics_s" },
-].sort((a, b) => {
-  const groupA = a.label.split(":")[0].trim();
-  const groupB = b.label.split(":")[0].trim();
-  const groupCompare = groupA.localeCompare(groupB);
-  if (groupCompare !== 0) {
-    return groupCompare;
-  }
-  const labelCompare = a.label.localeCompare(b.label);
-  if (labelCompare !== 0) {
-    return labelCompare;
-  }
-  return a.value.localeCompare(b.value);
-});
+// Uses IMAGE_FOLDER_OPTIONS, IMAGE_FOLDER_DESCRIPTIONS, getImageOption,
+// getImageDisplayTitle, getImageDescription, buildImagePreviewCard,
+// initializeImageCardTooltips from image_card_common.js
+// Uses createFolderSelector from folder_selector.js
 
-function getImageOption(folderValue) {
-  return IMAGE_FOLDER_OPTIONS.find((opt) => opt.value === folderValue);
+// Helper to get current selected folders
+function getSelectedFolders() {
+  return folderSelector ? folderSelector.getSelectedFolders() : ["vis_fixed_0"];
 }
 
 function resolveImageSpec(folderValue, stepsMap, expId) {
@@ -254,7 +119,6 @@ function renderPreviewsAtStep(step, previews, stepsMap) {
   const targetStep = step !== null && step !== undefined ? Math.max(0, Math.round(step)) : null;
   Object.values(previews || {}).forEach((preview) => {
     const expId = preview.expId;
-    const displayTitle = preview.displayTitle || expId;
     const folderValue = preview.folderValue;
     if (!expId || !folderValue) {
       return;
@@ -263,8 +127,9 @@ function renderPreviewsAtStep(step, previews, stepsMap) {
     const available = getStepsForFolder(stepsMap, expId, folderValue);
     const matched = targetStep !== null ? nearestStepAtOrBelow(targetStep, available) : (available.length ? available[available.length - 1] : null);
     if (matched === null) {
-      preview.title.textContent = displayTitle;
-      preview.path.textContent = "No images available.";
+      if (preview.stepLabel) {
+        preview.stepLabel.textContent = "—";
+      }
       preview.img.classList.add("d-none");
       preview.missing.textContent = "No images available.";
       preview.missing.classList.remove("d-none");
@@ -273,12 +138,9 @@ function renderPreviewsAtStep(step, previews, stepsMap) {
     }
     const filename = `${spec.prefix}${matched.toString().padStart(7, "0")}.png`;
     const src = `/assets/${expId}/${spec.folderPath}/${filename}`;
-    const pathText =
-      targetStep !== null
-        ? `${expId}/${spec.folderPath}/${filename} (selected ${targetStep}, showing ${matched})`
-        : `${expId}/${spec.folderPath}/${filename} (showing ${matched})`;
-    preview.title.textContent = displayTitle;
-    preview.path.textContent = pathText;
+    if (preview.stepLabel) {
+      preview.stepLabel.textContent = matched;
+    }
     preview.img.src = src;
     preview.img.alt = `${spec.folderPath} ${matched}`;
     preview.img.dataset.step = String(matched);
@@ -295,124 +157,15 @@ function renderPreviewsAtStep(step, previews, stepsMap) {
   });
 }
 
-function normalizeSelectedFolders(values) {
-  const normalized = [];
-  const seen = new Set();
-  (values || []).forEach((value) => {
-    const trimmed = value.trim();
-    if (!trimmed || seen.has(trimmed)) {
-      return;
-    }
-    if (!getImageOption(trimmed)) {
-      return;
-    }
-    seen.add(trimmed);
-    normalized.push(trimmed);
-  });
-  return normalized;
-}
-
-function updateFolderUrl(folders) {
-  const url = new URL(window.location.href);
-  const value = folders.join(",");
-  if (value) {
-    url.searchParams.set("folders", value);
-    url.searchParams.set("folder", folders[0]);
-  } else {
-    url.searchParams.delete("folders");
-    url.searchParams.delete("folder");
-  }
-  window.history.replaceState({}, "", buildUrlString(url));
-}
-
-function setSelectedFolders(nextSelected, { updateUrl = true, syncSelect = true } = {}) {
-  const normalized = normalizeSelectedFolders(nextSelected);
-  selectedImageFolders = normalized.length ? normalized : ["vis_fixed_0"];
-  if (updateUrl) {
-    updateFolderUrl(selectedImageFolders);
-  }
-  if (syncSelect) {
-    const select = document.getElementById("comparison-image-folder-select");
-    if (select) {
-      Array.from(select.options).forEach((option) => {
-        option.selected = selectedImageFolders.includes(option.value);
-      });
-    }
-  }
-  syncFolderDropdownSelection();
-}
-
-function mergeSelectionOrder(nextSelected) {
-  const normalized = normalizeSelectedFolders(nextSelected);
-  const nextSet = new Set(normalized);
-  const preserved = selectedImageFolders.filter((value) => nextSet.has(value));
-  const preservedSet = new Set(preserved);
-  const added = normalized.filter((value) => !preservedSet.has(value));
-  return preserved.concat(added);
-}
-
-function buildFolderDropdownItems() {
-  return IMAGE_FOLDER_OPTIONS.map((opt) => {
-    const item = document.createElement("label");
-    item.className = "dropdown-item d-flex align-items-center gap-2";
-    item.dataset.value = opt.value;
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.className = "form-check-input m-0";
-    checkbox.value = opt.value;
-    checkbox.checked = selectedImageFolders.includes(opt.value);
-    const text = document.createElement("span");
-    text.className = "small";
-    text.textContent = opt.label;
-    item.appendChild(checkbox);
-    item.appendChild(text);
-    return item;
-  });
-}
-
-function syncFolderDropdownSelection() {
-  const menu = document.getElementById("comparison-folder-menu");
-  if (!menu) {
-    return;
-  }
-  const checkboxes = menu.querySelectorAll('input[type="checkbox"]');
-  checkboxes.forEach((checkbox) => {
-    checkbox.checked = selectedImageFolders.includes(checkbox.value);
-  });
-}
-
-function initializeFolderDropdown() {
-  const menu = document.getElementById("comparison-folder-menu");
-  if (!menu) {
-    return;
-  }
-  menu.innerHTML = "";
-  const items = buildFolderDropdownItems();
-  items.forEach((item) => menu.appendChild(item));
-  menu.addEventListener("change", () => {
-    const nextSelected = Array.from(
-      menu.querySelectorAll('input[type="checkbox"]:checked')
-    ).map((checkbox) => checkbox.value);
-    const ordered = mergeSelectionOrder(nextSelected);
-    setSelectedFolders(ordered, { updateUrl: true, syncSelect: true });
-    updatePreviewRowsForSelection();
-  });
-}
-
 document.addEventListener("DOMContentLoaded", () => {
-  // Restore folder selection from URL
-  const urlParams = new URLSearchParams(window.location.search);
-  const foldersParam = urlParams.get("folders");
-  if (foldersParam) {
-    setSelectedFolders(foldersParam.split(","), { updateUrl: false, syncSelect: false });
-  } else {
-    const folderParam = urlParams.get("folder");
-    if (folderParam) {
-      setSelectedFolders([folderParam], { updateUrl: false, syncSelect: false });
-    }
-  }
+  // Initialize folder selector using shared component
+  folderSelector = createFolderSelector({
+    menuId: "folder-menu",
+    onSelectionChange: updatePreviewRowsForSelection,
+  });
 
   // Restore x-axis mode from URL
+  const urlParams = new URLSearchParams(window.location.search);
   const xAxisParam = urlParams.get("xaxis");
   if (xAxisParam === "flops" || xAxisParam === "elapsed") {
     currentXAxisMode = xAxisParam;
@@ -421,11 +174,6 @@ document.addEventListener("DOMContentLoaded", () => {
       xAxisSelect.value = xAxisParam;
     }
   }
-
-  initializeImageFolderSelector();
-  initializeFolderDropdown();
-  initializeFolderPresetButtons();
-  setSelectedFolders(selectedImageFolders, { updateUrl: false, syncSelect: true });
 
   const ids = getIdsFromDataset();
   if (ids.length >= 2) {
@@ -495,7 +243,8 @@ function renderComparison(payload) {
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
   refreshPreviewImages(grid, availableStepsByExp);
-  pendingInitialPreviewStep = computeInitialPreviewStepForFolders(availableStepsByExp, selectedImageFolders);
+  initializeImageCardTooltips(grid);
+  pendingInitialPreviewStep = computeInitialPreviewStepForFolders(availableStepsByExp, getSelectedFolders());
   lastPreviewStep = null;
   const figure = payload.figure;
   if (figure) {
@@ -700,36 +449,6 @@ function initializeCompareStickyPlot() {
   window.addEventListener("resize", onScroll);
 }
 
-function initializeImageFolderSelector() {
-  const selector = document.getElementById("comparison-image-folder-select");
-  if (!selector) {
-    return;
-  }
-  selector.innerHTML = "";
-  selector.multiple = true;
-  if (!selector.size) {
-    selector.size = 8;
-  }
-  IMAGE_FOLDER_OPTIONS.forEach((opt) => {
-    const option = document.createElement("option");
-    option.value = opt.value;
-    option.textContent = opt.label;
-    option.selected = selectedImageFolders.includes(opt.value);
-    selector.appendChild(option);
-  });
-
-  const applySelectorSelection = () => {
-    const nextSelected = Array.from(selector.selectedOptions).map((opt) => opt.value);
-    const ordered = mergeSelectionOrder(nextSelected);
-    setSelectedFolders(ordered, { updateUrl: true, syncSelect: true });
-    updatePreviewRowsForSelection();
-  };
-
-  selector.addEventListener("change", () => {
-    applySelectorSelection();
-  });
-}
-
 function updatePreviewRowsForSelection() {
   if (!currentExperiments.length) {
     return;
@@ -742,11 +461,12 @@ function updatePreviewRowsForSelection() {
   if (!previewRows) {
     return;
   }
-  const nextRows = buildPreviewRows(currentExperiments, selectedImageFolders);
+  const nextRows = buildPreviewRows(currentExperiments, getSelectedFolders());
   previewRows.replaceWith(nextRows);
   refreshPreviewImages(grid, currentStepsByExp);
+  initializeImageCardTooltips(grid);
   if (lastPreviewStep === null || lastPreviewStep === undefined) {
-    pendingInitialPreviewStep = computeInitialPreviewStepForFolders(currentStepsByExp, selectedImageFolders);
+    pendingInitialPreviewStep = computeInitialPreviewStepForFolders(currentStepsByExp, getSelectedFolders());
     if (pendingInitialPreviewStep !== null) {
       lastPreviewStep = pendingInitialPreviewStep;
     }
@@ -756,31 +476,10 @@ function updatePreviewRowsForSelection() {
   }
 }
 
-function initializeFolderPresetButtons() {
-  const presets = {
-    rollout: ["vis_fixed_0"],
-    z: ["vis_action_alignment_detail_z", "vis_self_distance_z", "vis_odometry_current_z"],
-    h: ["vis_action_alignment_detail_h", "vis_self_distance_h", "vis_odometry_current_h"],
-    s: ["vis_action_alignment_detail_s", "vis_self_distance_s", "vis_odometry_current_s"],
-  };
-
-  const buttons = document.querySelectorAll("[data-folder-preset]");
-  buttons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const preset = presets[button.dataset.folderPreset];
-      if (!preset) {
-        return;
-      }
-      setSelectedFolders(preset, { updateUrl: true, syncSelect: true });
-      updatePreviewRowsForSelection();
-    });
-  });
-}
-
 function buildExperimentGrid(experiments) {
   const container = document.createElement("div");
   container.className = "d-flex flex-column gap-4";
-  const previewRows = buildPreviewRows(experiments, selectedImageFolders);
+  const previewRows = buildPreviewRows(experiments, getSelectedFolders());
   container.appendChild(previewRows);
 
   // Row 2: Title/path/git section
@@ -825,21 +524,12 @@ function buildPreviewRows(experiments, folderValues) {
 
   (folderValues || []).forEach((folderValue) => {
     const label = getImageOption(folderValue)?.label || folderValue;
-    const group = document.createElement("div");
-    group.className = "d-flex flex-column gap-2";
-
-    const heading = document.createElement("div");
-    heading.className = "image-row-title small";
-    heading.textContent = label;
-    group.appendChild(heading);
-
     const row = buildSectionRow(
       label,
       experiments,
       (exp) => buildPreviewCell(exp, folderValue)
     );
-    group.appendChild(row);
-    container.appendChild(group);
+    container.appendChild(row);
   });
 
   return container;
@@ -862,35 +552,46 @@ function buildSectionRow(title, experiments, cellBuilder) {
 }
 
 function buildPreviewCell(exp, folderValue) {
-  const container = document.createElement("div");
-  container.className = "rollout-preview";
-  container.dataset.expId = exp.id;
-  container.dataset.folderValue = folderValue;
-   // Use title field when available; fall back to name.
+  // Use title field when available; fall back to name.
   const displayTitle = exp.title && exp.title !== "Untitled" ? exp.title : exp.name;
-  container.dataset.expTitle = displayTitle;
 
-  const title = document.createElement("div");
-  title.className = "rollout-title small mb-1";
-  title.textContent = displayTitle || "Rollout preview";
+  // Build card using the shared buildImagePreviewCard helper
+  const { card, stepLabelEl, img, missing } = buildImagePreviewCard({
+    folderValue,
+    showStepLabel: true,
+    initialStep: "—",
+  });
 
-  const path = document.createElement("div");
-  path.className = "small text-muted mb-1 rollout-path";
-  path.textContent = "Hover a point to preview rollout.";
+  // Add rollout-preview class and data attributes for hover tracking
+  card.classList.add("rollout-preview");
+  card.dataset.expId = exp.id;
+  card.dataset.folderValue = folderValue;
+  card.dataset.expTitle = displayTitle;
 
-  const img = document.createElement("img");
-  img.className = "rounded border rollout-img d-none";
-  img.alt = "Rollout preview";
+  // Insert experiment title between folder label and step/info controls
+  const cardHeader = card.querySelector(".card-header");
+  if (cardHeader) {
+    const headerControls = cardHeader.querySelector(".image-preview-card-controls");
+    const expTitleSpan = document.createElement("span");
+    expTitleSpan.className = "rollout-exp-title text-muted small";
+    expTitleSpan.textContent = displayTitle;
+    if (headerControls) {
+      cardHeader.insertBefore(expTitleSpan, headerControls);
+    } else {
+      cardHeader.appendChild(expTitleSpan);
+    }
+  }
 
-  const missing = document.createElement("div");
-  missing.className = "text-muted fst-italic rollout-missing d-none";
-  missing.textContent = "No rollout image available.";
+  // Mark elements with rollout-specific classes for backward compatibility
+  img.classList.add("rollout-img");
+  missing.classList.add("rollout-missing");
 
-  container.appendChild(title);
-  container.appendChild(path);
-  container.appendChild(img);
-  container.appendChild(missing);
-  return container;
+  // Add step label reference class
+  if (stepLabelEl) {
+    stepLabelEl.classList.add("rollout-step-label");
+  }
+
+  return card;
 }
 
 function buildInfoCell(exp, index) {
@@ -1006,13 +707,12 @@ function collectPreviewMap(root) {
       return;
     }
     const displayTitle = preview.dataset.expTitle || expId;
-    const title = preview.querySelector(".rollout-title");
-    const path = preview.querySelector(".rollout-path");
+    const stepLabel = preview.querySelector(".rollout-step-label");
     const img = preview.querySelector(".rollout-img");
     const missing = preview.querySelector(".rollout-missing");
-    if (title && path && img && missing) {
+    if (img && missing) {
       const key = `${expId}:${folderValue}`;
-      map[key] = { title, path, img, missing, displayTitle, expId, folderValue };
+      map[key] = { stepLabel, img, missing, displayTitle, expId, folderValue };
     }
   });
   return map;
@@ -1032,7 +732,9 @@ function refreshPreviewImages(container, stepsMap) {
     if (latestStep === null) {
       preview.img.classList.add("d-none");
       preview.missing.classList.remove("d-none");
-      preview.path.textContent = "No rollout image available.";
+      if (preview.stepLabel) {
+        preview.stepLabel.textContent = "—";
+      }
       return;
     }
     const spec = resolveImageSpec(folderValue, stepsMap, expId);
@@ -1040,7 +742,9 @@ function refreshPreviewImages(container, stepsMap) {
     preview.img.alt = `Rollout ${latestStep} for ${preview.displayTitle}`;
     preview.img.classList.remove("d-none");
     preview.missing.classList.add("d-none");
-    preview.path.textContent = `${spec.folderPath}/${spec.prefix}${latestStep}.png`;
+    if (preview.stepLabel) {
+      preview.stepLabel.textContent = latestStep;
+    }
   });
 }
 

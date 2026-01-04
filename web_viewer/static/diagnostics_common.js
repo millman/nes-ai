@@ -17,7 +17,7 @@ function initializeDiagnosticsPage(config, serverData) {
         ? Object.keys(frameMap || {}).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b)
         : [];
 
-    const stepLabels = document.querySelectorAll(".diagnostics-step-label");
+    const stepLabels = document.querySelectorAll(".step-label-value");
     const lossPlot = document.getElementById("diagnostics-loss-plot");
     const lossWrapper = document.getElementById("diagnostics-loss-wrapper");
     const lossPinButton = document.getElementById("diagnostics-loss-pin");
@@ -205,7 +205,7 @@ function initializeDiagnosticsPage(config, serverData) {
                 refs.img.src = url;
                 refs.img.classList.remove("d-none");
                 if (refs.header && refs.title) {
-                    const headerTitle = refs.header.querySelector(".diagnostic-title");
+                    const headerTitle = refs.header.querySelector(".image-preview-card-title");
                     if (headerTitle) {
                         headerTitle.textContent = headerText;
                     }

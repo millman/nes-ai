@@ -1,0 +1,74 @@
+{# Folder selector component for image preview selection #}
+{# Parameters (set before including): #}
+{#   folder_dropdown_id: ID for the dropdown button (default: "folder-dropdown") #}
+{#   folder_menu_id: ID for the dropdown menu (default: "folder-menu") #}
+{#   folder_actions_class: Optional additional class for the actions container #}
+
+{% set dropdown_id = folder_dropdown_id | default('folder-dropdown') %}
+{% set menu_id = folder_menu_id | default('folder-menu') %}
+{% set actions_class = folder_actions_class | default('') %}
+
+<div class="compare-plot-controls-row {{ actions_class }}">
+    <div class="comparison-action-group">
+        <button
+            type="button"
+            class="btn btn-outline-primary btn-sm"
+            data-folder-preset="rollout"
+        >Rollout</button>
+    </div>
+    <div class="comparison-action-group">
+        <div class="btn-group" role="group" aria-label="Diagnostics presets">
+            <span class="text-muted small comparison-action-label">Diags</span>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm comparison-action-first"
+                data-folder-preset="diags_z"
+            >Z</button>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm"
+                data-folder-preset="diags_h"
+            >H</button>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm"
+                data-folder-preset="diags_s"
+            >S</button>
+        </div>
+    </div>
+    <div class="comparison-action-group">
+        <div class="btn-group" role="group" aria-label="Action presets">
+            <span class="text-muted small comparison-action-label">Action</span>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm comparison-action-first"
+                data-folder-preset="action_z"
+            >Z</button>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm"
+                data-folder-preset="action_h"
+            >H</button>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm"
+                data-folder-preset="action_s"
+            >S</button>
+        </div>
+    </div>
+    <div class="dropdown folder-selector-dropdown">
+        <button
+            class="btn btn-outline-primary btn-sm dropdown-toggle"
+            type="button"
+            id="{{ dropdown_id }}"
+            data-bs-toggle="dropdown"
+            data-bs-auto-close="outside"
+            aria-expanded="false"
+        >+ more</button>
+        <div
+            class="dropdown-menu p-2 folder-selector-menu"
+            aria-labelledby="{{ dropdown_id }}"
+            id="{{ menu_id }}"
+        ></div>
+    </div>
+</div>

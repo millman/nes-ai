@@ -1,8 +1,6 @@
 /* Common styles shared across compare, diagnostics, and self-distance pages */
 
 /* Pin button styles - used for pinning plots to top of viewport */
-.compare-pin-btn,
-.diagnostics-pin-btn,
 .plot-pin-btn {
     position: absolute;
     bottom: 10px;
@@ -21,15 +19,11 @@
     transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
 }
 
-.compare-pin-btn:hover,
-.diagnostics-pin-btn:hover,
 .plot-pin-btn:hover {
     transform: translateY(-1px);
     box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
 }
 
-.compare-pin-btn.active,
-.diagnostics-pin-btn.active,
 .plot-pin-btn.active {
     background-color: #0d6efd;
     border-color: #0a58ca;
@@ -37,14 +31,10 @@
 }
 
 /* Sticky wrapper styles - used for pinned content */
-.compare-loss-wrapper,
-.diagnostics-loss-wrapper,
 .plot-pin-wrapper {
     position: relative;
 }
 
-.compare-loss-wrapper.sticky-active,
-.diagnostics-loss-wrapper.sticky-active,
 .plot-pin-wrapper.sticky-active {
     position: sticky;
     top: 0;
@@ -52,15 +42,11 @@
     background: #fff;
     border-radius: 0.5rem;
     box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
-}
-
-.plot-pin-wrapper.sticky-active {
     padding-bottom: 0.5rem;
 }
 
 /* Info icon styles - used for tooltips */
-.diagnostic-info-icon,
-.self-distance-info-icon {
+.diagnostic-info-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -182,15 +168,100 @@
     height: 220px;
 }
 
-.self-distance-step-label {
+/* Step label styles - monospace font for step numbers across all diagnostic pages */
+.step-label-value {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: 0.75rem;
-    color: #6c757d;
-    flex: 1 1 auto;
-    min-width: 0;
-    margin-left: auto;
+}
+
+/* ============================================================
+   Image Preview Card - Common styles for all image preview cards
+   Used by: Detail page, Compare page, Diagnostics pages
+   ============================================================ */
+
+.image-preview-card {
+    /* Card container - inherits Bootstrap .card styles */
+}
+
+.image-preview-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.5rem;
+}
+
+.image-preview-card-title {
+    /* font-weight: 600; */
+    color: #495057;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    text-align: right;
+    flex-shrink: 1;
+    min-width: 0;
+}
+
+.image-preview-card-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.image-preview-card-step {
     white-space: nowrap;
+    color: #6c757d;
+    font-size: 0.875rem;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.image-preview-card-step-prefix {
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.image-preview-card-step-value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    flex-shrink: 0;
+}
+
+.image-preview-card-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3949ab;
+    font-size: 12px;
+    border: 1px solid #c5cae9;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.image-preview-card-body {
+    display: flex;
+    flex-direction: column;
+    padding: 0.5rem;
+}
+
+.image-preview-card-img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.image-preview-card-missing {
+    padding: 1rem;
+    text-align: center;
+}
+
+/* Responsive: On very narrow screens, allow step prefix to shrink */
+@media (max-width: 400px) {
+    .image-preview-card-step-prefix {
+        max-width: 2em;
+    }
 }

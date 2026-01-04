@@ -17,6 +17,10 @@
     transition: none;
 }
 
+.compare-plot-controls-row .btn {
+    transition: none;
+}
+
 .compare-plot-controls-row {
     display: flex;
     flex-wrap: wrap;
@@ -329,6 +333,33 @@
     display: block;
 }
 
+/* Comparison preview card styling */
+#comparison-grid .rollout-preview.card {
+    width: 100%;
+}
+
+#comparison-grid .rollout-preview .card-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 0.75rem;
+}
+
+#comparison-grid .rollout-preview .image-preview-card-header {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#comparison-grid .rollout-exp-title {
+    flex: 1;
+    text-align: center;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 #comparison-grid .row {
     overflow-x: auto;
 }
@@ -401,15 +432,14 @@
 }
 
 .detail-preview-cell {
-    flex: 1 1 calc(25% - 0.75rem);
+    flex: 1 1 calc(33.333% - 0.667rem);
     min-width: 200px;
-    max-width: calc(25% - 0.75rem);
+    max-width: calc(33.333% - 0.667rem);
 }
 
 .detail-preview-title {
     font-weight: 600;
     color: #495057;
-    margin-bottom: 0.25rem;
 }
 
 .detail-preview-img {

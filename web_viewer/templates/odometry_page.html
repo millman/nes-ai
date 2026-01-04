@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
 {% endblock %}
@@ -28,56 +29,6 @@
 .odometry-loss-plot {
     height: 220px;
 }
-.odometry-plot-wrapper {
-    position: relative;
-}
-.odometry-pin-btn {
-    position: absolute;
-    bottom: 10px;
-    right: 10px;
-    width: 32px;
-    height: 32px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background-color: rgba(255, 255, 255, 0.9);
-    border: 1px solid #ced4da;
-    color: #6c757d;
-    z-index: 5;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
-    transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out, color 0.15s ease-in-out, border-color 0.15s ease-in-out;
-}
-.odometry-pin-btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
-}
-.odometry-pin-btn.active {
-    background-color: #0d6efd;
-    border-color: #0a58ca;
-    color: #fff;
-}
-.odometry-plot-wrapper.sticky-active {
-    position: sticky;
-    top: 0;
-    z-index: 1030;
-    background: #fff;
-    border-radius: 0.5rem;
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08);
-}
-.odometry-info-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 999px;
-    background: #eef2ff;
-    color: #3949ab;
-    font-size: 12px;
-    border: 1px solid #c5cae9;
-    cursor: pointer;
-}
 @media (max-width: 768px) {
     .odometry-grid {
         grid-template-columns: 1fr;
@@ -102,10 +53,10 @@
 {% if not experiment %}
 <div class="text-muted fst-italic">No experiments available.</div>
 {% else %}
-<div class="card mb-3 odometry-plot-wrapper sticky-active" id="odometry-plot-wrapper">
+<div class="card mb-3 plot-pin-wrapper sticky-active" id="odometry-plot-wrapper">
     <button
         type="button"
-        class="odometry-pin-btn active"
+        class="plot-pin-btn active"
         id="odometry-plot-pin"
         aria-pressed="true"
         aria-label="Pin odometry plot"
@@ -119,7 +70,7 @@
         <strong>Training metrics</strong>
         {% if odometry_steps %}
         <span class="text-muted small">hover to scrub steps</span>
-        <span class="ms-auto text-muted small">Step: <span id="odometry-step-label" class="odometry-step-label">{{ odometry_steps[-1] }}</span></span>
+        <span class="ms-auto text-muted small">Step: <span id="step-label-value" class="step-label-value">{{ odometry_steps[-1] }}</span></span>
         {% endif %}
     </div>
     <div class="card-body">
@@ -130,11 +81,11 @@
 <div class="odometry-grid">
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>PCA z</span>
+            <span class="image-preview-card-title">PCA z</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="PCA projection of z embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
@@ -158,11 +109,11 @@
     </div>
     <div class="card h-100 odometry-span-3">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>Cumulative sum of Δz PCA/ICA/t-SNE</span>
+            <span class="image-preview-card-title">Cumulative sum of Δz PCA/ICA/t-SNE</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="Trajectory of cumulative delta-z over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
@@ -186,11 +137,11 @@
     </div>
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>PCA s</span>
+            <span class="image-preview-card-title">PCA s</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="PCA projection of s embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
@@ -214,11 +165,11 @@
     </div>
     <div class="card h-100 odometry-span-3">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>Cumulative sum of Δs PCA/ICA/t-SNE</span>
+            <span class="image-preview-card-title">Cumulative sum of Δs PCA/ICA/t-SNE</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="Trajectory of cumulative delta-s over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
@@ -242,11 +193,11 @@
     </div>
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>PCA h</span>
+            <span class="image-preview-card-title">PCA h</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="PCA projection of h embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
@@ -270,11 +221,11 @@
     </div>
     <div class="card h-100 odometry-span-3">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>Cumulative sum of Δh PCA/ICA/t-SNE</span>
+            <span class="image-preview-card-title">Cumulative sum of Δh PCA/ICA/t-SNE</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="Trajectory of cumulative delta-h over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
@@ -298,11 +249,11 @@
     </div>
     <div class="card h-100 odometry-span-4">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>||z - z_hat|| + scatter</span>
+            <span class="image-preview-card-title">||z - z_hat|| + scatter</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="Predictor error norm over time plus a z vs. z_hat scatter view. Read: the line shows ||z - z_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
@@ -326,11 +277,11 @@
     </div>
     <div class="card h-100 odometry-span-4">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>||s - s_hat|| + scatter</span>
+            <span class="image-preview-card-title">||s - s_hat|| + scatter</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="Predictor error norm over time plus an s vs. s_hat scatter view. Read: the line shows ||s - s_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
@@ -354,11 +305,11 @@
     </div>
     <div class="card h-100 odometry-span-4">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span>||h - h_hat|| + scatter</span>
+            <span class="image-preview-card-title">||h - h_hat|| + scatter</span>
             <div class="d-flex align-items-center gap-2">
-                <span class="text-muted small">Step: <span class="odometry-step-label">—</span></span>
+                <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
-                    class="odometry-info-icon"
+                    class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
                     title="Predictor error norm over time plus an h vs. h_hat scatter view. Read: the line shows ||h - h_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
@@ -402,7 +353,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const figure = {{ figure | tojson if figure else 'null' }};
     const steps = {{ odometry_steps | tojson }};
     const odometryMap = {{ odometry_map | tojson }};
-    const stepLabels = document.querySelectorAll(".odometry-step-label");
+    const stepLabels = document.querySelectorAll(".step-label-value");
     const plotWrapper = document.getElementById("odometry-plot-wrapper");
     const plotPinButton = document.getElementById("odometry-plot-pin");
     let plotPinned = true;

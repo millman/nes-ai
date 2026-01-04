@@ -505,156 +505,69 @@
                             </svg>
                         </button>
                         {% endif %}
-                        <div class="d-flex align-items-center gap-1">
-                            <svg class="action-icon text-muted" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        {% set has_diag_z = exp.diagnostics_steps %}
+                        {% set has_diag_h = exp.asset_exists("vis_delta_h_pca") or exp.asset_exists("vis_action_alignment_h") or exp.asset_exists("vis_cycle_error_h") or exp.asset_exists("vis_self_distance_h") %}
+                        {% set has_diag_s = exp.diagnostics_s_steps %}
+                        {% if has_diag_z or has_diag_h or has_diag_s %}
+                        <a
+                            href="{{ url_for('diagnostics_zvs', exp_id=exp.id) }}"
+                            class="btn btn-outline-primary btn-sm"
+                            aria-label="Diagnostics (ZvHvS)"
+                            title="Diagnostics (ZvHvS)"
+                        >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                                 <path d="M1 13h14v1H1zm2-2h2V6H3zm4 0h2V3H7zm4 0h2V8h-2z"/>
                             </svg>
-                            <div class="btn-group" role="group" aria-label="Diagnostics">
-                                {% set has_diag_z = exp.diagnostics_steps %}
-                                {% set has_diag_h = exp.asset_exists("vis_delta_h_pca") or exp.asset_exists("vis_action_alignment_h") or exp.asset_exists("vis_cycle_error_h") or exp.asset_exists("vis_self_distance_h") %}
-                                {% set has_diag_s = exp.diagnostics_s_steps %}
-                                {% if exp.diagnostics_steps %}
-                                <a
-                                    href="{{ url_for('diagnostics_z', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Diagnostics (Z)"
-                                    title="Diagnostics (Z)"
-                                >Z</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics (Z)" title="diagnostics outputs missing">Z</button>
-                                {% endif %}
-                                {% if has_diag_h %}
-                                <a
-                                    href="{{ url_for('diagnostics_h', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Diagnostics (H)"
-                                    title="Diagnostics (H)"
-                                >H</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics (H)" title="diagnostics_h outputs missing">H</button>
-                                {% endif %}
-                                {% if exp.diagnostics_s_steps %}
-                                <a
-                                    href="{{ url_for('diagnostics_s', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Diagnostics (S)"
-                                    title="Diagnostics (S)"
-                                >S</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics (S)" title="diagnostics_s outputs missing">S</button>
-                                {% endif %}
-                                {% if has_diag_z or has_diag_h or has_diag_s %}
-                                <a
-                                    href="{{ url_for('diagnostics_zvs', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Diagnostics (ZvHvS)"
-                                    title="Diagnostics (ZvHvS)"
-                                ><span class="{% if not has_diag_z %}zvhvs-letter-missing{% endif %}">Z</span>v<span class="{% if not has_diag_h %}zvhvs-letter-missing{% endif %}">H</span>v<span class="{% if not has_diag_s %}zvhvs-letter-missing{% endif %}">S</span></a>
-                            {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics (ZvHvS)" title="diagnostics outputs missing"><span class="zvhvs-letter-missing">Z</span>v<span class="zvhvs-letter-missing">H</span>v<span class="zvhvs-letter-missing">S</span></button>
-                                {% endif %}
-                            </div>
-                        </div>
-                        <div class="d-flex align-items-center gap-1">
-                            <svg class="action-icon text-muted" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        </a>
+                        {% else %}
+                        <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Diagnostics (ZvHvS)" title="diagnostics outputs missing">
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M1 13h14v1H1zm2-2h2V6H3zm4 0h2V3H7zm4 0h2V8h-2z"/>
+                            </svg>
+                        </button>
+                        {% endif %}
+                        {% set has_self_z = exp.self_distance_csv %}
+                        {% set has_self_h = exp.asset_exists("self_distance_h") or exp.asset_exists("vis_self_distance_h") %}
+                        {% set has_self_s = exp.state_embedding_csv %}
+                        {% if has_self_z or has_self_h or has_self_s %}
+                        <a
+                            href="{{ url_for('self_distance_zvs', exp_id=exp.id) }}"
+                            class="btn btn-outline-primary btn-sm"
+                            aria-label="Self-distance (ZvHvS)"
+                            title="Self-distance (ZvHvS)"
+                        >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                                 <path d="M2 2h1v12H2zm11 0h1v12h-1zM5 10.5l3-5 3 5H5z"/>
                             </svg>
-                            <div class="btn-group" role="group" aria-label="Self-distance">
-                                {% set has_self_z = exp.self_distance_csv %}
-                                {% set has_self_h = exp.asset_exists("self_distance_h") or exp.asset_exists("vis_self_distance_h") %}
-                                {% set has_self_s = exp.state_embedding_csv %}
-                                {% if exp.self_distance_csv %}
-                                <a
-                                    href="{{ url_for('self_distance_z', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Self-distance (Z)"
-                                    title="Self-distance (Z)"
-                                >Z</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance (Z)" title="self_distance_z.csv missing">Z</button>
-                                {% endif %}
-                                {% if has_self_h %}
-                                <a
-                                    href="{{ url_for('self_distance_h', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Self-distance (H)"
-                                    title="Self-distance (H)"
-                                >H</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance (H)" title="self_distance_h outputs missing">H</button>
-                                {% endif %}
-                                {% if exp.state_embedding_csv %}
-                                <a
-                                    href="{{ url_for('self_distance_s', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Self-distance (S)"
-                                    title="Self-distance (S)"
-                                >S</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance (S)" title="state_embedding outputs missing">S</button>
-                                {% endif %}
-                                {% if has_self_z or has_self_h or has_self_s %}
-                                <a
-                                    href="{{ url_for('self_distance_zvs', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Self-distance (ZvHvS)"
-                                    title="Self-distance (ZvHvS)"
-                                ><span class="{% if not has_self_z %}zvhvs-letter-missing{% endif %}">Z</span>v<span class="{% if not has_self_h %}zvhvs-letter-missing{% endif %}">H</span>v<span class="{% if not has_self_s %}zvhvs-letter-missing{% endif %}">S</span></a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance (ZvHvS)" title="self-distance outputs missing"><span class="zvhvs-letter-missing">Z</span>v<span class="zvhvs-letter-missing">H</span>v<span class="zvhvs-letter-missing">S</span></button>
-                                {% endif %}
-                            </div>
-                        </div>
-                        <div class="d-flex align-items-center gap-1">
-                            <svg class="action-icon text-muted" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        </a>
+                        {% else %}
+                        <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Self-distance (ZvHvS)" title="self-distance outputs missing">
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M2 2h1v12H2zm11 0h1v12h-1zM5 10.5l3-5 3 5H5z"/>
+                            </svg>
+                        </button>
+                        {% endif %}
+                        {% set has_graph_z = exp.graph_diagnostics_steps %}
+                        {% set has_graph_h = exp.graph_diagnostics_h_steps %}
+                        {% set has_graph_s = exp.graph_diagnostics_s_steps %}
+                        {% if has_graph_z or has_graph_h or has_graph_s %}
+                        <a
+                            href="{{ url_for('graph_diagnostics_zvs', exp_id=exp.id) }}"
+                            class="btn btn-outline-primary btn-sm"
+                            aria-label="Graph Diagnostics (ZvHvS)"
+                            title="Graph Diagnostics (ZvHvS)"
+                        >
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                                 <path d="M3 3h3v3H3zm7 0h3v3h-3zM3 10h3v3H3zm7 0h3v3h-3zM6 4h4v1H6zm-2 4h8v1H4zm2 3h4v1H6z"/>
                             </svg>
-                            <div class="btn-group" role="group" aria-label="Graph Diagnostics">
-                                {% set has_graph_z = exp.graph_diagnostics_steps %}
-                                {% set has_graph_h = exp.graph_diagnostics_h_steps %}
-                                {% set has_graph_s = exp.graph_diagnostics_s_steps %}
-                                {% if exp.graph_diagnostics_steps %}
-                                <a
-                                    href="{{ url_for('graph_diagnostics_z', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Graph Diagnostics (Z)"
-                                    title="Graph Diagnostics (Z)"
-                                >Z</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics (Z)" title="graph_diagnostics outputs missing">Z</button>
-                                {% endif %}
-                                {% if has_graph_h %}
-                                <a
-                                    href="{{ url_for('graph_diagnostics_h', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Graph Diagnostics (H)"
-                                    title="Graph Diagnostics (H)"
-                                >H</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics (H)" title="graph_diagnostics_h outputs missing">H</button>
-                                {% endif %}
-                                {% if exp.graph_diagnostics_s_steps %}
-                                <a
-                                    href="{{ url_for('graph_diagnostics_s', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Graph Diagnostics (S)"
-                                    title="Graph Diagnostics (S)"
-                                >S</a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics (S)" title="graph_diagnostics_s outputs missing">S</button>
-                                {% endif %}
-                                {% if has_graph_z or has_graph_h or has_graph_s %}
-                                <a
-                                    href="{{ url_for('graph_diagnostics_zvs', exp_id=exp.id) }}"
-                                    class="btn btn-outline-primary btn-sm"
-                                    aria-label="Graph Diagnostics (ZvHvS)"
-                                    title="Graph Diagnostics (ZvHvS)"
-                                ><span class="{% if not has_graph_z %}zvhvs-letter-missing{% endif %}">Z</span>v<span class="{% if not has_graph_h %}zvhvs-letter-missing{% endif %}">H</span>v<span class="{% if not has_graph_s %}zvhvs-letter-missing{% endif %}">S</span></a>
-                                {% else %}
-                                <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics (ZvHvS)" title="graph diagnostics outputs missing"><span class="zvhvs-letter-missing">Z</span>v<span class="zvhvs-letter-missing">H</span>v<span class="zvhvs-letter-missing">S</span></button>
-                                {% endif %}
-                            </div>
-                        </div>
+                        </a>
+                        {% else %}
+                        <button class="btn btn-outline-secondary btn-sm" disabled aria-label="Graph Diagnostics (ZvHvS)" title="graph diagnostics outputs missing">
+                            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M3 3h3v3H3zm7 0h3v3h-3zM3 10h3v3H3zm7 0h3v3h-3zM6 4h4v1H6zm-2 4h8v1H4zm2 3h4v1H6z"/>
+                            </svg>
+                        </button>
+                        {% endif %}
                     </div>
                 </div>
             </div>

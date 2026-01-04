@@ -1,8 +1,11 @@
 {% extends "base.html" %}
 
 {% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+<script src="{{ url_for('static', filename='image_card_common.js') }}"></script>
+<script src="{{ url_for('static', filename='folder_selector.js') }}"></script>
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>
 {% endblock %}
 
@@ -10,261 +13,36 @@
 {% set heading_title = experiment.title if experiment.title != "Untitled" else "Untitled" %}
 <h3 class="mb-4">{{ heading_title }} <small class="text-muted">({{ experiment.id }})</small></h3>
 
-<div class="card mb-4">
-    <div class="card-body">
-        <div class="d-flex flex-column flex-lg-row gap-3">
-            <div class="flex-grow-1">
-                <div class="compare-plot-controls-row detail-image-folder-actions">
-                    <div class="comparison-action-group">
-                        <button
-                            type="button"
-                            class="btn btn-outline-primary btn-sm"
-                            data-folder-preset="rollout"
-                        >Rollout</button>
-                    </div>
-                    <div class="comparison-action-group">
-                        <div class="btn-group" role="group" aria-label="Action presets">
-                            <span class="text-muted small comparison-action-label">Action</span>
-                            <button
-                                type="button"
-                                class="btn btn-outline-primary btn-sm comparison-action-first"
-                                data-folder-preset="z"
-                            >Z</button>
-                            <button
-                                type="button"
-                                class="btn btn-outline-primary btn-sm"
-                                data-folder-preset="h"
-                            >H</button>
-                            <button
-                                type="button"
-                                class="btn btn-outline-primary btn-sm"
-                                data-folder-preset="s"
-                            >S</button>
-                        </div>
-                    </div>
-                    <div class="dropdown detail-folder-dropdown">
-                        <button
-                            class="btn btn-outline-primary btn-sm dropdown-toggle"
-                            type="button"
-                            id="detail-folder-dropdown"
-                            data-bs-toggle="dropdown"
-                            data-bs-auto-close="outside"
-                            aria-expanded="false"
-                        >+ more</button>
-                        <div
-                            class="dropdown-menu p-2 detail-folder-menu"
-                            aria-labelledby="detail-folder-dropdown"
-                            id="detail-folder-menu"
-                        ></div>
-                    </div>
-                </div>
-                <div class="compare-plot-wrapper">
-                    <div id="detail-plot" class="plot-area">
-                        {% if figure %}
-                        <p class="text-muted fst-italic">Loading plot...</p>
-                        {% else %}
-                        <p class="text-muted fst-italic">No metrics available for this experiment.</p>
-                        {% endif %}
-                    </div>
-                </div>
-            </div>
+<div class="mb-4">
+    {% include '_folder_selector.html' with context %}
+    <div class="compare-plot-wrapper">
+        <div id="detail-plot" class="plot-area">
+            {% if figure %}
+            <p class="text-muted fst-italic">Loading plot...</p>
+            {% else %}
+            <p class="text-muted fst-italic">No metrics available for this experiment.</p>
+            {% endif %}
         </div>
     </div>
 </div>
 
 <div class="mb-4">
-    <div class="small text-muted rollout-path mb-2">Hover a point to preview rollout.</div>
     <div id="detail-rollout-preview" class="mt-0"></div>
 </div>
 
 {% if figure %}
 <script>
-    const IMAGE_FOLDER_OPTIONS = [
-                    { value: "vis_fixed_0", label: "Rollouts:Fixed 0", prefix: "rollout_", folder: "vis_fixed_0" },
-                    { value: "vis_fixed_1", label: "Rollouts:Fixed 1", prefix: "rollout_", folder: "vis_fixed_1" },
-                    { value: "vis_rolling_0", label: "Rollouts:Rolling 0", prefix: "rollout_", folder: "vis_rolling_0" },
-                    { value: "vis_rolling_1", label: "Rollouts:Rolling 1", prefix: "rollout_", folder: "vis_rolling_1" },
-                    { value: "pca_z", label: "Diagnostics:PCA (Z)", prefix: "pca_z_", folder: "pca_z", legacyPrefix: "embeddings_", legacyFolder: "embeddings" },
-                    { value: "pca_s", label: "Diagnostics:PCA (S)", prefix: "pca_s_", folder: "pca_s" },
-                    { value: "pca_h", label: "Diagnostics:PCA (H)", prefix: "pca_h_", folder: "pca_h" },
-                    { value: "samples_hard", label: "Samples:Hard", prefix: "hard_", folder: "samples_hard" },
-                    { value: "vis_self_distance_z", label: "Self-distance:Distance (Z)", prefix: "self_distance_z_", folder: "vis_self_distance_z" },
-                    { value: "vis_self_distance_s", label: "Self-distance:Distance (S)", prefix: "self_distance_s_", folder: "vis_self_distance_s" },
-                    { value: "vis_self_distance_h", label: "Self-distance:Distance (H)", prefix: "self_distance_h_", folder: "vis_self_distance_h" },
-                    { value: "vis_delta_z_pca", label: "Diagnostics:Delta-z PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
-                    { value: "vis_delta_s_pca", label: "Diagnostics:Delta-s PCA", prefix: "delta_s_pca_", folder: "vis_delta_s_pca" },
-                    { value: "vis_delta_h_pca", label: "Diagnostics:Delta-h PCA", prefix: "delta_h_pca_", folder: "vis_delta_h_pca" },
-                    { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
-                    { value: "vis_odometry_current_s", label: "Odometry:Cumulative sum of Δs PCA/ICA/t-SNE", prefix: "odometry_s_", folder: "vis_odometry" },
-                    { value: "vis_odometry_current_h", label: "Odometry:Cumulative sum of Δh PCA/ICA/t-SNE", prefix: "odometry_h_", folder: "vis_odometry" },
-                    { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
-                    { value: "vis_odometry_s_vs_s_hat", label: "Odometry:||s - s_hat|| + scatter", prefix: "s_vs_s_hat_", folder: "vis_odometry" },
-                    { value: "vis_odometry_h_vs_h_hat", label: "Odometry:||h - h_hat|| + scatter", prefix: "h_vs_h_hat_", folder: "vis_odometry" },
-                    { value: "vis_action_alignment_detail_z", label: "Diagnostics:Action alignment of PCA (Z)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_z" },
-                    { value: "vis_action_alignment_detail_raw_z", label: "Diagnostics:Action alignment of raw delta (Z)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_z_raw" },
-                    { value: "vis_action_alignment_detail_centered_z", label: "Diagnostics:Action alignment of centered delta (Z)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_z_centered" },
-                    { value: "vis_action_alignment_detail_s", label: "Diagnostics:Action alignment of PCA (S)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_s" },
-                    { value: "vis_action_alignment_detail_raw_s", label: "Diagnostics:Action alignment of raw delta (S)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_s_raw" },
-                    { value: "vis_action_alignment_detail_centered_s", label: "Diagnostics:Action alignment of centered delta (S)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_s_centered" },
-                    { value: "vis_action_alignment_detail_h", label: "Diagnostics:Action alignment of PCA (H)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_h" },
-                    { value: "vis_action_alignment_detail_raw_h", label: "Diagnostics:Action alignment of raw delta (H)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_h_raw" },
-                    { value: "vis_action_alignment_detail_centered_h", label: "Diagnostics:Action alignment of centered delta (H)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_h_centered" },
-                    { value: "vis_ctrl_smoothness_z", label: "Vis v Ctrl:Local smoothness (Z)", prefix: "smoothness_z_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_smoothness_s", label: "Vis v Ctrl:Local smoothness (S)", prefix: "smoothness_s_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_smoothness_h", label: "Vis v Ctrl:Local smoothness (H)", prefix: "smoothness_h_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_composition_z", label: "Vis v Ctrl:Two-step composition error (Z)", prefix: "composition_error_z_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_composition_s", label: "Vis v Ctrl:Two-step composition error (S)", prefix: "composition_error_s_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_composition_h", label: "Vis v Ctrl:Two-step composition error (H)", prefix: "composition_error_h_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_stability_z", label: "Vis v Ctrl:Neighborhood stability (Z)", prefix: "stability_z_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_stability_s", label: "Vis v Ctrl:Neighborhood stability (S)", prefix: "stability_s_", folder: "vis_vis_ctrl" },
-                    { value: "vis_ctrl_stability_h", label: "Vis v Ctrl:Neighborhood stability (H)", prefix: "stability_h_", folder: "vis_vis_ctrl" },
-                    { value: "vis_cycle_error", label: "Diagnostics:Cycle error (Z)", prefix: "cycle_error_", folder: "vis_cycle_error_z" },
-                    { value: "vis_cycle_error_s", label: "Diagnostics:Cycle error (S)", prefix: "cycle_error_", folder: "vis_cycle_error_s" },
-                    { value: "vis_cycle_error_h", label: "Diagnostics:Cycle error (H)", prefix: "cycle_error_", folder: "vis_cycle_error_h" },
-                    { value: "vis_graph_rank1_cdf_z", label: "Graph Diagnostics:Rank-1 CDF (Z)", prefix: "rank1_cdf_", folder: "graph_diagnostics_z" },
-                    { value: "vis_graph_rank2_cdf_z", label: "Graph Diagnostics:Rank-2 CDF (Z)", prefix: "rank2_cdf_", folder: "graph_diagnostics_z" },
-                    { value: "vis_graph_neff_violin_z", label: "Graph Diagnostics:Neighborhood size (Z)", prefix: "neff_violin_", folder: "graph_diagnostics_z" },
-                    { value: "vis_graph_in_degree_hist_z", label: "Graph Diagnostics:In-degree (Z)", prefix: "in_degree_hist_", folder: "graph_diagnostics_z" },
-                    { value: "vis_graph_edge_consistency_z", label: "Graph Diagnostics:Edge consistency (Z)", prefix: "edge_consistency_", folder: "graph_diagnostics_z" },
-                    { value: "vis_graph_metrics_history_z", label: "Graph Diagnostics:Metrics history (Z)", prefix: "metrics_history_", folder: "graph_diagnostics_z" },
-                    { value: "vis_graph_rank1_cdf_h", label: "Graph Diagnostics:Rank-1 CDF (H)", prefix: "rank1_cdf_", folder: "graph_diagnostics_h" },
-                    { value: "vis_graph_rank2_cdf_h", label: "Graph Diagnostics:Rank-2 CDF (H)", prefix: "rank2_cdf_", folder: "graph_diagnostics_h" },
-                    { value: "vis_graph_neff_violin_h", label: "Graph Diagnostics:Neighborhood size (H)", prefix: "neff_violin_", folder: "graph_diagnostics_h" },
-                    { value: "vis_graph_in_degree_hist_h", label: "Graph Diagnostics:In-degree (H)", prefix: "in_degree_hist_", folder: "graph_diagnostics_h" },
-                    { value: "vis_graph_edge_consistency_h", label: "Graph Diagnostics:Edge consistency (H)", prefix: "edge_consistency_", folder: "graph_diagnostics_h" },
-                    { value: "vis_graph_metrics_history_h", label: "Graph Diagnostics:Metrics history (H)", prefix: "metrics_history_", folder: "graph_diagnostics_h" },
-                    { value: "vis_graph_rank1_cdf_s", label: "Graph Diagnostics:Rank-1 CDF (S)", prefix: "rank1_cdf_", folder: "graph_diagnostics_s" },
-                    { value: "vis_graph_rank2_cdf_s", label: "Graph Diagnostics:Rank-2 CDF (S)", prefix: "rank2_cdf_", folder: "graph_diagnostics_s" },
-                    { value: "vis_graph_neff_violin_s", label: "Graph Diagnostics:Neighborhood size (S)", prefix: "neff_violin_", folder: "graph_diagnostics_s" },
-                    { value: "vis_graph_in_degree_hist_s", label: "Graph Diagnostics:In-degree (S)", prefix: "in_degree_hist_", folder: "graph_diagnostics_s" },
-                    { value: "vis_graph_edge_consistency_s", label: "Graph Diagnostics:Edge consistency (S)", prefix: "edge_consistency_", folder: "graph_diagnostics_s" },
-                    { value: "vis_graph_metrics_history_s", label: "Graph Diagnostics:Metrics history (S)", prefix: "metrics_history_", folder: "graph_diagnostics_s" },
-                ].sort((a, b) => {
-                    const groupA = a.label.split(":")[0].trim();
-                    const groupB = b.label.split(":")[0].trim();
-                    const groupCompare = groupA.localeCompare(groupB);
-                    if (groupCompare !== 0) {
-                        return groupCompare;
-                    }
-                    const labelCompare = a.label.localeCompare(b.label);
-                    if (labelCompare !== 0) {
-                        return labelCompare;
-                    }
-                    return a.value.localeCompare(b.value);
-                });
+    // Uses IMAGE_FOLDER_OPTIONS, IMAGE_FOLDER_DESCRIPTIONS, getImageOption,
+    // getImageDisplayTitle, getImageDescription, buildImagePreviewCard,
+    // initializeImageCardTooltips from image_card_common.js
+    // Uses createFolderSelector from folder_selector.js
 
-                let selectedImageFolders = ["vis_fixed_0"];
                 let lastPreviewStep = null;
                 let detailStickyInitialized = false;
+                let folderSelector = null;
 
-                function getImageOption(folderValue) {
-                    return IMAGE_FOLDER_OPTIONS.find((opt) => opt.value === folderValue);
-                }
-
-                function normalizeSelectedFolders(values) {
-                    const normalized = [];
-                    const seen = new Set();
-                    (values || []).forEach((value) => {
-                        const trimmed = value.trim();
-                        if (!trimmed || seen.has(trimmed)) return;
-                        if (!getImageOption(trimmed)) return;
-                        seen.add(trimmed);
-                        normalized.push(trimmed);
-                    });
-                    return normalized;
-                }
-
-                function updateFolderUrl(folders) {
-                    const url = new URL(window.location.href);
-                    const value = folders.join(",");
-                    if (value) {
-                        url.searchParams.set("folders", value);
-                        url.searchParams.set("folder", folders[0]);
-                    } else {
-                        url.searchParams.delete("folders");
-                        url.searchParams.delete("folder");
-                    }
-                    window.history.replaceState({}, "", url.toString());
-                }
-
-                function syncFolderDropdownSelection() {
-                    const menu = document.getElementById("detail-folder-menu");
-                    if (!menu) return;
-                    const checkboxes = menu.querySelectorAll('input[type="checkbox"]');
-                    checkboxes.forEach((checkbox) => {
-                        checkbox.checked = selectedImageFolders.includes(checkbox.value);
-                    });
-                }
-
-                function setSelectedFolders(nextSelected, { updateUrl = true } = {}) {
-                    const normalized = normalizeSelectedFolders(nextSelected);
-                    selectedImageFolders = normalized.length ? normalized : ["vis_fixed_0"];
-                    if (updateUrl) {
-                        updateFolderUrl(selectedImageFolders);
-                    }
-                    syncFolderDropdownSelection();
-                }
-
-                function mergeSelectionOrder(nextSelected) {
-                    const normalized = normalizeSelectedFolders(nextSelected);
-                    const nextSet = new Set(normalized);
-                    const preserved = selectedImageFolders.filter((value) => nextSet.has(value));
-                    const preservedSet = new Set(preserved);
-                    const added = normalized.filter((value) => !preservedSet.has(value));
-                    return preserved.concat(added);
-                }
-
-                function buildFolderDropdownItems() {
-                    return IMAGE_FOLDER_OPTIONS.map((opt) => {
-                        const item = document.createElement("label");
-                        item.className = "dropdown-item d-flex align-items-center gap-2";
-                        item.dataset.value = opt.value;
-                        const checkbox = document.createElement("input");
-                        checkbox.type = "checkbox";
-                        checkbox.className = "form-check-input m-0";
-                        checkbox.value = opt.value;
-                        checkbox.checked = selectedImageFolders.includes(opt.value);
-                        const text = document.createElement("span");
-                        text.className = "small";
-                        text.textContent = opt.label;
-                        item.appendChild(checkbox);
-                        item.appendChild(text);
-                        return item;
-                    });
-                }
-
-                function initializeFolderDropdown(onSelectionChange) {
-                    const menu = document.getElementById("detail-folder-menu");
-                    if (!menu) return;
-                    menu.innerHTML = "";
-                    const items = buildFolderDropdownItems();
-                    items.forEach((item) => menu.appendChild(item));
-                    menu.addEventListener("change", () => {
-                        const nextSelected = Array.from(
-                            menu.querySelectorAll('input[type="checkbox"]:checked')
-                        ).map((checkbox) => checkbox.value);
-                        const ordered = mergeSelectionOrder(nextSelected);
-                        setSelectedFolders(ordered, { updateUrl: true });
-                        if (onSelectionChange) onSelectionChange();
-                    });
-                }
-
-                function initializeFolderPresetButtons(onSelectionChange) {
-                    const presets = {
-                        rollout: ["vis_fixed_0"],
-                        z: ["vis_action_alignment_detail_z", "vis_self_distance_z", "vis_odometry_current_z"],
-                        h: ["vis_action_alignment_detail_h", "vis_self_distance_h", "vis_odometry_current_h"],
-                        s: ["vis_action_alignment_detail_s", "vis_self_distance_s", "vis_odometry_current_s"],
-                    };
-                    const buttons = document.querySelectorAll("[data-folder-preset]");
-                    buttons.forEach((button) => {
-                        button.addEventListener("click", () => {
-                            const preset = presets[button.dataset.folderPreset];
-                            if (!preset) return;
-                            setSelectedFolders(preset, { updateUrl: true });
-                            if (onSelectionChange) onSelectionChange();
-                        });
-                    });
+                function getSelectedFolders() {
+                    return folderSelector ? folderSelector.getSelectedFolders() : ["vis_fixed_0"];
                 }
 
                 function initializeDetailStickyPlot() {
@@ -329,28 +107,19 @@
                     const expId = "{{ experiment.id }}";
                     const plotEl = document.getElementById("detail-plot");
 
-                    // Restore folder selection from URL
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const foldersParam = urlParams.get("folders");
-                    if (foldersParam) {
-                        setSelectedFolders(foldersParam.split(","), { updateUrl: false });
-                    } else {
-                        const folderParam = urlParams.get("folder");
-                        if (folderParam) {
-                            setSelectedFolders([folderParam], { updateUrl: false });
-                        }
-                    }
-
                     const rebuildAndUpdate = () => {
-                        buildPreviewGrid(expId, selectedImageFolders);
+                        buildPreviewGrid(expId, getSelectedFolders());
                         updatePreviewsAtStep(lastPreviewStep, rolloutSteps, visualizationSteps);
                     };
 
-                    initializeFolderDropdown(rebuildAndUpdate);
-                    initializeFolderPresetButtons(rebuildAndUpdate);
-                    syncFolderDropdownSelection();
+                    // Initialize shared folder selector (handles URL restoration internally)
+                    folderSelector = createFolderSelector({
+                        menuId: "folder-menu",
+                        onSelectionChange: rebuildAndUpdate,
+                    });
 
                     // Parse view state from URL
+                    const urlParams = new URLSearchParams(window.location.search);
                     const xMin = urlParams.get("xmin");
                     const xMax = urlParams.get("xmax");
                     const yMin = urlParams.get("ymin");
@@ -440,7 +209,7 @@
 
                     preview.innerHTML = "";
                     currentPreviewMap = {};
-                    const imagesPerRow = 4;
+                    const imagesPerRow = 3;
 
                     for (let rowStart = 0; rowStart < folders.length; rowStart += imagesPerRow) {
                         const rowFolders = folders.slice(rowStart, rowStart + imagesPerRow);
@@ -452,28 +221,21 @@
                             cell.className = "detail-preview-cell";
                             cell.dataset.folderValue = folderValue;
 
-                            const label = getImageOption(folderValue)?.label || folderValue;
-                            const title = document.createElement("div");
-                            title.className = "detail-preview-title small";
-                            title.textContent = label;
+                            // Use common card builder from image_card_common.js
+                            const { card, stepLabelEl, img, missing } = buildImagePreviewCard({
+                                folderValue,
+                                showStepLabel: true,
+                                initialStep: "—"
+                            });
 
-                            const img = document.createElement("img");
-                            img.className = "img-fluid rounded border detail-preview-img d-none";
-                            img.alt = "Preview";
-
-                            const missing = document.createElement("div");
-                            missing.className = "text-muted fst-italic small detail-preview-missing d-none";
-                            missing.textContent = "No images available.";
-
-                            cell.appendChild(title);
-                            cell.appendChild(img);
-                            cell.appendChild(missing);
+                            cell.appendChild(card);
                             row.appendChild(cell);
 
                             // Store references for later updates
                             currentPreviewMap[folderValue] = {
                                 cell,
-                                title,
+                                card,
+                                stepLabelEl,
                                 img,
                                 missing,
                                 folderValue,
@@ -483,19 +245,24 @@
 
                         preview.appendChild(row);
                     }
+
+                    // Initialize tooltips for newly created elements
+                    initializeImageCardTooltips(preview);
                 }
 
                 // Update existing elements with new step data - called on hover
                 function updatePreviewsAtStep(step, rolloutSteps, vizSteps) {
-                    const pathDisplay = document.querySelector(".rollout-path");
-                    const folders = selectedImageFolders;
-
                     Object.values(currentPreviewMap).forEach((preview) => {
-                        const { img, missing, folderValue, expId } = preview;
+                        const { img, missing, folderValue, expId, stepLabelEl } = preview;
                         const spec = resolveFolderSpec(folderValue, vizSteps || {});
                         const folderSteps = (vizSteps && vizSteps[spec.key]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
                         const target = step !== null ? Math.max(0, Math.round(step)) : (folderSteps.length ? folderSteps[folderSteps.length - 1] : null);
                         const matched = target !== null ? nearestStepAtOrBelow(target, folderSteps) : null;
+
+                        // Update step label in card header
+                        if (stepLabelEl) {
+                            stepLabelEl.textContent = matched !== null ? matched.toLocaleString() : "—";
+                        }
 
                         if (matched !== null) {
                             const filename = `${spec.prefix}${matched.toString().padStart(7, "0")}.png`;
@@ -523,29 +290,17 @@
                             missing.classList.remove("d-none");
                         }
                     });
-
-                    // Update path display
-                    if (pathDisplay && folders.length > 0 && step !== null) {
-                        const spec = resolveFolderSpec(folders[0], vizSteps || {});
-                        const folderSteps = (vizSteps && vizSteps[spec.key]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
-                        const target = Math.max(0, Math.round(step));
-                        const matched = nearestStepAtOrBelow(target, folderSteps);
-                        if (matched !== null) {
-                            pathDisplay.textContent = `Hovered step ${target}, showing step ${matched}`;
-                        } else {
-                            pathDisplay.textContent = "No images available.";
-                        }
-                    }
                 }
 
                 function attachRolloutPreview(plotEl, expId, rolloutSteps, vizSteps) {
                     if (!plotEl || typeof Plotly === "undefined") return;
 
                     // Build initial grid structure
-                    buildPreviewGrid(expId, selectedImageFolders);
+                    buildPreviewGrid(expId, getSelectedFolders());
 
                     const renderLatest = () => {
-                        const folderValue = selectedImageFolders[0] || "vis_fixed_0";
+                        const folders = getSelectedFolders();
+                        const folderValue = folders[0] || "vis_fixed_0";
                         const spec = resolveFolderSpec(folderValue, vizSteps || {});
                         const stepsForFolder = (vizSteps && vizSteps[spec.key]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
                         const lastStep = Array.isArray(stepsForFolder) && stepsForFolder.length

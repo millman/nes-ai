@@ -1,8 +1,11 @@
 {% extends "base.html" %}
 
 {% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+<script src="{{ url_for('static', filename='image_card_common.js') }}"></script>
+<script src="{{ url_for('static', filename='folder_selector.js') }}"></script>
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>
 <script defer src="{{ url_for('static', filename='comparison.js') }}"></script>
 {% endblock %}
@@ -18,7 +21,7 @@
         <div class="col" data-exp-title="{{ exp.id }}">
             <div class="card">
                 <div class="card-body">
-                    <div class="fw-semibold">{{ title_text }}</div>
+                    <div class="fw-semibold">{{ title_text }} <span class="text-muted fw-normal">({{ exp.id }})</span></div>
                 </div>
             </div>
         </div>
@@ -27,60 +30,11 @@
     </div>
 </div>
 
-<div class="card mb-4" data-selected-ids="{{ selected_ids|join(',') }}">
-    <div class="card-body">
-        <div class="d-flex flex-column flex-lg-row gap-3">
-            <div class="flex-grow-1">
-                <div class="compare-plot-controls-row comparison-image-folder-actions">
-                    <div class="comparison-action-group">
-                        <button
-                            type="button"
-                            class="btn btn-outline-primary btn-sm"
-                            data-folder-preset="rollout"
-                        >Rollout</button>
-                    </div>
-                    <div class="comparison-action-group">
-                        <div class="btn-group" role="group" aria-label="Action presets">
-                            <span class="text-muted small comparison-action-label">Action</span>
-                            <button
-                                type="button"
-                                class="btn btn-outline-primary btn-sm comparison-action-first"
-                                data-folder-preset="z"
-                            >Z</button>
-                            <button
-                                type="button"
-                                class="btn btn-outline-primary btn-sm"
-                                data-folder-preset="h"
-                            >H</button>
-                            <button
-                                type="button"
-                                class="btn btn-outline-primary btn-sm"
-                                data-folder-preset="s"
-                            >S</button>
-                        </div>
-                    </div>
-                    <div class="dropdown comparison-folder-dropdown">
-                        <button
-                            class="btn btn-outline-primary btn-sm dropdown-toggle"
-                            type="button"
-                            id="comparison-folder-dropdown"
-                            data-bs-toggle="dropdown"
-                            data-bs-auto-close="outside"
-                            aria-expanded="false"
-                        >+ more</button>
-                        <div
-                            class="dropdown-menu p-2 comparison-folder-menu"
-                            aria-labelledby="comparison-folder-dropdown"
-                            id="comparison-folder-menu"
-                        ></div>
-                    </div>
-                </div>
-                <div class="compare-plot-wrapper">
-                    <div id="comparison-plot" class="plot-area">
-                        <p class="text-muted fst-italic">Select experiments to view overlapping loss curves.</p>
-                    </div>
-                </div>
-            </div>
+<div class="mb-4" data-selected-ids="{{ selected_ids|join(',') }}">
+    {% include '_folder_selector.html' with context %}
+    <div class="compare-plot-wrapper">
+        <div id="comparison-plot" class="plot-area">
+            <p class="text-muted fst-italic">Select experiments to view overlapping loss curves.</p>
         </div>
     </div>
 </div>
