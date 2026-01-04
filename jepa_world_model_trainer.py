@@ -538,6 +538,10 @@ class LossWeights:
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
     additivity_h: float = 0.0
 
+    # k-step rollout consistency in h-space.
+    # Encourages short-horizon compositionality in the dynamics state.
+    rollout_kstep_h: float = 0.0
+
     # --- S ---
     # State-conditioned delta alignment: s_{t+1} - s_t vs E(s_t, a_t).
     # Makes s a navigable planning space with consistent action geometry.
@@ -546,6 +550,10 @@ class LossWeights:
     # Explicit additivity of s deltas across steps.
     # Encourages compositional planning moves in the abstract space.
     additivity_s: float = 0.0
+
+    # k-step rollout consistency in s-space.
+    # Encourages short-horizon compositionality in the planning abstraction.
+    rollout_kstep_s: float = 0.0
 
 
 @dataclass
@@ -818,7 +826,7 @@ def delta_prediction_loss(
     return loss, pred_norm, target_norm
 
 
-def rollout_loss(
+def rollout_z_loss(
     model: JEPAWorldModel,
     embeddings: torch.Tensor,
     actions: torch.Tensor,
@@ -843,6 +851,70 @@ def rollout_loss(
             pred, _, h_next = model.predictor(current, h_current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
+            steps += 1
+            current = pred
+            h_current = h_next
+    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+
+
+def rollout_h_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    h_states: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+) -> torch.Tensor:
+    if rollout_horizon <= 1:
+        return embeddings.new_tensor(0.0)
+    b, t, _ = embeddings.shape
+    if t < 2:
+        return embeddings.new_tensor(0.0)
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
+    for start in range(warmup, t - 1):
+        current = embeddings[:, start]
+        max_h = min(rollout_horizon, t - start - 1)
+        h_current = h_states[:, start]
+        for offset in range(max_h):
+            act = actions[:, start + offset]
+            pred, _, h_next = model.predictor(current, h_current, act)
+            target_h = h_states[:, start + offset + 1].detach()
+            total = total + F.mse_loss(h_next, target_h)
+            steps += 1
+            current = pred
+            h_current = h_next
+    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+
+
+def rollout_s_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    h_states: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+) -> torch.Tensor:
+    if rollout_horizon <= 1:
+        return embeddings.new_tensor(0.0)
+    b, t, _ = embeddings.shape
+    if t < 2:
+        return embeddings.new_tensor(0.0)
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
+    s_states = model.h2s(h_states)
+    for start in range(warmup, t - 1):
+        current = embeddings[:, start]
+        max_h = min(rollout_horizon, t - start - 1)
+        h_current = h_states[:, start]
+        for offset in range(max_h):
+            act = actions[:, start + offset]
+            pred, _, h_next = model.predictor(current, h_current, act)
+            s_next = model.h2s(h_next)
+            target_s = s_states[:, start + offset + 1].detach()
+            total = total + F.mse_loss(s_next, target_s)
             steps += 1
             current = pred
             h_current = h_next
@@ -1061,6 +1133,8 @@ def _compute_losses_and_metrics(
     loss_action_delta_z = x_frames.new_tensor(0.0)
     loss_action_delta_h = x_frames.new_tensor(0.0)
     loss_rollout_kstep_z = x_frames.new_tensor(0.0)
+    loss_rollout_kstep_h = x_frames.new_tensor(0.0)
+    loss_rollout_kstep_s = x_frames.new_tensor(0.0)
     loss_additivity_h = x_frames.new_tensor(0.0)
     loss_action_delta_s = x_frames.new_tensor(0.0)
     loss_additivity_s = x_frames.new_tensor(0.0)
@@ -1193,7 +1267,27 @@ def _compute_losses_and_metrics(
         loss_action_delta_z = F.mse_loss(delta_target, delta_proto)
 
     if weights.rollout_kstep_z > 0:
-        loss_rollout_kstep_z = rollout_loss(
+        loss_rollout_kstep_z = rollout_z_loss(
+            model,
+            z_embeddings,
+            a_seq,
+            h_states,
+            cfg.rollout_horizon,
+            warmup_frames,
+        )
+
+    if weights.rollout_kstep_h > 0:
+        loss_rollout_kstep_h = rollout_h_loss(
+            model,
+            z_embeddings,
+            a_seq,
+            h_states,
+            cfg.rollout_horizon,
+            warmup_frames,
+        )
+
+    if weights.rollout_kstep_s > 0:
+        loss_rollout_kstep_s = rollout_s_loss(
             model,
             z_embeddings,
             a_seq,
@@ -1249,6 +1343,8 @@ def _compute_losses_and_metrics(
         + weights.action_delta_z * _scaled("loss_action_delta_z", loss_action_delta_z)
         + weights.action_delta_h * _scaled("loss_action_delta_h", loss_action_delta_h)
         + weights.rollout_kstep_z * _scaled("loss_rollout_kstep_z", loss_rollout_kstep_z)
+        + weights.rollout_kstep_h * _scaled("loss_rollout_kstep_h", loss_rollout_kstep_h)
+        + weights.rollout_kstep_s * _scaled("loss_rollout_kstep_s", loss_rollout_kstep_s)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
         + weights.action_delta_s * _scaled("loss_action_delta_s", loss_action_delta_s)
         + weights.additivity_s * _scaled("loss_additivity_s", loss_additivity_s)
@@ -1299,6 +1395,8 @@ def _compute_losses_and_metrics(
         "loss_action_delta_z": loss_action_delta_z.item(),
         "loss_action_delta_h": loss_action_delta_h.item(),
         "loss_rollout_kstep_z": loss_rollout_kstep_z.item(),
+        "loss_rollout_kstep_h": loss_rollout_kstep_h.item(),
+        "loss_rollout_kstep_s": loss_rollout_kstep_s.item(),
         "loss_additivity_h": loss_additivity_h.item(),
         "loss_action_delta_s": loss_action_delta_s.item(),
         "loss_additivity_s": loss_additivity_s.item(),
@@ -1408,6 +1506,10 @@ def log_metrics(
         filtered.pop("loss_action_delta_h", None)
     if weights.rollout_kstep_z <= 0:
         filtered.pop("loss_rollout_kstep_z", None)
+    if weights.rollout_kstep_h <= 0:
+        filtered.pop("loss_rollout_kstep_h", None)
+    if weights.rollout_kstep_s <= 0:
+        filtered.pop("loss_rollout_kstep_s", None)
     if weights.additivity_h <= 0:
         filtered.pop("loss_additivity_h", None)
     if weights.action_delta_s <= 0:
@@ -1455,6 +1557,8 @@ LOSS_COLUMNS = [
     "loss_action_delta_z",
     "loss_action_delta_h",
     "loss_rollout_kstep_z",
+    "loss_rollout_kstep_h",
+    "loss_rollout_kstep_s",
     "loss_additivity_h",
     "loss_action_delta_s",
     "loss_additivity_s",
@@ -1500,6 +1604,8 @@ class LossHistory:
     action_delta_z: List[float] = field(default_factory=list)
     action_delta_h: List[float] = field(default_factory=list)
     rollout_kstep_z: List[float] = field(default_factory=list)
+    rollout_kstep_h: List[float] = field(default_factory=list)
+    rollout_kstep_s: List[float] = field(default_factory=list)
     additivity_h: List[float] = field(default_factory=list)
     action_delta_s: List[float] = field(default_factory=list)
     additivity_s: List[float] = field(default_factory=list)
@@ -1542,6 +1648,8 @@ class LossHistory:
         self.action_delta_z.append(metrics.get("loss_action_delta_z", 0.0))
         self.action_delta_h.append(metrics.get("loss_action_delta_h", 0.0))
         self.rollout_kstep_z.append(metrics.get("loss_rollout_kstep_z", 0.0))
+        self.rollout_kstep_h.append(metrics.get("loss_rollout_kstep_h", 0.0))
+        self.rollout_kstep_s.append(metrics.get("loss_rollout_kstep_s", 0.0))
         self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
         self.action_delta_s.append(metrics.get("loss_action_delta_s", 0.0))
         self.additivity_s.append(metrics.get("loss_additivity_s", 0.0))
@@ -1595,6 +1703,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.action_delta_z,
             history.action_delta_h,
             history.rollout_kstep_z,
+            history.rollout_kstep_h,
+            history.rollout_kstep_s,
             history.additivity_h,
             history.action_delta_s,
             history.additivity_s,
