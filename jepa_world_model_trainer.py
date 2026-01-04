@@ -72,6 +72,7 @@ from jepa_world_model.plots.plot_action_alignment_debug import (
     build_action_alignment_debug,
 )
 from jepa_world_model.vis_action_alignment import save_action_alignment_detail_plot
+from jepa_world_model.vis_odometry import _predictor_rollout
 from jepa_world_model.plots.write_action_alignment_report import (
     write_action_alignment_report,
 )
@@ -125,7 +126,7 @@ from jepa_world_model.plots.plot_in_degree_hist import save_in_degree_hist_plot
 from jepa_world_model.plots.plot_neff_violin import save_neff_violin_plot
 from jepa_world_model.plots.plot_rank_cdf import save_rank_cdf_plot
 from jepa_world_model.vis_self_distance import write_self_distance_outputs
-from jepa_world_model.vis_state_embedding import write_state_embedding_outputs, _rollout_hidden_states
+from jepa_world_model.vis_state_embedding import write_state_embedding_outputs
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
 from jepa_world_model.vis_visualization_batch import _render_visualization_batch
 from jepa_world_model.plots.plot_two_step_composition_error import (
@@ -212,6 +213,7 @@ class PredictorNetwork(nn.Module):
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
+        self.h_norm = nn.LayerNorm(state_dim)
         self.activation = nn.SiLU(inplace=True)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
@@ -232,7 +234,7 @@ class PredictorNetwork(nn.Module):
         hidden = self.activation(self.in_proj(torch.cat([emb_flat, h_flat, act_flat], dim=-1)))
         hidden = self.activation(self.hidden_proj(hidden))
         raw_delta = self.out_proj(hidden)
-        h_next = self.h_out(hidden)
+        h_next = self.h_norm(self.h_out(hidden))
         if self.use_delta_squash:
             delta = torch.tanh(raw_delta) * self.delta_scale
         else:
@@ -663,6 +665,7 @@ class JEPAWorldModel(nn.Module):
             cfg.state_dim,
         )
         self.state_dim = cfg.state_dim
+        self.initial_h = nn.Parameter(torch.randn(1, cfg.state_dim) * 0.02)
         self.h2s = HiddenToSProjector(
             cfg.state_dim,
             cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
@@ -710,43 +713,6 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 # Loss utilities
 # ------------------------------------------------------------
-
-
-
-
-def _predictor_rollout(
-    model: JEPAWorldModel, embeddings: torch.Tensor, actions: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Roll predictor across sequence to produce z_hat, delta, and h states."""
-    b, t, _ = embeddings.shape
-    if t < 2:
-        zero = embeddings.new_tensor(0.0)
-        return (
-            zero,
-            zero,
-            zero,
-            embeddings.new_zeros((b, t, model.state_dim)),
-        )
-    preds = []
-    deltas = []
-    h_preds = []
-    h_states = [embeddings.new_zeros(b, model.state_dim, device=embeddings.device)]
-    for step in range(t - 1):
-        z_t = embeddings[:, step]
-        h_t = h_states[-1]
-        act_t = actions[:, step]
-        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
-        preds.append(pred)
-        deltas.append(delta)
-        h_preds.append(h_next)
-        h_states.append(h_next)
-    return (
-        torch.stack(preds, dim=1),
-        torch.stack(deltas, dim=1),
-        torch.stack(h_preds, dim=1),
-        torch.stack(h_states, dim=1),
-    )
-
 
 def jepa_loss(
     model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
@@ -2553,7 +2519,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embed_frames = embedding_batch_cpu[0].to(device)
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
-                h_states = _rollout_hidden_states(model, embed_outputs["embeddings"], embed_actions)
+                _, _, _, h_states = _predictor_rollout(model, embed_outputs["embeddings"], embed_actions)
                 s_embeddings = model.h2s(h_states)
             assert torch.is_grad_enabled()
             save_embedding_projection(
@@ -2595,7 +2561,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 self_dist_actions = torch.from_numpy(self_distance_inputs.actions).unsqueeze(0).to(device)
                 self_dist_embeddings_full = model.encode_sequence(self_dist_frames)["embeddings"]
                 self_dist_embeddings = self_dist_embeddings_full[0]
-                self_dist_h_states = _rollout_hidden_states(model, self_dist_embeddings_full, self_dist_actions)
+                _, _, _, self_dist_h_states_batch = _predictor_rollout(model, self_dist_embeddings_full, self_dist_actions)
+                self_dist_h_states = self_dist_h_states_batch[0]
             assert torch.is_grad_enabled()
             write_self_distance_outputs(
                 self_dist_embeddings,

@@ -2,7 +2,7 @@
 """Odometry-style latent diagnostics."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,7 +26,7 @@ def _rollout_predictions(
     if t < 2:
         return embeddings.new_zeros((b, 0, embeddings.shape[-1]))
     preds = []
-    h_t = embeddings.new_zeros((b, model.state_dim))
+    h_t = model.predictor.h_norm(model.initial_h).expand(b, -1)
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = actions[:, step]
@@ -46,7 +46,7 @@ def _rollout_open_loop(
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, model.state_dim))
-    h_t = embeddings.new_zeros((b, model.state_dim))
+    h_t = model.predictor.h_norm(model.initial_h).expand(b, -1)
     z_t = embeddings[:, 0]
     h_preds = []
     for step in range(t - 1):
@@ -58,6 +58,39 @@ def _rollout_open_loop(
         h_t = h_next
     return torch.stack(h_preds, dim=1)
 
+
+def _predictor_rollout(
+    model, embeddings: torch.Tensor, actions: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Roll predictor across sequence to produce z_hat, delta, and h states."""
+    b, t, _ = embeddings.shape
+    if t < 2:
+        zero = embeddings.new_tensor(0.0)
+        return (
+            zero,
+            zero,
+            zero,
+            embeddings.new_zeros((b, t, model.state_dim)),
+        )
+    preds = []
+    deltas = []
+    h_preds = []
+    h_states = [model.predictor.h_norm(model.initial_h).expand(b, -1)]
+    for step in range(t - 1):
+        z_t = embeddings[:, step]
+        h_t = h_states[-1]
+        act_t = actions[:, step]
+        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
+        preds.append(pred)
+        deltas.append(delta)
+        h_preds.append(h_next)
+        h_states.append(h_next)
+    return (
+        torch.stack(preds, dim=1),
+        torch.stack(deltas, dim=1),
+        torch.stack(h_preds, dim=1),
+        torch.stack(h_states, dim=1),
+    )
 
 def _compute_pca_2d(data: np.ndarray) -> Optional[np.ndarray]:
     if data.shape[0] < 2:

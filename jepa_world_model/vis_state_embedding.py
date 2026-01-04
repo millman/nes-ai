@@ -13,29 +13,10 @@ from jepa_world_model.vis_self_distance import write_self_distance_outputs_from_
 from jepa_world_model.vis_odometry import (
     _rollout_open_loop,
     _rollout_predictions,
+    _predictor_rollout,
     _plot_latent_prediction_comparison,
     _plot_odometry_embeddings,
 )
-
-
-def _rollout_hidden_states(
-    model,
-    embeddings: torch.Tensor,
-    actions: torch.Tensor,
-) -> torch.Tensor:
-    """Roll hidden states forward with the predictor to build h_t for each step."""
-    b, t, _ = embeddings.shape
-    h_states = embeddings.new_zeros((b, t, model.state_dim))
-    if t < 2:
-        return h_states
-    h_t = embeddings.new_zeros((b, model.state_dim))
-    for step in range(t - 1):
-        z_t = embeddings[:, step]
-        act_t = actions[:, step]
-        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
-        h_states[:, step + 1] = h_next
-        h_t = h_next
-    return h_states
 
 
 def write_state_embedding_histogram(
@@ -86,7 +67,7 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         embeddings = model.encode_sequence(frames)["embeddings"]
         actions = torch.from_numpy(traj_inputs.actions).to(device).unsqueeze(0)
-        h_states = _rollout_hidden_states(model, embeddings, actions)
+        _, _, _, h_states = _predictor_rollout(model, embeddings, actions)
         s = model.h2s(h_states)[0]
 
     warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
@@ -189,7 +170,7 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         hist_embeddings = model.encode_sequence(hist_frames)["embeddings"]
         hist_actions = hist_actions_cpu.to(device)
-        hist_h_states = _rollout_hidden_states(model, hist_embeddings, hist_actions)
+        _, _, _, hist_h_states = _predictor_rollout(model, hist_embeddings, hist_actions)
         hist_s = model.h2s(hist_h_states)
     hist_warmup = max(min(warmup_frames, hist_s.shape[1] - 1), 0)
     hist_s = hist_s[:, hist_warmup:]
