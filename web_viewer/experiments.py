@@ -359,8 +359,9 @@ def load_experiment(
     metadata_custom_path = path / "experiment_metadata.txt"
     meta_start = time.perf_counter()
     title, tags, starred, archived = _read_metadata(metadata_custom_path)
-    metadata_text = metadata_path.read_text() if metadata_path.exists() else "metadata.txt missing."
-    metadata_data_root = _extract_data_root_from_metadata(metadata_text) if metadata_text else None
+    metadata_exists = metadata_path.exists()
+    metadata_text = metadata_path.read_text() if metadata_exists else "metadata.txt missing."
+    metadata_data_root = _extract_data_root_from_metadata(metadata_text) if metadata_exists else None
     _profile("load_experiment.text_meta.base", meta_start, path)
     meta_start = time.perf_counter()
     metadata_model_diff_text_raw = "—"
