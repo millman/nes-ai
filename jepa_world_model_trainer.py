@@ -1641,6 +1641,8 @@ def _write_spike_batch(
         header.extend([f"action_{i}" for i in range(actions.shape[-1])])
         writer.writerow(header)
         action_ids = compress_actions_to_ids(actions).detach().cpu().numpy()
+        if action_ids.ndim == 1:
+            action_ids = action_ids.reshape(actions.shape[0], actions.shape[1])
         for b_idx in range(actions.shape[0]):
             for t_idx in range(actions.shape[1]):
                 aid = int(action_ids[b_idx, t_idx])
