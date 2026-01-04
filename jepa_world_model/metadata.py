@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Set
 import subprocess
 import tomli_w
 
+from jepa_world_model.step_schedule import _parse_schedule
+
 __all__ = ["write_run_metadata", "write_git_metadata"]
 
 _TOML_NULL_SENTINEL = "null"
@@ -35,6 +37,16 @@ def _serialize_for_json(value: Any):
     return value
 
 
+def _format_schedule_for_metadata(raw: Any) -> Any:
+    if raw is None:
+        return None
+    schedule = _parse_schedule(raw)
+    return " ".join(
+        f"{every}:{'None' if max_step is None else max_step}"
+        for every, max_step in schedule
+    )
+
+
 def write_git_metadata(run_dir: Path) -> None:
     commit_sha = _run_git_command(["git", "rev-parse", "HEAD"])
     diff_output = _run_git_command(["git", "diff", "--patch"])
@@ -59,10 +71,14 @@ def write_run_metadata(
     model_cfg: Any,
     exclude_fields: Optional[Set[str]] = None,
 ) -> None:
-    train_config = _serialize_for_json(asdict(cfg))
+    train_config = asdict(cfg)
     if exclude_fields:
         for field_name in exclude_fields:
             train_config.pop(field_name, None)
+    for schedule_key in ("log_schedule", "vis_schedule"):
+        if schedule_key in train_config:
+            train_config[schedule_key] = _format_schedule_for_metadata(train_config[schedule_key])
+    train_config = _serialize_for_json(train_config)
     model_config = _serialize_for_json(asdict(model_cfg))
     toml_payload: Dict[str, Any] = {
         "train_config": train_config,
