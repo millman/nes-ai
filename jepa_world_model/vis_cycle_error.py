@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 
 
 def compute_cycle_errors(
@@ -76,7 +77,7 @@ def save_cycle_error_plot(
     action_dim: int,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2))
     if errors:
         axes[0].hist(errors, bins=20, color="tab:green", alpha=0.8)
         axes[0].set_title("Cycle error distribution")
@@ -120,6 +121,7 @@ def save_cycle_error_plot(
         axes[1].text(0.5, 0.5, "No per-action stats available.", ha="center", va="center")
         axes[1].axis("off")
 
+    apply_square_axes(axes)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

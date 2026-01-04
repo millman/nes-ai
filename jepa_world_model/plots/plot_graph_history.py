@@ -6,10 +6,11 @@ from typing import Dict, List
 
 import matplotlib.pyplot as plt
 
+from jepa_world_model.plots.plot_layout import figsize_for_grid
 
 def save_graph_history_plot(out_path: Path, history: List[Dict[str, float]], k: int) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=figsize_for_grid(3, 1), sharex=True)
     if not history:
         for ax in axes:
             ax.text(0.5, 0.5, "History unavailable.", ha="center", va="center")

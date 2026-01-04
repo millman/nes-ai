@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 
 from jepa_world_model.actions import decode_action_id
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 
 
 def save_delta_pca_plot(
@@ -21,7 +22,7 @@ def save_delta_pca_plot(
     embedding_label: str,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    fig, axes = plt.subplots(2, 2, figsize=figsize_for_grid(2, 2))
     num_var = min(10, variance_ratio.shape[0])
     axes[0, 0].bar(np.arange(num_var), variance_ratio[:num_var], color="tab:blue")
     axes[0, 0].set_title(f"Delta-{embedding_label} PCA variance ratio")
@@ -88,6 +89,7 @@ def save_delta_pca_plot(
     upper_label = embedding_label.upper()
     axes[1, 1].set_title(f"PCA of {upper_label} on motion-defined Δ{upper_label} basis")
 
+    apply_square_axes(axes)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

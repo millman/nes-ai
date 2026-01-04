@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
+from jepa_world_model.plots.plot_layout import figsize_for_grid
 
 
 def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -131,7 +132,7 @@ def write_self_distance_plots(
     cosine_prefix: Optional[str],
 ) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8.5))
+    fig, axes = plt.subplots(2, 3, figsize=figsize_for_grid(2, 3))
     axes[0, 0].plot(steps, dist_first_np, marker="o")
     axes[0, 0].set_title("Distance to first")
     axes[0, 0].set_xlabel("timestep")
@@ -167,7 +168,7 @@ def write_self_distance_plots(
     plt.close(fig)
 
     # Save a cosine-only PNG for quick inspection.
-    fig_cos, axes_cos = plt.subplots(1, 3, figsize=(14, 4.2))
+    fig_cos, axes_cos = plt.subplots(1, 3, figsize=figsize_for_grid(1, 3))
     axes_cos[0].plot(steps, dist_first_cos_np, marker="o", color="tab:green")
     axes_cos[0].set_title("Cosine distance to first")
     axes_cos[0].set_xlabel("timestep")

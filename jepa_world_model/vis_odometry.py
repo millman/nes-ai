@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 try:
     from sklearn.decomposition import FastICA
     from sklearn.manifold import TSNE
@@ -141,7 +142,7 @@ def _plot_odometry_embeddings(
         return
     out_path.parent.mkdir(parents=True, exist_ok=True)
     t = np.linspace(0, 1, num=history.shape[0])
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 3, figsize=figsize_for_grid(1, 3))
     for ax, title, coords in (
         (axes[0], "PCA", _compute_pca_2d(history)),
         (axes[1], "ICA", _compute_ica_2d(history)),
@@ -156,6 +157,7 @@ def _plot_odometry_embeddings(
         ax.set_xlabel("dim 1")
         ax.set_ylabel("dim 2")
         fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="time")
+    apply_square_axes(axes)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -170,7 +172,7 @@ def _plot_latent_prediction_comparison(
     if z_next.shape[0] < 2:
         return
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2))
 
     hat_label = f"{embedding_label}_hat"
     t = np.arange(z_next.shape[0])

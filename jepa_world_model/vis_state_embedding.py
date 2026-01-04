@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from jepa_world_model.vis_self_distance import write_self_distance_outputs_from_embeddings
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 from jepa_world_model.vis_odometry import (
     _rollout_open_loop,
     _rollout_predictions,
@@ -25,7 +26,7 @@ def write_state_embedding_histogram(
     global_step: int,
 ) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
-    fig_hist, ax = plt.subplots(figsize=(7, 4))
+    fig_hist, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
     if s_norm_np.size:
         finite = np.asarray(s_norm_np)[np.isfinite(s_norm_np)]
         if finite.size:
@@ -44,6 +45,7 @@ def write_state_embedding_histogram(
         ax.text(0.5, 0.5, "No state embeddings.", ha="center", va="center")
         ax.axis("off")
     ax.set_title("State embedding norm distribution")
+    apply_square_axes(ax)
     fig_hist.tight_layout()
     fig_hist.savefig(plot_dir / f"state_embedding_hist_{global_step:07d}.png", dpi=200, bbox_inches="tight")
     plt.close(fig_hist)

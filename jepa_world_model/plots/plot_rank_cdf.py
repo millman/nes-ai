@@ -6,10 +6,11 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 
 def save_rank_cdf_plot(out_path: Path, ranks: np.ndarray, k: int, title: str) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
     if ranks.size == 0:
         ax.text(0.5, 0.5, "No valid transitions.", ha="center", va="center")
     else:
@@ -24,6 +25,7 @@ def save_rank_cdf_plot(out_path: Path, ranks: np.ndarray, k: int, title: str) ->
         ax.grid(True, alpha=0.3)
         ax.legend()
     ax.set_title(title)
+    apply_square_axes(ax)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

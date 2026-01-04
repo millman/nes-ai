@@ -10,6 +10,7 @@ from matplotlib import colors as mcolors
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import decode_action_id
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 from jepa_world_model.plot_strip_scatter import plot_strip_scatter
 
 
@@ -21,7 +22,7 @@ def save_action_alignment_plot(
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if not stats:
-        fig, ax = plt.subplots(figsize=(6, 4))
+        fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
         ax.text(0.5, 0.5, "No actions met alignment criteria.", ha="center", va="center")
         ax.axis("off")
         fig.tight_layout()
@@ -33,7 +34,7 @@ def save_action_alignment_plot(
     for stat in stats:
         cos_values = stat.get("cosines")
         samples.append(np.asarray([] if cos_values is None else cos_values, dtype=np.float32))
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
     plot_strip_scatter(
         ax,
         samples,
@@ -48,6 +49,8 @@ def save_action_alignment_plot(
     ax.set_ylabel("cosine alignment")
     ax.set_ylim(-1.05, 1.05)
     ax.set_title("Action-conditioned cosine alignment (strip plot)")
+    apply_square_axes(ax)
+    apply_square_axes(axes)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -61,7 +64,7 @@ def save_action_alignment_detail_plot(
     alignment_label: str = "PCA",
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    fig, axes = plt.subplots(2, 2, figsize=figsize_for_grid(2, 2))
 
     overall_cos_raw = debug_data.get("overall_cos")
     overall_norms_raw = debug_data.get("overall_norms")

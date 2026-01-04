@@ -114,6 +114,7 @@ from jepa_world_model.plots.plot_variance_report import write_variance_report
 from jepa_world_model.plots.plot_variance_spectrum import (
     save_variance_spectrum_plot,
 )
+from jepa_world_model.plots.plot_layout import figsize_for_grid
 from jepa_world_model.plots.plot_graph_diagnostics import (
     GraphDiagnosticsConfig,
     build_graph_diag_indices,
@@ -1577,7 +1578,10 @@ def _compute_spike_batch_stats(frames: torch.Tensor, actions: torch.Tensor) -> D
     per_seq_stats: List[Dict[str, Any]] = []
     action_ids_seq = compress_actions_to_ids(actions).detach().cpu().numpy()
     for seq_idx, seq_actions in enumerate(action_ids_seq):
-        seq_actions = [int(a) for a in seq_actions.tolist()]
+        seq_list = seq_actions.tolist()
+        if isinstance(seq_list, int):
+            seq_list = [seq_list]
+        seq_actions = [int(a) for a in seq_list]
         unique_actions = len(set(seq_actions))
         repeats = sum(1 for i in range(1, len(seq_actions)) if seq_actions[i] == seq_actions[i - 1])
         per_seq_stats.append(
@@ -1927,7 +1931,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     if len(history) == 0:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=figsize_for_grid(1, 1))
     default_cycle = plt.rcParams.get("axes.prop_cycle")
     color_cycle = default_cycle.by_key().get("color", []) if default_cycle is not None else []
 
@@ -1981,7 +1985,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     has_rank_acc = any(val != 0.0 for val in history.geometry_rank_accuracy)
     has_rank_loss = any(val != 0.0 for val in history.geometry_rank)
     if has_rank_acc or has_rank_loss:
-        fig, ax1 = plt.subplots(figsize=(7, 4))
+        fig, ax1 = plt.subplots(figsize=figsize_for_grid(1, 1))
         if has_rank_acc:
             ax1.plot(history.steps, history.geometry_rank_accuracy, label="geometry_rank_accuracy", color=_color(3))
         ax1.set_xlabel("Step")

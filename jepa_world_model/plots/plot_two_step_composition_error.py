@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from jepa_world_model.vis_vis_ctrl_metrics import VisCtrlMetrics
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 
 
 def save_two_step_composition_error_plot(
@@ -15,7 +16,7 @@ def save_two_step_composition_error_plot(
     embedding_label: str,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
     if metrics.composition_errors.size:
         ax.hist(metrics.composition_errors, bins=20, color="tab:purple", alpha=0.8)
         ax.set_xlabel("two-step error")
@@ -29,6 +30,7 @@ def save_two_step_composition_error_plot(
     else:
         ax.text(0.5, 0.5, "No composition errors.", ha="center", va="center")
         ax.axis("off")
+    apply_square_axes(ax)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

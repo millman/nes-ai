@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 
 from jepa_world_model.plot_raincloud import plot_raincloud
 from jepa_world_model.vis_vis_ctrl_metrics import VisCtrlMetrics
+from jepa_world_model.plots.plot_layout import apply_square_axes, figsize_for_grid
 
 
 def save_smoothness_knn_distance_eigenvalue_spectrum_plot(
@@ -17,7 +18,7 @@ def save_smoothness_knn_distance_eigenvalue_spectrum_plot(
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ks = sorted(metrics.knn_mean_distances.keys())
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2))
     if ks:
         samples = [metrics.knn_distance_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
         labels = [f"k={k}" for k in ks]
@@ -40,6 +41,7 @@ def save_smoothness_knn_distance_eigenvalue_spectrum_plot(
     else:
         axes[1].text(0.5, 0.5, "No eigenvalues.", ha="center", va="center")
         axes[1].axis("off")
+    apply_square_axes(axes)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
