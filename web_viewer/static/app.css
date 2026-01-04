@@ -5,6 +5,18 @@
     min-height: 500px;
 }
 
+.comparison-image-folder {
+    min-width: 220px;
+    max-width: 320px;
+}
+
+@media (max-width: 991.98px) {
+    .comparison-image-folder {
+        max-width: none;
+        width: 100%;
+    }
+}
+
 /* Experiment table layout */
 .exp-table {
     table-layout: fixed;

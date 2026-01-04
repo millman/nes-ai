@@ -1,8 +1,11 @@
 let hasRenderedPlot = false;
-let currentImageFolder = "vis_fixed_0";
+let selectedImageFolders = ["vis_fixed_0"];
 let currentXAxisMode = "steps";
 let lastPreviewStep = null;
 let pendingInitialPreviewStep = null;
+let currentPreviewMap = {};
+let currentStepsByExp = {};
+let currentExperiments = [];
 
 // Helper to build URL string without encoding commas in ids parameter
 function buildUrlString(url) {
@@ -200,11 +203,25 @@ function computeInitialPreviewStep(stepsMap, folderValue) {
   return Math.min(...maxStepsPerExp);
 }
 
+function computeInitialPreviewStepForFolders(stepsMap, folderValues) {
+  const candidates = (folderValues || [])
+    .map((folderValue) => computeInitialPreviewStep(stepsMap, folderValue))
+    .filter((value) => value !== null && value !== undefined);
+  if (!candidates.length) {
+    return null;
+  }
+  return Math.min(...candidates);
+}
+
 function renderPreviewsAtStep(step, previews, stepsMap) {
   const targetStep = step !== null && step !== undefined ? Math.max(0, Math.round(step)) : null;
-  const folderValue = currentImageFolder;
-  Object.entries(previews || {}).forEach(([expId, preview]) => {
+  Object.values(previews || {}).forEach((preview) => {
+    const expId = preview.expId;
     const displayTitle = preview.displayTitle || expId;
+    const folderValue = preview.folderValue;
+    if (!expId || !folderValue) {
+      return;
+    }
     const spec = resolveImageSpec(folderValue, stepsMap, expId);
     const available = getStepsForFolder(stepsMap, expId, folderValue);
     const matched = targetStep !== null ? nearestStepAtOrBelow(targetStep, available) : (available.length ? available[available.length - 1] : null);
@@ -241,12 +258,72 @@ function renderPreviewsAtStep(step, previews, stepsMap) {
   });
 }
 
+function normalizeSelectedFolders(values) {
+  const normalized = [];
+  const seen = new Set();
+  (values || []).forEach((value) => {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    if (!getImageOption(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  });
+  return normalized;
+}
+
+function updateFolderUrl(folders) {
+  const url = new URL(window.location.href);
+  const value = folders.join(",");
+  if (value) {
+    url.searchParams.set("folders", value);
+    url.searchParams.set("folder", folders[0]);
+  } else {
+    url.searchParams.delete("folders");
+    url.searchParams.delete("folder");
+  }
+  window.history.replaceState({}, "", buildUrlString(url));
+}
+
+function setSelectedFolders(nextSelected, { updateUrl = true, syncSelect = true } = {}) {
+  const normalized = normalizeSelectedFolders(nextSelected);
+  selectedImageFolders = normalized.length ? normalized : ["vis_fixed_0"];
+  if (updateUrl) {
+    updateFolderUrl(selectedImageFolders);
+  }
+  if (syncSelect) {
+    const select = document.getElementById("comparison-image-folder-select");
+    if (select) {
+      Array.from(select.options).forEach((option) => {
+        option.selected = selectedImageFolders.includes(option.value);
+      });
+    }
+  }
+}
+
+function mergeSelectionOrder(nextSelected) {
+  const normalized = normalizeSelectedFolders(nextSelected);
+  const nextSet = new Set(normalized);
+  const preserved = selectedImageFolders.filter((value) => nextSet.has(value));
+  const preservedSet = new Set(preserved);
+  const added = normalized.filter((value) => !preservedSet.has(value));
+  return preserved.concat(added);
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // Restore folder selection from URL
   const urlParams = new URLSearchParams(window.location.search);
-  const folderParam = urlParams.get("folder");
-  if (folderParam && IMAGE_FOLDER_OPTIONS.some((opt) => opt.value === folderParam)) {
-    currentImageFolder = folderParam;
+  const foldersParam = urlParams.get("folders");
+  if (foldersParam) {
+    setSelectedFolders(foldersParam.split(","), { updateUrl: false, syncSelect: false });
+  } else {
+    const folderParam = urlParams.get("folder");
+    if (folderParam) {
+      setSelectedFolders([folderParam], { updateUrl: false, syncSelect: false });
+    }
   }
 
   // Restore x-axis mode from URL
@@ -258,6 +335,9 @@ document.addEventListener("DOMContentLoaded", () => {
       xAxisSelect.value = xAxisParam;
     }
   }
+
+  initializeImageFolderSelector();
+  setSelectedFolders(selectedImageFolders, { updateUrl: false, syncSelect: true });
 
   const ids = getIdsFromDataset();
   if (ids.length >= 2) {
@@ -322,12 +402,13 @@ function renderComparison(payload) {
     }
     availableStepsByExp[exp.id] = map;
   });
+  currentStepsByExp = availableStepsByExp;
+  currentExperiments = experiments;
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
-  const previewMap = collectPreviewMap(grid);
-  pendingInitialPreviewStep = computeInitialPreviewStep(availableStepsByExp, currentImageFolder);
-  lastPreviewStep = null;
   refreshPreviewImages(grid, availableStepsByExp);
+  pendingInitialPreviewStep = computeInitialPreviewStepForFolders(availableStepsByExp, selectedImageFolders);
+  lastPreviewStep = null;
   const figure = payload.figure;
   if (figure) {
     // Store original x-axis data for toggling
@@ -424,7 +505,7 @@ function renderComparison(payload) {
       applyXAxisMode(currentXAxisMode, { updateUrl: false });
       if (lastPreviewStep === null && pendingInitialPreviewStep !== null) {
         lastPreviewStep = pendingInitialPreviewStep;
-        renderPreviewsAtStep(lastPreviewStep, previewMap, availableStepsByExp);
+        renderPreviewsAtStep(lastPreviewStep, currentPreviewMap, currentStepsByExp);
       }
 
       // X-axis toggle handler
@@ -461,7 +542,7 @@ function renderComparison(payload) {
 
       wireExperimentVisibilitySync(plot);
     });
-    attachComparisonHover(plot, availableStepsByExp, previewMap);
+    attachComparisonHover(plot);
     hasRenderedPlot = true;
   } else {
     hasRenderedPlot = false;
@@ -471,60 +552,63 @@ function renderComparison(payload) {
   wireTagsForms(grid);
 }
 
-function buildExperimentGrid(experiments) {
-  const container = document.createElement("div");
-  container.className = "d-flex flex-column gap-4";
-
-  // Folder selector row
-  const selectorRow = document.createElement("div");
-  selectorRow.className = "d-flex align-items-center gap-2 mb-2";
-
-  const selectorLabel = document.createElement("label");
-  selectorLabel.className = "form-label mb-0 small text-muted";
-  selectorLabel.textContent = "Image folder:";
-  selectorLabel.htmlFor = "image-folder-select";
-
-  const selector = document.createElement("select");
-  selector.id = "image-folder-select";
-  selector.className = "form-select form-select-sm";
-  selector.style.width = "auto";
-
+function initializeImageFolderSelector() {
+  const selector = document.getElementById("comparison-image-folder-select");
+  if (!selector) {
+    return;
+  }
+  selector.innerHTML = "";
+  selector.multiple = true;
+  if (!selector.size) {
+    selector.size = 8;
+  }
   IMAGE_FOLDER_OPTIONS.forEach((opt) => {
     const option = document.createElement("option");
     option.value = opt.value;
     option.textContent = opt.label;
-    if (opt.value === currentImageFolder) {
-      option.selected = true;
-    }
+    option.selected = selectedImageFolders.includes(opt.value);
     selector.appendChild(option);
   });
-  selector.value = currentImageFolder;
 
-  selector.addEventListener("change", (e) => {
-    currentImageFolder = e.target.value;
-    // Update URL with folder selection
-    const url = new URL(window.location.href);
-    url.searchParams.set("folder", currentImageFolder);
-    window.history.replaceState({}, "", buildUrlString(url));
-    // Refresh rollout previews for the newly selected folder
-    const previews = collectPreviewMap(container);
-    if (lastPreviewStep === null || lastPreviewStep === undefined) {
-      lastPreviewStep = computeInitialPreviewStep(availableStepsByExp, currentImageFolder);
-    }
-    renderPreviewsAtStep(lastPreviewStep, previews, availableStepsByExp);
+  selector.addEventListener("change", () => {
+    const nextSelected = Array.from(selector.selectedOptions).map((opt) => opt.value);
+    const ordered = mergeSelectionOrder(nextSelected);
+    setSelectedFolders(ordered, { updateUrl: true, syncSelect: true });
+    updatePreviewRowsForSelection();
   });
+}
 
-  selectorRow.appendChild(selectorLabel);
-  selectorRow.appendChild(selector);
-  container.appendChild(selectorRow);
+function updatePreviewRowsForSelection() {
+  if (!currentExperiments.length) {
+    return;
+  }
+  const grid = document.getElementById("comparison-grid");
+  if (!grid) {
+    return;
+  }
+  const previewRows = grid.querySelector("#comparison-preview-rows");
+  if (!previewRows) {
+    return;
+  }
+  const nextRows = buildPreviewRows(currentExperiments, selectedImageFolders);
+  previewRows.replaceWith(nextRows);
+  refreshPreviewImages(grid, currentStepsByExp);
+  if (lastPreviewStep === null || lastPreviewStep === undefined) {
+    pendingInitialPreviewStep = computeInitialPreviewStepForFolders(currentStepsByExp, selectedImageFolders);
+    if (pendingInitialPreviewStep !== null) {
+      lastPreviewStep = pendingInitialPreviewStep;
+    }
+  }
+  if (lastPreviewStep !== null && lastPreviewStep !== undefined) {
+    renderPreviewsAtStep(lastPreviewStep, currentPreviewMap, currentStepsByExp);
+  }
+}
 
-  // Row 1: Preview section
-  const previewRow = buildSectionRow(
-    "Rollout Preview",
-    experiments,
-    (exp) => buildPreviewCell(exp)
-  );
-  container.appendChild(previewRow);
+function buildExperimentGrid(experiments) {
+  const container = document.createElement("div");
+  container.className = "d-flex flex-column gap-4";
+  const previewRows = buildPreviewRows(experiments, selectedImageFolders);
+  container.appendChild(previewRows);
 
   // Row 2: Title/path/git section
   const infoRow = buildSectionRow(
@@ -561,6 +645,33 @@ function buildExperimentGrid(experiments) {
   return container;
 }
 
+function buildPreviewRows(experiments, folderValues) {
+  const container = document.createElement("div");
+  container.id = "comparison-preview-rows";
+  container.className = "d-flex flex-column gap-3";
+
+  (folderValues || []).forEach((folderValue) => {
+    const label = getImageOption(folderValue)?.label || folderValue;
+    const group = document.createElement("div");
+    group.className = "d-flex flex-column gap-2";
+
+    const heading = document.createElement("div");
+    heading.className = "image-row-title small";
+    heading.textContent = label;
+    group.appendChild(heading);
+
+    const row = buildSectionRow(
+      label,
+      experiments,
+      (exp) => buildPreviewCell(exp, folderValue)
+    );
+    group.appendChild(row);
+    container.appendChild(group);
+  });
+
+  return container;
+}
+
 function buildSectionRow(title, experiments, cellBuilder) {
   const row = document.createElement("div");
   row.className = "row g-3";
@@ -577,10 +688,11 @@ function buildSectionRow(title, experiments, cellBuilder) {
   return row;
 }
 
-function buildPreviewCell(exp) {
+function buildPreviewCell(exp, folderValue) {
   const container = document.createElement("div");
   container.className = "rollout-preview";
   container.dataset.expId = exp.id;
+  container.dataset.folderValue = folderValue;
    // Use title field when available; fall back to name.
   const displayTitle = exp.title && exp.title !== "Untitled" ? exp.title : exp.name;
   container.dataset.expTitle = displayTitle;
@@ -716,7 +828,8 @@ function collectPreviewMap(root) {
   const map = {};
   root.querySelectorAll(".rollout-preview").forEach((preview) => {
     const expId = preview.dataset.expId;
-    if (!expId) {
+    const folderValue = preview.dataset.folderValue;
+    if (!expId || !folderValue) {
       return;
     }
     const displayTitle = preview.dataset.expTitle || expId;
@@ -725,7 +838,8 @@ function collectPreviewMap(root) {
     const img = preview.querySelector(".rollout-img");
     const missing = preview.querySelector(".rollout-missing");
     if (title && path && img && missing) {
-      map[expId] = { title, path, img, missing, displayTitle };
+      const key = `${expId}:${folderValue}`;
+      map[key] = { title, path, img, missing, displayTitle, expId, folderValue };
     }
   });
   return map;
@@ -733,8 +847,14 @@ function collectPreviewMap(root) {
 
 function refreshPreviewImages(container, stepsMap) {
   const previews = collectPreviewMap(container);
-  Object.entries(previews).forEach(([expId, preview]) => {
-    const steps = getStepsForFolder(stepsMap, expId, currentImageFolder);
+  currentPreviewMap = previews;
+  Object.values(previews).forEach((preview) => {
+    const expId = preview.expId;
+    const folderValue = preview.folderValue;
+    if (!expId || !folderValue) {
+      return;
+    }
+    const steps = getStepsForFolder(stepsMap, expId, folderValue);
     const latestStep = steps.length ? steps[steps.length - 1] : null;
     if (latestStep === null) {
       preview.img.classList.add("d-none");
@@ -742,7 +862,7 @@ function refreshPreviewImages(container, stepsMap) {
       preview.path.textContent = "No rollout image available.";
       return;
     }
-    const spec = resolveImageSpec(currentImageFolder, stepsMap, expId);
+    const spec = resolveImageSpec(folderValue, stepsMap, expId);
     preview.img.src = `/assets/${expId}/${spec.folderPath}/${spec.prefix}${latestStep}.png`;
     preview.img.alt = `Rollout ${latestStep} for ${preview.displayTitle}`;
     preview.img.classList.remove("d-none");
@@ -751,8 +871,8 @@ function refreshPreviewImages(container, stepsMap) {
   });
 }
 
-function attachComparisonHover(plotEl, stepsMap, previews) {
-  if (!plotEl || !previews || typeof Plotly === "undefined") {
+function attachComparisonHover(plotEl) {
+  if (!plotEl || typeof Plotly === "undefined") {
     return;
   }
   plotEl.on("plotly_hover", (event) => {
@@ -762,7 +882,7 @@ function attachComparisonHover(plotEl, stepsMap, previews) {
       return;
     }
     lastPreviewStep = point.x;
-    renderPreviewsAtStep(point.x, previews, stepsMap);
+    renderPreviewsAtStep(point.x, currentPreviewMap, currentStepsByExp);
   });
 }
 

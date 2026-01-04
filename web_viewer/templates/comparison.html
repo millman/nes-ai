@@ -37,8 +37,16 @@
                 <option value="elapsed">Elapsed time</option>
             </select>
         </div>
-        <div id="comparison-plot" class="plot-area">
-            <p class="text-muted fst-italic">Select experiments to view overlapping loss curves.</p>
+        <div class="d-flex flex-column flex-lg-row gap-3">
+            <div class="comparison-image-folder flex-shrink-0">
+                <label class="form-label mb-1 small text-muted" for="comparison-image-folder-select">Image folder:</label>
+                <select id="comparison-image-folder-select" class="form-select form-select-sm w-100" multiple size="8"></select>
+            </div>
+            <div class="flex-grow-1">
+                <div id="comparison-plot" class="plot-area">
+                    <p class="text-muted fst-italic">Select experiments to view overlapping loss curves.</p>
+                </div>
+            </div>
         </div>
     </div>
 </div>
