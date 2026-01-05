@@ -19,7 +19,7 @@ def save_variance_spectrum_plot(
     k = min(len(variance_ratio), 32)
     if k == 0:
         return
-    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     x = np.arange(k)
     ax.bar(x, variance_ratio[:k], color="tab:blue", alpha=0.8, label="variance ratio")
     cumulative = np.cumsum(variance_ratio[:k])
@@ -30,6 +30,5 @@ def save_variance_spectrum_plot(
     ax.set_title("Motion PCA spectrum")
     ax.legend()
     apply_square_axes(ax)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

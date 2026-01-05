@@ -727,7 +727,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (selectionOrder.length === 0) {
       compareLink.href = baseUrl;
     } else {
-      compareLink.href = `${baseUrl}?ids=${selectionOrder.join(",")}`;
+      const url = new URL(baseUrl, window.location.origin);
+      compareLink.href = applyIdsToUrl(url, selectionOrder);
     }
   }
 
@@ -746,9 +747,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function updateUrl(selectedIds) {
     const url = new URL(window.location.href);
-    url.searchParams.delete("ids");
-    selectedIds.forEach((id) => url.searchParams.append("ids", id));
-    window.history.replaceState({}, "", url.toString());
+    const urlString = applyIdsToUrl(url, selectedIds);
+    window.history.replaceState({}, "", urlString);
     updatePaginationLinks(selectedIds);
   }
 
@@ -757,9 +757,7 @@ document.addEventListener("DOMContentLoaded", () => {
     links.forEach((link) => {
       try {
         const url = new URL(link.href);
-        url.searchParams.delete("ids");
-        selectedIds.forEach((id) => url.searchParams.append("ids", id));
-        link.href = url.toString();
+        link.href = applyIdsToUrl(url, selectedIds);
       } catch (e) {
         // Ignore invalid href
       }
@@ -909,8 +907,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // Restore selections from URL first, then localStorage as fallback
-  const urlParams = new URLSearchParams(window.location.search);
-  const urlIds = urlParams.getAll("ids");
+  const urlIds = parseIdsFromSearch(window.location.search);
   if (urlIds.length > 0) {
     setSelectionOrder(urlIds);
   } else {

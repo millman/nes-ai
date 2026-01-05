@@ -132,7 +132,7 @@ def write_self_distance_plots(
     cosine_prefix: Optional[str],
 ) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 3, figsize=figsize_for_grid(2, 3))
+    fig, axes = plt.subplots(2, 3, figsize=figsize_for_grid(2, 3), constrained_layout=True)
     axes[0, 0].plot(steps, dist_first_np, marker="o")
     axes[0, 0].set_title("Distance to first")
     axes[0, 0].set_xlabel("timestep")
@@ -162,13 +162,12 @@ def write_self_distance_plots(
     fig.suptitle(f"{title_prefix}: {trajectory_label}", fontsize=12)
     fig.colorbar(sc0, ax=axes[0, 2], label="timestep")
     fig.colorbar(sc1, ax=axes[1, 2], label="timestep")
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
     out_path = plot_dir / f"{file_prefix}_{global_step:07d}.png"
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)
 
     # Save a cosine-only PNG for quick inspection.
-    fig_cos, axes_cos = plt.subplots(1, 3, figsize=figsize_for_grid(1, 3))
+    fig_cos, axes_cos = plt.subplots(1, 3, figsize=figsize_for_grid(1, 3), constrained_layout=True)
     axes_cos[0].plot(steps, dist_first_cos_np, marker="o", color="tab:green")
     axes_cos[0].set_title("Cosine distance to first")
     axes_cos[0].set_xlabel("timestep")
@@ -183,10 +182,9 @@ def write_self_distance_plots(
     axes_cos[2].set_ylabel(f"1 - cos({embedding_label}(t-1), {embedding_label}t)")
     fig_cos.suptitle(f"{title_prefix} (cosine): {trajectory_label}", fontsize=12)
     fig_cos.colorbar(sc_cos, ax=axes_cos[2], label="timestep")
-    fig_cos.tight_layout(rect=[0, 0, 1, 0.93])
     cosine_prefix = cosine_prefix or f"{file_prefix}_cosine"
     out_path_cos = plot_dir / f"{cosine_prefix}_{global_step:07d}.png"
-    fig_cos.savefig(out_path_cos, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig_cos.savefig(out_path_cos, dpi=DEFAULT_DPI)
     plt.close(fig_cos)
 
 

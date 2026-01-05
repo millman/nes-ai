@@ -10,7 +10,7 @@ from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, f
 
 def save_in_degree_hist_plot(out_path: Path, in_degree: np.ndarray) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     if in_degree.size == 0:
         ax.text(0.5, 0.5, "No edges to compute in-degree.", ha="center", va="center")
     else:
@@ -21,6 +21,5 @@ def save_in_degree_hist_plot(out_path: Path, in_degree: np.ndarray) -> None:
         ax.grid(True, alpha=0.3)
     ax.set_title("Hubness / in-degree distribution")
     apply_square_axes(ax)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

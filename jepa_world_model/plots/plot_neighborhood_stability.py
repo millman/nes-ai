@@ -18,7 +18,7 @@ def save_neighborhood_stability_plot(
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ks = sorted(metrics.jaccard_means.keys())
-    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     if ks:
         samples = [metrics.jaccard_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
         labels = [f"k={k}" for k in ks]
@@ -29,6 +29,5 @@ def save_neighborhood_stability_plot(
         ax.text(0.5, 0.5, "No stability data.", ha="center", va="center")
         ax.axis("off")
     apply_square_axes(ax)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

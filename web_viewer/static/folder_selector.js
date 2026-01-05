@@ -14,6 +14,13 @@ const FOLDER_GROUP_PRESETS = {
   action_z: ["vis_action_alignment_detail_centered_z", "vis_action_alignment_detail_z", "vis_action_alignment_detail_raw_z"],
   action_h: ["vis_action_alignment_detail_centered_h", "vis_action_alignment_detail_h", "vis_action_alignment_detail_raw_h"],
   action_s: ["vis_action_alignment_detail_centered_s", "vis_action_alignment_detail_s", "vis_action_alignment_detail_raw_s"],
+  // Self-distance: distance plots
+  self_distance_z: ["vis_self_distance_z"],
+  self_distance_h: ["vis_self_distance_h"],
+  self_distance_s: ["vis_self_distance_s"],
+  composability_z: ["vis_composability_z"],
+  composability_h: ["vis_composability_h"],
+  composability_s: ["vis_composability_s"],
 };
 
 /**

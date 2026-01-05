@@ -26,7 +26,7 @@ def write_state_embedding_histogram(
     global_step: int,
 ) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
-    fig_hist, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig_hist, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     if s_norm_np.size:
         finite = np.asarray(s_norm_np)[np.isfinite(s_norm_np)]
         if finite.size:
@@ -46,11 +46,9 @@ def write_state_embedding_histogram(
         ax.axis("off")
     ax.set_title("State embedding norm distribution")
     apply_square_axes(ax)
-    fig_hist.tight_layout()
     fig_hist.savefig(
         plot_dir / f"state_embedding_hist_{global_step:07d}.png",
         dpi=DEFAULT_DPI,
-        bbox_inches="tight",
     )
     plt.close(fig_hist)
 

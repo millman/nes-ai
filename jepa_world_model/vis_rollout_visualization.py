@@ -24,6 +24,7 @@ def save_rollout_visualization(
         row_block,
         seq_cols,
         figsize=(seq_cols * 2, row_block * 1.5),
+        constrained_layout=True,
     )
     axes = np.atleast_2d(axes)
 
@@ -96,7 +97,6 @@ def save_rollout_visualization(
             _imshow_array(delta_target_ax, delta_to_uint8_image(delta_target))
             _imshow_array(delta_recon_ax, delta_to_uint8_image(delta_recon))
     fig.suptitle("JEPA Rollout Visualization", fontsize=12)
-    fig.tight_layout(rect=(0.08, 0.02, 1.0, 0.95))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)

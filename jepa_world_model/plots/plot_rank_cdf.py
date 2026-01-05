@@ -10,7 +10,7 @@ from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, f
 
 def save_rank_cdf_plot(out_path: Path, ranks: np.ndarray, k: int, title: str) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     if ranks.size == 0:
         ax.text(0.5, 0.5, "No valid transitions.", ha="center", va="center")
     else:
@@ -26,6 +26,5 @@ def save_rank_cdf_plot(out_path: Path, ranks: np.ndarray, k: int, title: str) ->
         ax.legend()
     ax.set_title(title)
     apply_square_axes(ax)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

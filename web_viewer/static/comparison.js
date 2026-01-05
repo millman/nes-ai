@@ -8,13 +8,6 @@ let currentExperiments = [];
 let compareStickyInitialized = false;
 let folderSelector = null;
 
-// Helper to build URL string without encoding commas in ids parameter
-function buildUrlString(url) {
-  const str = url.toString();
-  // Decode %2C back to comma for the ids parameter
-  return str.replace(/ids=([^&]+)/g, (match, p1) => `ids=${decodeURIComponent(p1)}`);
-}
-
 // Store original data for x-axis toggling
 let originalSteps = [];
 let cumulativeFlops = [];
@@ -179,13 +172,9 @@ document.addEventListener("DOMContentLoaded", () => {
   if (ids.length >= 2) {
     // Update URL to reflect selected IDs
     const currentUrl = new URL(window.location.href);
-    const urlIds = currentUrl.searchParams.get("ids");
-    if (urlIds !== ids.join(",")) {
-      // Build URL manually to avoid encoding commas
-      currentUrl.searchParams.delete("ids");
-      const baseUrl = `${currentUrl.origin}${currentUrl.pathname}`;
-      const newUrl = `${baseUrl}?ids=${ids.join(",")}`;
-      window.history.replaceState({}, "", newUrl);
+    const normalizedUrl = applyIdsToUrl(currentUrl, ids);
+    if (normalizedUrl !== window.location.href) {
+      window.history.replaceState({}, "", normalizedUrl);
     }
     runComparison(ids);
   }
@@ -300,7 +289,7 @@ function renderComparison(payload) {
         // Clear zoom state when switching axes
         url.searchParams.delete("xmin");
         url.searchParams.delete("xmax");
-        window.history.replaceState({}, "", buildUrlString(url));
+        window.history.replaceState({}, "", normalizeIdsInUrl(url));
       }
 
       let xData = originalSteps;
@@ -375,7 +364,7 @@ function renderComparison(payload) {
           }
         }
 
-        window.history.replaceState({}, "", buildUrlString(url));
+        window.history.replaceState({}, "", normalizeIdsInUrl(url));
       });
 
       wireExperimentVisibilitySync(plot);

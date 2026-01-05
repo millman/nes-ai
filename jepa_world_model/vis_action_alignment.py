@@ -22,11 +22,10 @@ def save_action_alignment_plot(
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if not stats:
-        fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+        fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
         ax.text(0.5, 0.5, "No actions met alignment criteria.", ha="center", va="center")
         ax.axis("off")
-        fig.tight_layout()
-        fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+        fig.savefig(out_path, dpi=DEFAULT_DPI)
         plt.close(fig)
         return
     labels = [decode_action_id(s["action_id"], action_dim) for s in stats]
@@ -34,7 +33,7 @@ def save_action_alignment_plot(
     for stat in stats:
         cos_values = stat.get("cosines")
         samples.append(np.asarray([] if cos_values is None else cos_values, dtype=np.float32))
-    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     plot_strip_scatter(
         ax,
         samples,
@@ -51,8 +50,7 @@ def save_action_alignment_plot(
     ax.set_title("Action-conditioned cosine alignment (strip plot)")
     apply_square_axes(ax)
     apply_square_axes(axes)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)
 
 
@@ -64,7 +62,7 @@ def save_action_alignment_detail_plot(
     alignment_label: str = "PCA",
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=figsize_for_grid(2, 2))
+    fig, axes = plt.subplots(2, 2, figsize=figsize_for_grid(2, 2), constrained_layout=True)
 
     overall_cos_raw = debug_data.get("overall_cos")
     overall_norms_raw = debug_data.get("overall_norms")
@@ -199,6 +197,5 @@ def save_action_alignment_detail_plot(
         ax3.text(0.5, 0.5, "Mean direction similarity unavailable.", ha="center", va="center")
         ax3.axis("off")
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

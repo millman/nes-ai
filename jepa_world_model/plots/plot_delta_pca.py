@@ -22,7 +22,7 @@ def save_delta_pca_plot(
     embedding_label: str,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=figsize_for_grid(2, 2))
+    fig, axes = plt.subplots(2, 2, figsize=figsize_for_grid(2, 2), constrained_layout=True)
     num_var = min(10, variance_ratio.shape[0])
     axes[0, 0].bar(np.arange(num_var), variance_ratio[:num_var], color="tab:blue")
     axes[0, 0].set_title(f"Delta-{embedding_label} PCA variance ratio")
@@ -90,6 +90,5 @@ def save_delta_pca_plot(
     axes[1, 1].set_title(f"PCA of {upper_label} on motion-defined Δ{upper_label} basis")
 
     apply_square_axes(axes)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

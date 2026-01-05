@@ -10,7 +10,7 @@ from jepa_world_model.plots.plot_layout import DEFAULT_DPI, figsize_for_grid
 
 def save_graph_history_plot(out_path: Path, history: List[Dict[str, float]], k: int) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(3, 1, figsize=figsize_for_grid(3, 1), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=figsize_for_grid(3, 1), sharex=True, constrained_layout=True)
     if not history:
         for ax in axes:
             ax.text(0.5, 0.5, "History unavailable.", ha="center", va="center")
@@ -46,6 +46,5 @@ def save_graph_history_plot(out_path: Path, history: List[Dict[str, float]], k: 
         axes[2].set_ylabel("Graph health")
         axes[2].legend()
         axes[2].grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

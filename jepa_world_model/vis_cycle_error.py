@@ -77,7 +77,7 @@ def save_cycle_error_plot(
     action_dim: int,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2))
+    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2), constrained_layout=True)
     if errors:
         axes[0].hist(errors, bins=20, color="tab:green", alpha=0.8)
         axes[0].set_title("Cycle error distribution")
@@ -122,6 +122,5 @@ def save_cycle_error_plot(
         axes[1].axis("off")
 
     apply_square_axes(axes)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

@@ -14,12 +14,11 @@ def save_edge_consistency_hist_plot(
     embedding_label: str,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     ax.hist(edge_errors, bins=30, color="tab:gray", alpha=0.85)
     ax.set_title(f"Predictor-edge consistency (||{embedding_label}hat - {embedding_label}T||^2)")
     ax.set_xlabel("error")
     ax.set_ylabel("count")
     apply_square_axes(ax)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

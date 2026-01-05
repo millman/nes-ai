@@ -131,6 +131,7 @@ from jepa_world_model.vis_self_distance import write_self_distance_outputs
 from jepa_world_model.vis_state_embedding import write_state_embedding_outputs
 from jepa_world_model.vis_hard_samples import save_hard_example_grid
 from jepa_world_model.vis_visualization_batch import _render_visualization_batch
+from jepa_world_model.vis_composability import compute_composability_series, save_composability_plot
 from jepa_world_model.plots.plot_two_step_composition_error import (
     save_two_step_composition_error_plot,
 )
@@ -525,37 +526,37 @@ class LossWeights:
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
     # Encourages consistent action directions in z while leaving perception flexible.
-    action_delta_z: float = 0.0
+    action_delta_z: float = 1.0
 
     # k-step rollout consistency in z-space.
     # Encourages short-horizon compositionality without forcing long-horizon rigidity.
-    rollout_kstep_z: float = 0.0
+    rollout_kstep_z: float = 1.0
 
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 0.0
+    action_delta_h: float = 1.0
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 0.0
+    additivity_h: float = 1.0
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
-    rollout_kstep_h: float = 0.0
+    rollout_kstep_h: float = 1.0
 
     # --- S ---
     # State-conditioned delta alignment: s_{t+1} - s_t vs E(s_t, a_t).
     # Makes s a navigable planning space with consistent action geometry.
-    action_delta_s: float = 0.0
+    action_delta_s: float = 1.0
 
     # Explicit additivity of s deltas across steps.
     # Encourages compositional planning moves in the abstract space.
-    additivity_s: float = 0.0
+    additivity_s: float = 1.0
 
     # k-step rollout consistency in s-space.
     # Encourages short-horizon compositionality in the planning abstraction.
-    rollout_kstep_s: float = 0.0
+    rollout_kstep_s: float = 1.0
 
 
 @dataclass
@@ -683,7 +684,7 @@ class TrainConfig:
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
-    detach_decoder: bool = True
+    detach_decoder: bool = False
     delta_z_detach_target: bool = False
 
     # Specific losses
@@ -1933,7 +1934,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     if len(history) == 0:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=figsize_for_grid(2, 2))
+    plt.figure(figsize=figsize_for_grid(2, 2), constrained_layout=True)
     default_cycle = plt.rcParams.get("axes.prop_cycle")
     color_cycle = default_cycle.by_key().get("color", []) if default_cycle is not None else []
 
@@ -1980,14 +1981,13 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.title("Training Losses")
     plt.grid(True, alpha=0.3)
     plt.legend(ncol=2, fontsize=8)
-    plt.tight_layout()
     plt.savefig(out_dir / "loss_curves.png", dpi=DEFAULT_DPI)
     plt.close()
 
     has_rank_acc = any(val != 0.0 for val in history.geometry_rank_accuracy)
     has_rank_loss = any(val != 0.0 for val in history.geometry_rank)
     if has_rank_acc or has_rank_loss:
-        fig, ax1 = plt.subplots(figsize=figsize_for_grid(1, 1))
+        fig, ax1 = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
         if has_rank_acc:
             ax1.plot(history.steps, history.geometry_rank_accuracy, label="geometry_rank_accuracy", color=_color(3))
         ax1.set_xlabel("Step")
@@ -2003,7 +2003,6 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         pair_count = int(round(pair_values[-1])) if pair_values else 0
         title = f"Geometry Ranking Accuracy (pairs/batch: {pair_count})" if pair_count else "Geometry Ranking Accuracy"
         fig.suptitle(title, fontsize=11)
-        fig.tight_layout()
         fig.savefig(out_dir / "ranking_accuracy.png", dpi=DEFAULT_DPI)
         plt.close(fig)
 
@@ -2654,6 +2653,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     vis_self_distance_z_dir = run_dir / "vis_self_distance_z"
     vis_self_distance_s_dir = run_dir / "vis_self_distance_s"
     vis_self_distance_h_dir = run_dir / "vis_self_distance_h"
+    vis_composability_z_dir = run_dir / "vis_composability_z"
+    vis_composability_s_dir = run_dir / "vis_composability_s"
+    vis_composability_h_dir = run_dir / "vis_composability_h"
     vis_state_embedding_dir = run_dir / "vis_state_embedding"
     vis_odometry_dir = run_dir / "vis_odometry"
     self_distance_z_dir = run_dir / "self_distance_z"
@@ -2684,6 +2686,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_cycle_s_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
+        vis_composability_z_dir.mkdir(parents=True, exist_ok=True)
+        vis_composability_s_dir.mkdir(parents=True, exist_ok=True)
+        vis_composability_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.spike_diagnostics.enabled:
         spike_diagnostics_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
@@ -3143,6 +3148,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 if not (diag_frames.shape[0] > 0 and diag_frames.shape[1] >= 2):
                     raise AssertionError("Diagnostics require at least one sequence with two frames.")
 
+                warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
                 assert torch.is_grad_enabled()
                 with torch.no_grad():
                     diag_frames_device = diag_frames.to(device)
@@ -3154,6 +3160,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         diag_actions_device,
                     )
                     diag_s_embeddings = model.h2s(diag_h_states)
+                    diag_composability = compute_composability_series(
+                        model,
+                        diag_embeddings,
+                        diag_h_states,
+                        diag_actions_device,
+                        warmup_frames,
+                        cfg.diagnostics.min_action_count,
+                    )
                 assert torch.is_grad_enabled()
 
                 inverse_map = build_action_inverse_map(diag_actions.detach().cpu().numpy())
@@ -3171,6 +3185,21 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     motion_z.action_ids,
                     motion_z.action_dim,
                     "z",
+                )
+                save_composability_plot(
+                    vis_composability_z_dir / f"composability_z_{global_step:07d}.png",
+                    diag_composability["z"],
+                    "z",
+                )
+                save_composability_plot(
+                    vis_composability_h_dir / f"composability_h_{global_step:07d}.png",
+                    diag_composability["h"],
+                    "h",
+                )
+                save_composability_plot(
+                    vis_composability_s_dir / f"composability_s_{global_step:07d}.png",
+                    diag_composability["s"],
+                    "s",
                 )
                 save_variance_spectrum_plot(
                     motion_z.variance_ratio,

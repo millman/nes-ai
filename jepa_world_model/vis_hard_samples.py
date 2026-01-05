@@ -89,7 +89,7 @@ def save_hard_example_grid(
     limit = columns * rows
     subset = list(hard_samples)[:limit]
     blank = np.zeros((image_hw[0], image_hw[1], 3), dtype=np.uint8)
-    fig, axes = plt.subplots(rows, columns, figsize=(columns * 2, rows * 2))
+    fig, axes = plt.subplots(rows, columns, figsize=(columns * 2, rows * 2), constrained_layout=True)
     axes = np.atleast_2d(axes)
     for idx in range(rows * columns):
         ax = axes[idx // columns, idx % columns]
@@ -103,7 +103,6 @@ def save_hard_example_grid(
             ax.set_title("")
         ax.axis("off")
     fig.suptitle("Hard Examples", fontsize=12)
-    plt.tight_layout(rect=(0, 0.02, 1, 0.98))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200)
     plt.close(fig)

@@ -18,7 +18,7 @@ def save_smoothness_knn_distance_eigenvalue_spectrum_plot(
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ks = sorted(metrics.knn_mean_distances.keys())
-    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2))
+    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2), constrained_layout=True)
     if ks:
         samples = [metrics.knn_distance_samples.get(k, np.zeros(0, dtype=np.float32)) for k in ks]
         labels = [f"k={k}" for k in ks]
@@ -42,6 +42,5 @@ def save_smoothness_knn_distance_eigenvalue_spectrum_plot(
         axes[1].text(0.5, 0.5, "No eigenvalues.", ha="center", va="center")
         axes[1].axis("off")
     apply_square_axes(axes)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)

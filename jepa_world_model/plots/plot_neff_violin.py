@@ -12,7 +12,7 @@ from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, f
 
 def save_neff_violin_plot(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1))
+    fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
 
     def _clean(values: np.ndarray) -> np.ndarray:
         if values.size == 0:
@@ -37,6 +37,5 @@ def save_neff_violin_plot(out_path: Path, neff1: np.ndarray, neff2: np.ndarray) 
         )
     ax.set_title("Neighborhood size (exp entropy)")
     apply_square_axes(ax)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=DEFAULT_DPI, bbox_inches="tight")
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)
