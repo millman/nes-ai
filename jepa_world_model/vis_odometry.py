@@ -27,7 +27,7 @@ def _rollout_predictions(
     if t < 2:
         return embeddings.new_zeros((b, 0, embeddings.shape[-1]))
     preds = []
-    h_t = model.predictor.h_norm(model.initial_h).expand(b, -1)
+    h_t = embeddings.new_zeros((b, model.state_dim))
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = actions[:, step]
@@ -47,7 +47,7 @@ def _rollout_open_loop(
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, model.state_dim))
-    h_t = model.predictor.h_norm(model.initial_h).expand(b, -1)
+    h_t = embeddings.new_zeros((b, model.state_dim))
     z_t = embeddings[:, 0]
     h_preds = []
     for step in range(t - 1):
@@ -76,7 +76,7 @@ def _predictor_rollout(
     preds = []
     deltas = []
     h_preds = []
-    h_states = [model.predictor.h_norm(model.initial_h).expand(b, -1)]
+    h_states = [embeddings.new_zeros((b, model.state_dim))]
     for step in range(t - 1):
         z_t = embeddings[:, step]
         h_t = h_states[-1]

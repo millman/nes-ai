@@ -5,7 +5,10 @@
 
 // Folder group presets - maps group names to folder arrays
 const FOLDER_GROUP_PRESETS = {
-  rollout: ["vis_fixed_0"],
+  rollout_f0: ["vis_fixed_0"],
+  rollout_f1: ["vis_fixed_1"],
+  rollout_r0: ["vis_rolling_0"],
+  rollout_r1: ["vis_rolling_1"],
   // Diags: Action alignment of PCA, Distance, Cumulative sum
   diags_z: ["vis_action_alignment_detail_z", "vis_self_distance_z", "vis_odometry_current_z"],
   diags_h: ["vis_action_alignment_detail_h", "vis_self_distance_h", "vis_odometry_current_h"],

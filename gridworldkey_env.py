@@ -338,6 +338,8 @@ class GridworldKeyEnv(gym.Env):
             "controller": controller_action.copy(),
             "manual_control": bool(self._manual_control),
             "step_index": int(self._episode_steps),
+            "agent_x": int(self.agent_x),
+            "agent_y": int(self.agent_y),
         }
 
         if self.render_mode == "human":

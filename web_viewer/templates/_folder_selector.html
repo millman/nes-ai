@@ -10,11 +10,29 @@
 
 <div class="compare-plot-controls-row {{ actions_class }}">
     <div class="comparison-action-group">
-        <button
-            type="button"
-            class="btn btn-outline-primary btn-sm"
-            data-folder-preset="rollout"
-        >Rollout</button>
+        <div class="btn-group" role="group" aria-label="Rollout presets">
+            <span class="text-muted small comparison-action-label">Rollout</span>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm comparison-action-first"
+                data-folder-preset="rollout_f0"
+            >F0</button>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm"
+                data-folder-preset="rollout_f1"
+            >F1</button>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm"
+                data-folder-preset="rollout_r0"
+            >R0</button>
+            <button
+                type="button"
+                class="btn btn-outline-primary btn-sm"
+                data-folder-preset="rollout_r1"
+            >R1</button>
+        </div>
     </div>
     <div class="comparison-action-group">
         <div class="btn-group" role="group" aria-label="Diagnostics presets">

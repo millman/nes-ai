@@ -11,6 +11,7 @@ class LayerNormConfig:
     """LayerNorm toggles for debugging latent stability."""
 
     h2z_projector: bool = True
+    z2h_projector: bool = True
     h2s_projector: bool = True
     delta_projector: bool = True
     action_delta_projector: bool = True

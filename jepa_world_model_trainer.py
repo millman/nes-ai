@@ -289,6 +289,34 @@ class HiddenToZProjector(nn.Module):
         return z_hat.view(*original_shape, z_hat.shape[-1])
 
 
+class ZToHProjector(nn.Module):
+    """Project image-anchored embedding to a hidden state seed."""
+
+    def __init__(self, z_dim: int, h_dim: int, hidden_dim: int, use_layer_norm: bool = True) -> None:
+        super().__init__()
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(z_dim))
+        layers.extend(
+            [
+                nn.Linear(z_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, h_dim),
+            ]
+        )
+        self.net = nn.Sequential(*layers)
+        self.z_dim = z_dim
+        self.h_dim = h_dim
+        self.hidden_dim = hidden_dim
+        self.use_layer_norm = use_layer_norm
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        original_shape = z.shape[:-1]
+        z_flat = z.reshape(-1, z.shape[-1])
+        h_seed = self.net(z_flat)
+        return h_seed.view(*original_shape, h_seed.shape[-1])
+
+
 class HiddenToDeltaProjector(nn.Module):
     """Project hidden state to a delta in the target latent space."""
 
@@ -486,6 +514,7 @@ class LossWeights:
         * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
         * Purpose: advance the observable latent consistent with the next encoded frame.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
+    - loss_z2h: z->hidden projection; h_hat_from_z vs h (detached); trains z->h without steering predictor targets.
     - loss_pixel_delta: pixel delta reconstruction on decoded frames.
     Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
     """
@@ -504,17 +533,19 @@ class LossWeights:
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
+    # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
+    z2h: float = 1.0
 
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
     # Keeps s useful for planning geometry while avoiding action algebra constraints.
     geometry_rank: float = 0.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 0.0
+    inverse_dynamics_z: float = 1.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 0.0
+    inverse_dynamics_h: float = 1.0
     # Inverse dynamics from consecutive h pairs (s_t, s_{t+1}).
-    inverse_dynamics_s: float = 0.0
+    inverse_dynamics_s: float = 1.0
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make s algebraic for planning.
@@ -531,6 +562,12 @@ class LossWeights:
     # k-step rollout consistency in z-space.
     # Encourages short-horizon compositionality without forcing long-horizon rigidity.
     rollout_kstep_z: float = 1.0
+
+    # Pixel reconstruction on predicted z rollouts (decode z_roll vs x_{t+k}).
+    rollout_recon_z: float = 1.0
+
+    # Projection consistency on predicted z rollouts (enc(dec(z_roll)) vs z_roll).
+    rollout_project_z: float = 1.0
 
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
@@ -736,7 +773,6 @@ class JEPAWorldModel(nn.Module):
             cfg.state_dim,
         )
         self.state_dim = cfg.state_dim
-        self.initial_h = nn.Parameter(torch.randn(1, cfg.state_dim) * 0.02)
         self.h2s = HiddenToSProjector(
             cfg.state_dim,
             cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
@@ -749,6 +785,12 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.h2z_projector,
+        )
+        self.z_to_h = ZToHProjector(
+            self.embedding_dim,
+            cfg.state_dim,
+            cfg.hidden_dim,
+            use_layer_norm=cfg.layer_norms.z2h_projector,
         )
         self.inverse_dynamics_z = InverseDynamicsHead(
             self.embedding_dim,
@@ -855,6 +897,73 @@ def rollout_z_loss(
             pred, _, h_next = model.predictor(current, h_current, act)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
+            steps += 1
+            current = pred
+            h_current = h_next
+    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+
+
+def rollout_recon_z_loss(
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    frames: torch.Tensor,
+    h_states: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+) -> torch.Tensor:
+    if rollout_horizon <= 0:
+        return embeddings.new_tensor(0.0)
+    b, t, _ = embeddings.shape
+    if t < 2:
+        return embeddings.new_tensor(0.0)
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
+    for start in range(warmup, t - 1):
+        current = embeddings[:, start]
+        h_current = h_states[:, start]
+        max_h = min(rollout_horizon, t - start - 1)
+        for offset in range(max_h):
+            act = actions[:, start + offset]
+            pred, _, h_next = model.predictor(current, h_current, act)
+            decoded = decoder(pred)
+            target_frame = frames[:, start + offset + 1]
+            total = total + RECON_LOSS(decoded, target_frame)
+            steps += 1
+            current = pred
+            h_current = h_next
+    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+
+
+def rollout_project_z_loss(
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    h_states: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+) -> torch.Tensor:
+    if rollout_horizon <= 0:
+        return embeddings.new_tensor(0.0)
+    b, t, _ = embeddings.shape
+    if t < 2:
+        return embeddings.new_tensor(0.0)
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
+    for start in range(warmup, t - 1):
+        current = embeddings[:, start]
+        h_current = h_states[:, start]
+        max_h = min(rollout_horizon, t - start - 1)
+        for offset in range(max_h):
+            act = actions[:, start + offset]
+            pred, _, h_next = model.predictor(current, h_current, act)
+            decoded = decoder(pred)
+            z_back = model.encoder(decoded)
+            total = total + F.mse_loss(z_back, pred)
             steps += 1
             current = pred
             h_current = h_next
@@ -982,6 +1091,19 @@ def h2z_loss(
     h_stack = h_states[:, start:]
     z_hat_from_h = model.h_to_z(h_stack)
     return F.mse_loss(z_hat_from_h, embeddings[:, start:].detach())
+
+
+def z2h_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    h_states: torch.Tensor,
+    start: int,
+) -> torch.Tensor:
+    if h_states.numel() == 0 or embeddings.shape[1] - start <= 0:
+        return embeddings.new_tensor(0.0)
+    z_stack = embeddings[:, start:]
+    h_hat_from_z = model.z_to_h(z_stack)
+    return F.mse_loss(h_hat_from_z, h_states[:, start:].detach())
 
 
 
@@ -1124,6 +1246,7 @@ def _compute_losses_and_metrics(
 
     # h (Hidden) losses
     loss_h2z = x_frames.new_tensor(0.0)
+    loss_z2h = x_frames.new_tensor(0.0)
 
     # s (Geometry) losses
     loss_geometry_rank = x_frames.new_tensor(0.0)
@@ -1139,6 +1262,8 @@ def _compute_losses_and_metrics(
     loss_rollout_kstep_z = x_frames.new_tensor(0.0)
     loss_rollout_kstep_h = x_frames.new_tensor(0.0)
     loss_rollout_kstep_s = x_frames.new_tensor(0.0)
+    loss_rollout_recon_z = x_frames.new_tensor(0.0)
+    loss_rollout_project_z = x_frames.new_tensor(0.0)
     loss_additivity_h = x_frames.new_tensor(0.0)
     loss_action_delta_s = x_frames.new_tensor(0.0)
     loss_additivity_s = x_frames.new_tensor(0.0)
@@ -1216,6 +1341,8 @@ def _compute_losses_and_metrics(
     # h (Hidden) Hidden-state dynamics and cross-projection losses
     if weights.h2z > 0:
         loss_h2z = h2z_loss(model, z_embeddings, h_states, start_frame)
+    if weights.z2h > 0:
+        loss_z2h = z2h_loss(model, z_embeddings, h_states, start_frame)
 
     # h (Auxiliary)
     # s (Geometry)
@@ -1279,6 +1406,27 @@ def _compute_losses_and_metrics(
             cfg.rollout_horizon,
             warmup_frames,
         )
+    if weights.rollout_recon_z > 0:
+        loss_rollout_recon_z = rollout_recon_z_loss(
+            model,
+            decoder,
+            z_embeddings,
+            a_seq,
+            x_frames,
+            h_states,
+            cfg.rollout_horizon,
+            warmup_frames,
+        )
+    if weights.rollout_project_z > 0:
+        loss_rollout_project_z = rollout_project_z_loss(
+            model,
+            decoder,
+            z_embeddings,
+            a_seq,
+            h_states,
+            cfg.rollout_horizon,
+            warmup_frames,
+        )
 
     if weights.rollout_kstep_h > 0:
         loss_rollout_kstep_h = rollout_h_loss(
@@ -1335,6 +1483,7 @@ def _compute_losses_and_metrics(
         weights.jepa * _scaled("loss_jepa", loss_jepa)
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
+        + weights.z2h * _scaled("loss_z2h", loss_z2h)
         + weights.geometry_rank * _scaled("loss_geometry_rank", loss_geometry_rank)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
@@ -1347,6 +1496,8 @@ def _compute_losses_and_metrics(
         + weights.action_delta_z * _scaled("loss_action_delta_z", loss_action_delta_z)
         + weights.action_delta_h * _scaled("loss_action_delta_h", loss_action_delta_h)
         + weights.rollout_kstep_z * _scaled("loss_rollout_kstep_z", loss_rollout_kstep_z)
+        + weights.rollout_recon_z * _scaled("loss_rollout_recon_z", loss_rollout_recon_z)
+        + weights.rollout_project_z * _scaled("loss_rollout_project_z", loss_rollout_project_z)
         + weights.rollout_kstep_h * _scaled("loss_rollout_kstep_h", loss_rollout_kstep_h)
         + weights.rollout_kstep_s * _scaled("loss_rollout_kstep_s", loss_rollout_kstep_s)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
@@ -1390,6 +1541,7 @@ def _compute_losses_and_metrics(
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_pixel_delta": loss_pixel_delta.item(),
         "loss_h2z": loss_h2z.item(),
+        "loss_z2h": loss_z2h.item(),
         "loss_geometry_rank": loss_geometry_rank.item(),
         "geometry_rank_accuracy": geometry_rank_accuracy.item(),
         "geometry_rank_pairs": geometry_rank_pairs.item(),
@@ -1399,6 +1551,8 @@ def _compute_losses_and_metrics(
         "loss_action_delta_z": loss_action_delta_z.item(),
         "loss_action_delta_h": loss_action_delta_h.item(),
         "loss_rollout_kstep_z": loss_rollout_kstep_z.item(),
+        "loss_rollout_recon_z": loss_rollout_recon_z.item(),
+        "loss_rollout_project_z": loss_rollout_project_z.item(),
         "loss_rollout_kstep_h": loss_rollout_kstep_h.item(),
         "loss_rollout_kstep_s": loss_rollout_kstep_s.item(),
         "loss_additivity_h": loss_additivity_h.item(),
@@ -1597,6 +1751,92 @@ def _compute_spike_batch_stats(frames: torch.Tensor, actions: torch.Tensor) -> D
     return stats
 
 
+def _summarize_action_distribution(actions: torch.Tensor) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    action_ids = compress_actions_to_ids(actions).detach().cpu().numpy().reshape(-1)
+    action_dim = int(actions.shape[-1])
+    counts: Dict[int, int] = {}
+    for aid in action_ids.tolist():
+        counts[int(aid)] = counts.get(int(aid), 0) + 1
+    total = max(len(action_ids), 1)
+    distribution = [
+        {
+            "action_id": aid,
+            "label": decode_action_id(aid, action_dim),
+            "count": count,
+            "fraction": count / total,
+        }
+        for aid, count in sorted(counts.items())
+    ]
+    action_ids_seq = compress_actions_to_ids(actions).detach().cpu().numpy()
+    if action_ids_seq.ndim == 1:
+        action_ids_seq = action_ids_seq.reshape(actions.shape[0], actions.shape[1])
+    unique_actions: List[int] = []
+    repeat_fracs: List[float] = []
+    noop_fracs: List[float] = []
+    for seq_actions in action_ids_seq:
+        seq_list = [int(a) for a in seq_actions.tolist()]
+        unique_actions.append(len(set(seq_list)))
+        repeats = sum(1 for i in range(1, len(seq_list)) if seq_list[i] == seq_list[i - 1])
+        repeat_fracs.append(repeats / max(len(seq_list) - 1, 1))
+        noop_fracs.append(seq_list.count(0) / max(len(seq_list), 1))
+    summary = {
+        "mean_unique_actions": float(np.mean(unique_actions)) if unique_actions else 0.0,
+        "mean_repeat_fraction": float(np.mean(repeat_fracs)) if repeat_fracs else 0.0,
+        "mean_noop_fraction": float(np.mean(noop_fracs)) if noop_fracs else 0.0,
+    }
+    return distribution, summary
+
+
+def _write_recon_spike_action_overlay_row(
+    path: Path,
+    step: int,
+    actions: torch.Tensor,
+    recon_value: float,
+    recon_event: Optional[Dict[str, float]],
+) -> None:
+    distribution, summary = _summarize_action_distribution(actions)
+    top_action = max(distribution, key=lambda item: item["fraction"]) if distribution else None
+    header = [
+        "step",
+        "recon_spike",
+        "recon_value",
+        "recon_mean",
+        "recon_std",
+        "recon_z",
+        "recon_ratio",
+        "top_action_id",
+        "top_action_label",
+        "top_action_fraction",
+        "mean_unique_actions",
+        "mean_repeat_fraction",
+        "mean_noop_fraction",
+        "action_distribution_json",
+    ]
+    exists = path.exists()
+    with path.open("a", newline="") as handle:
+        writer = csv.writer(handle)
+        if not exists:
+            writer.writerow(header)
+        writer.writerow(
+            [
+                step,
+                1 if recon_event is not None else 0,
+                f"{recon_value:.6f}",
+                f"{recon_event['mean']:.6f}" if recon_event is not None else "",
+                f"{recon_event['std']:.6f}" if recon_event is not None else "",
+                f"{recon_event['z']:.6f}" if recon_event is not None else "",
+                f"{recon_event['ratio']:.6f}" if recon_event is not None else "",
+                top_action["action_id"] if top_action is not None else "",
+                top_action["label"] if top_action is not None else "",
+                f"{top_action['fraction']:.6f}" if top_action is not None else "",
+                f"{summary['mean_unique_actions']:.6f}",
+                f"{summary['mean_repeat_fraction']:.6f}",
+                f"{summary['mean_noop_fraction']:.6f}",
+                json.dumps(distribution, sort_keys=True),
+            ]
+        )
+
+
 def _write_spike_batch(
     spike_dir: Path,
     global_step: int,
@@ -1697,6 +1937,8 @@ def log_metrics(
         filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
     if weights.h2z <= 0:
         filtered.pop("loss_h2z", None)
+    if weights.z2h <= 0:
+        filtered.pop("loss_z2h", None)
     if weights.geometry_rank <= 0:
         filtered.pop("loss_geometry_rank", None)
         filtered.pop("geometry_rank_accuracy", None)
@@ -1713,6 +1955,10 @@ def log_metrics(
         filtered.pop("loss_action_delta_h", None)
     if weights.rollout_kstep_z <= 0:
         filtered.pop("loss_rollout_kstep_z", None)
+    if weights.rollout_recon_z <= 0:
+        filtered.pop("loss_rollout_recon_z", None)
+    if weights.rollout_project_z <= 0:
+        filtered.pop("loss_rollout_project_z", None)
     if weights.rollout_kstep_h <= 0:
         filtered.pop("loss_rollout_kstep_h", None)
     if weights.rollout_kstep_s <= 0:
@@ -1755,6 +2001,7 @@ LOSS_COLUMNS = [
     "loss_recon_patch",
     "loss_pixel_delta",
     "loss_h2z",
+    "loss_z2h",
     "loss_geometry_rank",
     "geometry_rank_accuracy",
     "geometry_rank_pairs",
@@ -1764,6 +2011,8 @@ LOSS_COLUMNS = [
     "loss_action_delta_z",
     "loss_action_delta_h",
     "loss_rollout_kstep_z",
+    "loss_rollout_recon_z",
+    "loss_rollout_project_z",
     "loss_rollout_kstep_h",
     "loss_rollout_kstep_s",
     "loss_additivity_h",
@@ -1802,6 +2051,7 @@ class LossHistory:
     recon_patch: List[float] = field(default_factory=list)
     pixel_delta: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
+    z2h: List[float] = field(default_factory=list)
     geometry_rank: List[float] = field(default_factory=list)
     geometry_rank_accuracy: List[float] = field(default_factory=list)
     geometry_rank_pairs: List[float] = field(default_factory=list)
@@ -1811,6 +2061,8 @@ class LossHistory:
     action_delta_z: List[float] = field(default_factory=list)
     action_delta_h: List[float] = field(default_factory=list)
     rollout_kstep_z: List[float] = field(default_factory=list)
+    rollout_recon_z: List[float] = field(default_factory=list)
+    rollout_project_z: List[float] = field(default_factory=list)
     rollout_kstep_h: List[float] = field(default_factory=list)
     rollout_kstep_s: List[float] = field(default_factory=list)
     additivity_h: List[float] = field(default_factory=list)
@@ -1846,6 +2098,7 @@ class LossHistory:
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.pixel_delta.append(metrics.get("loss_pixel_delta", 0.0))
         self.h2z.append(metrics["loss_h2z"])
+        self.z2h.append(metrics["loss_z2h"])
         self.geometry_rank.append(metrics.get("loss_geometry_rank", 0.0))
         self.geometry_rank_accuracy.append(metrics.get("geometry_rank_accuracy", 0.0))
         self.geometry_rank_pairs.append(metrics.get("geometry_rank_pairs", 0.0))
@@ -1855,6 +2108,8 @@ class LossHistory:
         self.action_delta_z.append(metrics.get("loss_action_delta_z", 0.0))
         self.action_delta_h.append(metrics.get("loss_action_delta_h", 0.0))
         self.rollout_kstep_z.append(metrics.get("loss_rollout_kstep_z", 0.0))
+        self.rollout_recon_z.append(metrics.get("loss_rollout_recon_z", 0.0))
+        self.rollout_project_z.append(metrics.get("loss_rollout_project_z", 0.0))
         self.rollout_kstep_h.append(metrics.get("loss_rollout_kstep_h", 0.0))
         self.rollout_kstep_s.append(metrics.get("loss_rollout_kstep_s", 0.0))
         self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
@@ -1901,6 +2156,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.recon_patch,
             history.pixel_delta,
             history.h2z,
+            history.z2h,
             history.geometry_rank,
             history.geometry_rank_accuracy,
             history.geometry_rank_pairs,
@@ -1910,6 +2166,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.action_delta_z,
             history.action_delta_h,
             history.rollout_kstep_z,
+            history.rollout_recon_z,
+            history.rollout_project_z,
             history.rollout_kstep_h,
             history.rollout_kstep_s,
             history.additivity_h,
@@ -2341,6 +2599,7 @@ def _build_visualization_sequences(
         )
     action_texts: List[List[str]] = []
     rollout_frames: List[List[Optional[torch.Tensor]]] = []
+    reencoded_frames: List[List[Optional[torch.Tensor]]] = []
     kept_row_indices: List[torch.Tensor] = []
     kept_start_indices: List[int] = []
     debug_lines: List[str] = []
@@ -2355,6 +2614,7 @@ def _build_visualization_sequences(
             action_idx = min(start_idx + offset, vis_actions.shape[1] - 1)
             row_actions.append(describe_action_tensor(vis_actions[idx, action_idx]))
         row_rollout: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
+        row_reencoded: List[Optional[torch.Tensor]] = [None for _ in range(max_window)]
         assert torch.is_grad_enabled()
         with torch.no_grad():
             current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
@@ -2369,6 +2629,8 @@ def _build_visualization_sequences(
                 decoded_next = decoder(next_embed)[0]
                 current_frame = decoded_next.clamp(0, 1)
                 row_rollout[step] = current_frame.detach().cpu()
+                reenc_embed = model.encoder(current_frame.unsqueeze(0))
+                row_reencoded[step] = decoder(reenc_embed)[0].clamp(0, 1).detach().cpu()
                 if vis_cfg.log_deltas and row_offset < 2:
                     latent_norm = (next_embed - prev_embed).norm().item()
                     pixel_delta = (current_frame - prev_pred_frame).abs().mean().item()
@@ -2386,6 +2648,7 @@ def _build_visualization_sequences(
         assert torch.is_grad_enabled()
         action_texts.append(row_actions)
         rollout_frames.append(row_rollout)
+        reencoded_frames.append(row_reencoded)
         kept_row_indices.append(idx)
         kept_start_indices.append(start_idx)
     if not kept_row_indices:
@@ -2400,6 +2663,7 @@ def _build_visualization_sequences(
         max_window=max_window,
         action_texts=action_texts,
         rollout_frames=rollout_frames,
+        reencoded_frames=reencoded_frames,
     )
     if debug_lines:
         print("\n".join(debug_lines))
@@ -2431,6 +2695,86 @@ def _build_visualization_sequences(
         gradients=gradients,
         show_gradients=vis_cfg.gradient_norms,
     )
+
+
+def _build_off_manifold_batch(
+    *,
+    data_root: Path,
+    train_trajs: Sequence[str],
+    seq_len: int,
+    image_hw: Tuple[int, int],
+    sample_count: int,
+    generator: torch.Generator,
+) -> Tuple[torch.Tensor, torch.Tensor, List[List[str]]]:
+    off_dataset = TrajectorySequenceDataset(
+        root=data_root,
+        seq_len=seq_len,
+        image_hw=image_hw,
+        max_traj=None,
+        included_trajectories=train_trajs,
+    )
+    return _build_embedding_batch(off_dataset, sample_count, generator=generator)
+
+
+def _compute_off_manifold_errors(
+    *,
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    batch_cpu: Tuple[torch.Tensor, torch.Tensor, List[List[str]]],
+    device: torch.device,
+    rollout_steps: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    frames = batch_cpu[0].to(device)
+    actions = batch_cpu[1].to(device)
+    if frames.shape[0] == 0:
+        raise AssertionError("Off-manifold batch requires at least one sequence.")
+    if frames.shape[1] < rollout_steps + 1:
+        raise AssertionError("Off-manifold batch does not include enough frames for the requested rollout.")
+    if actions.shape[1] < rollout_steps:
+        raise AssertionError("Off-manifold batch does not include enough actions for the requested rollout.")
+    start_frames = frames[:, 0]
+    action_seq = actions[:, :rollout_steps]
+    z_t = model.encoder(start_frames)
+    h_t = z_t.new_zeros(z_t.shape[0], model.state_dim)
+    step_indices: List[np.ndarray] = []
+    errors: List[np.ndarray] = []
+    for step in range(rollout_steps + 1):
+        decoded = decoder(z_t).clamp(0, 1)
+        z_back = model.encoder(decoded)
+        err = (z_back - z_t).norm(dim=-1)
+        errors.append(err.detach().cpu().numpy())
+        step_indices.append(np.full(err.shape, step, dtype=np.int64))
+        if step < rollout_steps:
+            act = action_seq[:, step]
+            _, _, h_next = model.predictor(z_t, h_t, act)
+            z_t = model.h_to_z(h_next)
+            h_t = h_next
+    return np.concatenate(step_indices), np.concatenate(errors)
+
+
+def save_off_manifold_visualization(
+    out_dir: Path,
+    step_indices: np.ndarray,
+    errors: np.ndarray,
+    global_step: int,
+) -> None:
+    if step_indices.size == 0 or errors.size == 0:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=figsize_for_grid(1, 2), constrained_layout=True)
+    rng = np.random.default_rng(0)
+    jitter = rng.normal(scale=0.06, size=step_indices.shape)
+    axes[0].scatter(step_indices + jitter, errors, s=10, alpha=0.6, color="tab:blue")
+    axes[0].set_title("Off-manifold error by rollout index")
+    axes[0].set_xlabel("rollout index")
+    axes[0].set_ylabel("||enc(dec(z_roll)) - z_roll||")
+    axes[1].hist(errors, bins=30, color="tab:orange", alpha=0.8)
+    axes[1].set_title("Off-manifold error histogram")
+    axes[1].set_xlabel("error")
+    axes[1].set_ylabel("count")
+    out_path = out_dir / f"off_manifold_{global_step:07d}.png"
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
+    plt.close(fig)
 
 
 def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
@@ -2609,6 +2953,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     vis_ctrl_generator = torch.Generator()
     vis_ctrl_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+    off_manifold_generator = torch.Generator()
+    off_manifold_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_rng = random.Random(python_rng.randint(0, 2**32 - 1))
     hard_reservoir_val_rng = random.Random(python_rng.randint(0, 2**32 - 1))
     # Dedicated RNGs keep visualization sampling consistent across experiments.
@@ -2646,6 +2992,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
     graph_diagnostics_h_dir = run_dir / "graph_diagnostics_h"
     vis_ctrl_dir = run_dir / "vis_vis_ctrl"
+    vis_off_manifold_dir = run_dir / "vis_off_manifold"
     samples_hard_dir = run_dir / "samples_hard"
     samples_hard_val_dir = run_dir / "samples_hard_val"
     inputs_vis_dir = run_dir / "vis_inputs"
@@ -2697,6 +3044,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         graph_diagnostics_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.vis_ctrl.enabled:
         vis_ctrl_dir.mkdir(parents=True, exist_ok=True)
+    vis_off_manifold_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
@@ -2718,6 +3066,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     loss_history = LossHistory()
     spike_tracker = SpikeTracker(cfg.spike_diagnostics) if cfg.spike_diagnostics.enabled else None
     spike_events_path = metrics_dir / "spike_events.csv"
+    recon_overlay_path = metrics_dir / "recon_spike_action_overlay.csv"
 
     write_run_metadata(run_dir, cfg, model_cfg, exclude_fields={"title"})
     write_git_metadata(run_dir)
@@ -2836,6 +3185,21 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
     # --- Fixed visualization batch (required later) ---
     fixed_batch_cpu, fixed_selection = _build_fixed_vis_batch(dataloader, cfg.vis.rows)
+    off_manifold_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
+    off_manifold_steps = max(1, cfg.rollout_horizon * 2)
+    off_points_per_rollout = off_manifold_steps + 1
+    off_sample_count = max(1, int(round(256 / off_points_per_rollout)))
+    try:
+        off_manifold_batch_cpu = _build_off_manifold_batch(
+            data_root=cfg.data_root,
+            train_trajs=train_trajs,
+            seq_len=off_manifold_steps + 1,
+            image_hw=(model_cfg.image_size, model_cfg.image_size),
+            sample_count=off_sample_count,
+            generator=off_manifold_generator,
+        )
+    except Exception as exc:
+        print(f"[warn] off-manifold batch unavailable: {exc}")
 
     if cfg.vis.embedding_projection_samples <= 0:
         raise AssertionError(
@@ -2913,6 +3277,21 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     f"[spike] step {global_step} {event['metric']}={event['value']:.4f} "
                     f"(mean {event['mean']:.4f}, std {event['std']:.4f}, z {event['z']:.2f})"
                 )
+        if cfg.spike_diagnostics.enabled:
+            recon_event = None
+            if spike_tracker is not None:
+                recon_event = next(
+                    (event for event in spike_events if event["metric"] == "loss_recon_multi_box"),
+                    None,
+                )
+            recon_value = float(metrics.get("loss_recon_multi_box", 0.0))
+            _write_recon_spike_action_overlay_row(
+                recon_overlay_path,
+                global_step,
+                batch[1],
+                recon_value,
+                recon_event,
+            )
 
         # Update hard examples.
         if hard_reservoir is not None and difficulty_info is not None:
@@ -3037,6 +3416,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 sequences,
                 grad_label,
                 global_step,
+                include_pixel_delta=weights.pixel_delta > 0,
             )
 
             sequences, grad_label = _build_visualization_sequences(
@@ -3053,7 +3433,25 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 sequences,
                 grad_label,
                 global_step,
+                include_pixel_delta=weights.pixel_delta > 0,
             )
+            if off_manifold_batch_cpu is not None:
+                assert torch.is_grad_enabled()
+                with torch.no_grad():
+                    step_indices, errors = _compute_off_manifold_errors(
+                        model=model,
+                        decoder=decoder,
+                        batch_cpu=off_manifold_batch_cpu,
+                        device=device,
+                        rollout_steps=off_manifold_steps,
+                    )
+                assert torch.is_grad_enabled()
+                save_off_manifold_visualization(
+                    vis_off_manifold_dir,
+                    step_indices,
+                    errors,
+                    global_step,
+                )
 
             assert torch.is_grad_enabled()
             with torch.no_grad():

@@ -103,56 +103,32 @@ def save_composability_plot(
     series: ComposabilitySeries,
     embedding_label: str,
 ) -> None:
-    fig, axes = plt.subplots(3, 2, figsize=figsize_for_grid(3, 2), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=figsize_for_grid(2, 2), constrained_layout=True)
     axes = np.asarray(axes)
     if series.fixed_actual.size:
-        axes[0, 0].scatter(
-            np.arange(series.fixed_actual.size),
-            series.fixed_actual,
-            s=8,
-            alpha=0.6,
-            color="tab:blue",
-        )
-        axes[0, 0].set_title(f"{embedding_label}: actual rollout (scatter)")
-        axes[0, 0].set_xlabel("sample index")
-        axes[0, 0].set_ylabel("L2 error")
-        axes[0, 1].hist(series.fixed_actual, bins=40, color="tab:blue", alpha=0.75)
-        axes[0, 1].set_title(f"{embedding_label}: actual rollout (hist)")
+        axes[0, 0].hist(series.fixed_actual, bins=40, color="tab:blue", alpha=0.75)
+        axes[0, 0].set_title(f"{embedding_label}: actual rollout (hist)")
+        axes[0, 1].set_xlabel("L2 error")
+        axes[0, 0].set_ylabel("count")
+    else:
+        axes[0, 0].text(0.5, 0.5, "No composability data.", ha="center", va="center")
+        axes[0, 0].set_xticks([])
+    if series.fixed_additive.size:
+        axes[0, 1].hist(series.fixed_additive, bins=40, color="tab:orange", alpha=0.75)
+        axes[0, 1].set_title(f"{embedding_label}: additive deltas (hist)")
         axes[0, 1].set_xlabel("L2 error")
         axes[0, 1].set_ylabel("count")
     else:
-        axes[0, 0].text(0.5, 0.5, "No composability data.", ha="center", va="center")
         axes[0, 1].text(0.5, 0.5, "No composability data.", ha="center", va="center")
-        axes[0, 0].set_xticks([])
         axes[0, 1].set_xticks([])
-    if series.fixed_additive.size:
-        axes[1, 0].scatter(
-            np.arange(series.fixed_additive.size),
-            series.fixed_additive,
-            s=8,
-            alpha=0.6,
-            color="tab:orange",
-        )
-        axes[1, 0].set_title(f"{embedding_label}: additive deltas (scatter)")
-        axes[1, 0].set_xlabel("sample index")
-        axes[1, 0].set_ylabel("L2 error")
-        axes[1, 1].hist(series.fixed_additive, bins=40, color="tab:orange", alpha=0.75)
-        axes[1, 1].set_title(f"{embedding_label}: additive deltas (hist)")
-        axes[1, 1].set_xlabel("L2 error")
-        axes[1, 1].set_ylabel("count")
-    else:
-        axes[1, 0].text(0.5, 0.5, "No composability data.", ha="center", va="center")
-        axes[1, 1].text(0.5, 0.5, "No composability data.", ha="center", va="center")
-        axes[1, 0].set_xticks([])
-        axes[1, 1].set_xticks([])
     _plot_strip(
-        axes[2, 0],
+        axes[1, 0],
         series.pair_actual,
         "action-pair strip (actual rollout)",
         pair_order=series.pair_order,
     )
     _plot_strip(
-        axes[2, 1],
+        axes[1, 1],
         series.pair_additive,
         "action-pair strip (additive deltas)",
         pair_order=series.pair_order,
@@ -221,6 +197,7 @@ def compute_composability_series(
     pred2, _, h2 = model.predictor(flat_z_tp1, flat_h1, flat_a_tp1)
     pred2 = pred2.view(b, steps, -1)
     h2 = h2.view(b, steps, -1)
+    h2_to_z = model.h_to_z(h2)
 
     s = model.h2s(h)
     s_t = s[:, :steps]
@@ -228,7 +205,7 @@ def compute_composability_series(
     s2_pred = model.h2s(h2)
 
     actual_z = torch.norm(pred2 - z_tp2, dim=-1)
-    actual_h = torch.norm(h2 - h_tp2, dim=-1)
+    actual_h = torch.norm(h2_to_z - z_tp2, dim=-1)
     actual_s = torch.norm(s2_pred - s_tp2, dim=-1)
 
     delta_z1 = model.action_delta_projector(flat_a_t).view(b, steps, -1)

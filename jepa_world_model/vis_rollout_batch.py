@@ -12,6 +12,7 @@ def save_rollout_sequence_batch(
     sequences: Sequence[VisualizationSequence],
     grad_label: str,
     global_step: int,
+    include_pixel_delta: bool,
 ) -> None:
     if not sequences:
         return
@@ -21,7 +22,7 @@ def save_rollout_sequence_batch(
         sample_dir = base_parent / f"{base_name}_{idx}"
         sample_dir.mkdir(parents=True, exist_ok=True)
         out_path = sample_dir / f"rollout_{global_step:07d}.png"
-        save_rollout_visualization(out_path, sequence, grad_label)
+        save_rollout_visualization(out_path, sequence, grad_label, include_pixel_delta)
 
 
 __all__ = ["save_rollout_sequence_batch"]

@@ -21,6 +21,7 @@ class SpikeDiagnosticsConfig:
     enabled: bool = True
     metrics: tuple[str, ...] = (
         "loss_world",
+        "loss_recon_multi_box",
         "loss_inverse_dynamics_h",
         "loss_inverse_dynamics_s",
         "grad_world",

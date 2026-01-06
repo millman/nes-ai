@@ -26,6 +26,7 @@ def _render_visualization_batch(
                 rollout=item.rollout,
                 gradients=item_gradients,
                 reconstructions=item.reconstructions,
+                reencoded=item.reencoded,
                 labels=item_labels,
                 actions=item.actions,
             )
