@@ -11,7 +11,7 @@
 
 function initializeDiagnosticsPage(config, serverData) {
     const { targets, hasAlignmentSummary = false, hasFrameSteps = false, hasCsvLinks = false } = config;
-    const { steps, diagnostics, frameMap, diagSummary, figure } = serverData;
+    const { steps, diagnostics, frameMap, diagSummary, figure, diagScalars } = serverData;
 
     const frameSteps = hasFrameSteps
         ? Object.keys(frameMap || {}).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b)
@@ -37,6 +37,12 @@ function initializeDiagnosticsPage(config, serverData) {
     const summaryStep = hasAlignmentSummary ? document.getElementById("diagnostics-summary-step") : null;
     const summaryLinks = hasAlignmentSummary ? document.getElementById("diagnostics-summary-links") : null;
     const summaryCaption = hasAlignmentSummary ? document.getElementById("diagnostics-summary-caption") : null;
+
+    const statusItems = document.querySelectorAll("[data-status-metric]");
+    const scalarSteps = Object.keys(diagScalars || {})
+        .map((k) => Number(k))
+        .filter((n) => !Number.isNaN(n))
+        .sort((a, b) => a - b);
 
     let currentFrames = [];
     let lossPinned = false;
@@ -113,6 +119,27 @@ function initializeDiagnosticsPage(config, serverData) {
         const num = Number(value);
         if (!Number.isFinite(num)) return "—";
         return (num * multiplier).toFixed(decimals);
+    }
+
+    function updateStatusStrip(stepValue) {
+        if (!statusItems.length || !scalarSteps.length) return;
+        let nearest = null;
+        for (let i = 0; i < scalarSteps.length; i++) {
+            const step = scalarSteps[i];
+            if (step > stepValue) {
+                continue;
+            }
+            if (nearest === null || step > nearest) {
+                nearest = step;
+            }
+        }
+        const step = nearest !== null ? nearest : scalarSteps[scalarSteps.length - 1];
+        const values = (diagScalars || {})[step] || {};
+        statusItems.forEach((item) => {
+            const key = item.getAttribute("data-status-metric");
+            if (!key) return;
+            item.textContent = formatNumber(values[key], 3);
+        });
     }
 
     function renderAlignmentSummary(summary) {
@@ -221,6 +248,7 @@ function initializeDiagnosticsPage(config, serverData) {
         if (hasAlignmentSummary) {
             renderAlignmentSummary(diagSummary);
         }
+        updateStatusStrip(step ?? 0);
     }
 
     function renderLossPlot() {

@@ -9,11 +9,23 @@ from dataclasses import dataclass
 class DiagnosticsConfig:
     enabled: bool = True
     sample_sequences: int = 128
-    top_k_components: int = 4
+    top_k_components: int = 8
     min_action_count: int = 5
     max_actions_to_plot: int = 12
     cosine_high_threshold: float = 0.7
     synthesize_cycle_samples: bool = False
+    rollout_divergence_horizon: int = 8
+    rollout_divergence_samples: int = 64
+    straightline_steps: int = 8
+    straightline_starts: int = 3
+    z_consistency_samples: int = 6
+    z_consistency_repeats: int = 8
+    z_consistency_noise_std: float = 0.02
+    z_monotonicity_max_shift: int = 6
+    z_monotonicity_samples: int = 12
+    path_independence_steps: int = 4
+    path_independence_samples: int = 16
+    h_drift_max_actions: int = 12
 
 
 @dataclass

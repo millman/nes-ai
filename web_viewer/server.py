@@ -1083,14 +1083,15 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-            "diagnostics_page.html",
-            view_label="z",
-            page_title="Diagnostics",
-            no_experiment_message="No experiments with diagnostics outputs.",
-            experiments=[],
-            experiment=None,
-            diagnostics_map={},
+                "diagnostics_page.html",
+                view_label="z",
+                page_title="Diagnostics",
+                no_experiment_message="No experiments with diagnostics outputs.",
+                experiments=[],
+                experiment=None,
+                diagnostics_map={},
                 diagnostics_csv_map={},
+                diagnostics_scalars={},
                 frame_map={},
                 cfg=cfg,
                 active_nav="diagnostics",
@@ -1240,6 +1241,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             experiment=selected,
             diagnostics_map=diagnostics_map,
             diagnostics_csv_map=diagnostics_csv_map,
+            diagnostics_scalars=_load_diagnostics_scalars(selected.path),
             frame_map=frame_map,
             figure=figure,
             diagnostics_summary=alignment_summary,
@@ -1287,6 +1289,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 experiment=None,
                 diagnostics_map={},
                 diagnostics_csv_map={},
+                diagnostics_scalars={},
                 frame_map={},
                 cfg=cfg,
                 active_nav="diagnostics_s",
@@ -1389,6 +1392,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             diagnostic_steps=diagnostics_steps,
             diagnostics_map=diagnostics_map,
             diagnostics_csv_map=diagnostics_csv_map,
+            diagnostics_scalars=_load_diagnostics_scalars(selected.path),
             frame_map=frame_map,
             figure=figure,
             cfg=cfg,
@@ -1409,6 +1413,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 ("vis_action_alignment_h", "action_alignment_detail_*.png"),
                 ("vis_cycle_error_h", "cycle_error_*.png"),
                 ("vis_self_distance_h", "self_distance_h_*.png"),
+                ("vis_h_ablation", "h_ablation_*.png"),
+                ("vis_h_drift_by_action", "h_drift_by_action_*.png"),
+                ("vis_norm_timeseries", "norm_timeseries_*.png"),
             ]
             for folder, pattern in checks:
                 target = exp_path / folder
@@ -1448,6 +1455,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 experiment=None,
                 diagnostics_map={},
                 diagnostics_csv_map={},
+                diagnostics_scalars={},
                 frame_map={},
                 diagnostic_steps=[],
                 cfg=cfg,
@@ -1477,6 +1485,15 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         diagnostics_map["self_distance_h"] = _collect_step_map_from_dir(
             selected.id, selected.path, "vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"
+        )
+        diagnostics_map["h_ablation"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_h_ablation", "h_ablation_*.png", "h_ablation_"
+        )
+        diagnostics_map["h_drift_by_action"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_h_drift_by_action", "h_drift_by_action_*.png", "h_drift_by_action_"
+        )
+        diagnostics_map["norm_timeseries"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_norm_timeseries", "norm_timeseries_*.png", "norm_timeseries_"
         )
 
         step_set: set[int] = set()
@@ -1519,6 +1536,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             experiment=selected,
             diagnostics_map=diagnostics_map,
             diagnostics_csv_map={},
+            diagnostics_scalars=_load_diagnostics_scalars(selected.path),
             frame_map=frame_map,
             diagnostic_steps=diagnostic_steps,
             figure=figure,
@@ -1569,6 +1587,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 diagnostics_map_z={},
                 diagnostics_map_h={},
                 diagnostics_map_s={},
+                diagnostics_scalars={},
                 diagnostic_steps=[],
                 figure=None,
                 cfg=cfg,
@@ -1665,6 +1684,15 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         diagnostics_map_h["self_distance_h"] = _collect_step_map_from_dir(
             selected.id, selected.path, "vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"
         )
+        diagnostics_map_h["h_ablation"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_h_ablation", "h_ablation_*.png", "h_ablation_"
+        )
+        diagnostics_map_h["h_drift_by_action"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_h_drift_by_action", "h_drift_by_action_*.png", "h_drift_by_action_"
+        )
+        diagnostics_map_h["norm_timeseries"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_norm_timeseries", "norm_timeseries_*.png", "norm_timeseries_"
+        )
 
         step_set: set[int] = set()
         for per_step in diagnostics_map_z.values():
@@ -1692,6 +1720,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             diagnostics_map_z=diagnostics_map_z,
             diagnostics_map_h=diagnostics_map_h,
             diagnostics_map_s=diagnostics_map_s,
+            diagnostics_scalars=_load_diagnostics_scalars(selected.path),
             diagnostic_steps=diagnostic_steps,
             figure=figure,
             cfg=cfg,
@@ -2481,6 +2510,37 @@ def _build_single_experiment_figure(experiment: Experiment):
     )
     label = experiment.title or experiment.name
     return build_overlay({label: loss_curves}, include_experiment_in_trace=False, trace_ids={label: experiment.id})
+
+
+def _load_diagnostics_scalars(exp_path: Path) -> Dict[int, Dict[str, float]]:
+    scalars_path = exp_path / "metrics" / "diagnostics_scalars.csv"
+    if not scalars_path.exists():
+        return {}
+    scalars: Dict[int, Dict[str, float]] = {}
+    try:
+        with scalars_path.open("r", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                step_raw = row.get("step")
+                if step_raw is None:
+                    continue
+                try:
+                    step = int(float(step_raw))
+                except ValueError:
+                    continue
+                entry = {}
+                for key, value in row.items():
+                    if key == "step" or value is None:
+                        continue
+                    try:
+                        entry[key] = float(value)
+                    except ValueError:
+                        continue
+                if entry:
+                    scalars[step] = entry
+    except OSError:
+        return {}
+    return scalars
 
 
 def _parse_step_suffix(stem: str, prefix: str) -> Optional[int]:

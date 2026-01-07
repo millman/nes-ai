@@ -908,6 +908,14 @@ VIS_STEP_SPECS = [
     ("vis_cycle_error", "vis_cycle_error_z", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_h", "vis_cycle_error_h", "cycle_error_*.png", "cycle_error_"),
+    ("vis_rollout_divergence", "vis_rollout_divergence", "rollout_divergence_*.png", "rollout_divergence_"),
+    ("vis_z_consistency", "vis_z_consistency", "z_consistency_*.png", "z_consistency_"),
+    ("vis_z_monotonicity", "vis_z_monotonicity", "z_monotonicity_*.png", "z_monotonicity_"),
+    ("vis_path_independence", "vis_path_independence", "path_independence_*.png", "path_independence_"),
+    ("vis_straightline_s", "vis_straightline_s", "straightline_s_*.png", "straightline_s_"),
+    ("vis_h_ablation", "vis_h_ablation", "h_ablation_*.png", "h_ablation_"),
+    ("vis_h_drift_by_action", "vis_h_drift_by_action", "h_drift_by_action_*.png", "h_drift_by_action_"),
+    ("vis_norm_timeseries", "vis_norm_timeseries", "norm_timeseries_*.png", "norm_timeseries_"),
     ("vis_graph_rank1_cdf_z", "graph_diagnostics_z", "rank1_cdf_*.png", "rank1_cdf_"),
     ("vis_graph_rank2_cdf_z", "graph_diagnostics_z", "rank2_cdf_*.png", "rank2_cdf_"),
     ("vis_graph_neff_violin_z", "graph_diagnostics_z", "neff_violin_*.png", "neff_violin_"),
@@ -1175,6 +1183,26 @@ def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
         cycle_imgs = sorted(fallback_dir.glob("*.png")) if fallback_dir.exists() else []
     if cycle_imgs:
         images["cycle_error"] = cycle_imgs
+    rollout_dir = root / "vis_rollout_divergence"
+    if rollout_dir.exists():
+        rollout_imgs = sorted(rollout_dir.glob("rollout_divergence_*.png"))
+        if rollout_imgs:
+            images["rollout_divergence"] = rollout_imgs
+    consistency_dir = root / "vis_z_consistency"
+    if consistency_dir.exists():
+        consistency_imgs = sorted(consistency_dir.glob("z_consistency_*.png"))
+        if consistency_imgs:
+            images["z_consistency"] = consistency_imgs
+    monotonicity_dir = root / "vis_z_monotonicity"
+    if monotonicity_dir.exists():
+        monotonicity_imgs = sorted(monotonicity_dir.glob("z_monotonicity_*.png"))
+        if monotonicity_imgs:
+            images["z_monotonicity"] = monotonicity_imgs
+    path_dir = root / "vis_path_independence"
+    if path_dir.exists():
+        path_imgs = sorted(path_dir.glob("path_independence_*.png"))
+        if path_imgs:
+            images["path_independence"] = path_imgs
     return images
 
 
@@ -1184,6 +1212,7 @@ def _collect_diagnostics_images_s(root: Path) -> Dict[str, List[Path]]:
         ("variance_spectrum_s", root / "vis_delta_s_pca", "delta_s_variance_spectrum_*.png"),
         ("action_alignment_detail_s", root / "vis_action_alignment_s", "action_alignment_detail_*.png"),
         ("cycle_error_s", root / "vis_cycle_error_s", "*.png"),
+        ("straightline_s", root / "vis_straightline_s", "straightline_s_*.png"),
     ]
     images: Dict[str, List[Path]] = {}
     for name, folder, pattern in diag_specs:
@@ -1203,6 +1232,10 @@ def _diagnostics_exists(root: Path) -> bool:
         root / "vis_cycle_error_z",
         root / "vis_cycle_error",
         root / "vis_diagnostics_frames",
+        root / "vis_rollout_divergence",
+        root / "vis_z_consistency",
+        root / "vis_z_monotonicity",
+        root / "vis_path_independence",
     ]
     suffixes = (".png", ".csv", ".txt")
     for folder in diag_dirs:
@@ -1218,6 +1251,7 @@ def _diagnostics_s_exists(root: Path) -> bool:
         root / "vis_delta_s_pca",
         root / "vis_action_alignment_s",
         root / "vis_cycle_error_s",
+        root / "vis_straightline_s",
     ]
     suffixes = (".png", ".csv", ".txt")
     for folder in diag_dirs:
@@ -1256,6 +1290,10 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
         "action_alignment": alignment_dir,
         "cycle_error": cycle_dir,
         "frame_alignment": root / "vis_diagnostics_frames",
+        "rollout_divergence": root / "vis_rollout_divergence",
+        "z_consistency": root / "vis_z_consistency",
+        "z_monotonicity": root / "vis_z_monotonicity",
+        "path_independence": root / "vis_path_independence",
     }
     csvs: Dict[str, List[Path]] = {}
     for name, folder in diag_dirs.items():

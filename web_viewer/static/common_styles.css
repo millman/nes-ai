@@ -106,6 +106,45 @@
     gap: 0.75rem;
 }
 
+.diagnostic-grid-extra {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.75rem;
+}
+
+.diagnostic-status-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.5rem;
+    padding: 0.75rem;
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 0.75rem;
+}
+
+.diagnostic-status-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.5rem;
+    background: #ffffff;
+    border: 1px solid #f1f3f5;
+}
+
+.diagnostic-status-label {
+    font-size: 0.7rem;
+    color: #6c757d;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.diagnostic-status-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #212529;
+}
+
 .diagnostic-grid-top {
     grid-template-columns: repeat(4, minmax(0, 1fr));
 }
