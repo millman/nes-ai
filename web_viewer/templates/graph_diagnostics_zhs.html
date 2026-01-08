@@ -32,7 +32,7 @@
         {% if experiment %}
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
-        <h3 class="mb-1">Graph Diagnostics (Z vs H vs S)</h3>
+        <h3 class="mb-1">Graph Diagnostics (Z/H/P)</h3>
         <div class="text-muted small">No experiments with graph diagnostics outputs.</div>
         {% endif %}
     </div>
@@ -43,7 +43,7 @@
     <a class="btn btn-sm btn-outline-secondary" href="{{ history_url_h }}" target="_blank" rel="noreferrer">Download history CSV (H)</a>
     {% endif %}
     {% if history_url_s %}
-    <a class="btn btn-sm btn-outline-secondary" href="{{ history_url_s }}" target="_blank" rel="noreferrer">Download history CSV (S)</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ history_url_s }}" target="_blank" rel="noreferrer">Download history CSV (P)</a>
     {% endif %}
 </div>
 
@@ -247,7 +247,7 @@
         </div>
     </div>
     <div class="col-12 col-xl-4">
-        <h5 class="mb-2">Graph Diagnostics (S)</h5>
+        <h5 class="mb-2">Graph Diagnostics (P)</h5>
         <div class="graph-grid mb-3">
             <div class="card h-100">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -258,7 +258,7 @@
                     </div>
                 </div>
                 <div class="card-body">
-                    <img id="graph-s-rank1-img" class="graph-card-img d-none" alt="Rank1 CDF (S)">
+                    <img id="graph-s-rank1-img" class="graph-card-img d-none" alt="Rank1 CDF (P)">
                     <div class="text-muted small" id="graph-s-rank1-caption"></div>
                 </div>
             </div>
@@ -271,7 +271,7 @@
                     </div>
                 </div>
                 <div class="card-body">
-                    <img id="graph-s-neff-img" class="graph-card-img d-none" alt="Neighborhood size raincloud (S)">
+                    <img id="graph-s-neff-img" class="graph-card-img d-none" alt="Neighborhood size raincloud (P)">
                     <div class="text-muted small" id="graph-s-neff-caption"></div>
                 </div>
             </div>
@@ -284,7 +284,7 @@
                     </div>
                 </div>
                 <div class="card-body">
-                    <img id="graph-s-edge-img" class="graph-card-img d-none" alt="Edge consistency (S)">
+                    <img id="graph-s-edge-img" class="graph-card-img d-none" alt="Edge consistency (P)">
                     <div class="text-muted small" id="graph-s-edge-caption"></div>
                 </div>
             </div>
@@ -297,7 +297,7 @@
                     </div>
                 </div>
                 <div class="card-body">
-                    <img id="graph-s-rank2-img" class="graph-card-img d-none" alt="Rank2 CDF (S)">
+                    <img id="graph-s-rank2-img" class="graph-card-img d-none" alt="Rank2 CDF (P)">
                     <div class="text-muted small" id="graph-s-rank2-caption"></div>
                 </div>
             </div>
@@ -310,7 +310,7 @@
                     </div>
                 </div>
                 <div class="card-body">
-                    <img id="graph-s-indegree-img" class="graph-card-img d-none" alt="In-degree histogram (S)">
+                    <img id="graph-s-indegree-img" class="graph-card-img d-none" alt="In-degree histogram (P)">
                     <div class="text-muted small" id="graph-s-indegree-caption"></div>
                 </div>
             </div>
@@ -324,7 +324,7 @@
                 </div>
                 <div class="card-body">
                     {% if history_plot_url_s %}
-                    <img id="graph-s-history-img" class="graph-card-img" src="{{ history_plot_url_s }}" alt="Metrics history (S)">
+                    <img id="graph-s-history-img" class="graph-card-img" src="{{ history_plot_url_s }}" alt="Metrics history (P)">
                     {% else %}
                     <div class="text-muted fst-italic">History plot not available.</div>
                     {% endif %}
@@ -383,7 +383,7 @@
     </div>
     <div class="col-12 col-xl-4">
         <div class="card">
-            <div class="card-header py-2">Metrics (S)</div>
+            <div class="card-header py-2">Metrics (P)</div>
             <div class="card-body">
                 <div class="table-responsive">
                     <table class="table table-sm align-middle graph-summary-table mb-0">

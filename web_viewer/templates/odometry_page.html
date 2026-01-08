@@ -137,14 +137,14 @@
     </div>
     <div class="card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span class="image-preview-card-title">PCA s</span>
+            <span class="image-preview-card-title">PCA p</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
                     class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
-                    title="PCA projection of s embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
+                    title="PCA projection of p embeddings across the sequence. Read: orderly gradients indicate structured latent geometry; scattered clouds suggest instability. Good: smooth progression with limited overlap."
                 >i</span>
             </div>
         </div>
@@ -158,21 +158,21 @@
                 {% endif %}
             </div>
             {% else %}
-            <img id="odometry-pca-s-img" class="odometry-card-img d-none" alt="PCA s">
+            <img id="odometry-pca-s-img" class="odometry-card-img d-none" alt="PCA p">
             <div class="text-muted small" id="odometry-pca-s-caption"></div>
             {% endif %}
         </div>
     </div>
     <div class="card h-100 odometry-span-3">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span class="image-preview-card-title">Cumulative sum of Δs PCA/ICA/t-SNE</span>
+            <span class="image-preview-card-title">Cumulative sum of Δp PCA/ICA/t-SNE</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
                     class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
-                    title="Trajectory of cumulative delta-s over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
+                    title="Trajectory of cumulative delta-p over time (after warmup), projected with PCA/ICA/t-SNE. Read: smooth curves and consistent drift indicate stable dynamics; sharp jumps or tangled loops suggest instability. Good: coherent, continuous trajectory with gradual drift."
                 >i</span>
             </div>
         </div>
@@ -186,7 +186,7 @@
                 {% endif %}
             </div>
             {% else %}
-            <img id="odometry-s-img" class="odometry-card-img d-none" alt="odometry s">
+            <img id="odometry-s-img" class="odometry-card-img d-none" alt="odometry p">
             <div class="text-muted small" id="odometry-s-caption"></div>
             {% endif %}
         </div>
@@ -277,14 +277,14 @@
     </div>
     <div class="card h-100 odometry-span-4">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span class="image-preview-card-title">||s - s_hat|| + scatter</span>
+            <span class="image-preview-card-title">||p - p_hat|| + scatter</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
                 <span
                     class="diagnostic-info-icon"
                     data-bs-toggle="tooltip"
                     data-bs-placement="left"
-                    title="Predictor error norm over time plus an s vs. s_hat scatter view. Read: the line shows ||s - s_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
+                    title="Predictor error norm over time plus a p vs. p_hat scatter view. Read: the line shows ||p - p_hat|| per step; the scatter should hug the diagonal. Good: low, stable error and tight diagonal scatter."
                 >i</span>
             </div>
         </div>
@@ -298,7 +298,7 @@
                 {% endif %}
             </div>
             {% else %}
-            <img id="odometry-shat-img" class="odometry-card-img d-none" alt="s vs s_hat">
+            <img id="odometry-shat-img" class="odometry-card-img d-none" alt="p vs p_hat">
             <div class="text-muted small" id="odometry-shat-caption"></div>
             {% endif %}
         </div>

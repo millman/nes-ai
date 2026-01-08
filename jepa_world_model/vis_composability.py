@@ -146,8 +146,8 @@ def compute_composability_series(
     warmup: int,
     min_action_count: int,
 ) -> Dict[str, ComposabilitySeries]:
-    if z_embeddings.shape[1] < warmup + 3:
-        empty = ComposabilitySeries(
+    def _empty_series() -> ComposabilitySeries:
+        return ComposabilitySeries(
             timesteps=np.zeros(0, dtype=np.float32),
             actual_means=np.zeros(0, dtype=np.float32),
             additive_means=np.zeros(0, dtype=np.float32),
@@ -157,30 +157,28 @@ def compute_composability_series(
             pair_additive={},
             pair_order=[],
         )
-        return {"z": empty, "h": empty, "s": empty}
+
+    if z_embeddings.shape[1] < warmup + 3:
+        empty = _empty_series()
+        return {"z": empty, "h": empty, "p": empty, "f": empty, "s": empty}
     z = z_embeddings[:, warmup:]
     h = h_states[:, warmup:]
     a = actions[:, warmup:]
     b, t, _ = z.shape
     steps = t - 2
     if steps <= 0:
-        empty = ComposabilitySeries(
-            timesteps=np.zeros(0, dtype=np.float32),
-            actual_means=np.zeros(0, dtype=np.float32),
-            additive_means=np.zeros(0, dtype=np.float32),
-            fixed_actual=np.zeros(0, dtype=np.float32),
-            fixed_additive=np.zeros(0, dtype=np.float32),
-            pair_actual={},
-            pair_additive={},
-            pair_order=[],
-        )
-        return {"z": empty, "h": empty, "s": empty}
+        empty = _empty_series()
+        return {"z": empty, "h": empty, "p": empty, "f": empty, "s": empty}
 
     z_t = z[:, :steps]
     z_tp1 = z[:, 1 : steps + 1]
     z_tp2 = z[:, 2 : steps + 2]
     h_t = h[:, :steps]
     h_tp2 = h[:, 2 : steps + 2]
+    p = model.h2pose(h)
+    f = model.h2desc(h)
+    p_tp2 = p[:, 2 : steps + 2]
+    f_tp2 = f[:, 2 : steps + 2]
     a_t = a[:, :steps]
     a_tp1 = a[:, 1 : steps + 1]
 
@@ -198,15 +196,13 @@ def compute_composability_series(
     pred2 = pred2.view(b, steps, -1)
     h2 = h2.view(b, steps, -1)
     h2_to_z = model.h_to_z(h2)
-
-    s = model.h2s(h)
-    s_t = s[:, :steps]
-    s_tp2 = s[:, 2 : steps + 2]
-    s2_pred = model.h2s(h2)
+    p2_pred = model.h2pose(h2)
+    f2_pred = model.h2desc(h2)
 
     actual_z = torch.norm(pred2 - z_tp2, dim=-1)
     actual_h = torch.norm(h2_to_z - z_tp2, dim=-1)
-    actual_s = torch.norm(s2_pred - s_tp2, dim=-1)
+    actual_p = torch.norm(p2_pred - p_tp2, dim=-1)
+    actual_f = torch.norm(f2_pred - f_tp2, dim=-1)
 
     delta_z1 = model.action_delta_projector(flat_a_t).view(b, steps, -1)
     delta_z2 = model.action_delta_projector(flat_a_tp1).view(b, steps, -1)
@@ -218,12 +214,10 @@ def compute_composability_series(
     dh2 = model.h_action_delta_projector(flat_h_t2, flat_a_tp1).view(b, steps, -1)
     h_add = h_t + dh1 + dh2
     add_h = torch.norm(h_add - h_tp2, dim=-1)
-
-    ds1 = model.s_action_delta_projector(s_t.reshape(-1, s_t.shape[-1]), flat_a_t).view(b, steps, -1)
-    flat_s_t2 = (s_t + ds1).reshape(-1, s_t.shape[-1])
-    ds2 = model.s_action_delta_projector(flat_s_t2, flat_a_tp1).view(b, steps, -1)
-    s_add = s_t + ds1 + ds2
-    add_s = torch.norm(s_add - s_tp2, dim=-1)
+    p_add = model.h2pose(h_add)
+    add_p = torch.norm(p_add - p_tp2, dim=-1)
+    f_add = model.h2desc(h_add)
+    add_f = torch.norm(f_add - f_tp2, dim=-1)
 
     action_ids = compress_actions_to_ids(a_t.reshape(-1, a_t.shape[-1])).view(b, steps).cpu().numpy()
     action_ids_next = compress_actions_to_ids(a_tp1.reshape(-1, a_tp1.shape[-1])).view(b, steps).cpu().numpy()
@@ -262,8 +256,12 @@ def compute_composability_series(
             pair_order=pair_order,
         )
 
+    pose_series = build_series(actual_p, add_p)
+    desc_series = build_series(actual_f, add_f)
     return {
         "z": build_series(actual_z, add_z),
         "h": build_series(actual_h, add_h),
-        "s": build_series(actual_s, add_s),
+        "p": pose_series,
+        "f": desc_series,
+        "s": pose_series,
     }

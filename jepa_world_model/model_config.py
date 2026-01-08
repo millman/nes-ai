@@ -50,7 +50,12 @@ class ModelConfig:
     # Optional separate dimension for the projected planning embedding s (h2s).
     # If None, defaults to state_dim so h and s share dimensionality.
     state_embed_dim: Optional[int] = None
+    # Planning pose dimensionality (defaults to state_embed_dim).
+    pose_dim: Optional[int] = None
+    # Descriptor dimensionality for place recognition (defaults to state_embed_dim).
+    descriptor_dim: Optional[int] = None
     state_embed_unit_norm: bool = False
+    descriptor_unit_norm: bool = True
     # LayerNorm toggles for debugging.
     layer_norms: LayerNormConfig = field(default_factory=LayerNormConfig)
     state_warmup_frames: int = 4
@@ -81,3 +86,7 @@ class ModelConfig:
                 )
         if self.state_embed_dim is None:
             self.state_embed_dim = self.state_dim
+        if self.pose_dim is None:
+            self.pose_dim = self.state_embed_dim
+        if self.descriptor_dim is None:
+            self.descriptor_dim = self.state_embed_dim

@@ -194,8 +194,10 @@ def save_norm_timeseries_plot(
     z_p95: Sequence[float],
     h_mean: Sequence[float],
     h_p95: Sequence[float],
-    s_mean: Sequence[float],
-    s_p95: Sequence[float],
+    p_mean: Sequence[float],
+    p_p95: Sequence[float],
+    f_mean: Sequence[float],
+    f_p95: Sequence[float],
     title: str = "Norm stability over steps",
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 3.4))
@@ -203,8 +205,11 @@ def save_norm_timeseries_plot(
     ax.plot(steps, z_p95, label="z p95", color="#4c72b0", linestyle="--")
     ax.plot(steps, h_mean, label="h mean", color="#55a868")
     ax.plot(steps, h_p95, label="h p95", color="#55a868", linestyle="--")
-    ax.plot(steps, s_mean, label="s mean", color="#c44e52")
-    ax.plot(steps, s_p95, label="s p95", color="#c44e52", linestyle="--")
+    ax.plot(steps, p_mean, label="p mean", color="#c44e52")
+    ax.plot(steps, p_p95, label="p p95", color="#c44e52", linestyle="--")
+    if f_mean and f_p95:
+        ax.plot(steps, f_mean, label="f mean", color="#8172b3")
+        ax.plot(steps, f_p95, label="f p95", color="#8172b3", linestyle="--")
     ax.set_xlabel("Step")
     ax.set_ylabel("Norm")
     ax.set_title(title)

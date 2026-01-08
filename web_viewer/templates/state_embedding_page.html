@@ -22,7 +22,7 @@
         <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
         {% else %}
         <h3 class="mb-1">{{ page_title if page_title is defined else "State embedding" }}</h3>
-        <div class="text-muted small">No experiments with self_distance_s.csv</div>
+        <div class="text-muted small">No experiments with self_distance_p.csv</div>
         {% endif %}
     </div>
     {% if experiment %}
@@ -33,10 +33,10 @@
 </div>
 
 {% if not experiment %}
-<div class="text-muted fst-italic">No self_distance_s.csv found in any experiments.</div>
+<div class="text-muted fst-italic">No self_distance_p.csv found in any experiments.</div>
 {% else %}
 <div class="small text-muted mb-2">
-    Loaded from {{ experiment.state_embedding_csv.name }}{% if experiment.state_embedding_images %}, latest PNG in vis_self_distance_s{% endif %}.
+    Loaded from {{ experiment.state_embedding_csv.name }}{% if experiment.state_embedding_images %}, latest PNG in pose self-distance images{% endif %}.
 </div>
 <div class="row gy-1 gx-3 mt-3">
     <div class="col-12 col-lg-4">
@@ -114,10 +114,10 @@
     <div class="col-12 col-lg-6">
         <div class="card h-100">
             <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                <span class="image-preview-card-title">Self-distance image (S)</span>
+                <span class="image-preview-card-title">Self-distance image (P)</span>
                 <div class="d-flex align-items-center gap-2">
                     <span class="text-muted small">Step: <span class="step-label-value" id="state-embedding-step-label">—</span></span>
-                    <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance S image over steps. Read: smoother trends mean stable geometry. Good: consistent scale with few abrupt spikes or drift.">i</span>
+                    <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Self-distance P image over steps. Read: smoother trends mean stable geometry. Good: consistent scale with few abrupt spikes or drift.">i</span>
                 </div>
             </div>
             <div class="card-body d-flex flex-column gap-2 align-items-start">
@@ -357,7 +357,7 @@
 
         const buildPlots = (rows) => {
             if (!rows.length) {
-                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance_s.csv.</p>";
+                if (firstPlot) firstPlot.innerHTML = "<p class='text-muted fst-italic'>No rows in self_distance_p.csv.</p>";
                 if (priorPlot) priorPlot.innerHTML = "";
                 if (scatterPlot) scatterPlot.innerHTML = "";
                 if (firstPlotCos) firstPlotCos.innerHTML = "";

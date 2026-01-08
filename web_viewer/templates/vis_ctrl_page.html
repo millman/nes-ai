@@ -77,7 +77,7 @@
         <strong>Vis v Ctrl metrics</strong>
         <span class="text-muted small">hover to scrub steps</span>
         <span class="ms-auto text-muted small">Step: <span id="step-label-value" class="step-label-value">—</span></span>
-        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Z vs S vs H are combined aggregates of three signals: local smoothness (mean kNN distance across k), two-step composition error, and neighborhood stability (mean Jaccard across k). Each combined value is the mean of those three components at the current step, letting you compare overall consistency in one line. Formula: combined = (mean_k knn_mean_k + composition_error + mean_k jaccard_k) / 3.">i</span>
+        <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Z, P, and H are combined aggregates of three signals: local smoothness (mean kNN distance across k), two-step composition error, and neighborhood stability (mean Jaccard across k). Each combined value is the mean of those three components at the current step, letting you compare overall consistency in one line. Formula: combined = (mean_k knn_mean_k + composition_error + mean_k jaccard_k) / 3.">i</span>
     </div>
     <div class="card-body">
         <div id="vis-ctrl-metrics-plot" style="height: 260px;"></div>
@@ -100,14 +100,14 @@
     </div>
     <div class="card vis-ctrl-card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span class="image-preview-card-title">Action alignment (S)</span>
+            <span class="image-preview-card-title">Action alignment (P)</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
-                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Per-action cosine alignment of delta-s directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers.">i</span>
+                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Per-action cosine alignment of delta-p directions. Read: values near 1 mean consistent action effects; near 0 means noisy alignment. Good: high alignment for common actions with few negative outliers.">i</span>
             </div>
         </div>
         <div class="card-body d-flex flex-column gap-2">
-            <img id="vis-ctrl-align-s-img" class="img-fluid d-none" alt="Action alignment (S)">
+            <img id="vis-ctrl-align-s-img" class="img-fluid d-none" alt="Action alignment (P)">
             <div class="text-muted small" id="vis-ctrl-align-s-caption"></div>
         </div>
     </div>
@@ -126,14 +126,14 @@
     </div>
     <div class="card vis-ctrl-card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span class="image-preview-card-title">Local smoothness (S)</span>
+            <span class="image-preview-card-title">Local smoothness (P)</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
-                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="kNN distance raincloud and variance spectrum in S. Read: lower kNN distances imply smoother local geometry; the spectrum shows how variance is distributed. Good: tight, low-distance distribution with a stable, non-exploding spectrum.">i</span>
+                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="kNN distance raincloud and variance spectrum in P. Read: lower kNN distances imply smoother local geometry; the spectrum shows how variance is distributed. Good: tight, low-distance distribution with a stable, non-exploding spectrum.">i</span>
             </div>
         </div>
         <div class="card-body d-flex flex-column gap-2">
-            <img id="vis-ctrl-smooth-s-img" class="img-fluid d-none" alt="Local smoothness (S)">
+            <img id="vis-ctrl-smooth-s-img" class="img-fluid d-none" alt="Local smoothness (P)">
             <div class="text-muted small" id="vis-ctrl-smooth-s-caption"></div>
         </div>
     </div>
@@ -181,14 +181,14 @@
     </div>
     <div class="card vis-ctrl-card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span class="image-preview-card-title">Two-step composition error (S)</span>
+            <span class="image-preview-card-title">Two-step composition error (P)</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
-                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Error between observed 2-step delta and mean action-direction composition in S. Read: histogram shows error spread; mean line summarizes typical mismatch. Good: low mean error with a tight distribution.">i</span>
+                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Error between observed 2-step delta and mean action-direction composition in P. Read: histogram shows error spread; mean line summarizes typical mismatch. Good: low mean error with a tight distribution.">i</span>
             </div>
         </div>
         <div class="card-body d-flex flex-column gap-2">
-            <img id="vis-ctrl-comp-s-img" class="img-fluid d-none" alt="Two-step composition error (S)">
+            <img id="vis-ctrl-comp-s-img" class="img-fluid d-none" alt="Two-step composition error (P)">
             <div class="text-muted small" id="vis-ctrl-comp-s-caption"></div>
         </div>
     </div>
@@ -207,14 +207,14 @@
     </div>
     <div class="card vis-ctrl-card h-100">
         <div class="card-header py-2 d-flex justify-content-between align-items-center">
-            <span class="image-preview-card-title">Neighborhood stability (S)</span>
+            <span class="image-preview-card-title">Neighborhood stability (P)</span>
             <div class="d-flex align-items-center gap-2">
                 <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
-                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Jaccard overlap of kNN sets across time for S. Read: higher values mean neighborhoods persist; low values mean rapid drift. Good: high mean/median with a compact spread.">i</span>
+                <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Jaccard overlap of kNN sets across time for P. Read: higher values mean neighborhoods persist; low values mean rapid drift. Good: high mean/median with a compact spread.">i</span>
             </div>
         </div>
         <div class="card-body d-flex flex-column gap-2">
-            <img id="vis-ctrl-stability-s-img" class="img-fluid d-none" alt="Neighborhood stability (S)">
+            <img id="vis-ctrl-stability-s-img" class="img-fluid d-none" alt="Neighborhood stability (P)">
             <div class="text-muted small" id="vis-ctrl-stability-s-caption"></div>
         </div>
     </div>

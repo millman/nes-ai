@@ -114,6 +114,17 @@ from jepa_world_model.plots.plot_variance_report import write_variance_report
 from jepa_world_model.plots.plot_variance_spectrum import (
     save_variance_spectrum_plot,
 )
+from jepa_world_model.plots.plot_diagnostics_extra import (
+    StraightLineTrajectory,
+    save_ablation_divergence_plot,
+    save_drift_by_action_plot,
+    save_monotonicity_plot,
+    save_norm_timeseries_plot,
+    save_path_independence_plot,
+    save_rollout_divergence_plot,
+    save_straightline_plot,
+    save_z_consistency_plot,
+)
 from jepa_world_model.plots.plot_layout import DEFAULT_DPI, figsize_for_grid
 from jepa_world_model.plots.plot_graph_diagnostics import (
     GraphDiagnosticsConfig,
@@ -495,7 +506,7 @@ class ActionFiLM(nn.Module):
         return out
 
 
-RECON_LOSS = HardnessWeightedL1Loss()
+RECON_LOSS = nn.MSELoss()
 JEPA_LOSS = nn.MSELoss()
 INVERSE_DYNAMICS_LOSS = nn.BCEWithLogitsLoss()
 
@@ -514,7 +525,7 @@ class LossWeights:
         * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
         * Purpose: advance the observable latent consistent with the next encoded frame.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
-    - loss_z2h: z->hidden projection; h_hat_from_z vs h (detached); trains z->h without steering predictor targets.
+    - loss_z2h: z->hidden projection; h_hat_from_z vs h (detached); z inputs are also detached so this only trains the z->h projector.
     - loss_pixel_delta: pixel delta reconstruction on decoded frames.
     Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
     """
@@ -526,26 +537,26 @@ class LossWeights:
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 0.3
+    recon_multi_box: float = 0.1
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
-    pixel_delta: float = 0.0
+    pixel_delta: float = 0.05
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
-    h2z: float = 1.0
+    h2z: float = 0.1
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
-    z2h: float = 1.0
+    z2h: float = 0.1
 
     # Goal-conditioned ranking loss on s = g(stopgrad(h)).
     # Keeps s useful for planning geometry while avoiding action algebra constraints.
-    geometry_rank: float = 0.0
+    geometry_rank: float = 0.05
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 1.0
+    inverse_dynamics_z: float = 0.05
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 1.0
+    inverse_dynamics_h: float = 0.05
     # Inverse dynamics from consecutive h pairs (s_t, s_{t+1}).
-    inverse_dynamics_s: float = 1.0
+    inverse_dynamics_s: float = 0.0
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make s algebraic for planning.
@@ -557,43 +568,53 @@ class LossWeights:
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
     # Encourages consistent action directions in z while leaving perception flexible.
-    action_delta_z: float = 1.0
+    action_delta_z: float = 0.0
 
     # k-step rollout consistency in z-space.
     # Encourages short-horizon compositionality without forcing long-horizon rigidity.
-    rollout_kstep_z: float = 1.0
+    rollout_kstep_z: float = 0.0
 
     # Pixel reconstruction on predicted z rollouts (decode z_roll vs x_{t+k}).
-    rollout_recon_z: float = 1.0
+    rollout_recon_z: float = 0.0
 
     # Projection consistency on predicted z rollouts (enc(dec(z_roll)) vs z_roll).
-    rollout_project_z: float = 1.0
+    rollout_project_z: float = 0.0
 
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 1.0
+    action_delta_h: float = 0.2
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 1.0
+    additivity_h: float = 0.05
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
-    rollout_kstep_h: float = 1.0
+    rollout_kstep_h: float = 0.0
 
-    # --- S ---
+    # --- Pose (planning state) ---
+    # 1-step odometry consistency: p_t + Δp_t vs observed p_{t+1}.
+    pose_1step: float = 0.05
+
+    # k-step composition consistency: p_t + ΣΔp vs observed p_{t+k}.
+    pose_kstep: float = 0.0
+
+    # Additivity of pose deltas across steps.
+    pose_additivity: float = 0.02
+
+    # Pose delta magnitude regularizer.
+    pose_mag: float = 0.0
+
+    # --- S (legacy; kept for compatibility) ---
     # State-conditioned delta alignment: s_{t+1} - s_t vs E(s_t, a_t).
-    # Makes s a navigable planning space with consistent action geometry.
-    action_delta_s: float = 1.0
+    action_delta_s: float = 0.0
 
     # Explicit additivity of s deltas across steps.
-    # Encourages compositional planning moves in the abstract space.
-    additivity_s: float = 1.0
+    additivity_s: float = 0.0
 
     # k-step rollout consistency in s-space.
-    # Encourages short-horizon compositionality in the planning abstraction.
-    rollout_kstep_s: float = 1.0
+    rollout_kstep_s: float = 0.0
 
 
 @dataclass
@@ -773,11 +794,21 @@ class JEPAWorldModel(nn.Module):
             cfg.state_dim,
         )
         self.state_dim = cfg.state_dim
-        self.h2s = HiddenToSProjector(
+        pose_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_embed_dim
+        desc_dim = cfg.descriptor_dim if cfg.descriptor_dim is not None else pose_dim
+        self.h2pose = HiddenToSProjector(
             cfg.state_dim,
-            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.state_embed_unit_norm,
+            use_layer_norm=cfg.layer_norms.h2s_projector,
+        )
+        self.h2s = self.h2pose
+        self.h2desc = HiddenToSProjector(
+            cfg.state_dim,
+            desc_dim if desc_dim is not None else cfg.state_dim,
+            cfg.hidden_dim,
+            cfg.descriptor_unit_norm,
             use_layer_norm=cfg.layer_norms.h2s_projector,
         )
         self.h_to_z = HiddenToZProjector(
@@ -805,7 +836,7 @@ class JEPAWorldModel(nn.Module):
             use_layer_norm=cfg.layer_norms.inverse_dynamics,
         )
         self.inverse_dynamics_s = InverseDynamicsHead(
-            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
             use_layer_norm=cfg.layer_norms.inverse_dynamics,
@@ -816,8 +847,14 @@ class JEPAWorldModel(nn.Module):
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.action_delta_projector,
         )
+        self.pose_delta_projector = HiddenActionDeltaProjector(
+            pose_dim if pose_dim is not None else cfg.state_dim,
+            cfg.action_dim,
+            cfg.hidden_dim,
+            use_layer_norm=cfg.layer_norms.action_delta_projector,
+        )
         self.s_action_delta_projector = HiddenActionDeltaProjector(
-            cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim,
+            pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.action_dim,
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.action_delta_projector,
@@ -870,6 +907,32 @@ def delta_prediction_loss(
     pred_norm = delta_pred.detach().norm(dim=-1).mean()
     target_norm = delta_target.norm(dim=-1).mean()
     return loss, pred_norm, target_norm
+
+
+def _rollout_pose(
+    model: JEPAWorldModel,
+    h_states: torch.Tensor,
+    actions: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build pose observations from h and integrate pose deltas over actions."""
+    pose_obs = model.h2pose(h_states)
+    bsz, steps, dim = pose_obs.shape
+    if steps <= 1 or actions.shape[1] < 1:
+        zero_delta = pose_obs.new_zeros((bsz, 0, dim))
+        return pose_obs, pose_obs, zero_delta
+    max_steps = min(actions.shape[1], steps - 1)
+    pose_pred: List[torch.Tensor] = [pose_obs[:, 0]]
+    pose_deltas: List[torch.Tensor] = []
+    for idx in range(max_steps):
+        delta = model.pose_delta_projector(pose_pred[-1], actions[:, idx])
+        pose_next = pose_pred[-1] + delta
+        pose_deltas.append(delta)
+        pose_pred.append(pose_next)
+    pose_pred_tensor = torch.stack(pose_pred, dim=1)
+    if pose_pred_tensor.shape[1] < steps:
+        pad = pose_pred_tensor[:, -1:].repeat(1, steps - pose_pred_tensor.shape[1], 1)
+        pose_pred_tensor = torch.cat([pose_pred_tensor, pad], dim=1)
+    return pose_obs, pose_pred_tensor, torch.stack(pose_deltas, dim=1)
 
 
 def rollout_z_loss(
@@ -1017,7 +1080,8 @@ def rollout_s_loss(
     total = embeddings.new_tensor(0.0)
     steps = 0
     warmup = max(min(warmup_frames, t - 1), 0)
-    s_states = model.h2s(h_states)
+    # NOTE: s is geometry-only; stop-grad h so s-losses don't shape dynamics.
+    s_states = model.h2s(h_states.detach())
     for start in range(warmup, t - 1):
         current = embeddings[:, start]
         max_h = min(rollout_horizon, t - start - 1)
@@ -1025,7 +1089,7 @@ def rollout_s_loss(
         for offset in range(max_h):
             act = actions[:, start + offset]
             pred, _, h_next = model.predictor(current, h_current, act)
-            s_next = model.h2s(h_next)
+            s_next = model.h2s(h_next.detach())
             target_s = s_states[:, start + offset + 1].detach()
             total = total + F.mse_loss(s_next, target_s)
             steps += 1
@@ -1101,7 +1165,7 @@ def z2h_loss(
 ) -> torch.Tensor:
     if h_states.numel() == 0 or embeddings.shape[1] - start <= 0:
         return embeddings.new_tensor(0.0)
-    z_stack = embeddings[:, start:]
+    z_stack = embeddings[:, start:].detach()
     h_hat_from_z = model.z_to_h(z_stack)
     return F.mse_loss(h_hat_from_z, h_states[:, start:].detach())
 
@@ -1116,7 +1180,7 @@ def geometry_rank_loss(
     if h_states.numel() == 0:
         zero = h_states.new_tensor(0.0)
         return zero, zero, zero
-    s_geom = model.h2s(h_states.detach())
+    s_geom = model.h2pose(h_states.detach())
     return geometry_ranking_loss(s_geom, cfg)
 
 
@@ -1267,6 +1331,10 @@ def _compute_losses_and_metrics(
     loss_additivity_h = x_frames.new_tensor(0.0)
     loss_action_delta_s = x_frames.new_tensor(0.0)
     loss_additivity_s = x_frames.new_tensor(0.0)
+    loss_pose_1step = x_frames.new_tensor(0.0)
+    loss_pose_kstep = x_frames.new_tensor(0.0)
+    loss_pose_additivity = x_frames.new_tensor(0.0)
+    loss_pose_mag = x_frames.new_tensor(0.0)
 
     # -------------------------------------------------------------------------
     # Calculate required inputs
@@ -1288,6 +1356,8 @@ def _compute_losses_and_metrics(
     # Warmup before applying hidden-state losses to avoid cold-start transients.
     start_frame = max(min(warmup_frames, seq_len - 1), 0)
 
+    pose_obs, pose_pred, pose_deltas = _rollout_pose(model, h_states, a_seq)
+
     def _norm_stats(tensor: torch.Tensor) -> Tuple[float, float, float]:
         if tensor.numel() == 0:
             return 0.0, 0.0, 0.0
@@ -1301,7 +1371,7 @@ def _compute_losses_and_metrics(
     with torch.no_grad():
         z_norm_mean, z_norm_std, z_norm_max = _norm_stats(z_embeddings)
         h_norm_mean, h_norm_std, h_norm_max = _norm_stats(h_states)
-        s_embeddings = model.h2s(h_states.detach())
+        s_embeddings = pose_obs.detach()
         s_norm_mean, s_norm_std, s_norm_max = _norm_stats(s_embeddings)
 
     # -------------------------------------------------------------------------
@@ -1362,17 +1432,48 @@ def _compute_losses_and_metrics(
                     loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
 
     ds_pred: Optional[torch.Tensor] = None
-    if weights.action_delta_s > 0 or weights.additivity_s > 0:
-        if h_states.shape[1] >= 2:
-            s_states = model.h2s(h_states)
-            s_curr = s_states[:, start_frame:-1]
-            s_next = s_states[:, start_frame + 1 :]
-            a_curr = a_seq[:, start_frame:-1]
-            if s_curr.numel() > 0:
-                ds_pred = model.s_action_delta_projector(s_curr, a_curr)
-                ds_target = s_next - s_curr
-                if weights.action_delta_s > 0:
-                    loss_action_delta_s = F.mse_loss(ds_pred, ds_target)
+    pose_weight = weights.pose_1step if weights.pose_1step > 0 else weights.action_delta_s
+    pose_add_weight = weights.pose_additivity if weights.pose_additivity > 0 else weights.additivity_s
+    if pose_weight > 0 or pose_add_weight > 0 or weights.pose_kstep > 0 or weights.pose_mag > 0:
+        if pose_obs.shape[1] >= 2:
+            pose_curr = pose_pred[:, start_frame:-1]
+            pose_next_obs = pose_obs[:, start_frame + 1 :]
+            if pose_curr.numel() > 0:
+                ds_pred = pose_deltas[:, start_frame:]
+                if pose_weight > 0:
+                    loss_pose_1step = F.mse_loss(pose_pred[:, start_frame + 1 :], pose_next_obs.detach())
+            if pose_add_weight > 0 and pose_deltas.shape[1] >= start_frame + 2:
+                delta_sum = pose_deltas[:, start_frame:-1] + pose_deltas[:, start_frame + 1 :]
+                pose_target = pose_obs[:, start_frame + 2 :] - pose_obs[:, start_frame:-2]
+                if delta_sum.numel() > 0 and pose_target.numel() > 0:
+                    loss_pose_additivity = F.mse_loss(delta_sum, pose_target.detach())
+            if weights.pose_kstep > 0 and pose_deltas.shape[1] >= 2:
+                max_k = min(cfg.rollout_horizon, pose_obs.shape[1] - 1)
+                if max_k >= 2:
+                    delta_cumsum = pose_deltas.cumsum(dim=1)
+                    k_losses: List[torch.Tensor] = []
+                    for k in range(2, max_k + 1):
+                        end = pose_obs.shape[1] - k
+                        if end <= start_frame:
+                            continue
+                        delta_end = delta_cumsum[:, start_frame + k - 1 : end + k - 1]
+                        if start_frame > 0:
+                            delta_start = delta_cumsum[:, start_frame - 1 : end - 1]
+                            delta_sum_k = delta_end - delta_start
+                        else:
+                            delta_sum_k = delta_end
+                        pose_hat = pose_obs[:, start_frame:end] + delta_sum_k
+                        pose_target_k = pose_obs[:, start_frame + k : end + k]
+                        if pose_hat.numel() > 0:
+                            k_losses.append(F.mse_loss(pose_hat, pose_target_k.detach()))
+                    if k_losses:
+                        loss_pose_kstep = torch.stack(k_losses).mean()
+            if weights.pose_mag > 0 and pose_deltas.numel() > 0:
+                loss_pose_mag = pose_deltas.norm(dim=-1).mean()
+    if weights.action_delta_s > 0 and weights.pose_1step <= 0:
+        loss_action_delta_s = loss_pose_1step
+    if weights.additivity_s > 0 and weights.pose_additivity <= 0:
+        loss_additivity_s = loss_pose_additivity
 
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
@@ -1387,7 +1488,8 @@ def _compute_losses_and_metrics(
 
     if weights.inverse_dynamics_s > 0:
         assert h_states.shape[1] >= 2
-        s_for_inverse = model.h2s(h_states)
+        # NOTE: inverse dynamics on s should not backprop into h/dynamics.
+        s_for_inverse = pose_obs.detach()
         action_logits_s = model.inverse_dynamics_s(s_for_inverse[:, :-1], s_for_inverse[:, 1:])
         loss_inverse_dynamics_s = INVERSE_DYNAMICS_LOSS(action_logits_s, a_seq[:, :-1])
 
@@ -1458,7 +1560,7 @@ def _compute_losses_and_metrics(
     if weights.additivity_s > 0 and ds_pred is not None:
         if ds_pred.shape[1] >= 2:
             ds_add_pred = ds_pred[:, :-1] + ds_pred[:, 1:]
-            s_states = model.h2s(h_states)
+            s_states = model.h2s(h_states.detach())
             ds_add_target = s_states[:, start_frame + 2 :] - s_states[:, start_frame:-2]
             if ds_add_pred.numel() > 0:
                 loss_additivity_s = F.mse_loss(ds_add_pred, ds_add_target)
@@ -1501,6 +1603,10 @@ def _compute_losses_and_metrics(
         + weights.rollout_kstep_h * _scaled("loss_rollout_kstep_h", loss_rollout_kstep_h)
         + weights.rollout_kstep_s * _scaled("loss_rollout_kstep_s", loss_rollout_kstep_s)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
+        + weights.pose_1step * _scaled("loss_pose_1step", loss_pose_1step)
+        + weights.pose_kstep * _scaled("loss_pose_kstep", loss_pose_kstep)
+        + weights.pose_additivity * _scaled("loss_pose_additivity", loss_pose_additivity)
+        + weights.pose_mag * _scaled("loss_pose_mag", loss_pose_mag)
         + weights.action_delta_s * _scaled("loss_action_delta_s", loss_action_delta_s)
         + weights.additivity_s * _scaled("loss_additivity_s", loss_additivity_s)
     )
@@ -1556,6 +1662,10 @@ def _compute_losses_and_metrics(
         "loss_rollout_kstep_h": loss_rollout_kstep_h.item(),
         "loss_rollout_kstep_s": loss_rollout_kstep_s.item(),
         "loss_additivity_h": loss_additivity_h.item(),
+        "loss_pose_1step": loss_pose_1step.item(),
+        "loss_pose_kstep": loss_pose_kstep.item(),
+        "loss_pose_additivity": loss_pose_additivity.item(),
+        "loss_pose_mag": loss_pose_mag.item(),
         "loss_action_delta_s": loss_action_delta_s.item(),
         "loss_additivity_s": loss_additivity_s.item(),
         "z_norm_mean": z_norm_mean,
@@ -1965,6 +2075,14 @@ def log_metrics(
         filtered.pop("loss_rollout_kstep_s", None)
     if weights.additivity_h <= 0:
         filtered.pop("loss_additivity_h", None)
+    if weights.pose_1step <= 0:
+        filtered.pop("loss_pose_1step", None)
+    if weights.pose_kstep <= 0:
+        filtered.pop("loss_pose_kstep", None)
+    if weights.pose_additivity <= 0:
+        filtered.pop("loss_pose_additivity", None)
+    if weights.pose_mag <= 0:
+        filtered.pop("loss_pose_mag", None)
     if weights.action_delta_s <= 0:
         filtered.pop("loss_action_delta_s", None)
     if weights.additivity_s <= 0:
@@ -2016,6 +2134,10 @@ LOSS_COLUMNS = [
     "loss_rollout_kstep_h",
     "loss_rollout_kstep_s",
     "loss_additivity_h",
+    "loss_pose_1step",
+    "loss_pose_kstep",
+    "loss_pose_additivity",
+    "loss_pose_mag",
     "loss_action_delta_s",
     "loss_additivity_s",
     "z_norm_mean",
@@ -2066,6 +2188,10 @@ class LossHistory:
     rollout_kstep_h: List[float] = field(default_factory=list)
     rollout_kstep_s: List[float] = field(default_factory=list)
     additivity_h: List[float] = field(default_factory=list)
+    pose_1step: List[float] = field(default_factory=list)
+    pose_kstep: List[float] = field(default_factory=list)
+    pose_additivity: List[float] = field(default_factory=list)
+    pose_mag: List[float] = field(default_factory=list)
     action_delta_s: List[float] = field(default_factory=list)
     additivity_s: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
@@ -2113,6 +2239,10 @@ class LossHistory:
         self.rollout_kstep_h.append(metrics.get("loss_rollout_kstep_h", 0.0))
         self.rollout_kstep_s.append(metrics.get("loss_rollout_kstep_s", 0.0))
         self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
+        self.pose_1step.append(metrics.get("loss_pose_1step", 0.0))
+        self.pose_kstep.append(metrics.get("loss_pose_kstep", 0.0))
+        self.pose_additivity.append(metrics.get("loss_pose_additivity", 0.0))
+        self.pose_mag.append(metrics.get("loss_pose_mag", 0.0))
         self.action_delta_s.append(metrics.get("loss_action_delta_s", 0.0))
         self.additivity_s.append(metrics.get("loss_additivity_s", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
@@ -2171,6 +2301,10 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.rollout_kstep_h,
             history.rollout_kstep_s,
             history.additivity_h,
+            history.pose_1step,
+            history.pose_kstep,
+            history.pose_additivity,
+            history.pose_mag,
             history.action_delta_s,
             history.additivity_s,
             history.z_norm_mean,
@@ -2777,6 +2911,55 @@ def save_off_manifold_visualization(
     plt.close(fig)
 
 
+def _append_csv_row(path: Path, header: Sequence[str], row: Sequence[object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not path.exists()
+    with path.open("a", newline="") as handle:
+        writer = csv.writer(handle)
+        if is_new:
+            writer.writerow(header)
+        writer.writerow(row)
+
+
+def _write_step_csv(out_dir: Path, name: str, header: Sequence[str], rows: Iterable[Sequence[object]]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / name
+    with out_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _compute_norm_stats(tensor: torch.Tensor, quantile: float = 0.95) -> Tuple[float, float]:
+    if tensor.numel() == 0:
+        return 0.0, 0.0
+    norms = tensor.detach().flatten(0, -2).norm(dim=-1)
+    if norms.numel() == 0:
+        return 0.0, 0.0
+    mean = float(norms.mean().item())
+    try:
+        p95 = float(torch.quantile(norms, quantile).item())
+    except RuntimeError:
+        p95 = float(norms.max().item())
+    return mean, p95
+
+
+def _shift_frame(frame: torch.Tensor, dx: int, dy: int) -> torch.Tensor:
+    _, h, w = frame.shape
+    shifted = torch.zeros_like(frame)
+    x0_src = max(0, -dx)
+    x1_src = min(w, w - dx) if dx < 0 else min(w, w - dx)
+    y0_src = max(0, -dy)
+    y1_src = min(h, h - dy) if dy < 0 else min(h, h - dy)
+    x0_dst = max(0, dx)
+    x1_dst = min(w, w + dx)
+    y0_dst = max(0, dy)
+    y1_dst = min(h, h + dy)
+    if x0_src < x1_src and y0_src < y1_src:
+        shifted[:, y0_dst:y1_dst, x0_dst:x1_dst] = frame[:, y0_src:y1_src, x0_src:x1_src]
+    return shifted
+
+
 def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
     total_time = sum(totals.values())
     if total_time <= 0:
@@ -2969,27 +3152,43 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     fixed_vis_dir = run_dir / "vis_fixed"
     rolling_vis_dir = run_dir / "vis_rolling"
     pca_z_dir = run_dir / "pca_z"
-    pca_s_dir = run_dir / "pca_s"
+    pca_p_dir = run_dir / "pca_p"
+    pca_f_dir = run_dir / "pca_f"
     pca_h_dir = run_dir / "pca_h"
     diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
-    diagnostics_delta_s_dir = run_dir / "vis_delta_s_pca"
+    diagnostics_delta_p_dir = run_dir / "vis_delta_p_pca"
+    diagnostics_delta_f_dir = run_dir / "vis_delta_f_pca"
     diagnostics_delta_h_dir = run_dir / "vis_delta_h_pca"
     diagnostics_alignment_dir = run_dir / "vis_action_alignment_z"
     diagnostics_alignment_raw_dir = run_dir / "vis_action_alignment_z_raw"
     diagnostics_alignment_centered_dir = run_dir / "vis_action_alignment_z_centered"
-    diagnostics_alignment_s_dir = run_dir / "vis_action_alignment_s"
-    diagnostics_alignment_s_raw_dir = run_dir / "vis_action_alignment_s_raw"
-    diagnostics_alignment_s_centered_dir = run_dir / "vis_action_alignment_s_centered"
+    diagnostics_alignment_p_dir = run_dir / "vis_action_alignment_p"
+    diagnostics_alignment_p_raw_dir = run_dir / "vis_action_alignment_p_raw"
+    diagnostics_alignment_p_centered_dir = run_dir / "vis_action_alignment_p_centered"
+    diagnostics_alignment_f_dir = run_dir / "vis_action_alignment_f"
+    diagnostics_alignment_f_raw_dir = run_dir / "vis_action_alignment_f_raw"
+    diagnostics_alignment_f_centered_dir = run_dir / "vis_action_alignment_f_centered"
     diagnostics_alignment_h_dir = run_dir / "vis_action_alignment_h"
     diagnostics_alignment_h_raw_dir = run_dir / "vis_action_alignment_h_raw"
     diagnostics_alignment_h_centered_dir = run_dir / "vis_action_alignment_h_centered"
     diagnostics_cycle_dir = run_dir / "vis_cycle_error_z"
-    diagnostics_cycle_s_dir = run_dir / "vis_cycle_error_s"
+    diagnostics_cycle_p_dir = run_dir / "vis_cycle_error_p"
+    diagnostics_cycle_f_dir = run_dir / "vis_cycle_error_f"
     diagnostics_cycle_h_dir = run_dir / "vis_cycle_error_h"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
+    diagnostics_rollout_divergence_dir = run_dir / "vis_rollout_divergence"
+    diagnostics_straightline_p_dir = run_dir / "vis_straightline_p"
+    diagnostics_straightline_f_dir = run_dir / "vis_straightline_f"
+    diagnostics_z_consistency_dir = run_dir / "vis_z_consistency"
+    diagnostics_z_monotonicity_dir = run_dir / "vis_z_monotonicity"
+    diagnostics_path_independence_dir = run_dir / "vis_path_independence"
+    diagnostics_h_ablation_dir = run_dir / "vis_h_ablation"
+    diagnostics_h_drift_dir = run_dir / "vis_h_drift_by_action"
+    diagnostics_norm_timeseries_dir = run_dir / "vis_norm_timeseries"
     spike_diagnostics_dir = run_dir / "spike_diagnostics"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
-    graph_diagnostics_s_dir = run_dir / "graph_diagnostics_s"
+    graph_diagnostics_p_dir = run_dir / "graph_diagnostics_p"
+    graph_diagnostics_f_dir = run_dir / "graph_diagnostics_f"
     graph_diagnostics_h_dir = run_dir / "graph_diagnostics_h"
     vis_ctrl_dir = run_dir / "vis_vis_ctrl"
     vis_off_manifold_dir = run_dir / "vis_off_manifold"
@@ -2998,49 +3197,82 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     inputs_vis_dir = run_dir / "vis_inputs"
     pair_vis_dir = run_dir / "vis_pairs"
     vis_self_distance_z_dir = run_dir / "vis_self_distance_z"
-    vis_self_distance_s_dir = run_dir / "vis_self_distance_s"
+    vis_self_distance_p_dir = run_dir / "vis_self_distance_p"
+    vis_self_distance_f_dir = run_dir / "vis_self_distance_f"
     vis_self_distance_h_dir = run_dir / "vis_self_distance_h"
     vis_composability_z_dir = run_dir / "vis_composability_z"
-    vis_composability_s_dir = run_dir / "vis_composability_s"
+    vis_composability_p_dir = run_dir / "vis_composability_p"
+    vis_composability_f_dir = run_dir / "vis_composability_f"
     vis_composability_h_dir = run_dir / "vis_composability_h"
     vis_state_embedding_dir = run_dir / "vis_state_embedding"
     vis_odometry_dir = run_dir / "vis_odometry"
     self_distance_z_dir = run_dir / "self_distance_z"
-    self_distance_s_dir = run_dir / "self_distance_s"
+    self_distance_p_dir = run_dir / "self_distance_p"
+    self_distance_f_dir = run_dir / "self_distance_f"
     self_distance_h_dir = run_dir / "self_distance_h"
     checkpoints_dir = run_dir / "checkpoints"
+
+    # Legacy aliases: keep _s variable names for backward-compat while writing to new _p outputs.
+    pca_s_dir = pca_p_dir
+    diagnostics_delta_s_dir = diagnostics_delta_p_dir
+    diagnostics_alignment_s_dir = diagnostics_alignment_p_dir
+    diagnostics_alignment_s_raw_dir = diagnostics_alignment_p_raw_dir
+    diagnostics_alignment_s_centered_dir = diagnostics_alignment_p_centered_dir
+    diagnostics_cycle_s_dir = diagnostics_cycle_p_dir
+    diagnostics_straightline_s_dir = diagnostics_straightline_p_dir
+    vis_composability_s_dir = vis_composability_p_dir
+    vis_self_distance_s_dir = vis_self_distance_p_dir
+    self_distance_s_dir = self_distance_p_dir
+    graph_diagnostics_s_dir = graph_diagnostics_p_dir
 
     print(f"[run] Writing outputs to {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
     pca_z_dir.mkdir(parents=True, exist_ok=True)
-    pca_s_dir.mkdir(parents=True, exist_ok=True)
+    pca_p_dir.mkdir(parents=True, exist_ok=True)
+    pca_f_dir.mkdir(parents=True, exist_ok=True)
     pca_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.diagnostics.enabled:
         diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_delta_s_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_delta_p_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_delta_f_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_delta_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_raw_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_centered_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_alignment_s_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_alignment_s_raw_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_alignment_s_centered_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_p_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_p_raw_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_p_centered_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_f_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_f_raw_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_alignment_f_centered_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_raw_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_centered_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_cycle_s_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_cycle_p_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_cycle_f_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
         vis_composability_z_dir.mkdir(parents=True, exist_ok=True)
-        vis_composability_s_dir.mkdir(parents=True, exist_ok=True)
+        vis_composability_p_dir.mkdir(parents=True, exist_ok=True)
+        vis_composability_f_dir.mkdir(parents=True, exist_ok=True)
         vis_composability_h_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_rollout_divergence_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_straightline_p_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_straightline_f_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_z_consistency_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_z_monotonicity_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_path_independence_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_h_ablation_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_h_drift_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_norm_timeseries_dir.mkdir(parents=True, exist_ok=True)
     if cfg.spike_diagnostics.enabled:
         spike_diagnostics_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
-        graph_diagnostics_s_dir.mkdir(parents=True, exist_ok=True)
+        graph_diagnostics_p_dir.mkdir(parents=True, exist_ok=True)
+        graph_diagnostics_f_dir.mkdir(parents=True, exist_ok=True)
         graph_diagnostics_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.vis_ctrl.enabled:
         vis_ctrl_dir.mkdir(parents=True, exist_ok=True)
@@ -3048,12 +3280,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     samples_hard_dir.mkdir(parents=True, exist_ok=True)
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
-    vis_self_distance_s_dir.mkdir(parents=True, exist_ok=True)
+    vis_self_distance_p_dir.mkdir(parents=True, exist_ok=True)
+    vis_self_distance_f_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_h_dir.mkdir(parents=True, exist_ok=True)
     vis_state_embedding_dir.mkdir(parents=True, exist_ok=True)
     vis_odometry_dir.mkdir(parents=True, exist_ok=True)
     self_distance_z_dir.mkdir(parents=True, exist_ok=True)
-    self_distance_s_dir.mkdir(parents=True, exist_ok=True)
+    self_distance_p_dir.mkdir(parents=True, exist_ok=True)
+    self_distance_f_dir.mkdir(parents=True, exist_ok=True)
     self_distance_h_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3459,7 +3693,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
                 _, _, _, h_states = _predictor_rollout(model, embed_outputs["embeddings"], embed_actions)
-                s_embeddings = model.h2s(h_states)
+                p_embeddings = model.h2pose(h_states)
+                f_embeddings = model.h2desc(h_states)
             assert torch.is_grad_enabled()
             save_embedding_projection(
                 embed_outputs["embeddings"],
@@ -3467,9 +3702,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 "PCA z",
             )
             save_embedding_projection(
-                s_embeddings,
-                pca_s_dir / f"pca_s_{global_step:07d}.png",
-                "PCA s",
+                p_embeddings,
+                pca_p_dir / f"pca_p_{global_step:07d}.png",
+                "PCA p",
+            )
+            save_embedding_projection(
+                f_embeddings,
+                pca_f_dir / f"pca_f_{global_step:07d}.png",
+                "PCA f",
             )
             save_embedding_projection(
                 h_states,
@@ -3502,6 +3742,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 self_dist_embeddings = self_dist_embeddings_full[0]
                 _, _, _, self_dist_h_states_batch = _predictor_rollout(model, self_dist_embeddings_full, self_dist_actions)
                 self_dist_h_states = self_dist_h_states_batch[0]
+                self_dist_p = model.h2pose(self_dist_h_states.unsqueeze(0))[0]
+                self_dist_f = model.h2desc(self_dist_h_states.unsqueeze(0))[0]
             assert torch.is_grad_enabled()
             write_self_distance_outputs(
                 self_dist_embeddings,
@@ -3524,6 +3766,28 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 title_prefix="Self-distance (H)",
                 file_prefix="self_distance_h",
                 cosine_prefix="self_distance_h_cosine",
+            )
+            write_self_distance_outputs(
+                self_dist_p,
+                self_distance_inputs,
+                self_distance_p_dir,
+                vis_self_distance_p_dir,
+                global_step,
+                embedding_label="p",
+                title_prefix="Self-distance (P)",
+                file_prefix="self_distance_p",
+                cosine_prefix="self_distance_p_cosine",
+            )
+            write_self_distance_outputs(
+                self_dist_f,
+                self_distance_inputs,
+                self_distance_f_dir,
+                vis_self_distance_f_dir,
+                global_step,
+                embedding_label="f",
+                title_prefix="Self-distance (F)",
+                file_prefix="self_distance_f",
+                cosine_prefix="self_distance_f_cosine",
             )
             hist_frames = rolling_batch_cpu[0]
             hist_actions = rolling_batch_cpu[1]
@@ -3557,7 +3821,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         diag_embeddings,
                         diag_actions_device,
                     )
-                    diag_s_embeddings = model.h2s(diag_h_states)
+                    diag_p_embeddings = model.h2pose(diag_h_states)
+                    diag_f_embeddings = model.h2desc(diag_h_states)
                     diag_composability = compute_composability_series(
                         model,
                         diag_embeddings,
@@ -3567,6 +3832,199 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         cfg.diagnostics.min_action_count,
                     )
                 assert torch.is_grad_enabled()
+                diag_s_embeddings = diag_p_embeddings
+
+                def _write_motion_bundle(
+                    name: str,
+                    motion: MotionSubspace,
+                    delta_dir: Path,
+                    alignment_dir: Path,
+                    alignment_raw_dir: Path,
+                    alignment_centered_dir: Path,
+                    cycle_dir: Path,
+                ) -> Tuple[
+                    Dict[str, Dict[int, Dict[str, float]]],
+                    Dict[str, Dict[int, Dict[str, float]]],
+                    Tuple[List[Tuple[int, float]], Dict[int, float]],
+                ]:
+                    save_delta_pca_plot(
+                        delta_dir / f"delta_{name}_pca_{global_step:07d}.png",
+                        motion.variance_ratio,
+                        motion.delta_proj,
+                        motion.proj_flat,
+                        motion.action_ids,
+                        motion.action_dim,
+                        name,
+                    )
+                    save_variance_spectrum_plot(
+                        motion.variance_ratio,
+                        delta_dir,
+                        global_step,
+                        name,
+                    )
+                    write_variance_report(
+                        motion.variance_ratio,
+                        delta_dir,
+                        global_step,
+                        name,
+                    )
+                    stats = compute_action_alignment_stats(
+                        motion.delta_proj,
+                        motion.action_ids,
+                        cfg.diagnostics.min_action_count,
+                        cfg.diagnostics.cosine_high_threshold,
+                    )
+                    debug = build_action_alignment_debug(
+                        stats,
+                        motion.delta_proj,
+                        motion.action_ids,
+                    )
+                    save_action_alignment_detail_plot(
+                        alignment_dir / f"action_alignment_detail_{global_step:07d}.png",
+                        debug,
+                        cfg.diagnostics.cosine_high_threshold,
+                        motion.action_dim,
+                        alignment_label="PCA",
+                    )
+                    write_action_alignment_report(
+                        stats,
+                        motion.action_dim,
+                        inverse_map,
+                        alignment_dir,
+                        global_step,
+                    )
+                    write_action_alignment_strength(
+                        stats,
+                        motion.action_dim,
+                        alignment_dir,
+                        global_step,
+                    )
+                    write_action_alignment_crosscheck(
+                        stats,
+                        motion,
+                        alignment_dir,
+                        global_step,
+                    )
+                    motion_raw = replace(motion, delta_proj=motion.delta_embed)
+                    stats_raw = compute_action_alignment_stats(
+                        motion_raw.delta_proj,
+                        motion_raw.action_ids,
+                        cfg.diagnostics.min_action_count,
+                        cfg.diagnostics.cosine_high_threshold,
+                    )
+                    debug_raw = build_action_alignment_debug(
+                        stats_raw,
+                        motion_raw.delta_proj,
+                        motion_raw.action_ids,
+                    )
+                    save_action_alignment_detail_plot(
+                        alignment_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
+                        debug_raw,
+                        cfg.diagnostics.cosine_high_threshold,
+                        motion_raw.action_dim,
+                        alignment_label="raw delta",
+                    )
+                    write_action_alignment_crosscheck(
+                        stats_raw,
+                        motion_raw,
+                        alignment_raw_dir,
+                        global_step,
+                    )
+                    motion_centered = replace(motion, delta_proj=motion.delta_centered)
+                    stats_centered = compute_action_alignment_stats(
+                        motion_centered.delta_proj,
+                        motion_centered.action_ids,
+                        cfg.diagnostics.min_action_count,
+                        cfg.diagnostics.cosine_high_threshold,
+                    )
+                    debug_centered = build_action_alignment_debug(
+                        stats_centered,
+                        motion_centered.delta_proj,
+                        motion_centered.action_ids,
+                    )
+                    save_action_alignment_detail_plot(
+                        alignment_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
+                        debug_centered,
+                        cfg.diagnostics.cosine_high_threshold,
+                        motion_centered.action_dim,
+                        alignment_label="centered delta",
+                    )
+                    write_action_alignment_crosscheck(
+                        stats_centered,
+                        motion_centered,
+                        alignment_centered_dir,
+                        global_step,
+                    )
+                    for dir_entry, stats_entry, debug_entry in [
+                        (alignment_dir, stats, debug),
+                        (alignment_raw_dir, stats_raw, debug_raw),
+                        (alignment_centered_dir, stats_centered, debug_centered),
+                    ]:
+                        write_action_alignment_csv(
+                            dir_entry,
+                            global_step,
+                            motion.action_dim,
+                            stats_entry,
+                        )
+                        write_action_alignment_full_csv(
+                            dir_entry,
+                            global_step,
+                            motion.action_dim,
+                            stats_entry,
+                        )
+                        write_action_alignment_pairwise_csv(
+                            dir_entry,
+                            global_step,
+                            motion.action_dim,
+                            debug_entry,
+                        )
+                        write_action_alignment_overview_txt(
+                            dir_entry,
+                            global_step,
+                            cfg.diagnostics.cosine_high_threshold,
+                            debug_entry,
+                        )
+                    cycle_errors, cycle_per_action = compute_cycle_errors(
+                        motion.proj_sequences,
+                        motion.actions_seq,
+                        inverse_map,
+                        include_synthetic=cfg.diagnostics.synthesize_cycle_samples,
+                    )
+                    save_cycle_error_plot(
+                        cycle_dir / f"cycle_error_{global_step:07d}.png",
+                        [e[1] for e in cycle_errors],
+                        cycle_per_action,
+                        motion.action_dim,
+                    )
+                    write_delta_variance_csv(
+                        delta_dir,
+                        global_step,
+                        motion.variance_ratio,
+                        name,
+                    )
+                    write_delta_samples_csv(
+                        delta_dir,
+                        global_step,
+                        motion.paths,
+                        name,
+                    )
+                    write_cycle_error_values_csv(
+                        cycle_dir,
+                        global_step,
+                        motion.action_dim,
+                        cycle_errors,
+                    )
+                    write_cycle_error_summary_csv(
+                        cycle_dir,
+                        global_step,
+                        motion.action_dim,
+                        cycle_per_action,
+                    )
+                    return (
+                        {"pca": stats, "raw": stats_raw, "centered": stats_centered},
+                        {"pca": debug, "raw": debug_raw, "centered": debug_centered},
+                        (cycle_errors, cycle_per_action),
+                    )
 
                 inverse_map = build_action_inverse_map(diag_actions.detach().cpu().numpy())
                 motion_z = build_motion_subspace(
@@ -3575,14 +4033,23 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.diagnostics.top_k_components,
                     diag_paths,
                 )
-                save_delta_pca_plot(
-                    diagnostics_delta_dir / f"delta_z_pca_{global_step:07d}.png",
-                    motion_z.variance_ratio,
-                    motion_z.delta_proj,
-                    motion_z.proj_flat,
-                    motion_z.action_ids,
-                    motion_z.action_dim,
-                    "z",
+                motion_h = build_motion_subspace(
+                    diag_h_states,
+                    diag_actions,
+                    cfg.diagnostics.top_k_components,
+                    diag_paths,
+                )
+                motion_p = build_motion_subspace(
+                    diag_p_embeddings,
+                    diag_actions,
+                    cfg.diagnostics.top_k_components,
+                    diag_paths,
+                )
+                motion_f = build_motion_subspace(
+                    diag_f_embeddings,
+                    diag_actions,
+                    cfg.diagnostics.top_k_components,
+                    diag_paths,
                 )
                 save_composability_plot(
                     vis_composability_z_dir / f"composability_z_{global_step:07d}.png",
@@ -3595,609 +4062,50 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     "h",
                 )
                 save_composability_plot(
-                    vis_composability_s_dir / f"composability_s_{global_step:07d}.png",
-                    diag_composability["s"],
-                    "s",
+                    vis_composability_p_dir / f"composability_p_{global_step:07d}.png",
+                    diag_composability.get("p", diag_composability["s"]),
+                    "p",
                 )
-                save_variance_spectrum_plot(
-                    motion_z.variance_ratio,
-                    diagnostics_delta_dir,
-                    global_step,
+                save_composability_plot(
+                    vis_composability_f_dir / f"composability_f_{global_step:07d}.png",
+                    diag_composability["f"],
+                    "f",
+                )
+                alignment_stats_z, alignment_debug_z, (cycle_errors_z, cycle_per_action_z) = _write_motion_bundle(
                     "z",
-                )
-                write_variance_report(
-                    motion_z.variance_ratio,
-                    diagnostics_delta_dir,
-                    global_step,
-                    "z",
-                )
-                alignment_stats_z = compute_action_alignment_stats(
-                    motion_z.delta_proj,
-                    motion_z.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_z = build_action_alignment_debug(
-                    alignment_stats_z,
-                    motion_z.delta_proj,
-                    motion_z.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_z,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_z.action_dim,
-                    alignment_label="PCA",
-                )
-                write_action_alignment_report(
-                    alignment_stats_z,
-                    motion_z.action_dim,
-                    inverse_map,
-                    diagnostics_alignment_dir,
-                    global_step,
-                )
-                write_action_alignment_strength(
-                    alignment_stats_z,
-                    motion_z.action_dim,
-                    diagnostics_alignment_dir,
-                    global_step,
-                )
-                write_action_alignment_crosscheck(
-                    alignment_stats_z,
                     motion_z,
-                    diagnostics_alignment_dir,
-                    global_step,
-                )
-                motion_z_raw = replace(motion_z, delta_proj=motion_z.delta_embed)
-                alignment_stats_z_raw = compute_action_alignment_stats(
-                    motion_z_raw.delta_proj,
-                    motion_z_raw.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_z_raw = build_action_alignment_debug(
-                    alignment_stats_z_raw,
-                    motion_z_raw.delta_proj,
-                    motion_z_raw.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_z_raw,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_z_raw.action_dim,
-                    alignment_label="raw delta",
-                )
-                write_action_alignment_report(
-                    alignment_stats_z_raw,
-                    motion_z_raw.action_dim,
-                    inverse_map,
-                    diagnostics_alignment_raw_dir,
-                    global_step,
-                )
-                write_action_alignment_strength(
-                    alignment_stats_z_raw,
-                    motion_z_raw.action_dim,
-                    diagnostics_alignment_raw_dir,
-                    global_step,
-                )
-                write_action_alignment_crosscheck(
-                    alignment_stats_z_raw,
-                    motion_z_raw,
-                    diagnostics_alignment_raw_dir,
-                    global_step,
-                )
-                motion_z_centered = replace(motion_z, delta_proj=motion_z.delta_centered)
-                alignment_stats_z_centered = compute_action_alignment_stats(
-                    motion_z_centered.delta_proj,
-                    motion_z_centered.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_z_centered = build_action_alignment_debug(
-                    alignment_stats_z_centered,
-                    motion_z_centered.delta_proj,
-                    motion_z_centered.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_z_centered,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_z_centered.action_dim,
-                    alignment_label="centered delta",
-                )
-                write_action_alignment_report(
-                    alignment_stats_z_centered,
-                    motion_z_centered.action_dim,
-                    inverse_map,
-                    diagnostics_alignment_centered_dir,
-                    global_step,
-                )
-                write_action_alignment_strength(
-                    alignment_stats_z_centered,
-                    motion_z_centered.action_dim,
-                    diagnostics_alignment_centered_dir,
-                    global_step,
-                )
-                write_action_alignment_crosscheck(
-                    alignment_stats_z_centered,
-                    motion_z_centered,
-                    diagnostics_alignment_centered_dir,
-                    global_step,
-                )
-                motion_h = build_motion_subspace(
-                    diag_h_states,
-                    diag_actions,
-                    cfg.diagnostics.top_k_components,
-                    diag_paths,
-                )
-                save_delta_pca_plot(
-                    diagnostics_delta_h_dir / f"delta_h_pca_{global_step:07d}.png",
-                    motion_h.variance_ratio,
-                    motion_h.delta_proj,
-                    motion_h.proj_flat,
-                    motion_h.action_ids,
-                    motion_h.action_dim,
-                    "h",
-                )
-                save_variance_spectrum_plot(
-                    motion_h.variance_ratio,
-                    diagnostics_delta_h_dir,
-                    global_step,
-                    "h",
-                )
-                write_variance_report(
-                    motion_h.variance_ratio,
-                    diagnostics_delta_h_dir,
-                    global_step,
-                    "h",
-                )
-                alignment_stats_h = compute_action_alignment_stats(
-                    motion_h.delta_proj,
-                    motion_h.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_h = build_action_alignment_debug(
-                    alignment_stats_h,
-                    motion_h.delta_proj,
-                    motion_h.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_h_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_h,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_h.action_dim,
-                    alignment_label="PCA",
-                )
-                motion_h_raw = replace(motion_h, delta_proj=motion_h.delta_embed)
-                alignment_stats_h_raw = compute_action_alignment_stats(
-                    motion_h_raw.delta_proj,
-                    motion_h_raw.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_h_raw = build_action_alignment_debug(
-                    alignment_stats_h_raw,
-                    motion_h_raw.delta_proj,
-                    motion_h_raw.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_h_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_h_raw,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_h_raw.action_dim,
-                    alignment_label="raw delta",
-                )
-                motion_h_centered = replace(motion_h, delta_proj=motion_h.delta_centered)
-                alignment_stats_h_centered = compute_action_alignment_stats(
-                    motion_h_centered.delta_proj,
-                    motion_h_centered.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_h_centered = build_action_alignment_debug(
-                    alignment_stats_h_centered,
-                    motion_h_centered.delta_proj,
-                    motion_h_centered.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_h_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_h_centered,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_h_centered.action_dim,
-                    alignment_label="centered delta",
-                )
-                cycle_errors_h, cycle_per_action_h = compute_cycle_errors(
-                    motion_h.proj_sequences,
-                    motion_h.actions_seq,
-                    inverse_map,
-                    include_synthetic=cfg.diagnostics.synthesize_cycle_samples,
-                )
-                save_cycle_error_plot(
-                    diagnostics_cycle_h_dir / f"cycle_error_{global_step:07d}.png",
-                    [e[1] for e in cycle_errors_h],
-                    cycle_per_action_h,
-                    motion_h.action_dim,
-                )
-                write_delta_variance_csv(
-                    diagnostics_delta_h_dir,
-                    global_step,
-                    motion_h.variance_ratio,
-                    "h",
-                )
-                write_delta_samples_csv(
-                    diagnostics_delta_h_dir,
-                    global_step,
-                    motion_h.paths,
-                    "h",
-                )
-                write_cycle_error_values_csv(
-                    diagnostics_cycle_h_dir,
-                    global_step,
-                    motion_h.action_dim,
-                    cycle_errors_h,
-                )
-                write_cycle_error_summary_csv(
-                    diagnostics_cycle_h_dir,
-                    global_step,
-                    motion_h.action_dim,
-                    cycle_per_action_h,
-                )
-                cycle_errors_z, cycle_per_action_z = compute_cycle_errors(
-                    motion_z.proj_sequences,
-                    motion_z.actions_seq,
-                    inverse_map,
-                    include_synthetic=cfg.diagnostics.synthesize_cycle_samples,
-                )
-                save_cycle_error_plot(
-                    diagnostics_cycle_dir / f"cycle_error_{global_step:07d}.png",
-                    [e[1] for e in cycle_errors_z],
-                    cycle_per_action_z,
-                    motion_z.action_dim,
-                )
-                write_delta_variance_csv(
                     diagnostics_delta_dir,
-                    global_step,
-                    motion_z.variance_ratio,
-                    "z",
-                )
-                write_delta_samples_csv(
-                    diagnostics_delta_dir,
-                    global_step,
-                    motion_z.paths,
-                    "z",
-                )
-                write_action_alignment_csv(
                     diagnostics_alignment_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_stats_z,
-                )
-                write_action_alignment_full_csv(
-                    diagnostics_alignment_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_stats_z,
-                )
-                write_action_alignment_pairwise_csv(
-                    diagnostics_alignment_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_debug_z,
-                )
-                write_action_alignment_overview_txt(
-                    diagnostics_alignment_dir,
-                    global_step,
-                    cfg.diagnostics.cosine_high_threshold,
-                    alignment_debug_z,
-                )
-                write_action_alignment_csv(
                     diagnostics_alignment_raw_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_stats_z_raw,
-                )
-                write_action_alignment_full_csv(
-                    diagnostics_alignment_raw_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_stats_z_raw,
-                )
-                write_action_alignment_pairwise_csv(
-                    diagnostics_alignment_raw_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_debug_z_raw,
-                )
-                write_action_alignment_overview_txt(
-                    diagnostics_alignment_raw_dir,
-                    global_step,
-                    cfg.diagnostics.cosine_high_threshold,
-                    alignment_debug_z_raw,
-                )
-                write_action_alignment_csv(
                     diagnostics_alignment_centered_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_stats_z_centered,
-                )
-                write_action_alignment_full_csv(
-                    diagnostics_alignment_centered_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_stats_z_centered,
-                )
-                write_action_alignment_pairwise_csv(
-                    diagnostics_alignment_centered_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    alignment_debug_z_centered,
-                )
-                write_action_alignment_overview_txt(
-                    diagnostics_alignment_centered_dir,
-                    global_step,
-                    cfg.diagnostics.cosine_high_threshold,
-                    alignment_debug_z_centered,
-                )
-                write_cycle_error_values_csv(
                     diagnostics_cycle_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    cycle_errors_z,
                 )
-                write_cycle_error_summary_csv(
-                    diagnostics_cycle_dir,
-                    global_step,
-                    motion_z.action_dim,
-                    cycle_per_action_z,
+                alignment_stats_h, alignment_debug_h, (cycle_errors_h, cycle_per_action_h) = _write_motion_bundle(
+                    "h",
+                    motion_h,
+                    diagnostics_delta_h_dir,
+                    diagnostics_alignment_h_dir,
+                    diagnostics_alignment_h_raw_dir,
+                    diagnostics_alignment_h_centered_dir,
+                    diagnostics_cycle_h_dir,
                 )
-                motion_s = build_motion_subspace(
-                    diag_s_embeddings,
-                    diag_actions,
-                    cfg.diagnostics.top_k_components,
-                    diag_paths,
+                alignment_stats_p, alignment_debug_p, (cycle_errors_p, cycle_per_action_p) = _write_motion_bundle(
+                    "p",
+                    motion_p,
+                    diagnostics_delta_p_dir,
+                    diagnostics_alignment_p_dir,
+                    diagnostics_alignment_p_raw_dir,
+                    diagnostics_alignment_p_centered_dir,
+                    diagnostics_cycle_p_dir,
                 )
-                save_delta_pca_plot(
-                    diagnostics_delta_s_dir / f"delta_s_pca_{global_step:07d}.png",
-                    motion_s.variance_ratio,
-                    motion_s.delta_proj,
-                    motion_s.proj_flat,
-                    motion_s.action_ids,
-                    motion_s.action_dim,
-                    "s",
-                )
-                save_variance_spectrum_plot(
-                    motion_s.variance_ratio,
-                    diagnostics_delta_s_dir,
-                    global_step,
-                    "s",
-                )
-                write_variance_report(
-                    motion_s.variance_ratio,
-                    diagnostics_delta_s_dir,
-                    global_step,
-                    "s",
-                )
-                alignment_stats_s = compute_action_alignment_stats(
-                    motion_s.delta_proj,
-                    motion_s.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_s = build_action_alignment_debug(
-                    alignment_stats_s,
-                    motion_s.delta_proj,
-                    motion_s.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_s_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_s,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_s.action_dim,
-                    alignment_label="PCA",
-                )
-                write_action_alignment_report(
-                    alignment_stats_s,
-                    motion_s.action_dim,
-                    inverse_map,
-                    diagnostics_alignment_s_dir,
-                    global_step,
-                )
-                write_action_alignment_strength(
-                    alignment_stats_s,
-                    motion_s.action_dim,
-                    diagnostics_alignment_s_dir,
-                    global_step,
-                )
-                write_action_alignment_crosscheck(
-                    alignment_stats_s,
-                    motion_s,
-                    diagnostics_alignment_s_dir,
-                    global_step,
-                )
-                motion_s_raw = replace(motion_s, delta_proj=motion_s.delta_embed)
-                alignment_stats_s_raw = compute_action_alignment_stats(
-                    motion_s_raw.delta_proj,
-                    motion_s_raw.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_s_raw = build_action_alignment_debug(
-                    alignment_stats_s_raw,
-                    motion_s_raw.delta_proj,
-                    motion_s_raw.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_s_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_s_raw,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_s_raw.action_dim,
-                    alignment_label="raw delta",
-                )
-                write_action_alignment_report(
-                    alignment_stats_s_raw,
-                    motion_s_raw.action_dim,
-                    inverse_map,
-                    diagnostics_alignment_s_raw_dir,
-                    global_step,
-                )
-                write_action_alignment_strength(
-                    alignment_stats_s_raw,
-                    motion_s_raw.action_dim,
-                    diagnostics_alignment_s_raw_dir,
-                    global_step,
-                )
-                write_action_alignment_crosscheck(
-                    alignment_stats_s_raw,
-                    motion_s_raw,
-                    diagnostics_alignment_s_raw_dir,
-                    global_step,
-                )
-                motion_s_centered = replace(motion_s, delta_proj=motion_s.delta_centered)
-                alignment_stats_s_centered = compute_action_alignment_stats(
-                    motion_s_centered.delta_proj,
-                    motion_s_centered.action_ids,
-                    cfg.diagnostics.min_action_count,
-                    cfg.diagnostics.cosine_high_threshold,
-                )
-                alignment_debug_s_centered = build_action_alignment_debug(
-                    alignment_stats_s_centered,
-                    motion_s_centered.delta_proj,
-                    motion_s_centered.action_ids,
-                )
-                save_action_alignment_detail_plot(
-                    diagnostics_alignment_s_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
-                    alignment_debug_s_centered,
-                    cfg.diagnostics.cosine_high_threshold,
-                    motion_s_centered.action_dim,
-                    alignment_label="centered delta",
-                )
-                write_action_alignment_report(
-                    alignment_stats_s_centered,
-                    motion_s_centered.action_dim,
-                    inverse_map,
-                    diagnostics_alignment_s_centered_dir,
-                    global_step,
-                )
-                write_action_alignment_strength(
-                    alignment_stats_s_centered,
-                    motion_s_centered.action_dim,
-                    diagnostics_alignment_s_centered_dir,
-                    global_step,
-                )
-                write_action_alignment_crosscheck(
-                    alignment_stats_s_centered,
-                    motion_s_centered,
-                    diagnostics_alignment_s_centered_dir,
-                    global_step,
-                )
-                cycle_errors_s, cycle_per_action_s = compute_cycle_errors(
-                    motion_s.proj_sequences,
-                    motion_s.actions_seq,
-                    inverse_map,
-                    include_synthetic=cfg.diagnostics.synthesize_cycle_samples,
-                )
-                save_cycle_error_plot(
-                    diagnostics_cycle_s_dir / f"cycle_error_{global_step:07d}.png",
-                    [e[1] for e in cycle_errors_s],
-                    cycle_per_action_s,
-                    motion_s.action_dim,
-                )
-                write_delta_variance_csv(
-                    diagnostics_delta_s_dir,
-                    global_step,
-                    motion_s.variance_ratio,
-                    "s",
-                )
-                write_delta_samples_csv(
-                    diagnostics_delta_s_dir,
-                    global_step,
-                    motion_s.paths,
-                    "s",
-                )
-                write_action_alignment_csv(
-                    diagnostics_alignment_s_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_stats_s,
-                )
-                write_action_alignment_full_csv(
-                    diagnostics_alignment_s_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_stats_s,
-                )
-                write_action_alignment_pairwise_csv(
-                    diagnostics_alignment_s_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_debug_s,
-                )
-                write_action_alignment_overview_txt(
-                    diagnostics_alignment_s_dir,
-                    global_step,
-                    cfg.diagnostics.cosine_high_threshold,
-                    alignment_debug_s,
-                )
-                write_action_alignment_csv(
-                    diagnostics_alignment_s_raw_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_stats_s_raw,
-                )
-                write_action_alignment_full_csv(
-                    diagnostics_alignment_s_raw_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_stats_s_raw,
-                )
-                write_action_alignment_pairwise_csv(
-                    diagnostics_alignment_s_raw_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_debug_s_raw,
-                )
-                write_action_alignment_overview_txt(
-                    diagnostics_alignment_s_raw_dir,
-                    global_step,
-                    cfg.diagnostics.cosine_high_threshold,
-                    alignment_debug_s_raw,
-                )
-                write_action_alignment_csv(
-                    diagnostics_alignment_s_centered_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_stats_s_centered,
-                )
-                write_action_alignment_full_csv(
-                    diagnostics_alignment_s_centered_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_stats_s_centered,
-                )
-                write_action_alignment_pairwise_csv(
-                    diagnostics_alignment_s_centered_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    alignment_debug_s_centered,
-                )
-                write_action_alignment_overview_txt(
-                    diagnostics_alignment_s_centered_dir,
-                    global_step,
-                    cfg.diagnostics.cosine_high_threshold,
-                    alignment_debug_s_centered,
-                )
-                write_cycle_error_values_csv(
-                    diagnostics_cycle_s_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    cycle_errors_s,
-                )
-                write_cycle_error_summary_csv(
-                    diagnostics_cycle_s_dir,
-                    global_step,
-                    motion_s.action_dim,
-                    cycle_per_action_s,
+                alignment_stats_f, alignment_debug_f, (cycle_errors_f, cycle_per_action_f) = _write_motion_bundle(
+                    "f",
+                    motion_f,
+                    diagnostics_delta_f_dir,
+                    diagnostics_alignment_f_dir,
+                    diagnostics_alignment_f_raw_dir,
+                    diagnostics_alignment_f_centered_dir,
+                    diagnostics_cycle_f_dir,
                 )
                 write_alignment_debug_csv(
                     diag_frames,
@@ -4213,6 +4121,500 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     diagnostics_frames_dir,
                     global_step,
                 )
+
+                diagnostics_scalars_path = metrics_dir / "diagnostics_scalars.csv"
+                z_norm_mean, z_norm_p95 = _compute_norm_stats(diag_embeddings)
+                h_norm_mean, h_norm_p95 = _compute_norm_stats(diag_h_states)
+                p_norm_mean, p_norm_p95 = _compute_norm_stats(diag_p_embeddings)
+                f_norm_mean, f_norm_p95 = _compute_norm_stats(diag_f_embeddings)
+                if diag_h_states.shape[1] >= 2:
+                    h_drift = diag_h_states[:, 1:] - diag_h_states[:, :-1]
+                    p_drift = diag_p_embeddings[:, 1:] - diag_p_embeddings[:, :-1]
+                    f_drift = diag_f_embeddings[:, 1:] - diag_f_embeddings[:, :-1]
+                    h_drift_mean = float(h_drift.norm(dim=-1).mean().item())
+                    p_drift_mean = float(p_drift.norm(dim=-1).mean().item())
+                    f_drift_mean = float(f_drift.norm(dim=-1).mean().item())
+                else:
+                    h_drift_mean = 0.0
+                    p_drift_mean = 0.0
+                    f_drift_mean = 0.0
+                id_acc_p = 0.0
+                if diag_p_embeddings.shape[1] >= 2:
+                    action_logits_p = model.inverse_dynamics_s(
+                        diag_p_embeddings[:, :-1],
+                        diag_p_embeddings[:, 1:],
+                    )
+                    action_preds = (torch.sigmoid(action_logits_p) > 0.5).to(diag_actions_device.dtype)
+                    id_acc_p = float((action_preds == diag_actions_device[:, :-1]).float().mean().item())
+                _append_csv_row(
+                    diagnostics_scalars_path,
+                    [
+                        "step",
+                        "z_norm_mean",
+                        "z_norm_p95",
+                        "h_norm_mean",
+                        "h_norm_p95",
+                        "p_norm_mean",
+                        "p_norm_p95",
+                        "f_norm_mean",
+                        "f_norm_p95",
+                        "h_drift_mean",
+                        "p_drift_mean",
+                        "f_drift_mean",
+                        "id_acc_p",
+                        "s_norm_mean",
+                        "s_norm_p95",
+                        "s_drift_mean",
+                        "id_acc_s",
+                    ],
+                    [
+                        global_step,
+                        z_norm_mean,
+                        z_norm_p95,
+                        h_norm_mean,
+                        h_norm_p95,
+                        p_norm_mean,
+                        p_norm_p95,
+                        f_norm_mean,
+                        f_norm_p95,
+                        h_drift_mean,
+                        p_drift_mean,
+                        f_drift_mean,
+                        id_acc_p,
+                        p_norm_mean,
+                        p_norm_p95,
+                        p_drift_mean,
+                        id_acc_p,
+                    ],
+                )
+                try:
+                    with diagnostics_scalars_path.open("r", newline="") as handle:
+                        reader = csv.DictReader(handle)
+                        steps_list: List[int] = []
+                        z_mean_list: List[float] = []
+                        z_p95_list: List[float] = []
+                        h_mean_list: List[float] = []
+                        h_p95_list: List[float] = []
+                        p_mean_list: List[float] = []
+                        p_p95_list: List[float] = []
+                        f_mean_list: List[float] = []
+                        f_p95_list: List[float] = []
+                        for row in reader:
+                            steps_list.append(int(float(row["step"])))
+                            z_mean_list.append(float(row["z_norm_mean"]))
+                            z_p95_list.append(float(row["z_norm_p95"]))
+                            h_mean_list.append(float(row["h_norm_mean"]))
+                            h_p95_list.append(float(row["h_norm_p95"]))
+                            p_mean_list.append(float(row.get("p_norm_mean", row.get("s_norm_mean", 0.0))))
+                            p_p95_list.append(float(row.get("p_norm_p95", row.get("s_norm_p95", 0.0))))
+                            f_mean_list.append(float(row.get("f_norm_mean", 0.0)))
+                            f_p95_list.append(float(row.get("f_norm_p95", 0.0)))
+                    if steps_list:
+                        save_norm_timeseries_plot(
+                            diagnostics_norm_timeseries_dir / f"norm_timeseries_{global_step:07d}.png",
+                            steps_list,
+                            z_mean_list,
+                            z_p95_list,
+                            h_mean_list,
+                            h_p95_list,
+                            p_mean_list,
+                            p_p95_list,
+                            f_mean_list,
+                            f_p95_list,
+                        )
+                except OSError:
+                    pass
+
+                action_ids_np = compress_actions_to_ids(diag_actions.detach().cpu().numpy())
+                action_ids_flat = action_ids_np.reshape(-1)
+                unique_actions, action_counts = np.unique(action_ids_flat, return_counts=True)
+                action_labels = {int(aid): decode_action_id(int(aid), motion_z.action_dim) for aid in unique_actions}
+                action_vectors: Dict[int, torch.Tensor] = {}
+                flat_actions = diag_actions.detach().cpu().reshape(-1, diag_actions.shape[-1])
+                for idx, aid in enumerate(action_ids_flat):
+                    if int(aid) not in action_vectors:
+                        action_vectors[int(aid)] = flat_actions[idx].to(device)
+
+                def _find_action_id(keyword: str) -> Optional[int]:
+                    for aid, label in action_labels.items():
+                        if keyword in label:
+                            return aid
+                    return None
+
+                right_id = _find_action_id("RIGHT")
+                left_id = _find_action_id("LEFT")
+                up_id = _find_action_id("UP")
+                down_id = _find_action_id("DOWN")
+                noop_id = _find_action_id("NOOP")
+                sorted_ids = [
+                    int(aid)
+                    for aid, _ in sorted(
+                        zip(unique_actions.tolist(), action_counts.tolist()),
+                        key=lambda pair: pair[1],
+                        reverse=True,
+                    )
+                ]
+                straightline_ids: List[int] = []
+                if right_id is not None and left_id is not None:
+                    straightline_ids = [right_id, left_id]
+                elif up_id is not None and down_id is not None:
+                    straightline_ids = [up_id, down_id]
+                else:
+                    straightline_ids = sorted_ids[:2]
+
+                if straightline_ids and diag_p_embeddings.shape[1] >= 2:
+                    p_flat = diag_p_embeddings.detach().cpu().reshape(-1, diag_p_embeddings.shape[-1]).numpy()
+                    p_center = p_flat.mean(axis=0, keepdims=True)
+                    centered = p_flat - p_center
+                    try:
+                        _, _, vt = np.linalg.svd(centered, full_matrices=False)
+                    except np.linalg.LinAlgError:
+                        jitter = np.random.normal(scale=1e-6, size=centered.shape)
+                        _, _, vt = np.linalg.svd(centered + jitter, full_matrices=False)
+                    projection = vt[:2].T if vt.shape[0] >= 2 else None
+                    if projection is not None:
+                        seq_len = diag_p_embeddings.shape[1]
+                        start_frame = max(min(warmup_frames, seq_len - 2), 0)
+                        max_starts = min(cfg.diagnostics.straightline_starts, diag_p_embeddings.shape[0])
+                        if max_starts > 0:
+                            perm = torch.randperm(diag_p_embeddings.shape[0], generator=diagnostics_generator)[:max_starts]
+                            trajectories: List[StraightLineTrajectory] = []
+                            palette = ["#4c72b0", "#55a868", "#c44e52", "#8172b3"]
+                            for action_idx, action_id in enumerate(straightline_ids):
+                                action_vec = action_vectors.get(action_id)
+                                if action_vec is None:
+                                    continue
+                                label = action_labels.get(action_id, f"action {action_id}")
+                                color = palette[action_idx % len(palette)]
+                                for row_offset, b_idx in enumerate(perm):
+                                    b = int(b_idx.item())
+                                    z_t = diag_embeddings[b, start_frame]
+                                    h_t = diag_h_states[b, start_frame]
+                                    p_points = [diag_p_embeddings[b, start_frame].detach().cpu().numpy()]
+                                    for _ in range(cfg.diagnostics.straightline_steps):
+                                        pred, _, h_next = model.predictor(
+                                            z_t.unsqueeze(0),
+                                            h_t.unsqueeze(0),
+                                            action_vec.unsqueeze(0),
+                                        )
+                                        z_t = pred.squeeze(0)
+                                        h_t = h_next.squeeze(0)
+                                        p_points.append(model.h2pose(h_t.unsqueeze(0)).squeeze(0).detach().cpu().numpy())
+                                    p_points_np = np.stack(p_points, axis=0)
+                                    proj = (p_points_np - p_center) @ projection
+                                    traj_label = f"{label} (start {row_offset + 1})"
+                                    trajectories.append(StraightLineTrajectory(points=proj, label=traj_label, color=color))
+                            if trajectories:
+                                save_straightline_plot(
+                                    diagnostics_straightline_p_dir / f"straightline_p_{global_step:07d}.png",
+                                    trajectories,
+                                )
+
+                rollout_horizon = min(cfg.diagnostics.rollout_divergence_horizon, diag_frames.shape[1] - 1)
+                if rollout_horizon > 0:
+                    start_span = diag_frames.shape[1] - 1 - warmup_frames
+                    if start_span > 0:
+                        total_positions = diag_frames.shape[0] * start_span
+                        sample_count = min(cfg.diagnostics.rollout_divergence_samples, total_positions)
+                        perm = torch.randperm(total_positions, generator=diagnostics_generator)[:sample_count]
+                        pixel_errors = torch.zeros(rollout_horizon, device=device)
+                        latent_errors = torch.zeros(rollout_horizon, device=device)
+                        counts = torch.zeros(rollout_horizon, device=device)
+                        for flat_idx in perm.tolist():
+                            b = flat_idx // start_span
+                            t0 = (flat_idx % start_span) + warmup_frames
+                            z_t = diag_embeddings[b, t0]
+                            h_t = diag_h_states[b, t0]
+                            for k in range(rollout_horizon):
+                                if t0 + k >= diag_frames.shape[1] - 1:
+                                    break
+                                act = diag_actions_device[b, t0 + k]
+                                pred, _, h_next = model.predictor(
+                                    z_t.unsqueeze(0),
+                                    h_t.unsqueeze(0),
+                                    act.unsqueeze(0),
+                                )
+                                z_t = pred.squeeze(0)
+                                h_t = h_next.squeeze(0)
+                                decoded = decoder(z_t.unsqueeze(0))
+                                pixel_errors[k] += RECON_LOSS(decoded, diag_frames_device[b, t0 + k + 1].unsqueeze(0))
+                                p_pred = model.h2pose(h_t.unsqueeze(0)).squeeze(0)
+                                p_gt = diag_p_embeddings[b, t0 + k + 1]
+                                latent_errors[k] += (p_pred - p_gt).norm()
+                                counts[k] += 1
+                        counts = torch.clamp(counts, min=1.0)
+                        pixel_mean = (pixel_errors / counts).detach().cpu().numpy().tolist()
+                        latent_mean = (latent_errors / counts).detach().cpu().numpy().tolist()
+                        horizons = list(range(1, rollout_horizon + 1))
+                        save_rollout_divergence_plot(
+                            diagnostics_rollout_divergence_dir / f"rollout_divergence_{global_step:07d}.png",
+                            horizons,
+                            pixel_mean,
+                            latent_mean,
+                        )
+                        _write_step_csv(
+                            diagnostics_rollout_divergence_dir,
+                            f"rollout_divergence_{global_step:07d}.csv",
+                            ["k", "pixel_error", "latent_error"],
+                            zip(horizons, pixel_mean, latent_mean),
+                        )
+
+                z_consistency_samples = min(
+                    cfg.diagnostics.z_consistency_samples,
+                    diag_frames.shape[0] * diag_frames.shape[1],
+                )
+                if z_consistency_samples > 0:
+                    frame_count = diag_frames.shape[0] * diag_frames.shape[1]
+                    perm = torch.randperm(frame_count, generator=diagnostics_generator)[:z_consistency_samples]
+                    distances: List[float] = []
+                    cosines: List[float] = []
+                    for sample_idx, flat_idx in enumerate(perm.tolist()):
+                        b = flat_idx // diag_frames.shape[1]
+                        t0 = flat_idx % diag_frames.shape[1]
+                        frame = diag_frames_device[b, t0]
+                        repeats = cfg.diagnostics.z_consistency_repeats
+                        noise = torch.randn(
+                            (repeats, *frame.shape),
+                            device=frame.device,
+                        ) * cfg.diagnostics.z_consistency_noise_std
+                        noisy = (frame.unsqueeze(0) + noise).clamp(0, 1)
+                        z_samples = model.encoder(noisy)
+                        z_mean = z_samples.mean(dim=0, keepdim=True)
+                        dist = (z_samples - z_mean).norm(dim=-1)
+                        cos = F.cosine_similarity(z_samples, z_mean, dim=-1)
+                        distances.extend(dist.detach().cpu().numpy().tolist())
+                        cosines.extend(cos.detach().cpu().numpy().tolist())
+                    if distances and cosines:
+                        save_z_consistency_plot(
+                            diagnostics_z_consistency_dir / f"z_consistency_{global_step:07d}.png",
+                            distances,
+                            cosines,
+                        )
+                        _write_step_csv(
+                            diagnostics_z_consistency_dir,
+                            f"z_consistency_{global_step:07d}.csv",
+                            ["idx", "distance", "cosine"],
+                            [(idx, d, c) for idx, (d, c) in enumerate(zip(distances, cosines))],
+                        )
+
+                max_shift = max(1, cfg.diagnostics.z_monotonicity_max_shift)
+                monotonicity_samples = min(
+                    cfg.diagnostics.z_monotonicity_samples,
+                    diag_frames.shape[0] * diag_frames.shape[1],
+                )
+                if monotonicity_samples > 0:
+                    frame_count = diag_frames.shape[0] * diag_frames.shape[1]
+                    perm = torch.randperm(frame_count, generator=diagnostics_generator)[:monotonicity_samples]
+                    z_refs: List[torch.Tensor] = []
+                    frames_sel: List[torch.Tensor] = []
+                    for flat_idx in perm.tolist():
+                        b = flat_idx // diag_frames.shape[1]
+                        t0 = flat_idx % diag_frames.shape[1]
+                        frame = diag_frames_device[b, t0]
+                        z_ref = model.encoder(frame.unsqueeze(0)).squeeze(0)
+                        z_refs.append(z_ref)
+                        frames_sel.append(frame)
+                    shifts = list(range(0, max_shift + 1))
+                    distances = []
+                    for shift in shifts:
+                        total = 0.0
+                        count = 0
+                        for frame, z_ref in zip(frames_sel, z_refs):
+                            shifted = _shift_frame(frame, shift, 0)
+                            z_shift = model.encoder(shifted.unsqueeze(0)).squeeze(0)
+                            total += float((z_shift - z_ref).norm().item())
+                            count += 1
+                        distances.append(total / max(1, count))
+                    save_monotonicity_plot(
+                        diagnostics_z_monotonicity_dir / f"z_monotonicity_{global_step:07d}.png",
+                        shifts,
+                        distances,
+                    )
+                    _write_step_csv(
+                        diagnostics_z_monotonicity_dir,
+                        f"z_monotonicity_{global_step:07d}.csv",
+                        ["shift", "distance"],
+                        zip(shifts, distances),
+                    )
+
+                if diag_embeddings.shape[1] >= 2 and straightline_ids:
+                    a_id = straightline_ids[0]
+                    b_id = straightline_ids[1] if len(straightline_ids) > 1 else straightline_ids[0]
+                    action_a = action_vectors.get(a_id)
+                    action_b = action_vectors.get(b_id)
+                    if action_a is not None and action_b is not None:
+                        seq_len = diag_embeddings.shape[1]
+                        start_frame = max(min(warmup_frames, seq_len - 2), 0)
+                        max_starts = min(cfg.diagnostics.path_independence_samples, diag_embeddings.shape[0])
+                        if max_starts > 0:
+                            perm = torch.randperm(diag_embeddings.shape[0], generator=diagnostics_generator)[:max_starts]
+                            z_diffs = []
+                            p_diffs = []
+                            use_noop = noop_id is not None and noop_id in action_vectors
+                            action_b_first = action_vectors.get(noop_id) if use_noop else action_b
+                            action_b_second = action_vectors.get(noop_id) if use_noop else action_a
+                            for b_idx in perm.tolist():
+                                z_start = diag_embeddings[b_idx, start_frame]
+                                h_start = diag_h_states[b_idx, start_frame]
+                                z_a = z_start
+                                h_a = h_start
+                                z_b = z_start
+                                h_b = h_start
+                                for _ in range(cfg.diagnostics.path_independence_steps):
+                                    pred_a, _, h_a_next = model.predictor(
+                                        z_a.unsqueeze(0),
+                                        h_a.unsqueeze(0),
+                                        action_a.unsqueeze(0),
+                                    )
+                                    pred_b, _, h_b_next = model.predictor(
+                                        z_b.unsqueeze(0),
+                                        h_b.unsqueeze(0),
+                                        action_b_first.unsqueeze(0),
+                                    )
+                                    z_a = pred_a.squeeze(0)
+                                    h_a = h_a_next.squeeze(0)
+                                    z_b = pred_b.squeeze(0)
+                                    h_b = h_b_next.squeeze(0)
+                                for _ in range(cfg.diagnostics.path_independence_steps):
+                                    pred_a, _, h_a_next = model.predictor(
+                                        z_a.unsqueeze(0),
+                                        h_a.unsqueeze(0),
+                                        action_b.unsqueeze(0),
+                                    )
+                                    pred_b, _, h_b_next = model.predictor(
+                                        z_b.unsqueeze(0),
+                                        h_b.unsqueeze(0),
+                                        action_b_second.unsqueeze(0),
+                                    )
+                                    z_a = pred_a.squeeze(0)
+                                    h_a = h_a_next.squeeze(0)
+                                    z_b = pred_b.squeeze(0)
+                                    h_b = h_b_next.squeeze(0)
+                                z_diffs.append(float((z_a - z_b).norm().item()))
+                                p_a = model.h2pose(h_a.unsqueeze(0)).squeeze(0)
+                                p_b = model.h2pose(h_b.unsqueeze(0)).squeeze(0)
+                                p_diffs.append(float((p_a - p_b).norm().item()))
+                            if z_diffs and p_diffs:
+                                label_a = action_labels.get(a_id, f"action {a_id}")
+                                label_b = action_labels.get(b_id, f"action {b_id}")
+                                if use_noop:
+                                    label_b_path = action_labels.get(noop_id, "NOOP")
+                                else:
+                                    label_b_path = f"{label_b}+{label_a}"
+                                labels = [f"{label_a}+{label_b} vs {label_b_path}"]
+                                save_path_independence_plot(
+                                    diagnostics_path_independence_dir / f"path_independence_{global_step:07d}.png",
+                                    labels,
+                                    [float(np.mean(z_diffs))],
+                                    [float(np.mean(p_diffs))],
+                                )
+                                _write_step_csv(
+                                    diagnostics_path_independence_dir,
+                                    f"path_independence_{global_step:07d}.csv",
+                                    ["label", "z_distance", "p_distance"],
+                                    [(labels[0], float(np.mean(z_diffs)), float(np.mean(p_diffs)))],
+                                )
+
+                if rollout_horizon > 0 and diag_embeddings.shape[1] >= 2:
+                    start_span = diag_embeddings.shape[1] - 1 - warmup_frames
+                    if start_span > 0:
+                        total_positions = diag_embeddings.shape[0] * start_span
+                        sample_count = min(cfg.diagnostics.rollout_divergence_samples, total_positions)
+                        perm = torch.randperm(total_positions, generator=diagnostics_generator)[:sample_count]
+                        pixel_errors = torch.zeros(rollout_horizon, device=device)
+                        pixel_errors_zero = torch.zeros(rollout_horizon, device=device)
+                        latent_errors = torch.zeros(rollout_horizon, device=device)
+                        latent_errors_zero = torch.zeros(rollout_horizon, device=device)
+                        counts = torch.zeros(rollout_horizon, device=device)
+                        for flat_idx in perm.tolist():
+                            b = flat_idx // start_span
+                            t0 = (flat_idx % start_span) + warmup_frames
+                            z_norm = diag_embeddings[b, t0]
+                            h_norm = diag_h_states[b, t0]
+                            z_zero = z_norm.clone()
+                            for k in range(rollout_horizon):
+                                if t0 + k >= diag_embeddings.shape[1] - 1:
+                                    break
+                                act = diag_actions_device[b, t0 + k]
+                                pred_norm, _, h_next_norm = model.predictor(
+                                    z_norm.unsqueeze(0),
+                                    h_norm.unsqueeze(0),
+                                    act.unsqueeze(0),
+                                )
+                                pred_zero, _, h_next_zero = model.predictor(
+                                    z_zero.unsqueeze(0),
+                                    torch.zeros_like(h_norm).unsqueeze(0),
+                                    act.unsqueeze(0),
+                                )
+                                z_norm = pred_norm.squeeze(0)
+                                h_norm = h_next_norm.squeeze(0)
+                                z_zero = pred_zero.squeeze(0)
+                                decoded_norm = decoder(z_norm.unsqueeze(0))
+                                decoded_zero = decoder(z_zero.unsqueeze(0))
+                                target = diag_frames_device[b, t0 + k + 1].unsqueeze(0)
+                                pixel_errors[k] += RECON_LOSS(decoded_norm, target)
+                                pixel_errors_zero[k] += RECON_LOSS(decoded_zero, target)
+                                p_norm = model.h2pose(h_norm.unsqueeze(0)).squeeze(0)
+                                p_zero = model.h2pose(h_next_zero).squeeze(0)
+                                p_gt = diag_p_embeddings[b, t0 + k + 1]
+                                latent_errors[k] += (p_norm - p_gt).norm()
+                                latent_errors_zero[k] += (p_zero - p_gt).norm()
+                                counts[k] += 1
+                        counts = torch.clamp(counts, min=1.0)
+                        pixel_mean = (pixel_errors / counts).detach().cpu().numpy().tolist()
+                        pixel_zero_mean = (pixel_errors_zero / counts).detach().cpu().numpy().tolist()
+                        latent_mean = (latent_errors / counts).detach().cpu().numpy().tolist()
+                        latent_zero_mean = (latent_errors_zero / counts).detach().cpu().numpy().tolist()
+                        horizons = list(range(1, rollout_horizon + 1))
+                        save_ablation_divergence_plot(
+                            diagnostics_h_ablation_dir / f"h_ablation_{global_step:07d}.png",
+                            horizons,
+                            pixel_mean,
+                            pixel_zero_mean,
+                            latent_mean,
+                            latent_zero_mean,
+                        )
+                        _write_step_csv(
+                            diagnostics_h_ablation_dir,
+                            f"h_ablation_{global_step:07d}.csv",
+                            ["k", "pixel_error", "pixel_error_zero", "latent_error", "latent_error_zero"],
+                            zip(horizons, pixel_mean, pixel_zero_mean, latent_mean, latent_zero_mean),
+                        )
+
+                if diag_h_states.shape[1] >= 2:
+                    h_deltas = diag_h_states[:, 1:] - diag_h_states[:, :-1]
+                    action_ids = compress_actions_to_ids(diag_actions[:, :-1].detach().cpu().numpy())
+                    action_ids_flat = action_ids.reshape(-1)
+                    h_drift_flat = h_deltas.detach().cpu().reshape(-1, h_deltas.shape[-1]).norm(dim=-1).numpy()
+                    drift_stats = []
+                    for aid in np.unique(action_ids_flat):
+                        mask = action_ids_flat == aid
+                        count = int(mask.sum())
+                        if count == 0:
+                            continue
+                        mean_drift = float(h_drift_flat[mask].mean())
+                        drift_stats.append((int(aid), count, mean_drift))
+                    drift_stats.sort(key=lambda row: row[1], reverse=True)
+                    drift_stats = drift_stats[: cfg.diagnostics.h_drift_max_actions]
+                    if drift_stats:
+                        labels = [action_labels.get(aid, f"action {aid}") for aid, _, _ in drift_stats]
+                        counts = [count for _, count, _ in drift_stats]
+                        drifts = [drift for _, _, drift in drift_stats]
+                        save_drift_by_action_plot(
+                            diagnostics_h_drift_dir / f"h_drift_by_action_{global_step:07d}.png",
+                            labels,
+                            drifts,
+                            counts,
+                        )
+                        _write_step_csv(
+                            diagnostics_h_drift_dir,
+                            f"h_drift_by_action_{global_step:07d}.csv",
+                            ["action_id", "label", "count", "mean_drift"],
+                            [
+                                (aid, action_labels.get(aid, f"action {aid}"), count, drift)
+                                for aid, count, drift in drift_stats
+                            ],
+                        )
 
             if cfg.vis_ctrl.enabled:
                 vis_frames = vis_ctrl_batch_cpu[0].to(device)

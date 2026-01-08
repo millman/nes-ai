@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+<style>
+.assessment-image {
+    width: 100%;
+    max-width: 280px;
+    border: 1px solid #e9ecef;
+    border-radius: 0.5rem;
+}
+.assessment-table td {
+    vertical-align: top;
+}
+.assessment-step {
+    min-width: 4ch;
+    display: inline-block;
+}
+</style>
+
+<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+    <div>
+        {% if experiment %}
+        <h3 class="mb-1">{{ experiment.title if experiment.title != "Untitled" else "Untitled" }} <small class="text-muted">({{ experiment.id }})</small></h3>
+        <div class="text-muted small">Assessment based on the latest available CSVs; hover the plot to scrub per-step images.</div>
+        {% else %}
+        <h3 class="mb-1">Assessment</h3>
+        <div class="text-muted small">No experiments found.</div>
+        {% endif %}
+    </div>
+</div>
+
+{% if not experiment %}
+<div class="text-muted fst-italic">No experiment available for assessment.</div>
+{% else %}
+<div class="card mb-3">
+    <div class="card-header py-2 d-flex align-items-center gap-2">
+        <strong>Training metrics</strong>
+        <span class="text-muted small">hover to scrub steps</span>
+        <span class="ms-auto text-muted small">Step: <span id="assessment-step-label" class="assessment-step">—</span></span>
+    </div>
+    <div class="card-body">
+        <div id="assessment-loss-plot" style="height: 260px;"></div>
+    </div>
+</div>
+
+<div class="table-responsive">
+    <table class="table table-sm table-striped align-middle assessment-table">
+        <thead class="table-dark">
+            <tr>
+                <th scope="col">Signal</th>
+                <th scope="col">Diagnostic</th>
+                <th scope="col">Metric</th>
+                <th scope="col">Judgement</th>
+                <th scope="col">Image</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in assessment_rows %}
+            <tr>
+                <td>{{ row.label }}</td>
+                <td>{{ row.diagnostic }}</td>
+                <td>
+                    {% if row.metric_value is not none %}
+                    {{ row.metric_label }}: {{ "%.4f"|format(row.metric_value) }}
+                    {% else %}
+                    {{ row.metric_label }}: —
+                    {% endif %}
+                    {% if row.csv_url %}
+                    <div class="text-muted small">
+                        from <a href="{{ row.csv_url }}" target="_blank" rel="noreferrer">{{ row.csv_name }}</a>
+                        {% if row.csv_step is not none %}(step {{ row.csv_step }}){% endif %}
+                    </div>
+                    {% endif %}
+                    <div class="text-muted small">Showing step <span id="assessment-{{ row.key }}-step" class="assessment-step">—</span></div>
+                </td>
+                <td>
+                    <strong>{{ row.judgement }}</strong>
+                    {% if row.judgement_detail %}
+                    <div class="text-muted small">{{ row.judgement_detail }}</div>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if row.image_map %}
+                    <img id="assessment-{{ row.key }}-img" class="assessment-image d-none" alt="{{ row.label }}">
+                    {% else %}
+                    <div class="text-muted small">No per-step images found.</div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{% if experiment %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    if (typeof Plotly === "undefined") {
+        const plot = document.getElementById("assessment-loss-plot");
+        if (plot) plot.innerHTML = "<p class='text-danger small'>Plotly failed to load.</p>";
+        return;
+    }
+
+    const assessmentRows = {{ assessment_rows | tojson }};
+    const stepLabel = document.getElementById("assessment-step-label");
+    const plotEl = document.getElementById("assessment-loss-plot");
+    const figure = {{ figure | tojson if figure else 'null' }};
+
+    const rowState = assessmentRows.map((row) => {
+        const steps = Object.keys(row.image_map || {}).map((k) => Number(k)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+        return {
+            key: row.key,
+            steps,
+            map: row.image_map || {},
+            imgEl: document.getElementById(`assessment-${row.key}-img`),
+            stepEl: document.getElementById(`assessment-${row.key}-step`),
+            defaultStep: row.csv_step ?? (steps.length ? steps[steps.length - 1] : null),
+        };
+    });
+
+    const nearestStep = (step, steps) => {
+        if (!steps.length) return null;
+        let best = steps[0];
+        let bestDiff = Math.abs(step - best);
+        for (let i = 1; i < steps.length; i++) {
+            const diff = Math.abs(step - steps[i]);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                best = steps[i];
+            }
+        }
+        return best;
+    };
+
+    const updateRowImage = (row, step) => {
+        if (!row.imgEl || !row.stepEl) return;
+        const nearest = nearestStep(step, row.steps);
+        if (nearest === null || !row.map[nearest]) {
+            row.imgEl.classList.add("d-none");
+            row.stepEl.textContent = "—";
+            return;
+        }
+        row.imgEl.src = row.map[nearest];
+        row.imgEl.classList.remove("d-none");
+        row.stepEl.textContent = nearest;
+    };
+
+    const updateAllRows = (step) => {
+        rowState.forEach((row) => updateRowImage(row, step));
+        if (stepLabel) stepLabel.textContent = typeof step === "number" ? step : "—";
+    };
+
+    rowState.forEach((row) => {
+        const initial = row.defaultStep ?? (row.steps.length ? row.steps[row.steps.length - 1] : null);
+        if (initial !== null) updateRowImage(row, initial);
+    });
+
+    if (figure && plotEl) {
+        Plotly.react(plotEl, figure.data, figure.layout, buildPlotlyConfig(figure.config || {})).then(() => {
+            plotEl.on("plotly_hover", (event) => {
+                const point = event?.points?.[0];
+                if (!point || typeof point.x === "undefined") return;
+                const step = Number(point.x);
+                if (!Number.isFinite(step)) return;
+                updateAllRows(step);
+            });
+        });
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

@@ -1,4 +1,4 @@
-// Common diagnostics page logic shared between all diagnostics views (Z, H, S, ZvHvS)
+// Common diagnostics page logic shared between all diagnostics views (Z, H, P, ZHP)
 // Used by diagnostics_page.html and diagnostics_page_zhs.html templates
 //
 // Usage: Each page should define DIAGNOSTICS_CONFIG with:
