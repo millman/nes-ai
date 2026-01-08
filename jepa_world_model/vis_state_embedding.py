@@ -22,13 +22,13 @@ from jepa_world_model.vis_odometry import (
 
 def write_state_embedding_histogram(
     plot_dir: Path,
-    s_norm_np,
+    p_norm_np,
     global_step: int,
 ) -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
     fig_hist, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
-    if s_norm_np.size:
-        finite = np.asarray(s_norm_np)[np.isfinite(s_norm_np)]
+    if p_norm_np.size:
+        finite = np.asarray(p_norm_np)[np.isfinite(p_norm_np)]
         if finite.size:
             min_val = float(finite.min())
             max_val = float(finite.max())
@@ -39,12 +39,12 @@ def write_state_embedding_histogram(
         else:
             ax.text(0.5, 0.5, "No finite state norms.", ha="center", va="center")
             ax.axis("off")
-        ax.set_xlabel("||s||")
+        ax.set_xlabel("||p||")
         ax.set_ylabel("count")
     else:
         ax.text(0.5, 0.5, "No state embeddings.", ha="center", va="center")
         ax.axis("off")
-    ax.set_title("State embedding norm distribution")
+    ax.set_title("Pose embedding norm distribution")
     apply_square_axes(ax)
     fig_hist.savefig(
         plot_dir / f"state_embedding_hist_{global_step:07d}.png",
@@ -72,23 +72,23 @@ def write_state_embedding_outputs(
         embeddings = model.encode_sequence(frames)["embeddings"]
         actions = torch.from_numpy(traj_inputs.actions).to(device).unsqueeze(0)
         _, _, _, h_states = _predictor_rollout(model, embeddings, actions)
-        s = model.h2s(h_states)[0]
+        p = model.h2p(h_states)[0]
 
-    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
-    warmup = max(min(warmup_frames, s.shape[0] - 1), 0)
-    s = s[warmup:]
-    if s.shape[0] < 1:
+    warmup_frames = max(model.cfg.warmup_frames_h, 0)
+    warmup = max(min(warmup_frames, p.shape[0] - 1), 0)
+    p = p[warmup:]
+    if p.shape[0] < 1:
         return
 
     write_self_distance_outputs_from_embeddings(
-        s,
+        p,
         traj_inputs,
         csv_dir,
         plot_dir,
         global_step,
-        embedding_label="s",
-        title_prefix="Self-distance (S)",
-        file_prefix="self_distance_s",
+        embedding_label="p",
+        title_prefix="Self-distance (P)",
+        file_prefix="self_distance_p",
         cosine_prefix="self_distance_cosine",
         start_index=warmup,
     )
@@ -105,14 +105,14 @@ def write_state_embedding_outputs(
                 "Cumulative sum of Δz",
             )
 
-        s_np = s.detach().cpu().numpy()
-        if s_np.shape[0] >= 2:
-            delta_s = s_np[1:] - s_np[:-1]
-            current_s = np.cumsum(delta_s, axis=0)
+        p_np = p.detach().cpu().numpy()
+        if p_np.shape[0] >= 2:
+            delta_p = p_np[1:] - p_np[:-1]
+            current_p = np.cumsum(delta_p, axis=0)
             _plot_odometry_embeddings(
-                odometry_plot_dir / f"odometry_s_{global_step:07d}.png",
-                current_s,
-                "Cumulative sum of Δs",
+                odometry_plot_dir / f"odometry_p_{global_step:07d}.png",
+                current_p,
+                "Cumulative sum of Δp",
             )
 
         h_np = h_states[0].detach().cpu().numpy()
@@ -141,17 +141,17 @@ def write_state_embedding_outputs(
 
         h_hat_open = _rollout_open_loop(model, embeddings, actions)
         if h_hat_open.shape[1] > 0:
-            s_hat = model.h2s(h_hat_open)[0].detach().cpu().numpy()
-            s_next = s_np[1:]
-            s_hat_trim = s_hat[warmup:]
-            s_next_trim = s_next[warmup:] if warmup < s_next.shape[0] else s_next[:0]
-            min_len = min(s_next_trim.shape[0], s_hat_trim.shape[0])
+            p_hat = model.h2p(h_hat_open)[0].detach().cpu().numpy()
+            p_next = p_np[1:]
+            p_hat_trim = p_hat[warmup:]
+            p_next_trim = p_next[warmup:] if warmup < p_next.shape[0] else p_next[:0]
+            min_len = min(p_next_trim.shape[0], p_hat_trim.shape[0])
             if min_len >= 2:
                 _plot_latent_prediction_comparison(
-                    odometry_plot_dir / f"s_vs_s_hat_{global_step:07d}.png",
-                    s_next_trim[:min_len],
-                    s_hat_trim[:min_len],
-                    "s",
+                    odometry_plot_dir / f"p_vs_p_hat_{global_step:07d}.png",
+                    p_next_trim[:min_len],
+                    p_hat_trim[:min_len],
+                    "p",
                 )
             h_hat = h_hat_open[0].detach().cpu().numpy()
             h_next = h_seq[1:]
@@ -175,12 +175,12 @@ def write_state_embedding_outputs(
         hist_embeddings = model.encode_sequence(hist_frames)["embeddings"]
         hist_actions = hist_actions_cpu.to(device)
         _, _, _, hist_h_states = _predictor_rollout(model, hist_embeddings, hist_actions)
-        hist_s = model.h2s(hist_h_states)
-    hist_warmup = max(min(warmup_frames, hist_s.shape[1] - 1), 0)
-    hist_s = hist_s[:, hist_warmup:]
-    if hist_s.shape[1] < 1:
+        hist_p = model.h2p(hist_h_states)
+    hist_warmup = max(min(warmup_frames, hist_p.shape[1] - 1), 0)
+    hist_p = hist_p[:, hist_warmup:]
+    if hist_p.shape[1] < 1:
         return
-    hist_flat = hist_s.reshape(-1, hist_s.shape[-1])
+    hist_flat = hist_p.reshape(-1, hist_p.shape[-1])
     hist_norm = torch.norm(hist_flat, dim=-1).detach().cpu().numpy()
     hist_dir = hist_plot_dir if hist_plot_dir is not None else plot_dir
     write_state_embedding_histogram(hist_dir, hist_norm, global_step)

@@ -175,8 +175,8 @@ def compute_composability_series(
     z_tp2 = z[:, 2 : steps + 2]
     h_t = h[:, :steps]
     h_tp2 = h[:, 2 : steps + 2]
-    p = model.h2pose(h)
-    f = model.h2desc(h)
+    p = model.h2p(h)
+    f = model.h2f(h)
     p_tp2 = p[:, 2 : steps + 2]
     f_tp2 = f[:, 2 : steps + 2]
     a_t = a[:, :steps]
@@ -196,8 +196,8 @@ def compute_composability_series(
     pred2 = pred2.view(b, steps, -1)
     h2 = h2.view(b, steps, -1)
     h2_to_z = model.h_to_z(h2)
-    p2_pred = model.h2pose(h2)
-    f2_pred = model.h2desc(h2)
+    p2_pred = model.h2p(h2)
+    f2_pred = model.h2f(h2)
 
     actual_z = torch.norm(pred2 - z_tp2, dim=-1)
     actual_h = torch.norm(h2_to_z - z_tp2, dim=-1)
@@ -214,9 +214,9 @@ def compute_composability_series(
     dh2 = model.h_action_delta_projector(flat_h_t2, flat_a_tp1).view(b, steps, -1)
     h_add = h_t + dh1 + dh2
     add_h = torch.norm(h_add - h_tp2, dim=-1)
-    p_add = model.h2pose(h_add)
+    p_add = model.h2p(h_add)
     add_p = torch.norm(p_add - p_tp2, dim=-1)
-    f_add = model.h2desc(h_add)
+    f_add = model.h2f(h_add)
     add_f = torch.norm(f_add - f_tp2, dim=-1)
 
     action_ids = compress_actions_to_ids(a_t.reshape(-1, a_t.shape[-1])).view(b, steps).cpu().numpy()

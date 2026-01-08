@@ -27,10 +27,10 @@ class ModelConfig:
             └─ Encoder(encoder_schedule → pool → z_dim = encoder_schedule[-1])
             ▼
         z_t ────────────────────────────────┐
-                        ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}, ŝ_{t+1}
+                        ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}
         h_t (state_dim) ─────────────────────┘
             │
-            ├→ StateHead(h_t) → s_t (planning embedding)
+            ├→ StateHead(h_t) → p_t (planning embedding)
             └→ Decoder(decoder_schedule → image reconstruction from z)
 
     Notes:
@@ -47,18 +47,25 @@ class ModelConfig:
     decoder_schedule: Optional[Tuple[int, ...]] = (32, 64, 64, 128)
     action_dim: int = 8
     state_dim: int = 256
-    # Optional separate dimension for the projected planning embedding s (h2s).
-    # If None, defaults to state_dim so h and s share dimensionality.
+
+    # Number of initial seq_len frames excluded from h/pose losses only.
+    warmup_frames_h: int = 0
+
+    # Planning/state embedding (p) configuration.
+    # Optional separate dimension for the projected planning embedding p (h2p).
+    # If None, defaults to state_dim so h and p share dimensionality.
     state_embed_dim: Optional[int] = None
+    # Apply L2 unit normalization to p embeddings.
+    state_embed_unit_norm: bool = False
     # Planning pose dimensionality (defaults to state_embed_dim).
     pose_dim: Optional[int] = None
-    # Descriptor dimensionality for place recognition (defaults to state_embed_dim).
+    # Feature/descriptor dimensionality for place recognition (defaults to state_embed_dim).
     descriptor_dim: Optional[int] = None
-    state_embed_unit_norm: bool = False
+    # Apply L2 unit normalization to descriptor embeddings.
     descriptor_unit_norm: bool = True
+
     # LayerNorm toggles for debugging.
     layer_norms: LayerNormConfig = field(default_factory=LayerNormConfig)
-    state_warmup_frames: int = 4
 
     @property
     def embedding_dim(self) -> int:

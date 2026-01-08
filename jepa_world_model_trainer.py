@@ -176,8 +176,8 @@ LegacyEncoder = ConvEncoder
 LegacyVisualizationDecoder = ConvVisualizationDecoder
 
 
-class HiddenToSProjector(nn.Module):
-    """Project hidden state to a planning/state embedding."""
+class HiddenToStateProjector(nn.Module):
+    """Project hidden state to a planning (p) or feature (f) embedding."""
 
     def __init__(
         self,
@@ -208,10 +208,10 @@ class HiddenToSProjector(nn.Module):
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         original_shape = h.shape[:-1]
         h_flat = h.reshape(-1, h.shape[-1])
-        s = self.net(h_flat)
+        state = self.net(h_flat)
         if self.unit_norm:
-            s = F.normalize(s, dim=-1)
-        return s.view(*original_shape, s.shape[-1])
+            state = F.normalize(state, dim=-1)
+        return state.view(*original_shape, state.shape[-1])
 
 
 class PredictorNetwork(nn.Module):
@@ -543,27 +543,27 @@ class LossWeights:
     pixel_delta: float = 0.05
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
-    h2z: float = 0.1
+    h2z: float = 1.0
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
-    z2h: float = 0.1
+    z2h: float = 1.0
 
-    # Goal-conditioned ranking loss on s = g(stopgrad(h)).
-    # Keeps s useful for planning geometry while avoiding action algebra constraints.
-    geometry_rank: float = 0.05
+    # Goal-conditioned ranking loss on p = g(stopgrad(h)).
+    # Keeps p useful for planning geometry while avoiding action algebra constraints.
+    geometry_rank: float = 0.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 0.05
+    inverse_dynamics_z: float = 0.2
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 0.05
-    # Inverse dynamics from consecutive h pairs (s_t, s_{t+1}).
+    inverse_dynamics_h: float = 0.0
+    # Inverse dynamics from consecutive h pairs (p_t, p_{t+1}).
     inverse_dynamics_s: float = 0.0
 
     # -------------------------------------------------------------------------
-    # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make s algebraic for planning.
+    # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
     # -------------------------------------------------------------------------
     # z: Level 1 fixed translation; weakly anchor action directions without overfitting perception.
     # h: Level 2 + light Level 3; state-conditioned deltas with short-horizon composition.
-    # s: Level 3; a smoother planning space with consistent multi-step structure.
+    # p: Level 3; a smoother planning space with consistent multi-step structure.
 
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
@@ -583,11 +583,11 @@ class LossWeights:
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 0.2
+    action_delta_h: float = 0.0
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 0.05
+    additivity_h: float = 0.0
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
@@ -595,25 +595,25 @@ class LossWeights:
 
     # --- Pose (planning state) ---
     # 1-step odometry consistency: p_t + Δp_t vs observed p_{t+1}.
-    pose_1step: float = 0.05
+    pose_1step: float = 0.0
 
     # k-step composition consistency: p_t + ΣΔp vs observed p_{t+k}.
     pose_kstep: float = 0.0
 
     # Additivity of pose deltas across steps.
-    pose_additivity: float = 0.02
+    pose_additivity: float = 0.0
 
     # Pose delta magnitude regularizer.
     pose_mag: float = 0.0
 
-    # --- S (legacy; kept for compatibility) ---
-    # State-conditioned delta alignment: s_{t+1} - s_t vs E(s_t, a_t).
+    # --- S (legacy; kept for compatibility with earlier naming) ---
+    # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
     action_delta_s: float = 0.0
 
-    # Explicit additivity of s deltas across steps.
+    # Explicit additivity of p deltas across steps.
     additivity_s: float = 0.0
 
-    # k-step rollout consistency in s-space.
+    # k-step rollout consistency in p-space.
     rollout_kstep_s: float = 0.0
 
 
@@ -796,21 +796,24 @@ class JEPAWorldModel(nn.Module):
         self.state_dim = cfg.state_dim
         pose_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_embed_dim
         desc_dim = cfg.descriptor_dim if cfg.descriptor_dim is not None else pose_dim
-        self.h2pose = HiddenToSProjector(
+        self.h2p = HiddenToStateProjector(
             cfg.state_dim,
             pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.state_embed_unit_norm,
             use_layer_norm=cfg.layer_norms.h2s_projector,
         )
-        self.h2s = self.h2pose
-        self.h2desc = HiddenToSProjector(
+        self.h2f = HiddenToStateProjector(
             cfg.state_dim,
             desc_dim if desc_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.descriptor_unit_norm,
             use_layer_norm=cfg.layer_norms.h2s_projector,
         )
+        # Backwards-compatible aliases for legacy names.
+        self.h2pose = self.h2p
+        self.h2desc = self.h2f
+        self.h2s = self.h2p
         self.h_to_z = HiddenToZProjector(
             cfg.state_dim,
             self.embedding_dim,
@@ -915,7 +918,7 @@ def _rollout_pose(
     actions: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build pose observations from h and integrate pose deltas over actions."""
-    pose_obs = model.h2pose(h_states)
+    pose_obs = model.h2p(h_states)
     bsz, steps, dim = pose_obs.shape
     if steps <= 1 or actions.shape[1] < 1:
         zero_delta = pose_obs.new_zeros((bsz, 0, dim))
@@ -1064,7 +1067,7 @@ def rollout_h_loss(
     return total / steps if steps > 0 else embeddings.new_tensor(0.0)
 
 
-def rollout_s_loss(
+def rollout_p_loss(
     model: JEPAWorldModel,
     embeddings: torch.Tensor,
     actions: torch.Tensor,
@@ -1080,8 +1083,8 @@ def rollout_s_loss(
     total = embeddings.new_tensor(0.0)
     steps = 0
     warmup = max(min(warmup_frames, t - 1), 0)
-    # NOTE: s is geometry-only; stop-grad h so s-losses don't shape dynamics.
-    s_states = model.h2s(h_states.detach())
+    # NOTE: p is geometry-only; stop-grad h so p-losses don't shape dynamics.
+    p_states = model.h2p(h_states.detach())
     for start in range(warmup, t - 1):
         current = embeddings[:, start]
         max_h = min(rollout_horizon, t - start - 1)
@@ -1089,9 +1092,9 @@ def rollout_s_loss(
         for offset in range(max_h):
             act = actions[:, start + offset]
             pred, _, h_next = model.predictor(current, h_current, act)
-            s_next = model.h2s(h_next.detach())
-            target_s = s_states[:, start + offset + 1].detach()
-            total = total + F.mse_loss(s_next, target_s)
+            p_next = model.h2p(h_next.detach())
+            target_p = p_states[:, start + offset + 1].detach()
+            total = total + F.mse_loss(p_next, target_p)
             steps += 1
             current = pred
             h_current = h_next
@@ -1180,8 +1183,8 @@ def geometry_rank_loss(
     if h_states.numel() == 0:
         zero = h_states.new_tensor(0.0)
         return zero, zero, zero
-    s_geom = model.h2pose(h_states.detach())
-    return geometry_ranking_loss(s_geom, cfg)
+    p_geom = model.h2p(h_states.detach())
+    return geometry_ranking_loss(p_geom, cfg)
 
 
 def pixel_delta_loss(recon: torch.Tensor, frames: torch.Tensor) -> torch.Tensor:
@@ -1283,7 +1286,7 @@ def _compute_losses_and_metrics(
     # x: raw pixel frames (B, T, C, H, W) used for recon and pixel-space losses.
     # z: per-frame encoder embeddings used for JEPA and z-space auxiliaries.
     # h: hidden/belief state produced by the dynamics predictor.
-    # s: geometry/planning head derived from h for ranking/geometry losses.
+    # p: geometry/planning head derived from h for ranking/geometry losses.
     x_frames, a_seq = batch[0], batch[1]
     batch_paths = batch[2]
     batch_indices = batch[3]
@@ -1312,7 +1315,7 @@ def _compute_losses_and_metrics(
     loss_h2z = x_frames.new_tensor(0.0)
     loss_z2h = x_frames.new_tensor(0.0)
 
-    # s (Geometry) losses
+    # p (Geometry) losses
     loss_geometry_rank = x_frames.new_tensor(0.0)
     geometry_rank_accuracy = x_frames.new_tensor(0.0)
     geometry_rank_pairs = x_frames.new_tensor(0.0)
@@ -1351,7 +1354,7 @@ def _compute_losses_and_metrics(
     x_recon = decoder(z_for_decoder)
 
     seq_len = z_embeddings.shape[1]
-    warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
+    warmup_frames = max(model.cfg.warmup_frames_h, 0)
 
     # Warmup before applying hidden-state losses to avoid cold-start transients.
     start_frame = max(min(warmup_frames, seq_len - 1), 0)
@@ -1371,8 +1374,8 @@ def _compute_losses_and_metrics(
     with torch.no_grad():
         z_norm_mean, z_norm_std, z_norm_max = _norm_stats(z_embeddings)
         h_norm_mean, h_norm_std, h_norm_max = _norm_stats(h_states)
-        s_embeddings = pose_obs.detach()
-        s_norm_mean, s_norm_std, s_norm_max = _norm_stats(s_embeddings)
+        p_embeddings = pose_obs.detach()
+        p_norm_mean, p_norm_std, p_norm_max = _norm_stats(p_embeddings)
 
     # -------------------------------------------------------------------------
     # Losses
@@ -1415,7 +1418,7 @@ def _compute_losses_and_metrics(
         loss_z2h = z2h_loss(model, z_embeddings, h_states, start_frame)
 
     # h (Auxiliary)
-    # s (Geometry)
+    # p (Geometry)
     if weights.geometry_rank > 0:
         loss_geometry_rank, geometry_rank_accuracy, geometry_rank_pairs = geometry_rank_loss(model, h_states, cfg.geometry)
 
@@ -1489,8 +1492,8 @@ def _compute_losses_and_metrics(
     if weights.inverse_dynamics_s > 0:
         assert h_states.shape[1] >= 2
         # NOTE: inverse dynamics on s should not backprop into h/dynamics.
-        s_for_inverse = pose_obs.detach()
-        action_logits_s = model.inverse_dynamics_s(s_for_inverse[:, :-1], s_for_inverse[:, 1:])
+        p_for_inverse = pose_obs.detach()
+        action_logits_s = model.inverse_dynamics_s(p_for_inverse[:, :-1], p_for_inverse[:, 1:])
         loss_inverse_dynamics_s = INVERSE_DYNAMICS_LOSS(action_logits_s, a_seq[:, :-1])
 
     if weights.action_delta_z > 0:
@@ -1541,7 +1544,7 @@ def _compute_losses_and_metrics(
         )
 
     if weights.rollout_kstep_s > 0:
-        loss_rollout_kstep_s = rollout_s_loss(
+        loss_rollout_kstep_s = rollout_p_loss(
             model,
             z_embeddings,
             a_seq,
@@ -1560,8 +1563,8 @@ def _compute_losses_and_metrics(
     if weights.additivity_s > 0 and ds_pred is not None:
         if ds_pred.shape[1] >= 2:
             ds_add_pred = ds_pred[:, :-1] + ds_pred[:, 1:]
-            s_states = model.h2s(h_states.detach())
-            ds_add_target = s_states[:, start_frame + 2 :] - s_states[:, start_frame:-2]
+            p_states = model.h2p(h_states.detach())
+            ds_add_target = p_states[:, start_frame + 2 :] - p_states[:, start_frame:-2]
             if ds_add_pred.numel() > 0:
                 loss_additivity_s = F.mse_loss(ds_add_pred, ds_add_target)
 
@@ -1674,9 +1677,9 @@ def _compute_losses_and_metrics(
         "h_norm_mean": h_norm_mean,
         "h_norm_std": h_norm_std,
         "h_norm_max": h_norm_max,
-        "s_norm_mean": s_norm_mean,
-        "s_norm_std": s_norm_std,
-        "s_norm_max": s_norm_max,
+        "p_norm_mean": p_norm_mean,
+        "p_norm_std": p_norm_std,
+        "p_norm_max": p_norm_max,
         "loss_world": world_loss.item(),
     }
     if for_training:
@@ -2146,9 +2149,9 @@ LOSS_COLUMNS = [
     "h_norm_mean",
     "h_norm_std",
     "h_norm_max",
-    "s_norm_mean",
-    "s_norm_std",
-    "s_norm_max",
+    "p_norm_mean",
+    "p_norm_std",
+    "p_norm_max",
     "grad_world",
     "grad_decoder",
 ]
@@ -2200,9 +2203,9 @@ class LossHistory:
     h_norm_mean: List[float] = field(default_factory=list)
     h_norm_std: List[float] = field(default_factory=list)
     h_norm_max: List[float] = field(default_factory=list)
-    s_norm_mean: List[float] = field(default_factory=list)
-    s_norm_std: List[float] = field(default_factory=list)
-    s_norm_max: List[float] = field(default_factory=list)
+    p_norm_mean: List[float] = field(default_factory=list)
+    p_norm_std: List[float] = field(default_factory=list)
+    p_norm_max: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
 
@@ -2251,9 +2254,9 @@ class LossHistory:
         self.h_norm_mean.append(metrics.get("h_norm_mean", 0.0))
         self.h_norm_std.append(metrics.get("h_norm_std", 0.0))
         self.h_norm_max.append(metrics.get("h_norm_max", 0.0))
-        self.s_norm_mean.append(metrics.get("s_norm_mean", 0.0))
-        self.s_norm_std.append(metrics.get("s_norm_std", 0.0))
-        self.s_norm_max.append(metrics.get("s_norm_max", 0.0))
+        self.p_norm_mean.append(metrics.get("p_norm_mean", 0.0))
+        self.p_norm_std.append(metrics.get("p_norm_std", 0.0))
+        self.p_norm_max.append(metrics.get("p_norm_max", 0.0))
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
 
@@ -2313,9 +2316,9 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.h_norm_mean,
             history.h_norm_std,
             history.h_norm_max,
-            history.s_norm_mean,
-            history.s_norm_std,
-            history.s_norm_max,
+            history.p_norm_mean,
+            history.p_norm_std,
+            history.p_norm_max,
             history.grad_world,
             history.grad_decoder,
         ):
@@ -2614,19 +2617,19 @@ def _run_graph_diag(
     ema_embeddings: Optional[torch.Tensor],
     ema_h_states: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if embedding_kind == "s":
-        s_targets = model.h2s(graph_h_states)
-        s_hat_full = torch.cat(
-            [model.h2s(graph_h_preds), model.h2s(graph_h_states[:, -1:, :])],
+    if embedding_kind == "p":
+        p_targets = model.h2p(graph_h_states)
+        p_hat_full = torch.cat(
+            [model.h2p(graph_h_preds), model.h2p(graph_h_states[:, -1:, :])],
             dim=1,
         )
         if graph_cfg.use_ema_targets and ema_model is not None and ema_h_states is not None:
-            targets = ema_model.h2s(ema_h_states)
+            targets = ema_model.h2p(ema_h_states)
         else:
-            targets = s_targets
-        z_flat = s_targets.reshape(-1, s_targets.shape[-1])
+            targets = p_targets
+        z_flat = p_targets.reshape(-1, p_targets.shape[-1])
         target_flat = targets.reshape(-1, targets.shape[-1])
-        zhat_full = s_hat_full.reshape(-1, s_hat_full.shape[-1])
+        zhat_full = p_hat_full.reshape(-1, p_hat_full.shape[-1])
     elif embedding_kind == "h":
         targets = ema_h_states if graph_cfg.use_ema_targets and ema_h_states is not None else graph_h_states
         z_flat = graph_h_states.reshape(-1, graph_h_states.shape[-1])
@@ -2673,7 +2676,7 @@ def _prepare_graph_diag_dataset(
         max_traj=None,
         included_trajectories=train_trajs,
     )
-    graph_action_dim = getattr(graph_diag_dataset, "action_dim", dataset_action_dim)
+    graph_action_dim = graph_diag_dataset.action_dim
     if graph_action_dim != dataset_action_dim:
         raise AssertionError(
             f"Graph diagnostics action_dim {graph_action_dim} does not match train action_dim {dataset_action_dim}"
@@ -3340,9 +3343,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         run_dir,
     )
 
-    dataset_action_dim = getattr(dataset, "action_dim", model_cfg.action_dim)
+    dataset_action_dim = dataset.action_dim
     if val_dataset is not None:
-        val_action_dim = getattr(val_dataset, "action_dim", dataset_action_dim)
+        val_action_dim = val_dataset.action_dim
         if val_action_dim != dataset_action_dim:
             raise AssertionError(f"Validation action_dim {val_action_dim} does not match train action_dim {dataset_action_dim}")
     assert dataset_action_dim == 8, f"Expected action_dim 8, got {dataset_action_dim}"
@@ -3693,8 +3696,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
                 _, _, _, h_states = _predictor_rollout(model, embed_outputs["embeddings"], embed_actions)
-                p_embeddings = model.h2pose(h_states)
-                f_embeddings = model.h2desc(h_states)
+                p_embeddings = model.h2p(h_states)
+                f_embeddings = model.h2f(h_states)
             assert torch.is_grad_enabled()
             save_embedding_projection(
                 embed_outputs["embeddings"],
@@ -3742,8 +3745,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 self_dist_embeddings = self_dist_embeddings_full[0]
                 _, _, _, self_dist_h_states_batch = _predictor_rollout(model, self_dist_embeddings_full, self_dist_actions)
                 self_dist_h_states = self_dist_h_states_batch[0]
-                self_dist_p = model.h2pose(self_dist_h_states.unsqueeze(0))[0]
-                self_dist_f = model.h2desc(self_dist_h_states.unsqueeze(0))[0]
+                self_dist_p = model.h2p(self_dist_h_states.unsqueeze(0))[0]
+                self_dist_f = model.h2f(self_dist_h_states.unsqueeze(0))[0]
             assert torch.is_grad_enabled()
             write_self_distance_outputs(
                 self_dist_embeddings,
@@ -3795,8 +3798,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 model,
                 self_distance_inputs,
                 device,
-                self_distance_s_dir,
-                vis_self_distance_s_dir,
+                self_distance_p_dir,
+                vis_self_distance_p_dir,
                 vis_state_embedding_dir,
                 vis_odometry_dir,
                 global_step,
@@ -3810,7 +3813,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 if not (diag_frames.shape[0] > 0 and diag_frames.shape[1] >= 2):
                     raise AssertionError("Diagnostics require at least one sequence with two frames.")
 
-                warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
+                warmup_frames = max(model.cfg.warmup_frames_h, 0)
                 assert torch.is_grad_enabled()
                 with torch.no_grad():
                     diag_frames_device = diag_frames.to(device)
@@ -3821,18 +3824,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         diag_embeddings,
                         diag_actions_device,
                     )
-                    diag_p_embeddings = model.h2pose(diag_h_states)
-                    diag_f_embeddings = model.h2desc(diag_h_states)
-                    diag_composability = compute_composability_series(
-                        model,
-                        diag_embeddings,
-                        diag_h_states,
-                        diag_actions_device,
-                        warmup_frames,
-                        cfg.diagnostics.min_action_count,
-                    )
-                assert torch.is_grad_enabled()
-                diag_s_embeddings = diag_p_embeddings
+                    diag_p_embeddings = model.h2p(diag_h_states)
+                    diag_f_embeddings = model.h2f(diag_h_states)
+                diag_composability = compute_composability_series(
+                    model,
+                    diag_embeddings,
+                    diag_h_states,
+                    diag_actions_device,
+                    warmup_frames,
+                    cfg.diagnostics.min_action_count,
+                )
+            assert torch.is_grad_enabled()
+            diag_p_series = diag_composability.get("p") or diag_composability.get("s")
 
                 def _write_motion_bundle(
                     name: str,
@@ -4063,7 +4066,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 )
                 save_composability_plot(
                     vis_composability_p_dir / f"composability_p_{global_step:07d}.png",
-                    diag_composability.get("p", diag_composability["s"]),
+                    diag_p_series,
                     "p",
                 )
                 save_composability_plot(
@@ -4162,10 +4165,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         "p_drift_mean",
                         "f_drift_mean",
                         "id_acc_p",
-                        "s_norm_mean",
-                        "s_norm_p95",
-                        "s_drift_mean",
-                        "id_acc_s",
                     ],
                     [
                         global_step,
@@ -4180,10 +4179,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         h_drift_mean,
                         p_drift_mean,
                         f_drift_mean,
-                        id_acc_p,
-                        p_norm_mean,
-                        p_norm_p95,
-                        p_drift_mean,
                         id_acc_p,
                     ],
                 )
@@ -4299,7 +4294,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                         )
                                         z_t = pred.squeeze(0)
                                         h_t = h_next.squeeze(0)
-                                        p_points.append(model.h2pose(h_t.unsqueeze(0)).squeeze(0).detach().cpu().numpy())
+                                        p_points.append(model.h2p(h_t.unsqueeze(0)).squeeze(0).detach().cpu().numpy())
                                     p_points_np = np.stack(p_points, axis=0)
                                     proj = (p_points_np - p_center) @ projection
                                     traj_label = f"{label} (start {row_offset + 1})"
@@ -4338,7 +4333,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 h_t = h_next.squeeze(0)
                                 decoded = decoder(z_t.unsqueeze(0))
                                 pixel_errors[k] += RECON_LOSS(decoded, diag_frames_device[b, t0 + k + 1].unsqueeze(0))
-                                p_pred = model.h2pose(h_t.unsqueeze(0)).squeeze(0)
+                                p_pred = model.h2p(h_t.unsqueeze(0)).squeeze(0)
                                 p_gt = diag_p_embeddings[b, t0 + k + 1]
                                 latent_errors[k] += (p_pred - p_gt).norm()
                                 counts[k] += 1
@@ -4491,8 +4486,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                     z_b = pred_b.squeeze(0)
                                     h_b = h_b_next.squeeze(0)
                                 z_diffs.append(float((z_a - z_b).norm().item()))
-                                p_a = model.h2pose(h_a.unsqueeze(0)).squeeze(0)
-                                p_b = model.h2pose(h_b.unsqueeze(0)).squeeze(0)
+                                p_a = model.h2p(h_a.unsqueeze(0)).squeeze(0)
+                                p_b = model.h2p(h_b.unsqueeze(0)).squeeze(0)
                                 p_diffs.append(float((p_a - p_b).norm().item()))
                             if z_diffs and p_diffs:
                                 label_a = action_labels.get(a_id, f"action {a_id}")
@@ -4554,8 +4549,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 target = diag_frames_device[b, t0 + k + 1].unsqueeze(0)
                                 pixel_errors[k] += RECON_LOSS(decoded_norm, target)
                                 pixel_errors_zero[k] += RECON_LOSS(decoded_zero, target)
-                                p_norm = model.h2pose(h_norm.unsqueeze(0)).squeeze(0)
-                                p_zero = model.h2pose(h_next_zero).squeeze(0)
+                                p_norm = model.h2p(h_norm.unsqueeze(0)).squeeze(0)
+                                p_zero = model.h2p(h_next_zero).squeeze(0)
                                 p_gt = diag_p_embeddings[b, t0 + k + 1]
                                 latent_errors[k] += (p_norm - p_gt).norm()
                                 latent_errors_zero[k] += (p_zero - p_gt).norm()
@@ -4621,8 +4616,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_actions = vis_ctrl_batch_cpu[1].to(device)
                 vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
                 _, _, _, vis_h_states = _predictor_rollout(model, vis_embeddings, vis_actions)
-                vis_s_embeddings = model.h2s(vis_h_states)
-                warmup_frames = max(getattr(model.cfg, "state_warmup_frames", 0), 0)
+                vis_p_embeddings = model.h2p(vis_h_states)
+                warmup_frames = max(model.cfg.warmup_frames_h, 0)
                 metrics_z = compute_vis_ctrl_metrics(
                     vis_embeddings,
                     vis_actions,
@@ -4632,8 +4627,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.vis_ctrl.stability_delta,
                     cfg.vis_ctrl.knn_chunk_size,
                 )
-                metrics_s = compute_vis_ctrl_metrics(
-                    vis_s_embeddings,
+                metrics_p = compute_vis_ctrl_metrics(
+                    vis_p_embeddings,
                     vis_actions,
                     cfg.vis_ctrl.knn_k_values,
                     warmup_frames,
@@ -4656,9 +4651,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     "z",
                 )
                 save_smoothness_knn_distance_eigenvalue_spectrum_plot(
-                    vis_ctrl_dir / f"smoothness_s_{global_step:07d}.png",
-                    metrics_s,
-                    "s",
+                    vis_ctrl_dir / f"smoothness_p_{global_step:07d}.png",
+                    metrics_p,
+                    "p",
                 )
                 save_smoothness_knn_distance_eigenvalue_spectrum_plot(
                     vis_ctrl_dir / f"smoothness_h_{global_step:07d}.png",
@@ -4671,9 +4666,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     "z",
                 )
                 save_two_step_composition_error_plot(
-                    vis_ctrl_dir / f"composition_error_s_{global_step:07d}.png",
-                    metrics_s,
-                    "s",
+                    vis_ctrl_dir / f"composition_error_p_{global_step:07d}.png",
+                    metrics_p,
+                    "p",
                 )
                 save_two_step_composition_error_plot(
                     vis_ctrl_dir / f"composition_error_h_{global_step:07d}.png",
@@ -4686,9 +4681,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     "z",
                 )
                 save_neighborhood_stability_plot(
-                    vis_ctrl_dir / f"stability_s_{global_step:07d}.png",
-                    metrics_s,
-                    "s",
+                    vis_ctrl_dir / f"stability_p_{global_step:07d}.png",
+                    metrics_p,
+                    "p",
                 )
                 save_neighborhood_stability_plot(
                     vis_ctrl_dir / f"stability_h_{global_step:07d}.png",
@@ -4699,7 +4694,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     metrics_dir / "vis_ctrl_metrics.csv",
                     global_step,
                     metrics_z,
-                    metrics_s,
+                    metrics_p,
                     metrics_h,
                 )
 
@@ -4822,8 +4817,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     global_step,
                     metrics_dir / "graph_diagnostics_h.csv",
                 )
-                s_queries, s_targets, s_predictions = _run_graph_diag(
-                    embedding_kind="s",
+                p_queries, p_targets, p_predictions = _run_graph_diag(
+                    embedding_kind="p",
                     graph_cfg=cfg.graph_diagnostics,
                     model=model,
                     ema_model=ema_model,
@@ -4834,10 +4829,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     ema_embeddings=graph_diag.ema_embeddings,
                     ema_h_states=graph_diag.ema_h_states,
                 )
-                stats_s = compute_graph_diagnostics_stats(
-                    s_queries,
-                    s_targets,
-                    s_predictions,
+                stats_p = compute_graph_diagnostics_stats(
+                    p_queries,
+                    p_targets,
+                    p_predictions,
                     graph_diag.next_index,
                     graph_diag.next2_index,
                     graph_diag.chunk_ids,
@@ -4845,36 +4840,36 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     global_step,
                 )
                 save_rank_cdf_plot(
-                    graph_diagnostics_s_dir / f"rank1_cdf_{global_step:07d}.png",
-                    stats_s.ranks1,
-                    stats_s.k,
+                    graph_diagnostics_p_dir / f"rank1_cdf_{global_step:07d}.png",
+                    stats_p.ranks1,
+                    stats_p.k,
                     "1-step rank CDF",
                 )
                 save_rank_cdf_plot(
-                    graph_diagnostics_s_dir / f"rank2_cdf_{global_step:07d}.png",
-                    stats_s.ranks2,
-                    stats_s.k,
+                    graph_diagnostics_p_dir / f"rank2_cdf_{global_step:07d}.png",
+                    stats_p.ranks2,
+                    stats_p.k,
                     "2-hop rank CDF",
                 )
                 save_neff_violin_plot(
-                    graph_diagnostics_s_dir / f"neff_violin_{global_step:07d}.png",
-                    stats_s.neff1,
-                    stats_s.neff2,
+                    graph_diagnostics_p_dir / f"neff_violin_{global_step:07d}.png",
+                    stats_p.neff1,
+                    stats_p.neff2,
                 )
                 save_in_degree_hist_plot(
-                    graph_diagnostics_s_dir / f"in_degree_hist_{global_step:07d}.png",
-                    stats_s.in_degree,
+                    graph_diagnostics_p_dir / f"in_degree_hist_{global_step:07d}.png",
+                    stats_p.in_degree,
                 )
                 save_edge_consistency_hist_plot(
-                    graph_diagnostics_s_dir / f"edge_consistency_{global_step:07d}.png",
-                    stats_s.edge_errors,
-                    embedding_label="s",
+                    graph_diagnostics_p_dir / f"edge_consistency_{global_step:07d}.png",
+                    stats_p.edge_errors,
+                    embedding_label="p",
                 )
                 update_graph_diagnostics_history(
-                    graph_diagnostics_s_dir,
-                    stats_s,
+                    graph_diagnostics_p_dir,
+                    stats_p,
                     global_step,
-                    metrics_dir / "graph_diagnostics_s.csv",
+                    metrics_dir / "graph_diagnostics_p.csv",
                 )
 
             # --- Train ---

@@ -30,6 +30,13 @@ function resolveImageSpec(folderValue, stepsMap, expId) {
     return { stepsKey: folderValue, folderPath: folderValue, prefix: "rollout_" };
   }
   const map = stepsMap?.[expId];
+  if (option.preferredFolder && Array.isArray(map?.[option.preferredFolder]) && map[option.preferredFolder].length) {
+    return {
+      stepsKey: option.preferredFolder,
+      folderPath: option.preferredFolderPath || option.preferredFolder,
+      prefix: option.preferredPrefix || option.prefix,
+    };
+  }
   const directSteps = map?.[folderValue];
   if (
     option.legacyFolder
@@ -39,7 +46,7 @@ function resolveImageSpec(folderValue, stepsMap, expId) {
   ) {
     return {
       stepsKey: option.legacyFolder,
-      folderPath: option.legacyFolder,
+      folderPath: option.legacyFolderPath || option.legacyFolder,
       prefix: option.legacyPrefix || option.prefix,
     };
   }

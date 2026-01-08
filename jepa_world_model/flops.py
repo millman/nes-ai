@@ -86,13 +86,13 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     delta_head_flops += _linear_flops(hidden_dim, action_dim)
     delta_head_total = delta_head_flops * num_predictions
 
-    # --- Action-from-s-pair head (per transition) ---
-    s_dim = cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim
-    s_delta_head_flops = 0
-    s_delta_head_flops += _linear_flops(s_dim * 2, hidden_dim)
-    s_delta_head_flops += _linear_flops(hidden_dim, hidden_dim)
-    s_delta_head_flops += _linear_flops(hidden_dim, action_dim)
-    s_delta_head_total = s_delta_head_flops * num_predictions
+    # --- Action-from-p-pair head (per transition) ---
+    p_dim = cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim
+    p_delta_head_flops = 0
+    p_delta_head_flops += _linear_flops(p_dim * 2, hidden_dim)
+    p_delta_head_flops += _linear_flops(hidden_dim, hidden_dim)
+    p_delta_head_flops += _linear_flops(hidden_dim, action_dim)
+    p_delta_head_total = p_delta_head_flops * num_predictions
 
     # --- Decoder FLOPs (per frame) ---
     decoder_schedule = cfg.decoder_schedule if cfg.decoder_schedule is not None else cfg.encoder_schedule
@@ -124,7 +124,7 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     decoder_total = decoder_flops * batch_size * seq_len
 
     # --- Total ---
-    forward_total = encoder_total + predictor_total + decoder_total + delta_head_total + s_delta_head_total
+    forward_total = encoder_total + predictor_total + decoder_total + delta_head_total + p_delta_head_total
     backward_total = forward_total * 2  # Backward is roughly 2x forward
     total_per_step = forward_total + backward_total
 
