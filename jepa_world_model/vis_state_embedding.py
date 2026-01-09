@@ -73,7 +73,7 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         embeddings = model.encode_sequence(frames)["embeddings"]
         actions = torch.from_numpy(traj_inputs.actions).to(device).unsqueeze(0)
-        _, _, _, h_states = _predictor_rollout(
+        _, _, h_states = _predictor_rollout(
             model,
             embeddings,
             actions,
@@ -191,7 +191,7 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         hist_embeddings = model.encode_sequence(hist_frames)["embeddings"]
         hist_actions = hist_actions_cpu.to(device)
-        _, _, _, hist_h_states = _predictor_rollout(
+        _, _, hist_h_states = _predictor_rollout(
             model,
             hist_embeddings,
             hist_actions,

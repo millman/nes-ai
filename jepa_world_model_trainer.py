@@ -226,7 +226,6 @@ class PredictorNetwork(nn.Module):
         super().__init__()
         self.in_proj = nn.Linear(embedding_dim + action_dim + state_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
         self.h_norm = nn.LayerNorm(state_dim) if use_layer_norm else None
         self.activation = nn.SiLU(inplace=True)
@@ -234,13 +233,11 @@ class PredictorNetwork(nn.Module):
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.state_dim = state_dim
-        self.delta_scale = 1.0
-        self.use_delta_squash = False
         self.use_layer_norm = use_layer_norm
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if not (embeddings.shape[:-1] == actions.shape[:-1] == hidden_state.shape[:-1]):
             raise ValueError("Embeddings, hidden state, and actions must share leading dimensions for predictor conditioning.")
         original_shape = embeddings.shape[:-1]
@@ -249,21 +246,11 @@ class PredictorNetwork(nn.Module):
         h_flat = hidden_state.reshape(-1, hidden_state.shape[-1])
         hidden = self.activation(self.in_proj(torch.cat([emb_flat, h_flat, act_flat], dim=-1)))
         hidden = self.activation(self.hidden_proj(hidden))
-        raw_delta = self.out_proj(hidden)
         h_next = self.h_out(hidden)
         if self.h_norm is not None:
             h_next = self.h_norm(h_next)
-        if self.use_delta_squash:
-            delta = torch.tanh(raw_delta) * self.delta_scale
-        else:
-            delta = raw_delta * self.delta_scale
-        pred = emb_flat + delta
         h_next = h_next.view(*original_shape, h_next.shape[-1])
-        return (
-            pred.view(*original_shape, pred.shape[-1]),
-            delta.view(*original_shape, delta.shape[-1]),
-            h_next,
-        )
+        return h_next
 
     def shape_info(self) -> Dict[str, Any]:
         return {
@@ -884,35 +871,19 @@ def jepa_loss(
     outputs: Dict[str, torch.Tensor],
     actions: torch.Tensor,
     use_z2h_init: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """JEPA loss using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
-    preds, delta_pred, h_preds, h_states = _predictor_rollout(
+    if embeddings.shape[1] < 2:
+        raise AssertionError("JEPA loss requires at least two timesteps.")
+    preds, h_preds, h_states = _predictor_rollout(
         model,
         embeddings,
         actions,
         use_z2h_init=use_z2h_init,
     )
-    if embeddings.shape[1] < 2:
-        zero = embeddings.new_tensor(0.0)
-        delta = embeddings.new_zeros(embeddings[:, :-1].shape)
-        return zero, delta, embeddings.new_zeros(embeddings[:, :-1].shape), h_preds, h_states
     target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(preds, target), delta_pred, preds, h_preds, h_states
-
-
-def delta_prediction_loss(
-    delta_pred: torch.Tensor, embeddings: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Auxiliary loss comparing predicted and target latent deltas."""
-    if embeddings.shape[1] < 2:
-        zero = embeddings.new_tensor(0.0)
-        return zero, zero, zero
-    delta_target = (embeddings[:, 1:] - embeddings[:, :-1]).detach()
-    loss = F.mse_loss(delta_pred, delta_target)
-    pred_norm = delta_pred.detach().norm(dim=-1).mean()
-    target_norm = delta_target.norm(dim=-1).mean()
-    return loss, pred_norm, target_norm
+    return JEPA_LOSS(preds, target), preds, h_preds, h_states
 
 
 def _rollout_pose(
@@ -950,26 +921,31 @@ def rollout_z_loss(
     warmup_frames: int,
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_horizon must be > 1 for rollout_z_loss.")
     b, t, d = embeddings.shape
     if t < 2:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_z_loss requires at least two timesteps.")
     total = embeddings.new_tensor(0.0)
     steps = 0
     warmup = max(min(warmup_frames, t - 1), 0)
+    if warmup >= t - 1:
+        raise AssertionError("warmup_frames leaves no rollout steps for rollout_z_loss.")
     for start in range(warmup, t - 1):
         current = embeddings[:, start]
         max_h = min(rollout_horizon, t - start - 1)
         h_current = h_states[:, start]
         for offset in range(max_h):
             act = actions[:, start + offset]
-            pred, _, h_next = model.predictor(current, h_current, act)
+            h_next = model.predictor(current, h_current, act)
+            pred = model.h_to_z(h_next)
             target_step = embeddings[:, start + offset + 1].detach()
             total = total + JEPA_LOSS(pred, target_step)
             steps += 1
             current = pred
             h_current = h_next
-    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+    if steps <= 0:
+        raise AssertionError("rollout_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    return total / steps
 
 
 def rollout_recon_z_loss(
@@ -983,27 +959,32 @@ def rollout_recon_z_loss(
     warmup_frames: int,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_horizon must be > 0 for rollout_recon_z_loss.")
     b, t, _ = embeddings.shape
     if t < 2:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_recon_z_loss requires at least two timesteps.")
     total = embeddings.new_tensor(0.0)
     steps = 0
     warmup = max(min(warmup_frames, t - 1), 0)
+    if warmup >= t - 1:
+        raise AssertionError("warmup_frames leaves no rollout steps for rollout_recon_z_loss.")
     for start in range(warmup, t - 1):
         current = embeddings[:, start]
         h_current = h_states[:, start]
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            pred, _, h_next = model.predictor(current, h_current, act)
+            h_next = model.predictor(current, h_current, act)
+            pred = model.h_to_z(h_next)
             decoded = decoder(pred)
             target_frame = frames[:, start + offset + 1]
             total = total + RECON_LOSS(decoded, target_frame)
             steps += 1
             current = pred
             h_current = h_next
-    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+    if steps <= 0:
+        raise AssertionError("rollout_recon_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    return total / steps
 
 
 def rollout_project_z_loss(
@@ -1016,27 +997,32 @@ def rollout_project_z_loss(
     warmup_frames: int,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_horizon must be > 0 for rollout_project_z_loss.")
     b, t, _ = embeddings.shape
     if t < 2:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_project_z_loss requires at least two timesteps.")
     total = embeddings.new_tensor(0.0)
     steps = 0
     warmup = max(min(warmup_frames, t - 1), 0)
+    if warmup >= t - 1:
+        raise AssertionError("warmup_frames leaves no rollout steps for rollout_project_z_loss.")
     for start in range(warmup, t - 1):
         current = embeddings[:, start]
         h_current = h_states[:, start]
         max_h = min(rollout_horizon, t - start - 1)
         for offset in range(max_h):
             act = actions[:, start + offset]
-            pred, _, h_next = model.predictor(current, h_current, act)
+            h_next = model.predictor(current, h_current, act)
+            pred = model.h_to_z(h_next)
             decoded = decoder(pred)
             z_back = model.encoder(decoded)
             total = total + F.mse_loss(z_back, pred)
             steps += 1
             current = pred
             h_current = h_next
-    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+    if steps <= 0:
+        raise AssertionError("rollout_project_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    return total / steps
 
 
 def rollout_h_loss(
@@ -1048,26 +1034,31 @@ def rollout_h_loss(
     warmup_frames: int,
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_horizon must be > 1 for rollout_h_loss.")
     b, t, _ = embeddings.shape
     if t < 2:
-        return embeddings.new_tensor(0.0)
+        raise AssertionError("rollout_h_loss requires at least two timesteps.")
     total = embeddings.new_tensor(0.0)
     steps = 0
     warmup = max(min(warmup_frames, t - 1), 0)
+    if warmup >= t - 1:
+        raise AssertionError("warmup_frames leaves no rollout steps for rollout_h_loss.")
     for start in range(warmup, t - 1):
         current = embeddings[:, start]
         max_h = min(rollout_horizon, t - start - 1)
         h_current = h_states[:, start]
         for offset in range(max_h):
             act = actions[:, start + offset]
-            pred, _, h_next = model.predictor(current, h_current, act)
+            h_next = model.predictor(current, h_current, act)
+            pred = model.h_to_z(h_next)
             target_h = h_states[:, start + offset + 1].detach()
             total = total + F.mse_loss(h_next, target_h)
             steps += 1
             current = pred
             h_current = h_next
-    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
+    if steps <= 0:
+        raise AssertionError("rollout_h_loss produced no steps; check rollout_horizon or warmup_frames.")
+    return total / steps
 
 
 def multi_scale_recon_loss_gauss(
@@ -1122,8 +1113,10 @@ def h2z_loss(
     h_states: torch.Tensor,
     start: int,
 ) -> torch.Tensor:
-    if h_states.numel() == 0 or embeddings.shape[1] - start <= 0:
-        return embeddings.new_tensor(0.0)
+    if h_states.numel() == 0:
+        raise AssertionError("h2z_loss requires non-empty h_states.")
+    if embeddings.shape[1] - start <= 0:
+        raise AssertionError("h2z_loss requires at least one timestep after start.")
     h_stack = h_states[:, start:]
     z_hat_from_h = model.h_to_z(h_stack)
     return F.mse_loss(z_hat_from_h, embeddings[:, start:].detach())
@@ -1135,8 +1128,10 @@ def z2h_loss(
     h_states: torch.Tensor,
     start: int,
 ) -> torch.Tensor:
-    if h_states.numel() == 0 or embeddings.shape[1] < 1:
-        return embeddings.new_tensor(0.0)
+    if h_states.numel() == 0:
+        raise AssertionError("z2h_loss requires non-empty h_states.")
+    if embeddings.shape[1] < 1:
+        raise AssertionError("z2h_loss requires at least one timestep.")
     z0 = embeddings[:, :1].detach()
     h0_target = h_states[:, :1].detach()
     h_hat_from_z = model.z_to_h(z0)
@@ -1151,15 +1146,14 @@ def geometry_rank_loss(
     cfg: LossGeometryConfig,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if h_states.numel() == 0:
-        zero = h_states.new_tensor(0.0)
-        return zero, zero, zero
+        raise AssertionError("geometry_rank_loss requires non-empty h_states.")
     p_geom = model.h2p(h_states.detach())
     return geometry_ranking_loss(p_geom, cfg)
 
 
 def pixel_delta_loss(recon: torch.Tensor, frames: torch.Tensor) -> torch.Tensor:
     if frames.shape[1] <= 1:
-        return frames.new_tensor(0.0)
+        raise AssertionError("pixel_delta_loss requires at least two frames.")
     delta_target = frames[:, 1:] - frames[:, :-1]
     delta_pred = recon[:, 1:] - recon[:, :-1]
     return RECON_LOSS(delta_pred, delta_target)
@@ -1315,7 +1309,7 @@ def _compute_losses_and_metrics(
 
     encode_outputs = model.encode_sequence(x_frames)
     z_embeddings = encode_outputs["embeddings"]
-    loss_jepa_raw, delta_pred, preds, h_preds, h_states = jepa_loss(
+    loss_jepa_raw, preds, h_preds, h_states = jepa_loss(
         model,
         encode_outputs,
         a_seq,
@@ -2506,7 +2500,7 @@ def _prepare_graph_diagnostics(
         graph_frames_device = graph_frames.to(device)
         graph_actions_device = graph_actions.to(device)
         graph_embeddings = model.encode_sequence(graph_frames_device)["embeddings"]
-        graph_preds, _, graph_h_preds, graph_h_states = _predictor_rollout(
+        graph_preds, graph_h_preds, graph_h_states = _predictor_rollout(
             model,
             graph_embeddings,
             graph_actions_device,
@@ -2516,7 +2510,7 @@ def _prepare_graph_diagnostics(
         ema_h_states: Optional[torch.Tensor] = None
         if graph_cfg.use_ema_targets and ema_model is not None:
             ema_embeddings = ema_model.encode_sequence(graph_frames_device)["embeddings"]
-            _, _, _, ema_h_states = _predictor_rollout(
+            _, _, ema_h_states = _predictor_rollout(
                 ema_model,
                 ema_embeddings,
                 graph_actions_device,
@@ -2698,7 +2692,7 @@ def _build_visualization_sequences(
             for step in range(1, max_window):
                 action = vis_actions[idx, start_idx + step - 1].unsqueeze(0)
                 prev_embed = current_embed
-                pred, delta, h_next = model.predictor(current_embed, current_hidden, action)
+                h_next = model.predictor(current_embed, current_hidden, action)
                 next_embed = model.h_to_z(h_next)
                 decoded_next = decoder(next_embed)[0]
                 current_frame = decoded_next.clamp(0, 1)
@@ -2820,7 +2814,7 @@ def _compute_off_manifold_errors(
         step_indices.append(np.full(err.shape, step, dtype=np.int64))
         if step < rollout_steps:
             act = action_seq[:, step]
-            _, _, h_next = model.predictor(z_t, h_t, act)
+            h_next = model.predictor(z_t, h_t, act)
             z_t = model.h_to_z(h_next)
             h_t = h_next
     return np.concatenate(step_indices), np.concatenate(errors)
@@ -3634,7 +3628,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embed_frames = embedding_batch_cpu[0].to(device)
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
-                _, _, _, h_states = _predictor_rollout(
+                _, _, h_states = _predictor_rollout(
                     model,
                     embed_outputs["embeddings"],
                     embed_actions,
@@ -3687,7 +3681,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 self_dist_actions = torch.from_numpy(self_distance_inputs.actions).unsqueeze(0).to(device)
                 self_dist_embeddings_full = model.encode_sequence(self_dist_frames)["embeddings"]
                 self_dist_embeddings = self_dist_embeddings_full[0]
-                _, _, _, self_dist_h_states_batch = _predictor_rollout(
+                _, _, self_dist_h_states_batch = _predictor_rollout(
                     model,
                     self_dist_embeddings_full,
                     self_dist_actions,
@@ -3769,7 +3763,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     diag_frames_device = diag_frames.to(device)
                     diag_actions_device = diag_actions.to(device)
                     diag_embeddings = model.encode_sequence(diag_frames_device)["embeddings"]
-                    _, _, _, diag_h_states = _predictor_rollout(
+                    _, _, diag_h_states = _predictor_rollout(
                         model,
                         diag_embeddings,
                         diag_actions_device,
@@ -4238,12 +4232,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                     h_t = diag_h_states[b, start_frame]
                                     p_points = [diag_p_embeddings[b, start_frame].detach().cpu().numpy()]
                                     for _ in range(cfg.diagnostics.straightline_steps):
-                                        pred, _, h_next = model.predictor(
+                                        h_next = model.predictor(
                                             z_t.unsqueeze(0),
                                             h_t.unsqueeze(0),
                                             action_vec.unsqueeze(0),
                                         )
-                                        z_t = pred.squeeze(0)
+                                        z_t = model.h_to_z(h_next).squeeze(0)
                                         h_t = h_next.squeeze(0)
                                         p_points.append(model.h2p(h_t.unsqueeze(0)).squeeze(0).detach().cpu().numpy())
                                     p_points_np = np.stack(p_points, axis=0)
@@ -4275,12 +4269,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 if t0 + k >= diag_frames.shape[1] - 1:
                                     break
                                 act = diag_actions_device[b, t0 + k]
-                                pred, _, h_next = model.predictor(
+                                h_next = model.predictor(
                                     z_t.unsqueeze(0),
                                     h_t.unsqueeze(0),
                                     act.unsqueeze(0),
                                 )
-                                z_t = pred.squeeze(0)
+                                z_t = model.h_to_z(h_next).squeeze(0)
                                 h_t = h_next.squeeze(0)
                                 decoded = decoder(z_t.unsqueeze(0))
                                 pixel_errors[k] += RECON_LOSS(decoded, diag_frames_device[b, t0 + k + 1].unsqueeze(0))
@@ -4407,34 +4401,34 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 z_b = z_start
                                 h_b = h_start
                                 for _ in range(cfg.diagnostics.path_independence_steps):
-                                    pred_a, _, h_a_next = model.predictor(
+                                    h_a_next = model.predictor(
                                         z_a.unsqueeze(0),
                                         h_a.unsqueeze(0),
                                         action_a.unsqueeze(0),
                                     )
-                                    pred_b, _, h_b_next = model.predictor(
+                                    h_b_next = model.predictor(
                                         z_b.unsqueeze(0),
                                         h_b.unsqueeze(0),
                                         action_b_first.unsqueeze(0),
                                     )
-                                    z_a = pred_a.squeeze(0)
+                                    z_a = model.h_to_z(h_a_next).squeeze(0)
                                     h_a = h_a_next.squeeze(0)
-                                    z_b = pred_b.squeeze(0)
+                                    z_b = model.h_to_z(h_b_next).squeeze(0)
                                     h_b = h_b_next.squeeze(0)
                                 for _ in range(cfg.diagnostics.path_independence_steps):
-                                    pred_a, _, h_a_next = model.predictor(
+                                    h_a_next = model.predictor(
                                         z_a.unsqueeze(0),
                                         h_a.unsqueeze(0),
                                         action_b.unsqueeze(0),
                                     )
-                                    pred_b, _, h_b_next = model.predictor(
+                                    h_b_next = model.predictor(
                                         z_b.unsqueeze(0),
                                         h_b.unsqueeze(0),
                                         action_b_second.unsqueeze(0),
                                     )
-                                    z_a = pred_a.squeeze(0)
+                                    z_a = model.h_to_z(h_a_next).squeeze(0)
                                     h_a = h_a_next.squeeze(0)
-                                    z_b = pred_b.squeeze(0)
+                                    z_b = model.h_to_z(h_b_next).squeeze(0)
                                     h_b = h_b_next.squeeze(0)
                                 z_diffs.append(float((z_a - z_b).norm().item()))
                                 p_a = model.h2p(h_a.unsqueeze(0)).squeeze(0)
@@ -4482,19 +4476,19 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 if t0 + k >= diag_embeddings.shape[1] - 1:
                                     break
                                 act = diag_actions_device[b, t0 + k]
-                                pred_norm, _, h_next_norm = model.predictor(
+                                h_next_norm = model.predictor(
                                     z_norm.unsqueeze(0),
                                     h_norm.unsqueeze(0),
                                     act.unsqueeze(0),
                                 )
-                                pred_zero, _, h_next_zero = model.predictor(
+                                h_next_zero = model.predictor(
                                     z_zero.unsqueeze(0),
                                     torch.zeros_like(h_norm).unsqueeze(0),
                                     act.unsqueeze(0),
                                 )
-                                z_norm = pred_norm.squeeze(0)
+                                z_norm = model.h_to_z(h_next_norm).squeeze(0)
                                 h_norm = h_next_norm.squeeze(0)
-                                z_zero = pred_zero.squeeze(0)
+                                z_zero = model.h_to_z(h_next_zero).squeeze(0)
                                 decoded_norm = decoder(z_norm.unsqueeze(0))
                                 decoded_zero = decoder(z_zero.unsqueeze(0))
                                 target = diag_frames_device[b, t0 + k + 1].unsqueeze(0)
@@ -4566,7 +4560,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_frames = vis_ctrl_batch_cpu[0].to(device)
                 vis_actions = vis_ctrl_batch_cpu[1].to(device)
                 vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
-                _, _, _, vis_h_states = _predictor_rollout(
+                _, _, vis_h_states = _predictor_rollout(
                     model,
                     vis_embeddings,
                     vis_actions,

@@ -36,7 +36,7 @@ def _rollout_predictions(
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = actions[:, step]
-        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
+        h_next = model.predictor(z_t, h_t, act_t)
         z_pred = model.h_to_z(h_next)
         preds.append(z_pred)
         h_t = h_next
@@ -62,7 +62,7 @@ def _rollout_open_loop(
     h_preds = []
     for step in range(t - 1):
         act_t = actions[:, step]
-        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
+        h_next = model.predictor(z_t, h_t, act_t)
         z_next = model.h_to_z(h_next)
         h_preds.append(h_next)
         z_t = z_next
@@ -76,39 +76,36 @@ def _predictor_rollout(
     actions: torch.Tensor,
     *,
     use_z2h_init: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Roll predictor across sequence to produce z_hat, delta, and h states."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Roll predictor across sequence to produce z_hat and h states."""
     b, t, _ = embeddings.shape
     h0 = None
     if use_z2h_init and t > 0:
         h0 = model.z_to_h(embeddings[:, 0].detach())
     if t < 2:
-        zero = embeddings.new_tensor(0.0)
+        preds = embeddings.new_zeros((b, 0, embeddings.shape[-1]))
+        h_preds = embeddings.new_zeros((b, 0, model.state_dim))
         h_states = embeddings.new_zeros((b, t, model.state_dim))
         if h0 is not None and t > 0:
             h_states[:, 0] = h0
         return (
-            zero,
-            zero,
-            zero,
+            preds,
+            h_preds,
             h_states,
         )
     preds = []
-    deltas = []
     h_preds = []
     h_states = [h0 if h0 is not None else embeddings.new_zeros((b, model.state_dim))]
     for step in range(t - 1):
         z_t = embeddings[:, step]
         h_t = h_states[-1]
         act_t = actions[:, step]
-        pred, delta, h_next = model.predictor(z_t, h_t, act_t)
-        preds.append(pred)
-        deltas.append(delta)
+        h_next = model.predictor(z_t, h_t, act_t)
+        preds.append(model.h_to_z(h_next))
         h_preds.append(h_next)
         h_states.append(h_next)
     return (
         torch.stack(preds, dim=1),
-        torch.stack(deltas, dim=1),
         torch.stack(h_preds, dim=1),
         torch.stack(h_states, dim=1),
     )

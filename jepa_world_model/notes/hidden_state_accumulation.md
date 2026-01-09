@@ -107,9 +107,10 @@ Disadvantages:
 
 ## Why b611179c Architecture Worked
 
-The b611179c architecture used `PredictorNetwork` that directly outputs:
+The b611179c architecture used `PredictorNetwork` that outputs:
 ```python
-pred, delta, h_next = model.predictor(z_t, h_t, act_t)
+h_next = model.predictor(z_t, h_t, act_t)
+z_hat = model.h_to_z(h_next)
 ```
 
 Where `h_next` is a direct prediction, not a residual update. This avoids the accumulation problem entirely.
