@@ -1,5 +1,5 @@
 // Common diagnostics page logic shared between all diagnostics views (Z, H, P, ZHP)
-// Used by diagnostics_page.html and diagnostics_page_zhs.html templates
+// Used by diagnostics_page.html and diagnostics_page_zhp.html templates
 //
 // Usage: Each page should define DIAGNOSTICS_CONFIG with:
 // - targets: Object mapping diagnostic keys to DOM elements and metadata

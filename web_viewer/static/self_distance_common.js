@@ -1,4 +1,4 @@
-// Common self-distance page logic shared between self_distance_page.html, self_distance_h.html, and self_distance_zhs.html
+// Common self-distance page logic shared between self_distance_page.html, self_distance_h.html, and self_distance_zhp.html
 //
 // Usage: Each page should define SELF_DISTANCE_CONFIG with:
 // - csvUrl: URL to the self-distance CSV file

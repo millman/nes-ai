@@ -543,20 +543,20 @@ class LossWeights:
     pixel_delta: float = 0.05
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
-    h2z: float = 1.0
+    h2z: float = 0.5
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
-    z2h: float = 1.0
+    z2h: float = 0.5
 
     # Goal-conditioned ranking loss on p = g(stopgrad(h)).
     # Keeps p useful for planning geometry while avoiding action algebra constraints.
-    geometry_rank: float = 0.0
+    geometry_rank: float = 0.2
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
     inverse_dynamics_z: float = 0.2
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
     inverse_dynamics_h: float = 0.0
     # Inverse dynamics from consecutive h pairs (p_t, p_{t+1}).
-    inverse_dynamics_s: float = 0.0
+    inverse_dynamics_p: float = 0.1
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
@@ -568,7 +568,7 @@ class LossWeights:
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
     # Encourages consistent action directions in z while leaving perception flexible.
-    action_delta_z: float = 0.0
+    action_delta_z: float = 0.02
 
     # k-step rollout consistency in z-space.
     # Encourages short-horizon compositionality without forcing long-horizon rigidity.
@@ -583,38 +583,28 @@ class LossWeights:
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 0.0
+    action_delta_h: float = 0.3
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 0.0
+    additivity_h: float = 0.05
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
-    rollout_kstep_h: float = 0.0
+    rollout_kstep_h: float = 0.2
 
-    # --- Pose (planning state) ---
-    # 1-step odometry consistency: p_t + Δp_t vs observed p_{t+1}.
-    pose_1step: float = 0.0
-
-    # k-step composition consistency: p_t + ΣΔp vs observed p_{t+k}.
-    pose_kstep: float = 0.0
-
-    # Additivity of pose deltas across steps.
-    pose_additivity: float = 0.0
-
-    # Pose delta magnitude regularizer.
-    pose_mag: float = 0.0
-
-    # --- S (legacy; kept for compatibility with earlier naming) ---
+    # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
-    action_delta_s: float = 0.0
+    action_delta_p: float = 0.3
 
     # Explicit additivity of p deltas across steps.
-    additivity_s: float = 0.0
+    additivity_p: float = 0.1
 
     # k-step rollout consistency in p-space.
-    rollout_kstep_s: float = 0.0
+    rollout_kstep_p: float = 0.2
+
+    # Pose delta magnitude regularizer.
+    mag_p: float = 0.01
 
 
 @dataclass
@@ -838,7 +828,7 @@ class JEPAWorldModel(nn.Module):
             cfg.action_dim,
             use_layer_norm=cfg.layer_norms.inverse_dynamics,
         )
-        self.inverse_dynamics_s = InverseDynamicsHead(
+        self.inverse_dynamics_p = InverseDynamicsHead(
             pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
@@ -885,11 +875,19 @@ class JEPAWorldModel(nn.Module):
 # ------------------------------------------------------------
 
 def jepa_loss(
-    model: JEPAWorldModel, outputs: Dict[str, torch.Tensor], actions: torch.Tensor
+    model: JEPAWorldModel,
+    outputs: Dict[str, torch.Tensor],
+    actions: torch.Tensor,
+    use_z2h_init: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """JEPA loss using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
-    preds, delta_pred, h_preds, h_states = _predictor_rollout(model, embeddings, actions)
+    preds, delta_pred, h_preds, h_states = _predictor_rollout(
+        model,
+        embeddings,
+        actions,
+        use_z2h_init=use_z2h_init,
+    )
     if embeddings.shape[1] < 2:
         zero = embeddings.new_tensor(0.0)
         delta = embeddings.new_zeros(embeddings[:, :-1].shape)
@@ -1061,40 +1059,6 @@ def rollout_h_loss(
             pred, _, h_next = model.predictor(current, h_current, act)
             target_h = h_states[:, start + offset + 1].detach()
             total = total + F.mse_loss(h_next, target_h)
-            steps += 1
-            current = pred
-            h_current = h_next
-    return total / steps if steps > 0 else embeddings.new_tensor(0.0)
-
-
-def rollout_p_loss(
-    model: JEPAWorldModel,
-    embeddings: torch.Tensor,
-    actions: torch.Tensor,
-    h_states: torch.Tensor,
-    rollout_horizon: int,
-    warmup_frames: int,
-) -> torch.Tensor:
-    if rollout_horizon <= 1:
-        return embeddings.new_tensor(0.0)
-    b, t, _ = embeddings.shape
-    if t < 2:
-        return embeddings.new_tensor(0.0)
-    total = embeddings.new_tensor(0.0)
-    steps = 0
-    warmup = max(min(warmup_frames, t - 1), 0)
-    # NOTE: p is geometry-only; stop-grad h so p-losses don't shape dynamics.
-    p_states = model.h2p(h_states.detach())
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        h_current = h_states[:, start]
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            pred, _, h_next = model.predictor(current, h_current, act)
-            p_next = model.h2p(h_next.detach())
-            target_p = p_states[:, start + offset + 1].detach()
-            total = total + F.mse_loss(p_next, target_p)
             steps += 1
             current = pred
             h_current = h_next
@@ -1323,21 +1287,18 @@ def _compute_losses_and_metrics(
     # Inverse dynamics losses
     loss_inverse_dynamics_z = x_frames.new_tensor(0.0)
     loss_inverse_dynamics_h = x_frames.new_tensor(0.0)
-    loss_inverse_dynamics_s = x_frames.new_tensor(0.0)
+    loss_inverse_dynamics_p = x_frames.new_tensor(0.0)
     loss_action_delta_z = x_frames.new_tensor(0.0)
     loss_action_delta_h = x_frames.new_tensor(0.0)
     loss_rollout_kstep_z = x_frames.new_tensor(0.0)
     loss_rollout_kstep_h = x_frames.new_tensor(0.0)
-    loss_rollout_kstep_s = x_frames.new_tensor(0.0)
+    loss_rollout_kstep_p = x_frames.new_tensor(0.0)
     loss_rollout_recon_z = x_frames.new_tensor(0.0)
     loss_rollout_project_z = x_frames.new_tensor(0.0)
     loss_additivity_h = x_frames.new_tensor(0.0)
-    loss_action_delta_s = x_frames.new_tensor(0.0)
-    loss_additivity_s = x_frames.new_tensor(0.0)
-    loss_pose_1step = x_frames.new_tensor(0.0)
-    loss_pose_kstep = x_frames.new_tensor(0.0)
-    loss_pose_additivity = x_frames.new_tensor(0.0)
-    loss_pose_mag = x_frames.new_tensor(0.0)
+    loss_action_delta_p = x_frames.new_tensor(0.0)
+    loss_additivity_p = x_frames.new_tensor(0.0)
+    loss_mag_p = x_frames.new_tensor(0.0)
 
     # -------------------------------------------------------------------------
     # Calculate required inputs
@@ -1348,7 +1309,12 @@ def _compute_losses_and_metrics(
 
     encode_outputs = model.encode_sequence(x_frames)
     z_embeddings = encode_outputs["embeddings"]
-    loss_jepa_raw, delta_pred, preds, h_preds, h_states = jepa_loss(model, encode_outputs, a_seq)
+    loss_jepa_raw, delta_pred, preds, h_preds, h_states = jepa_loss(
+        model,
+        encode_outputs,
+        a_seq,
+        use_z2h_init=weights.z2h > 0,
+    )
 
     z_for_decoder = z_embeddings.detach() if cfg.detach_decoder else z_embeddings
     x_recon = decoder(z_for_decoder)
@@ -1434,23 +1400,27 @@ def _compute_losses_and_metrics(
                 if weights.action_delta_h > 0:
                     loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
 
-    ds_pred: Optional[torch.Tensor] = None
-    pose_weight = weights.pose_1step if weights.pose_1step > 0 else weights.action_delta_s
-    pose_add_weight = weights.pose_additivity if weights.pose_additivity > 0 else weights.additivity_s
-    if pose_weight > 0 or pose_add_weight > 0 or weights.pose_kstep > 0 or weights.pose_mag > 0:
+    if (
+        weights.action_delta_p > 0
+        or weights.additivity_p > 0
+        or weights.rollout_kstep_p > 0
+        or weights.mag_p > 0
+    ):
         if pose_obs.shape[1] >= 2:
             pose_curr = pose_pred[:, start_frame:-1]
             pose_next_obs = pose_obs[:, start_frame + 1 :]
             if pose_curr.numel() > 0:
-                ds_pred = pose_deltas[:, start_frame:]
-                if pose_weight > 0:
-                    loss_pose_1step = F.mse_loss(pose_pred[:, start_frame + 1 :], pose_next_obs.detach())
-            if pose_add_weight > 0 and pose_deltas.shape[1] >= start_frame + 2:
+                if weights.action_delta_p > 0:
+                    loss_action_delta_p = F.mse_loss(
+                        pose_pred[:, start_frame + 1 :],
+                        pose_next_obs.detach(),
+                    )
+            if weights.additivity_p > 0 and pose_deltas.shape[1] >= start_frame + 2:
                 delta_sum = pose_deltas[:, start_frame:-1] + pose_deltas[:, start_frame + 1 :]
                 pose_target = pose_obs[:, start_frame + 2 :] - pose_obs[:, start_frame:-2]
                 if delta_sum.numel() > 0 and pose_target.numel() > 0:
-                    loss_pose_additivity = F.mse_loss(delta_sum, pose_target.detach())
-            if weights.pose_kstep > 0 and pose_deltas.shape[1] >= 2:
+                    loss_additivity_p = F.mse_loss(delta_sum, pose_target.detach())
+            if weights.rollout_kstep_p > 0 and pose_deltas.shape[1] >= 2:
                 max_k = min(cfg.rollout_horizon, pose_obs.shape[1] - 1)
                 if max_k >= 2:
                     delta_cumsum = pose_deltas.cumsum(dim=1)
@@ -1470,13 +1440,9 @@ def _compute_losses_and_metrics(
                         if pose_hat.numel() > 0:
                             k_losses.append(F.mse_loss(pose_hat, pose_target_k.detach()))
                     if k_losses:
-                        loss_pose_kstep = torch.stack(k_losses).mean()
-            if weights.pose_mag > 0 and pose_deltas.numel() > 0:
-                loss_pose_mag = pose_deltas.norm(dim=-1).mean()
-    if weights.action_delta_s > 0 and weights.pose_1step <= 0:
-        loss_action_delta_s = loss_pose_1step
-    if weights.additivity_s > 0 and weights.pose_additivity <= 0:
-        loss_additivity_s = loss_pose_additivity
+                        loss_rollout_kstep_p = torch.stack(k_losses).mean()
+            if weights.mag_p > 0 and pose_deltas.numel() > 0:
+                loss_mag_p = pose_deltas.norm(dim=-1).mean()
 
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
@@ -1489,12 +1455,12 @@ def _compute_losses_and_metrics(
         action_logits_h = model.inverse_dynamics_h(h_states[:, :-1], h_states[:, 1:])
         loss_inverse_dynamics_h = INVERSE_DYNAMICS_LOSS(action_logits_h, a_seq[:, :-1])
 
-    if weights.inverse_dynamics_s > 0:
+    if weights.inverse_dynamics_p > 0:
         assert h_states.shape[1] >= 2
         # NOTE: inverse dynamics on s should not backprop into h/dynamics.
         p_for_inverse = pose_obs.detach()
-        action_logits_s = model.inverse_dynamics_s(p_for_inverse[:, :-1], p_for_inverse[:, 1:])
-        loss_inverse_dynamics_s = INVERSE_DYNAMICS_LOSS(action_logits_s, a_seq[:, :-1])
+        action_logits_p = model.inverse_dynamics_p(p_for_inverse[:, :-1], p_for_inverse[:, 1:])
+        loss_inverse_dynamics_p = INVERSE_DYNAMICS_LOSS(action_logits_p, a_seq[:, :-1])
 
     if weights.action_delta_z > 0:
         assert z_embeddings.shape[1] >= 2
@@ -1543,30 +1509,12 @@ def _compute_losses_and_metrics(
             warmup_frames,
         )
 
-    if weights.rollout_kstep_s > 0:
-        loss_rollout_kstep_s = rollout_p_loss(
-            model,
-            z_embeddings,
-            a_seq,
-            h_states,
-            cfg.rollout_horizon,
-            warmup_frames,
-        )
-
     if weights.additivity_h > 0 and dh_pred is not None:
         if dh_pred.shape[1] >= 2:
             dh_add_pred = dh_pred[:, :-1] + dh_pred[:, 1:]
             dh_add_target = h_states[:, start_frame + 2 :] - h_states[:, start_frame:-2]
             if dh_add_pred.numel() > 0:
                 loss_additivity_h = F.mse_loss(dh_add_pred, dh_add_target)
-
-    if weights.additivity_s > 0 and ds_pred is not None:
-        if ds_pred.shape[1] >= 2:
-            ds_add_pred = ds_pred[:, :-1] + ds_pred[:, 1:]
-            p_states = model.h2p(h_states.detach())
-            ds_add_target = p_states[:, start_frame + 2 :] - p_states[:, start_frame:-2]
-            if ds_add_pred.numel() > 0:
-                loss_additivity_s = F.mse_loss(ds_add_pred, ds_add_target)
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
@@ -1597,21 +1545,18 @@ def _compute_losses_and_metrics(
         + weights.pixel_delta * _scaled("loss_pixel_delta", loss_pixel_delta)
         + weights.inverse_dynamics_z * _scaled("loss_inverse_dynamics_z", loss_inverse_dynamics_z)
         + weights.inverse_dynamics_h * _scaled("loss_inverse_dynamics_h", loss_inverse_dynamics_h)
-        + weights.inverse_dynamics_s * _scaled("loss_inverse_dynamics_s", loss_inverse_dynamics_s)
+        + weights.inverse_dynamics_p * _scaled("loss_inverse_dynamics_p", loss_inverse_dynamics_p)
         + weights.action_delta_z * _scaled("loss_action_delta_z", loss_action_delta_z)
         + weights.action_delta_h * _scaled("loss_action_delta_h", loss_action_delta_h)
         + weights.rollout_kstep_z * _scaled("loss_rollout_kstep_z", loss_rollout_kstep_z)
         + weights.rollout_recon_z * _scaled("loss_rollout_recon_z", loss_rollout_recon_z)
         + weights.rollout_project_z * _scaled("loss_rollout_project_z", loss_rollout_project_z)
         + weights.rollout_kstep_h * _scaled("loss_rollout_kstep_h", loss_rollout_kstep_h)
-        + weights.rollout_kstep_s * _scaled("loss_rollout_kstep_s", loss_rollout_kstep_s)
+        + weights.rollout_kstep_p * _scaled("loss_rollout_kstep_p", loss_rollout_kstep_p)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
-        + weights.pose_1step * _scaled("loss_pose_1step", loss_pose_1step)
-        + weights.pose_kstep * _scaled("loss_pose_kstep", loss_pose_kstep)
-        + weights.pose_additivity * _scaled("loss_pose_additivity", loss_pose_additivity)
-        + weights.pose_mag * _scaled("loss_pose_mag", loss_pose_mag)
-        + weights.action_delta_s * _scaled("loss_action_delta_s", loss_action_delta_s)
-        + weights.additivity_s * _scaled("loss_additivity_s", loss_additivity_s)
+        + weights.mag_p * _scaled("loss_mag_p", loss_mag_p)
+        + weights.action_delta_p * _scaled("loss_action_delta_p", loss_action_delta_p)
+        + weights.additivity_p * _scaled("loss_additivity_p", loss_additivity_p)
     )
 
     world_grad_norm = 0.0
@@ -1656,21 +1601,18 @@ def _compute_losses_and_metrics(
         "geometry_rank_pairs": geometry_rank_pairs.item(),
         "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
         "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
-        "loss_inverse_dynamics_s": loss_inverse_dynamics_s.item(),
+        "loss_inverse_dynamics_p": loss_inverse_dynamics_p.item(),
         "loss_action_delta_z": loss_action_delta_z.item(),
         "loss_action_delta_h": loss_action_delta_h.item(),
         "loss_rollout_kstep_z": loss_rollout_kstep_z.item(),
         "loss_rollout_recon_z": loss_rollout_recon_z.item(),
         "loss_rollout_project_z": loss_rollout_project_z.item(),
         "loss_rollout_kstep_h": loss_rollout_kstep_h.item(),
-        "loss_rollout_kstep_s": loss_rollout_kstep_s.item(),
+        "loss_rollout_kstep_p": loss_rollout_kstep_p.item(),
         "loss_additivity_h": loss_additivity_h.item(),
-        "loss_pose_1step": loss_pose_1step.item(),
-        "loss_pose_kstep": loss_pose_kstep.item(),
-        "loss_pose_additivity": loss_pose_additivity.item(),
-        "loss_pose_mag": loss_pose_mag.item(),
-        "loss_action_delta_s": loss_action_delta_s.item(),
-        "loss_additivity_s": loss_additivity_s.item(),
+        "loss_mag_p": loss_mag_p.item(),
+        "loss_action_delta_p": loss_action_delta_p.item(),
+        "loss_additivity_p": loss_additivity_p.item(),
         "z_norm_mean": z_norm_mean,
         "z_norm_std": z_norm_std,
         "z_norm_max": z_norm_max,
@@ -2060,8 +2002,8 @@ def log_metrics(
         filtered.pop("loss_inverse_dynamics_z", None)
     if weights.inverse_dynamics_h <= 0:
         filtered.pop("loss_inverse_dynamics_h", None)
-    if weights.inverse_dynamics_s <= 0:
-        filtered.pop("loss_inverse_dynamics_s", None)
+    if weights.inverse_dynamics_p <= 0:
+        filtered.pop("loss_inverse_dynamics_p", None)
     if weights.action_delta_z <= 0:
         filtered.pop("loss_action_delta_z", None)
     if weights.action_delta_h <= 0:
@@ -2074,22 +2016,16 @@ def log_metrics(
         filtered.pop("loss_rollout_project_z", None)
     if weights.rollout_kstep_h <= 0:
         filtered.pop("loss_rollout_kstep_h", None)
-    if weights.rollout_kstep_s <= 0:
-        filtered.pop("loss_rollout_kstep_s", None)
+    if weights.rollout_kstep_p <= 0:
+        filtered.pop("loss_rollout_kstep_p", None)
     if weights.additivity_h <= 0:
         filtered.pop("loss_additivity_h", None)
-    if weights.pose_1step <= 0:
-        filtered.pop("loss_pose_1step", None)
-    if weights.pose_kstep <= 0:
-        filtered.pop("loss_pose_kstep", None)
-    if weights.pose_additivity <= 0:
-        filtered.pop("loss_pose_additivity", None)
-    if weights.pose_mag <= 0:
-        filtered.pop("loss_pose_mag", None)
-    if weights.action_delta_s <= 0:
-        filtered.pop("loss_action_delta_s", None)
-    if weights.additivity_s <= 0:
-        filtered.pop("loss_additivity_s", None)
+    if weights.mag_p <= 0:
+        filtered.pop("loss_mag_p", None)
+    if weights.action_delta_p <= 0:
+        filtered.pop("loss_action_delta_p", None)
+    if weights.additivity_p <= 0:
+        filtered.pop("loss_additivity_p", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -2128,21 +2064,18 @@ LOSS_COLUMNS = [
     "geometry_rank_pairs",
     "loss_inverse_dynamics_z",
     "loss_inverse_dynamics_h",
-    "loss_inverse_dynamics_s",
+    "loss_inverse_dynamics_p",
     "loss_action_delta_z",
     "loss_action_delta_h",
     "loss_rollout_kstep_z",
     "loss_rollout_recon_z",
     "loss_rollout_project_z",
     "loss_rollout_kstep_h",
-    "loss_rollout_kstep_s",
+    "loss_rollout_kstep_p",
     "loss_additivity_h",
-    "loss_pose_1step",
-    "loss_pose_kstep",
-    "loss_pose_additivity",
-    "loss_pose_mag",
-    "loss_action_delta_s",
-    "loss_additivity_s",
+    "loss_mag_p",
+    "loss_action_delta_p",
+    "loss_additivity_p",
     "z_norm_mean",
     "z_norm_std",
     "z_norm_max",
@@ -2182,21 +2115,18 @@ class LossHistory:
     geometry_rank_pairs: List[float] = field(default_factory=list)
     inverse_dynamics_z: List[float] = field(default_factory=list)
     inverse_dynamics_h: List[float] = field(default_factory=list)
-    inverse_dynamics_s: List[float] = field(default_factory=list)
+    inverse_dynamics_p: List[float] = field(default_factory=list)
     action_delta_z: List[float] = field(default_factory=list)
     action_delta_h: List[float] = field(default_factory=list)
     rollout_kstep_z: List[float] = field(default_factory=list)
     rollout_recon_z: List[float] = field(default_factory=list)
     rollout_project_z: List[float] = field(default_factory=list)
     rollout_kstep_h: List[float] = field(default_factory=list)
-    rollout_kstep_s: List[float] = field(default_factory=list)
+    rollout_kstep_p: List[float] = field(default_factory=list)
     additivity_h: List[float] = field(default_factory=list)
-    pose_1step: List[float] = field(default_factory=list)
-    pose_kstep: List[float] = field(default_factory=list)
-    pose_additivity: List[float] = field(default_factory=list)
-    pose_mag: List[float] = field(default_factory=list)
-    action_delta_s: List[float] = field(default_factory=list)
-    additivity_s: List[float] = field(default_factory=list)
+    mag_p: List[float] = field(default_factory=list)
+    action_delta_p: List[float] = field(default_factory=list)
+    additivity_p: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
     z_norm_std: List[float] = field(default_factory=list)
     z_norm_max: List[float] = field(default_factory=list)
@@ -2233,21 +2163,18 @@ class LossHistory:
         self.geometry_rank_pairs.append(metrics.get("geometry_rank_pairs", 0.0))
         self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
         self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
-        self.inverse_dynamics_s.append(metrics.get("loss_inverse_dynamics_s", 0.0))
+        self.inverse_dynamics_p.append(metrics.get("loss_inverse_dynamics_p", 0.0))
         self.action_delta_z.append(metrics.get("loss_action_delta_z", 0.0))
         self.action_delta_h.append(metrics.get("loss_action_delta_h", 0.0))
         self.rollout_kstep_z.append(metrics.get("loss_rollout_kstep_z", 0.0))
         self.rollout_recon_z.append(metrics.get("loss_rollout_recon_z", 0.0))
         self.rollout_project_z.append(metrics.get("loss_rollout_project_z", 0.0))
         self.rollout_kstep_h.append(metrics.get("loss_rollout_kstep_h", 0.0))
-        self.rollout_kstep_s.append(metrics.get("loss_rollout_kstep_s", 0.0))
+        self.rollout_kstep_p.append(metrics.get("loss_rollout_kstep_p", 0.0))
         self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
-        self.pose_1step.append(metrics.get("loss_pose_1step", 0.0))
-        self.pose_kstep.append(metrics.get("loss_pose_kstep", 0.0))
-        self.pose_additivity.append(metrics.get("loss_pose_additivity", 0.0))
-        self.pose_mag.append(metrics.get("loss_pose_mag", 0.0))
-        self.action_delta_s.append(metrics.get("loss_action_delta_s", 0.0))
-        self.additivity_s.append(metrics.get("loss_additivity_s", 0.0))
+        self.mag_p.append(metrics.get("loss_mag_p", 0.0))
+        self.action_delta_p.append(metrics.get("loss_action_delta_p", 0.0))
+        self.additivity_p.append(metrics.get("loss_additivity_p", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
         self.z_norm_std.append(metrics.get("z_norm_std", 0.0))
         self.z_norm_max.append(metrics.get("z_norm_max", 0.0))
@@ -2295,21 +2222,18 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.geometry_rank_pairs,
             history.inverse_dynamics_z,
             history.inverse_dynamics_h,
-            history.inverse_dynamics_s,
+            history.inverse_dynamics_p,
             history.action_delta_z,
             history.action_delta_h,
             history.rollout_kstep_z,
             history.rollout_recon_z,
             history.rollout_project_z,
             history.rollout_kstep_h,
-            history.rollout_kstep_s,
+            history.rollout_kstep_p,
             history.additivity_h,
-            history.pose_1step,
-            history.pose_kstep,
-            history.pose_additivity,
-            history.pose_mag,
-            history.action_delta_s,
-            history.additivity_s,
+            history.mag_p,
+            history.action_delta_p,
+            history.additivity_p,
             history.z_norm_mean,
             history.z_norm_std,
             history.z_norm_max,
@@ -2567,6 +2491,7 @@ def _prepare_graph_diagnostics(
     ema_model: Optional[JEPAWorldModel],
     graph_cfg: GraphDiagnosticsConfig,
     device: torch.device,
+    use_z2h_init: bool,
 ) -> "GraphDiagnosticsBatch":
     if graph_frames.shape[1] < 3:
         raise AssertionError("Graph diagnostics require sequences with at least three frames.")
@@ -2579,6 +2504,7 @@ def _prepare_graph_diagnostics(
             model,
             graph_embeddings,
             graph_actions_device,
+            use_z2h_init=use_z2h_init,
         )
         ema_embeddings: Optional[torch.Tensor] = None
         ema_h_states: Optional[torch.Tensor] = None
@@ -2588,6 +2514,7 @@ def _prepare_graph_diagnostics(
                 ema_model,
                 ema_embeddings,
                 graph_actions_device,
+                use_z2h_init=use_z2h_init,
             )
     assert torch.is_grad_enabled()
     next_index, next2_index, chunk_ids = build_graph_diag_indices(graph_frames_device)
@@ -3695,7 +3622,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embed_frames = embedding_batch_cpu[0].to(device)
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
-                _, _, _, h_states = _predictor_rollout(model, embed_outputs["embeddings"], embed_actions)
+                _, _, _, h_states = _predictor_rollout(
+                    model,
+                    embed_outputs["embeddings"],
+                    embed_actions,
+                    use_z2h_init=weights.z2h > 0,
+                )
                 p_embeddings = model.h2p(h_states)
                 f_embeddings = model.h2f(h_states)
             assert torch.is_grad_enabled()
@@ -3743,7 +3675,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 self_dist_actions = torch.from_numpy(self_distance_inputs.actions).unsqueeze(0).to(device)
                 self_dist_embeddings_full = model.encode_sequence(self_dist_frames)["embeddings"]
                 self_dist_embeddings = self_dist_embeddings_full[0]
-                _, _, _, self_dist_h_states_batch = _predictor_rollout(model, self_dist_embeddings_full, self_dist_actions)
+                _, _, _, self_dist_h_states_batch = _predictor_rollout(
+                    model,
+                    self_dist_embeddings_full,
+                    self_dist_actions,
+                    use_z2h_init=weights.z2h > 0,
+                )
                 self_dist_h_states = self_dist_h_states_batch[0]
                 self_dist_p = model.h2p(self_dist_h_states.unsqueeze(0))[0]
                 self_dist_f = model.h2f(self_dist_h_states.unsqueeze(0))[0]
@@ -3803,6 +3740,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_state_embedding_dir,
                 vis_odometry_dir,
                 global_step,
+                use_z2h_init=weights.z2h > 0,
                 hist_frames_cpu=hist_frames,
                 hist_actions_cpu=hist_actions,
             )
@@ -3823,6 +3761,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         model,
                         diag_embeddings,
                         diag_actions_device,
+                        use_z2h_init=weights.z2h > 0,
                     )
                     diag_p_embeddings = model.h2p(diag_h_states)
                     diag_f_embeddings = model.h2f(diag_h_states)
@@ -3834,8 +3773,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     warmup_frames,
                     cfg.diagnostics.min_action_count,
                 )
-            assert torch.is_grad_enabled()
-            diag_p_series = diag_composability.get("p") or diag_composability.get("s")
+                assert torch.is_grad_enabled()
+                diag_p_series = diag_composability.get("p") or diag_composability.get("s")
 
                 def _write_motion_bundle(
                     name: str,
@@ -4143,7 +4082,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     f_drift_mean = 0.0
                 id_acc_p = 0.0
                 if diag_p_embeddings.shape[1] >= 2:
-                    action_logits_p = model.inverse_dynamics_s(
+                    action_logits_p = model.inverse_dynamics_p(
                         diag_p_embeddings[:, :-1],
                         diag_p_embeddings[:, 1:],
                     )
@@ -4615,7 +4554,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_frames = vis_ctrl_batch_cpu[0].to(device)
                 vis_actions = vis_ctrl_batch_cpu[1].to(device)
                 vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
-                _, _, _, vis_h_states = _predictor_rollout(model, vis_embeddings, vis_actions)
+                _, _, _, vis_h_states = _predictor_rollout(
+                    model,
+                    vis_embeddings,
+                    vis_actions,
+                    use_z2h_init=weights.z2h > 0,
+                )
                 vis_p_embeddings = model.h2p(vis_h_states)
                 warmup_frames = max(model.cfg.warmup_frames_h, 0)
                 metrics_z = compute_vis_ctrl_metrics(
@@ -4708,6 +4652,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     ema_model=ema_model,
                     graph_cfg=cfg.graph_diagnostics,
                     device=device,
+                    use_z2h_init=weights.z2h > 0,
                 )
                 z_queries, z_targets, z_predictions = _run_graph_diag(
                     embedding_kind="z",

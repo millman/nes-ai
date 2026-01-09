@@ -62,6 +62,8 @@ def write_state_embedding_outputs(
     hist_plot_dir: Optional[Path],
     odometry_plot_dir: Optional[Path],
     global_step: int,
+    *,
+    use_z2h_init: bool = False,
     hist_frames_cpu: Optional[torch.Tensor] = None,
     hist_actions_cpu: Optional[torch.Tensor] = None,
 ) -> None:
@@ -71,7 +73,12 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         embeddings = model.encode_sequence(frames)["embeddings"]
         actions = torch.from_numpy(traj_inputs.actions).to(device).unsqueeze(0)
-        _, _, _, h_states = _predictor_rollout(model, embeddings, actions)
+        _, _, _, h_states = _predictor_rollout(
+            model,
+            embeddings,
+            actions,
+            use_z2h_init=use_z2h_init,
+        )
         p = model.h2p(h_states)[0]
 
     warmup_frames = max(model.cfg.warmup_frames_h, 0)
@@ -126,7 +133,12 @@ def write_state_embedding_outputs(
                 "Cumulative sum of Δh",
             )
 
-        z_hat = _rollout_predictions(model, embeddings, actions)[0].detach().cpu().numpy()
+        z_hat = _rollout_predictions(
+            model,
+            embeddings,
+            actions,
+            use_z2h_init=use_z2h_init,
+        )[0].detach().cpu().numpy()
         if z_hat.shape[0] >= 1:
             z_next = z[1 + warmup :]
             z_hat_trim = z_hat[warmup:]
@@ -139,7 +151,12 @@ def write_state_embedding_outputs(
                     "z",
                 )
 
-        h_hat_open = _rollout_open_loop(model, embeddings, actions)
+        h_hat_open = _rollout_open_loop(
+            model,
+            embeddings,
+            actions,
+            use_z2h_init=use_z2h_init,
+        )
         if h_hat_open.shape[1] > 0:
             p_hat = model.h2p(h_hat_open)[0].detach().cpu().numpy()
             p_next = p_np[1:]
@@ -174,7 +191,12 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         hist_embeddings = model.encode_sequence(hist_frames)["embeddings"]
         hist_actions = hist_actions_cpu.to(device)
-        _, _, _, hist_h_states = _predictor_rollout(model, hist_embeddings, hist_actions)
+        _, _, _, hist_h_states = _predictor_rollout(
+            model,
+            hist_embeddings,
+            hist_actions,
+            use_z2h_init=use_z2h_init,
+        )
         hist_p = model.h2p(hist_h_states)
     hist_warmup = max(min(warmup_frames, hist_p.shape[1] - 1), 0)
     hist_p = hist_p[:, hist_warmup:]

@@ -1075,7 +1075,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "self_distance_zhs.html",
+                "self_distance_zhp.html",
                 experiments=[],
                 experiment=None,
                 page_title="Self-distance (Z/H/P/F)",
@@ -1111,7 +1111,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         page_title = "Self-distance (Z/H/P/F)" if selected.self_distance_f_csv is not None else "Self-distance (Z/H/P)"
         return render_template(
-            "self_distance_zhs.html",
+            "self_distance_zhp.html",
             experiments=[],
             experiment=selected,
             figure=figure,
@@ -1955,7 +1955,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "diagnostics_page_zhs.html",
+                "diagnostics_page_zhp.html",
                 experiments=[],
                 experiment=None,
                 diagnostics_map_z={},
@@ -2127,7 +2127,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         _log_timing("diagnostics_zhp.total", route_start, selected=selected.id)
         return render_template(
-            "diagnostics_page_zhs.html",
+            "diagnostics_page_zhp.html",
             experiments=[],
             experiment=selected,
             diagnostics_map_z=diagnostics_map_z,
@@ -2558,7 +2558,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         if selected_id is None:
             return render_template(
-                "graph_diagnostics_zhs.html",
+                "graph_diagnostics_zhp.html",
                 experiments=[],
                 experiment=None,
                 graph_map_z={},
@@ -2692,7 +2692,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             history=len(history_rows_z) + len(history_rows_h) + len(history_rows_s),
         )
         return render_template(
-            "graph_diagnostics_zhs.html",
+            "graph_diagnostics_zhp.html",
             experiments=[],
             experiment=selected,
             graph_map_z=graph_map_z,

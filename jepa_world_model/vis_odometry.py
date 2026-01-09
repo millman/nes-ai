@@ -21,13 +21,18 @@ def _rollout_predictions(
     model,
     embeddings: torch.Tensor,
     actions: torch.Tensor,
+    *,
+    use_z2h_init: bool = False,
 ) -> torch.Tensor:
     """Roll predictor forward to obtain z_hat for each next step."""
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, embeddings.shape[-1]))
     preds = []
-    h_t = embeddings.new_zeros((b, model.state_dim))
+    if use_z2h_init and t > 0:
+        h_t = model.z_to_h(embeddings[:, 0].detach())
+    else:
+        h_t = embeddings.new_zeros((b, model.state_dim))
     for step in range(t - 1):
         z_t = embeddings[:, step]
         act_t = actions[:, step]
@@ -42,12 +47,17 @@ def _rollout_open_loop(
     model,
     embeddings: torch.Tensor,
     actions: torch.Tensor,
+    *,
+    use_z2h_init: bool = False,
 ) -> torch.Tensor:
     """Roll predictor using its own predictions to get open-loop hidden states."""
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, model.state_dim))
-    h_t = embeddings.new_zeros((b, model.state_dim))
+    if use_z2h_init and t > 0:
+        h_t = model.z_to_h(embeddings[:, 0].detach())
+    else:
+        h_t = embeddings.new_zeros((b, model.state_dim))
     z_t = embeddings[:, 0]
     h_preds = []
     for step in range(t - 1):
@@ -61,22 +71,32 @@ def _rollout_open_loop(
 
 
 def _predictor_rollout(
-    model, embeddings: torch.Tensor, actions: torch.Tensor
+    model,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    *,
+    use_z2h_init: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Roll predictor across sequence to produce z_hat, delta, and h states."""
     b, t, _ = embeddings.shape
+    h0 = None
+    if use_z2h_init and t > 0:
+        h0 = model.z_to_h(embeddings[:, 0].detach())
     if t < 2:
         zero = embeddings.new_tensor(0.0)
+        h_states = embeddings.new_zeros((b, t, model.state_dim))
+        if h0 is not None and t > 0:
+            h_states[:, 0] = h0
         return (
             zero,
             zero,
             zero,
-            embeddings.new_zeros((b, t, model.state_dim)),
+            h_states,
         )
     preds = []
     deltas = []
     h_preds = []
-    h_states = [embeddings.new_zeros((b, model.state_dim))]
+    h_states = [h0 if h0 is not None else embeddings.new_zeros((b, model.state_dim))]
     for step in range(t - 1):
         z_t = embeddings[:, step]
         h_t = h_states[-1]
