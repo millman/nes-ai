@@ -221,13 +221,14 @@ class PredictorNetwork(nn.Module):
         hidden_dim: int,
         action_dim: int,
         state_dim: int,
+        use_layer_norm: bool = True,
     ) -> None:
         super().__init__()
         self.in_proj = nn.Linear(embedding_dim + action_dim + state_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, embedding_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
-        self.h_norm = nn.LayerNorm(state_dim)
+        self.h_norm = nn.LayerNorm(state_dim) if use_layer_norm else None
         self.activation = nn.SiLU(inplace=True)
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
@@ -235,6 +236,7 @@ class PredictorNetwork(nn.Module):
         self.state_dim = state_dim
         self.delta_scale = 1.0
         self.use_delta_squash = False
+        self.use_layer_norm = use_layer_norm
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
@@ -248,7 +250,9 @@ class PredictorNetwork(nn.Module):
         hidden = self.activation(self.in_proj(torch.cat([emb_flat, h_flat, act_flat], dim=-1)))
         hidden = self.activation(self.hidden_proj(hidden))
         raw_delta = self.out_proj(hidden)
-        h_next = self.h_norm(self.h_out(hidden))
+        h_next = self.h_out(hidden)
+        if self.h_norm is not None:
+            h_next = self.h_norm(h_next)
         if self.use_delta_squash:
             delta = torch.tanh(raw_delta) * self.delta_scale
         else:
@@ -525,7 +529,7 @@ class LossWeights:
         * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
         * Purpose: advance the observable latent consistent with the next encoded frame.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
-    - loss_z2h: z->hidden projection; h_hat_from_z vs h (detached); z inputs are also detached so this only trains the z->h projector.
+    - loss_z2h: z->hidden init projection; h_hat_from_z0 vs h0 (detached); z inputs are also detached so this only trains the z->h projector.
     - loss_pixel_delta: pixel delta reconstruction on decoded frames.
     Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
     """
@@ -537,26 +541,26 @@ class LossWeights:
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 0.1
+    recon_multi_box: float = 0.3
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
-    pixel_delta: float = 0.05
+    pixel_delta: float = 0.50
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
-    h2z: float = 0.5
+    h2z: float = 1.0
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
-    z2h: float = 0.5
+    z2h: float = 0.0
 
     # Goal-conditioned ranking loss on p = g(stopgrad(h)).
     # Keeps p useful for planning geometry while avoiding action algebra constraints.
-    geometry_rank: float = 0.2
+    geometry_rank: float = 0.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 0.2
+    inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
     inverse_dynamics_h: float = 0.0
     # Inverse dynamics from consecutive h pairs (p_t, p_{t+1}).
-    inverse_dynamics_p: float = 0.1
+    inverse_dynamics_p: float = 0.0
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
@@ -568,7 +572,7 @@ class LossWeights:
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
     # Encourages consistent action directions in z while leaving perception flexible.
-    action_delta_z: float = 0.02
+    action_delta_z: float = 0.0
 
     # k-step rollout consistency in z-space.
     # Encourages short-horizon compositionality without forcing long-horizon rigidity.
@@ -583,28 +587,28 @@ class LossWeights:
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 0.3
+    action_delta_h: float = 0.0
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 0.05
+    additivity_h: float = 0.0
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
-    rollout_kstep_h: float = 0.2
+    rollout_kstep_h: float = 0.0
 
     # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
-    action_delta_p: float = 0.3
+    action_delta_p: float = 0.0
 
     # Explicit additivity of p deltas across steps.
-    additivity_p: float = 0.1
+    additivity_p: float = 0.0
 
     # k-step rollout consistency in p-space.
-    rollout_kstep_p: float = 0.2
+    rollout_kstep_p: float = 0.0
 
     # Pose delta magnitude regularizer.
-    mag_p: float = 0.01
+    mag_p: float = 0.0
 
 
 @dataclass
@@ -782,6 +786,7 @@ class JEPAWorldModel(nn.Module):
             cfg.hidden_dim,
             cfg.action_dim,
             cfg.state_dim,
+            use_layer_norm=cfg.layer_norms.h_next,
         )
         self.state_dim = cfg.state_dim
         pose_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_embed_dim
@@ -1130,11 +1135,12 @@ def z2h_loss(
     h_states: torch.Tensor,
     start: int,
 ) -> torch.Tensor:
-    if h_states.numel() == 0 or embeddings.shape[1] - start <= 0:
+    if h_states.numel() == 0 or embeddings.shape[1] < 1:
         return embeddings.new_tensor(0.0)
-    z_stack = embeddings[:, start:].detach()
-    h_hat_from_z = model.z_to_h(z_stack)
-    return F.mse_loss(h_hat_from_z, h_states[:, start:].detach())
+    z0 = embeddings[:, :1].detach()
+    h0_target = h_states[:, :1].detach()
+    h_hat_from_z = model.z_to_h(z0)
+    return F.mse_loss(h_hat_from_z, h0_target)
 
 
 
@@ -2625,6 +2631,7 @@ def _build_visualization_sequences(
     device: torch.device,
     vis_cfg: VisConfig,
     vis_selection_generator: torch.Generator,
+    use_z2h_init: bool,
 ) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
@@ -2682,7 +2689,10 @@ def _build_visualization_sequences(
         assert torch.is_grad_enabled()
         with torch.no_grad():
             current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
-            current_hidden = current_embed.new_zeros(1, model.state_dim)
+            if use_z2h_init:
+                current_hidden = model.z_to_h(current_embed.detach())
+            else:
+                current_hidden = current_embed.new_zeros(1, model.state_dim)
             prev_pred_frame = decoded_frames[idx, start_idx].detach()
             current_frame = prev_pred_frame
             for step in range(1, max_window):
@@ -3574,6 +3584,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 device=device,
                 vis_cfg=cfg.vis,
                 vis_selection_generator=vis_selection_generator,
+                use_z2h_init=weights.z2h > 0,
             )
             save_rollout_sequence_batch(
                 fixed_vis_dir,
@@ -3591,6 +3602,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 device=device,
                 vis_cfg=cfg.vis,
                 vis_selection_generator=vis_selection_generator,
+                use_z2h_init=weights.z2h > 0,
             )
             save_rollout_sequence_batch(
                 rolling_vis_dir,

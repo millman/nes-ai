@@ -10,12 +10,12 @@ from typing import Optional, Tuple
 class LayerNormConfig:
     """LayerNorm toggles for debugging latent stability."""
 
-    h2z_projector: bool = True
-    z2h_projector: bool = True
-    h2s_projector: bool = True
-    delta_projector: bool = True
-    action_delta_projector: bool = True
-    inverse_dynamics: bool = True
+    h2z_projector: bool = False
+    z2h_projector: bool = False
+    h2s_projector: bool = False
+    delta_projector: bool = False
+    action_delta_projector: bool = False
+    inverse_dynamics: bool = False
     h_next: bool = False
 
 

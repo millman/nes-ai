@@ -27,7 +27,7 @@ def save_rollout_divergence_plot(
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(6, 3.2))
     ax.plot(horizons, pixel_errors, marker="o", label="Pixel error")
-    ax.plot(horizons, latent_errors, marker="o", label="Latent error (S)")
+    ax.plot(horizons, latent_errors, marker="o", label="Latent error")
     ax.set_xlabel("Rollout step k")
     ax.set_ylabel("Error")
     ax.set_title(title)
@@ -59,7 +59,7 @@ def save_ablation_divergence_plot(
 
     axes[1].plot(horizons, latent_errors, marker="o", label="normal")
     axes[1].plot(horizons, latent_errors_zero, marker="o", label="h=0")
-    axes[1].set_title("Latent error (S)")
+    axes[1].set_title("Latent error")
     axes[1].set_xlabel("Rollout step k")
     axes[1].set_ylabel("Error")
     axes[1].grid(True, alpha=0.3)
@@ -75,7 +75,7 @@ def save_ablation_divergence_plot(
 def save_straightline_plot(
     out_path: Path,
     trajectories: Sequence[StraightLineTrajectory],
-    title: str = "Straight-line action rays (S)",
+    title: str = "Straight-line action rays",
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(5.8, 4.2))
     for traj in trajectories:

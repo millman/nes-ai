@@ -950,9 +950,11 @@ VIS_STEP_SPECS = [
     ("vis_delta_s_pca", "vis_delta_s_pca", "delta_s_pca_*.png", "delta_s_pca_"),
     ("vis_delta_h_pca", "vis_delta_h_pca", "delta_h_pca_*.png", "delta_h_pca_"),
     ("vis_odometry_current_z", "vis_odometry", "odometry_z_*.png", "odometry_z_"),
+    ("vis_odometry_current_p", "vis_odometry", "odometry_p_*.png", "odometry_p_"),
     ("vis_odometry_current_s", "vis_odometry", "odometry_s_*.png", "odometry_s_"),
     ("vis_odometry_current_h", "vis_odometry", "odometry_h_*.png", "odometry_h_"),
     ("vis_odometry_z_vs_z_hat", "vis_odometry", "z_vs_z_hat_*.png", "z_vs_z_hat_"),
+    ("vis_odometry_p_vs_p_hat", "vis_odometry", "p_vs_p_hat_*.png", "p_vs_p_hat_"),
     ("vis_odometry_s_vs_s_hat", "vis_odometry", "s_vs_s_hat_*.png", "s_vs_s_hat_"),
     ("vis_odometry_h_vs_h_hat", "vis_odometry", "h_vs_h_hat_*.png", "h_vs_h_hat_"),
     ("vis_action_alignment_detail_z", "vis_action_alignment_z", "action_alignment_detail_*.png", "action_alignment_detail_"),
@@ -1367,31 +1369,39 @@ def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
 
 def _collect_diagnostics_images_s(root: Path) -> Dict[str, List[Path]]:
     diag_specs = [
-        ("delta_s_pca", root / "vis_delta_p_pca", "delta_p_pca_*.png"),
-        ("variance_spectrum_s", root / "vis_delta_p_pca", "delta_p_variance_spectrum_*.png"),
-        ("action_alignment_detail_s", root / "vis_action_alignment_p", "action_alignment_detail_*.png"),
-        ("cycle_error_s", root / "vis_cycle_error_p", "*.png"),
-        ("straightline_s", root / "vis_straightline_p", "straightline_p_*.png"),
+        ("delta_s_pca", root / "vis_delta_p_pca", "delta_p_pca_*.png", root / "vis_delta_s_pca", "delta_s_pca_*.png"),
+        (
+            "variance_spectrum_s",
+            root / "vis_delta_p_pca",
+            "delta_p_variance_spectrum_*.png",
+            root / "vis_delta_s_pca",
+            "delta_s_variance_spectrum_*.png",
+        ),
+        (
+            "action_alignment_detail_s",
+            root / "vis_action_alignment_p",
+            "action_alignment_detail_*.png",
+            root / "vis_action_alignment_s",
+            "action_alignment_detail_*.png",
+        ),
+        ("cycle_error_s", root / "vis_cycle_error_p", "*.png", root / "vis_cycle_error_s", "*.png"),
+        (
+            "straightline_s",
+            root / "vis_straightline_p",
+            "straightline_p_*.png",
+            root / "vis_straightline_s",
+            "straightline_s_*.png",
+        ),
     ]
     images: Dict[str, List[Path]] = {}
-    for name, folder, pattern in diag_specs:
+    for name, folder, pattern, fallback_folder, fallback_pattern in diag_specs:
+        imgs: List[Path] = []
         if folder.exists():
             imgs = sorted(folder.glob(pattern))
-            if imgs:
-                images[name] = imgs
-    if not images:
-        fallback_specs = [
-            ("delta_s_pca", root / "vis_delta_s_pca", "delta_s_pca_*.png"),
-            ("variance_spectrum_s", root / "vis_delta_s_pca", "delta_s_variance_spectrum_*.png"),
-            ("action_alignment_detail_s", root / "vis_action_alignment_s", "action_alignment_detail_*.png"),
-            ("cycle_error_s", root / "vis_cycle_error_s", "*.png"),
-            ("straightline_s", root / "vis_straightline_s", "straightline_s_*.png"),
-        ]
-        for name, folder, pattern in fallback_specs:
-            if folder.exists():
-                imgs = sorted(folder.glob(pattern))
-                if imgs:
-                    images[name] = imgs
+        if not imgs and fallback_folder.exists():
+            imgs = sorted(fallback_folder.glob(fallback_pattern))
+        if imgs:
+            images[name] = imgs
     return images
 
 
@@ -1520,28 +1530,20 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
 
 
 def _collect_diagnostics_csvs_s(root: Path) -> Dict[str, List[Path]]:
-    diag_dirs = {
-        "delta_s_pca": root / "vis_delta_p_pca",
-        "action_alignment_s": root / "vis_action_alignment_p",
-        "cycle_error_s": root / "vis_cycle_error_p",
-    }
+    diag_dirs = [
+        ("delta_s_pca", root / "vis_delta_p_pca", root / "vis_delta_s_pca"),
+        ("action_alignment_s", root / "vis_action_alignment_p", root / "vis_action_alignment_s"),
+        ("cycle_error_s", root / "vis_cycle_error_p", root / "vis_cycle_error_s"),
+    ]
     csvs: Dict[str, List[Path]] = {}
-    for name, folder in diag_dirs.items():
+    for name, folder, fallback_folder in diag_dirs:
+        files: List[Path] = []
         if folder.exists():
             files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
-            if files:
-                csvs[name] = files
-    if not csvs:
-        fallback_dirs = {
-            "delta_s_pca": root / "vis_delta_s_pca",
-            "action_alignment_s": root / "vis_action_alignment_s",
-            "cycle_error_s": root / "vis_cycle_error_s",
-        }
-        for name, folder in fallback_dirs.items():
-            if folder.exists():
-                files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
-                if files:
-                    csvs[name] = files
+        if not files and fallback_folder.exists():
+            files = sorted(fallback_folder.glob("*.csv")) + sorted(fallback_folder.glob("*.txt"))
+        if files:
+            csvs[name] = files
     return csvs
 
 
