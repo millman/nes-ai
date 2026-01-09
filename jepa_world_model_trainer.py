@@ -73,7 +73,7 @@ from jepa_world_model.plots.plot_action_alignment_debug import (
     build_action_alignment_debug,
 )
 from jepa_world_model.vis_action_alignment import save_action_alignment_detail_plot
-from jepa_world_model.vis_odometry import _predictor_rollout
+from jepa_world_model.rollout import rollout_teacher_forced
 from jepa_world_model.plots.write_action_alignment_report import (
     write_action_alignment_report,
 )
@@ -876,7 +876,7 @@ def jepa_loss(
     embeddings = outputs["embeddings"]
     if embeddings.shape[1] < 2:
         raise AssertionError("JEPA loss requires at least two timesteps.")
-    preds, h_preds, h_states = _predictor_rollout(
+    preds, h_preds, h_states = rollout_teacher_forced(
         model,
         embeddings,
         actions,
@@ -2500,7 +2500,7 @@ def _prepare_graph_diagnostics(
         graph_frames_device = graph_frames.to(device)
         graph_actions_device = graph_actions.to(device)
         graph_embeddings = model.encode_sequence(graph_frames_device)["embeddings"]
-        graph_preds, graph_h_preds, graph_h_states = _predictor_rollout(
+        graph_preds, graph_h_preds, graph_h_states = rollout_teacher_forced(
             model,
             graph_embeddings,
             graph_actions_device,
@@ -2510,7 +2510,7 @@ def _prepare_graph_diagnostics(
         ema_h_states: Optional[torch.Tensor] = None
         if graph_cfg.use_ema_targets and ema_model is not None:
             ema_embeddings = ema_model.encode_sequence(graph_frames_device)["embeddings"]
-            _, _, ema_h_states = _predictor_rollout(
+            _, _, ema_h_states = rollout_teacher_forced(
                 ema_model,
                 ema_embeddings,
                 graph_actions_device,
@@ -3628,7 +3628,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 embed_frames = embedding_batch_cpu[0].to(device)
                 embed_actions = embedding_batch_cpu[1].to(device)
                 embed_outputs = model.encode_sequence(embed_frames)
-                _, _, h_states = _predictor_rollout(
+                _, _, h_states = rollout_teacher_forced(
                     model,
                     embed_outputs["embeddings"],
                     embed_actions,
@@ -3681,7 +3681,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 self_dist_actions = torch.from_numpy(self_distance_inputs.actions).unsqueeze(0).to(device)
                 self_dist_embeddings_full = model.encode_sequence(self_dist_frames)["embeddings"]
                 self_dist_embeddings = self_dist_embeddings_full[0]
-                _, _, self_dist_h_states_batch = _predictor_rollout(
+                _, _, self_dist_h_states_batch = rollout_teacher_forced(
                     model,
                     self_dist_embeddings_full,
                     self_dist_actions,
@@ -3763,7 +3763,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     diag_frames_device = diag_frames.to(device)
                     diag_actions_device = diag_actions.to(device)
                     diag_embeddings = model.encode_sequence(diag_frames_device)["embeddings"]
-                    _, _, diag_h_states = _predictor_rollout(
+                    _, _, diag_h_states = rollout_teacher_forced(
                         model,
                         diag_embeddings,
                         diag_actions_device,
@@ -4560,7 +4560,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_frames = vis_ctrl_batch_cpu[0].to(device)
                 vis_actions = vis_ctrl_batch_cpu[1].to(device)
                 vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
-                _, _, vis_h_states = _predictor_rollout(
+                _, _, vis_h_states = rollout_teacher_forced(
                     model,
                     vis_embeddings,
                     vis_actions,

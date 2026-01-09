@@ -11,10 +11,12 @@ import torch
 
 from jepa_world_model.vis_self_distance import write_self_distance_outputs_from_embeddings
 from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
+from jepa_world_model.rollout import (
+    rollout_self_fed,
+    rollout_teacher_forced_z,
+    rollout_teacher_forced,
+)
 from jepa_world_model.vis_odometry import (
-    _rollout_open_loop,
-    _rollout_predictions,
-    _predictor_rollout,
     _plot_latent_prediction_comparison,
     _plot_odometry_embeddings,
 )
@@ -73,7 +75,7 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         embeddings = model.encode_sequence(frames)["embeddings"]
         actions = torch.from_numpy(traj_inputs.actions).to(device).unsqueeze(0)
-        _, _, h_states = _predictor_rollout(
+        _, _, h_states = rollout_teacher_forced(
             model,
             embeddings,
             actions,
@@ -133,7 +135,7 @@ def write_state_embedding_outputs(
                 "Cumulative sum of Δh",
             )
 
-        z_hat = _rollout_predictions(
+        z_hat = rollout_teacher_forced_z(
             model,
             embeddings,
             actions,
@@ -151,7 +153,7 @@ def write_state_embedding_outputs(
                     "z",
                 )
 
-        h_hat_open = _rollout_open_loop(
+        h_hat_open = rollout_self_fed(
             model,
             embeddings,
             actions,
@@ -191,7 +193,7 @@ def write_state_embedding_outputs(
     with torch.no_grad():
         hist_embeddings = model.encode_sequence(hist_frames)["embeddings"]
         hist_actions = hist_actions_cpu.to(device)
-        _, _, hist_h_states = _predictor_rollout(
+        _, _, hist_h_states = rollout_teacher_forced(
             model,
             hist_embeddings,
             hist_actions,
