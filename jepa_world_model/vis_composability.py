@@ -204,8 +204,8 @@ def compute_composability_series(
     actual_p = torch.norm(p2_pred - p_tp2, dim=-1)
     actual_f = torch.norm(f2_pred - f_tp2, dim=-1)
 
-    delta_z1 = model.action_delta_projector(flat_a_t).view(b, steps, -1)
-    delta_z2 = model.action_delta_projector(flat_a_tp1).view(b, steps, -1)
+    delta_z1 = model.z_action_delta_projector(flat_a_t).view(b, steps, -1)
+    delta_z2 = model.z_action_delta_projector(flat_a_tp1).view(b, steps, -1)
     z_add = z_t + delta_z1 + delta_z2
     add_z = torch.norm(z_add - z_tp2, dim=-1)
 

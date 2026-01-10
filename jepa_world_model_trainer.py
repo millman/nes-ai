@@ -528,26 +528,26 @@ class LossWeights:
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 0.3
+    recon_multi_box: float = 1.0
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
-    pixel_delta: float = 0.50
+    pixel_delta: float = 1.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
-    z2h: float = 0.0
+    z2h: float = 1.0
 
     # Goal-conditioned ranking loss on p = g(stopgrad(h)).
     # Keeps p useful for planning geometry while avoiding action algebra constraints.
-    geometry_rank: float = 0.0
+    geometry_rank: float = 1.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 0.0
+    inverse_dynamics_z: float = 1.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 0.0
+    inverse_dynamics_h: float = 1.0
     # Inverse dynamics from consecutive h pairs (p_t, p_{t+1}).
-    inverse_dynamics_p: float = 0.0
+    inverse_dynamics_p: float = 1.0
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
@@ -559,7 +559,7 @@ class LossWeights:
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
     # Encourages consistent action directions in z while leaving perception flexible.
-    action_delta_z: float = 0.0
+    action_delta_z: float = 1.0
 
     # k-step rollout consistency in z-space.
     # Encourages short-horizon compositionality without forcing long-horizon rigidity.
@@ -574,7 +574,7 @@ class LossWeights:
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 0.0
+    action_delta_h: float = 1.0
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
@@ -586,13 +586,13 @@ class LossWeights:
 
     # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
-    action_delta_p: float = 0.0
+    action_delta_p: float = 1.0
 
     # Explicit additivity of p deltas across steps.
-    additivity_p: float = 0.0
+    additivity_p: float = 1.0
 
     # k-step rollout consistency in p-space.
-    rollout_kstep_p: float = 0.0
+    rollout_kstep_p: float = 1.0
 
     # Pose delta magnitude regularizer.
     mag_p: float = 0.0
@@ -793,9 +793,6 @@ class JEPAWorldModel(nn.Module):
             use_layer_norm=cfg.layer_norms.h2s_projector,
         )
         # Backwards-compatible aliases for legacy names.
-        self.h2pose = self.h2p
-        self.h2desc = self.h2f
-        self.h2s = self.h2p
         self.h_to_z = HiddenToZProjector(
             cfg.state_dim,
             self.embedding_dim,
@@ -832,19 +829,14 @@ class JEPAWorldModel(nn.Module):
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.action_delta_projector,
         )
-        self.pose_delta_projector = HiddenActionDeltaProjector(
+        self.p_action_delta_projector = HiddenActionDeltaProjector(
             pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.action_dim,
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.action_delta_projector,
         )
-        self.s_action_delta_projector = HiddenActionDeltaProjector(
-            pose_dim if pose_dim is not None else cfg.state_dim,
-            cfg.action_dim,
-            cfg.hidden_dim,
-            use_layer_norm=cfg.layer_norms.action_delta_projector,
-        )
-        self.action_delta_projector = ActionDeltaProjector(
+        self.s_action_delta_projector = self.p_action_delta_projector
+        self.z_action_delta_projector = ActionDeltaProjector(
             cfg.action_dim,
             self.embedding_dim,
             use_layer_norm=cfg.layer_norms.action_delta_projector,
@@ -901,7 +893,7 @@ def _rollout_pose(
     pose_pred: List[torch.Tensor] = [pose_obs[:, 0]]
     pose_deltas: List[torch.Tensor] = []
     for idx in range(max_steps):
-        delta = model.pose_delta_projector(pose_pred[-1], actions[:, idx])
+        delta = model.p_action_delta_projector(pose_pred[-1], actions[:, idx])
         pose_next = pose_pred[-1] + delta
         pose_deltas.append(delta)
         pose_pred.append(pose_next)
@@ -1465,7 +1457,7 @@ def _compute_losses_and_metrics(
     if weights.action_delta_z > 0:
         assert z_embeddings.shape[1] >= 2
         delta_target = z_embeddings[:, 1:] - z_embeddings[:, :-1]
-        delta_proto = model.action_delta_projector(a_seq[:, :-1])
+        delta_proto = model.z_action_delta_projector(a_seq[:, :-1])
         loss_action_delta_z = F.mse_loss(delta_target, delta_proto)
 
     if weights.rollout_kstep_z > 0:

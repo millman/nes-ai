@@ -172,6 +172,18 @@
                     if (!opt) {
                         return { key: folderValue, folder: folderValue, prefix: "rollout_" };
                     }
+                    if (
+                        opt.preferredFolder
+                        && vizSteps
+                        && Array.isArray(vizSteps[opt.preferredFolder])
+                        && vizSteps[opt.preferredFolder].length
+                    ) {
+                        return {
+                            key: opt.preferredFolder,
+                            folder: opt.preferredFolderPath || opt.preferredFolder,
+                            prefix: opt.preferredPrefix || opt.prefix,
+                        };
+                    }
                     const directSteps = vizSteps && vizSteps[folderValue];
                     if (
                         opt.legacyFolder
@@ -182,7 +194,7 @@
                     ) {
                         return {
                             key: opt.legacyFolder,
-                            folder: opt.legacyFolder,
+                            folder: opt.legacyFolderPath || opt.legacyFolder,
                             prefix: opt.legacyPrefix || opt.prefix,
                         };
                     }
