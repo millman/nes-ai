@@ -522,7 +522,7 @@ class LossWeights:
     """
     # Latent transition supervision: ẑ_{t+1} (from predictor) vs detached z_{t+1}; shapes encoder+predictor via z_t.
     jepa: float = 1.0
-    sigreg: float = 0.01
+    sigreg: float = 0.0
 
     # Image/pixel reconstruction
     recon: float = 0.0
@@ -728,7 +728,7 @@ class TrainConfig:
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
     detach_decoder: bool = False
-    delta_z_detach_target: bool = False
+    detach_z_inputs_jepa: bool = False
 
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
@@ -867,14 +867,16 @@ def jepa_loss(
     outputs: Dict[str, torch.Tensor],
     actions: torch.Tensor,
     use_z2h_init: bool = False,
+    detach_z_inputs: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """JEPA loss using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
     if embeddings.shape[1] < 2:
         raise AssertionError("JEPA loss requires at least two timesteps.")
+    embeddings_for_rollout = embeddings.detach() if detach_z_inputs else embeddings
     preds, h_preds, h_states = rollout_teacher_forced(
         model,
-        embeddings,
+        embeddings_for_rollout,
         actions,
         use_z2h_init=use_z2h_init,
     )
@@ -1310,6 +1312,7 @@ def _compute_losses_and_metrics(
         encode_outputs,
         a_seq,
         use_z2h_init=weights.z2h > 0,
+        detach_z_inputs=cfg.detach_z_inputs_jepa,
     )
 
     z_for_decoder = z_embeddings.detach() if cfg.detach_decoder else z_embeddings
