@@ -543,7 +543,8 @@ class LossWeights:
     geometry_rank: float = 1.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
-    inverse_dynamics_z: float = 1.0
+    # Keep at 0: forces z to reveal actions, breaking loop-closure invariance.
+    inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
     inverse_dynamics_h: float = 1.0
     # Inverse dynamics from consecutive h pairs (p_t, p_{t+1}).
@@ -558,17 +559,20 @@ class LossWeights:
 
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
-    # Encourages consistent action directions in z while leaving perception flexible.
-    action_delta_z: float = 1.0
+    # Keep at 0: makes z compose under actions (path-dependent), violating loop closure.
+    action_delta_z: float = 0.0
 
     # k-step rollout consistency in z-space.
     # Encourages short-horizon compositionality without forcing long-horizon rigidity.
+    # Keep at 0: pushes z toward action-compositional dynamics rather than place invariance.
     rollout_kstep_z: float = 0.0
 
     # Pixel reconstruction on predicted z rollouts (decode z_roll vs x_{t+k}).
+    # Keep at 0: ties z rollouts to action effects, which should live in h/p instead.
     rollout_recon_z: float = 0.0
 
     # Projection consistency on predicted z rollouts (enc(dec(z_roll)) vs z_roll).
+    # Keep at 0: reinforces action-conditioned z trajectories, hurting loop closure.
     rollout_project_z: float = 0.0
 
     # --- H ---
