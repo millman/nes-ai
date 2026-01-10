@@ -160,7 +160,7 @@ def compute_composability_series(
 
     if z_embeddings.shape[1] < warmup + 3:
         empty = _empty_series()
-        return {"z": empty, "h": empty, "p": empty, "f": empty, "s": empty}
+        return {"z": empty, "h": empty, "p": empty, "s": empty}
     z = z_embeddings[:, warmup:]
     h = h_states[:, warmup:]
     a = actions[:, warmup:]
@@ -168,7 +168,7 @@ def compute_composability_series(
     steps = t - 2
     if steps <= 0:
         empty = _empty_series()
-        return {"z": empty, "h": empty, "p": empty, "f": empty, "s": empty}
+        return {"z": empty, "h": empty, "p": empty, "s": empty}
 
     z_t = z[:, :steps]
     z_tp1 = z[:, 1 : steps + 1]
@@ -176,9 +176,7 @@ def compute_composability_series(
     h_t = h[:, :steps]
     h_tp2 = h[:, 2 : steps + 2]
     p = model.h2p(h)
-    f = model.h2f(h)
     p_tp2 = p[:, 2 : steps + 2]
-    f_tp2 = f[:, 2 : steps + 2]
     a_t = a[:, :steps]
     a_tp1 = a[:, 1 : steps + 1]
 
@@ -197,12 +195,10 @@ def compute_composability_series(
     h2 = h2.view(b, steps, -1)
     h2_to_z = model.h_to_z(h2)
     p2_pred = model.h2p(h2)
-    f2_pred = model.h2f(h2)
 
     actual_z = torch.norm(pred2 - z_tp2, dim=-1)
     actual_h = torch.norm(h2_to_z - z_tp2, dim=-1)
     actual_p = torch.norm(p2_pred - p_tp2, dim=-1)
-    actual_f = torch.norm(f2_pred - f_tp2, dim=-1)
 
     delta_z1 = model.z_action_delta_projector(flat_a_t).view(b, steps, -1)
     delta_z2 = model.z_action_delta_projector(flat_a_tp1).view(b, steps, -1)
@@ -216,8 +212,6 @@ def compute_composability_series(
     add_h = torch.norm(h_add - h_tp2, dim=-1)
     p_add = model.h2p(h_add)
     add_p = torch.norm(p_add - p_tp2, dim=-1)
-    f_add = model.h2f(h_add)
-    add_f = torch.norm(f_add - f_tp2, dim=-1)
 
     action_ids = compress_actions_to_ids(a_t.reshape(-1, a_t.shape[-1])).view(b, steps).cpu().numpy()
     action_ids_next = compress_actions_to_ids(a_tp1.reshape(-1, a_tp1.shape[-1])).view(b, steps).cpu().numpy()
@@ -257,11 +251,9 @@ def compute_composability_series(
         )
 
     pose_series = build_series(actual_p, add_p)
-    desc_series = build_series(actual_f, add_f)
     return {
         "z": build_series(actual_z, add_z),
         "h": build_series(actual_h, add_h),
         "p": pose_series,
-        "f": desc_series,
         "s": pose_series,
     }

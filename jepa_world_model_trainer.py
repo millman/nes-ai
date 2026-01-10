@@ -3079,11 +3079,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     rolling_vis_dir = run_dir / "vis_rolling"
     pca_z_dir = run_dir / "pca_z"
     pca_p_dir = run_dir / "pca_p"
-    pca_f_dir = run_dir / "pca_f"
     pca_h_dir = run_dir / "pca_h"
     diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
     diagnostics_delta_p_dir = run_dir / "vis_delta_p_pca"
-    diagnostics_delta_f_dir = run_dir / "vis_delta_f_pca"
     diagnostics_delta_h_dir = run_dir / "vis_delta_h_pca"
     diagnostics_alignment_dir = run_dir / "vis_action_alignment_z"
     diagnostics_alignment_raw_dir = run_dir / "vis_action_alignment_z_raw"
@@ -3091,20 +3089,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_alignment_p_dir = run_dir / "vis_action_alignment_p"
     diagnostics_alignment_p_raw_dir = run_dir / "vis_action_alignment_p_raw"
     diagnostics_alignment_p_centered_dir = run_dir / "vis_action_alignment_p_centered"
-    diagnostics_alignment_f_dir = run_dir / "vis_action_alignment_f"
-    diagnostics_alignment_f_raw_dir = run_dir / "vis_action_alignment_f_raw"
-    diagnostics_alignment_f_centered_dir = run_dir / "vis_action_alignment_f_centered"
     diagnostics_alignment_h_dir = run_dir / "vis_action_alignment_h"
     diagnostics_alignment_h_raw_dir = run_dir / "vis_action_alignment_h_raw"
     diagnostics_alignment_h_centered_dir = run_dir / "vis_action_alignment_h_centered"
     diagnostics_cycle_dir = run_dir / "vis_cycle_error_z"
     diagnostics_cycle_p_dir = run_dir / "vis_cycle_error_p"
-    diagnostics_cycle_f_dir = run_dir / "vis_cycle_error_f"
     diagnostics_cycle_h_dir = run_dir / "vis_cycle_error_h"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
     diagnostics_rollout_divergence_dir = run_dir / "vis_rollout_divergence"
     diagnostics_straightline_p_dir = run_dir / "vis_straightline_p"
-    diagnostics_straightline_f_dir = run_dir / "vis_straightline_f"
     diagnostics_z_consistency_dir = run_dir / "vis_z_consistency"
     diagnostics_z_monotonicity_dir = run_dir / "vis_z_monotonicity"
     diagnostics_path_independence_dir = run_dir / "vis_path_independence"
@@ -3114,7 +3107,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     spike_diagnostics_dir = run_dir / "spike_diagnostics"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_p_dir = run_dir / "graph_diagnostics_p"
-    graph_diagnostics_f_dir = run_dir / "graph_diagnostics_f"
     graph_diagnostics_h_dir = run_dir / "graph_diagnostics_h"
     vis_ctrl_dir = run_dir / "vis_vis_ctrl"
     vis_off_manifold_dir = run_dir / "vis_off_manifold"
@@ -3124,17 +3116,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     pair_vis_dir = run_dir / "vis_pairs"
     vis_self_distance_z_dir = run_dir / "vis_self_distance_z"
     vis_self_distance_p_dir = run_dir / "vis_self_distance_p"
-    vis_self_distance_f_dir = run_dir / "vis_self_distance_f"
     vis_self_distance_h_dir = run_dir / "vis_self_distance_h"
     vis_composability_z_dir = run_dir / "vis_composability_z"
     vis_composability_p_dir = run_dir / "vis_composability_p"
-    vis_composability_f_dir = run_dir / "vis_composability_f"
     vis_composability_h_dir = run_dir / "vis_composability_h"
     vis_state_embedding_dir = run_dir / "vis_state_embedding"
     vis_odometry_dir = run_dir / "vis_odometry"
     self_distance_z_dir = run_dir / "self_distance_z"
     self_distance_p_dir = run_dir / "self_distance_p"
-    self_distance_f_dir = run_dir / "self_distance_f"
     self_distance_h_dir = run_dir / "self_distance_h"
     checkpoints_dir = run_dir / "checkpoints"
 
@@ -3156,12 +3145,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     metrics_dir.mkdir(parents=True, exist_ok=True)
     pca_z_dir.mkdir(parents=True, exist_ok=True)
     pca_p_dir.mkdir(parents=True, exist_ok=True)
-    pca_f_dir.mkdir(parents=True, exist_ok=True)
     pca_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.diagnostics.enabled:
         diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_delta_p_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_delta_f_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_delta_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_raw_dir.mkdir(parents=True, exist_ok=True)
@@ -3169,24 +3156,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_alignment_p_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_p_raw_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_p_centered_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_alignment_f_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_alignment_f_raw_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_alignment_f_centered_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_raw_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_alignment_h_centered_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_p_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_cycle_f_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_cycle_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
         vis_composability_z_dir.mkdir(parents=True, exist_ok=True)
         vis_composability_p_dir.mkdir(parents=True, exist_ok=True)
-        vis_composability_f_dir.mkdir(parents=True, exist_ok=True)
         vis_composability_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_rollout_divergence_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_straightline_p_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_straightline_f_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_z_consistency_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_z_monotonicity_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_path_independence_dir.mkdir(parents=True, exist_ok=True)
@@ -3198,7 +3179,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     if cfg.graph_diagnostics.enabled:
         graph_diagnostics_dir.mkdir(parents=True, exist_ok=True)
         graph_diagnostics_p_dir.mkdir(parents=True, exist_ok=True)
-        graph_diagnostics_f_dir.mkdir(parents=True, exist_ok=True)
         graph_diagnostics_h_dir.mkdir(parents=True, exist_ok=True)
     if cfg.vis_ctrl.enabled:
         vis_ctrl_dir.mkdir(parents=True, exist_ok=True)
@@ -3207,13 +3187,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_p_dir.mkdir(parents=True, exist_ok=True)
-    vis_self_distance_f_dir.mkdir(parents=True, exist_ok=True)
     vis_self_distance_h_dir.mkdir(parents=True, exist_ok=True)
     vis_state_embedding_dir.mkdir(parents=True, exist_ok=True)
     vis_odometry_dir.mkdir(parents=True, exist_ok=True)
     self_distance_z_dir.mkdir(parents=True, exist_ok=True)
     self_distance_p_dir.mkdir(parents=True, exist_ok=True)
-    self_distance_f_dir.mkdir(parents=True, exist_ok=True)
     self_distance_h_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3627,7 +3605,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     use_z2h_init=weights.z2h > 0,
                 )
                 p_embeddings = model.h2p(h_states)
-                f_embeddings = model.h2f(h_states)
             assert torch.is_grad_enabled()
             save_embedding_projection(
                 embed_outputs["embeddings"],
@@ -3638,11 +3615,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 p_embeddings,
                 pca_p_dir / f"pca_p_{global_step:07d}.png",
                 "PCA p",
-            )
-            save_embedding_projection(
-                f_embeddings,
-                pca_f_dir / f"pca_f_{global_step:07d}.png",
-                "PCA f",
             )
             save_embedding_projection(
                 h_states,
@@ -3681,7 +3653,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 )
                 self_dist_h_states = self_dist_h_states_batch[0]
                 self_dist_p = model.h2p(self_dist_h_states.unsqueeze(0))[0]
-                self_dist_f = model.h2f(self_dist_h_states.unsqueeze(0))[0]
             assert torch.is_grad_enabled()
             write_self_distance_outputs(
                 self_dist_embeddings,
@@ -3715,17 +3686,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 title_prefix="Self-distance (P)",
                 file_prefix="self_distance_p",
                 cosine_prefix="self_distance_p_cosine",
-            )
-            write_self_distance_outputs(
-                self_dist_f,
-                self_distance_inputs,
-                self_distance_f_dir,
-                vis_self_distance_f_dir,
-                global_step,
-                embedding_label="f",
-                title_prefix="Self-distance (F)",
-                file_prefix="self_distance_f",
-                cosine_prefix="self_distance_f_cosine",
             )
             hist_frames = rolling_batch_cpu[0]
             hist_actions = rolling_batch_cpu[1]
@@ -3762,7 +3722,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         use_z2h_init=weights.z2h > 0,
                     )
                     diag_p_embeddings = model.h2p(diag_h_states)
-                    diag_f_embeddings = model.h2f(diag_h_states)
                 diag_composability = compute_composability_series(
                     model,
                     diag_embeddings,
@@ -3985,12 +3944,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.diagnostics.top_k_components,
                     diag_paths,
                 )
-                motion_f = build_motion_subspace(
-                    diag_f_embeddings,
-                    diag_actions,
-                    cfg.diagnostics.top_k_components,
-                    diag_paths,
-                )
                 save_composability_plot(
                     vis_composability_z_dir / f"composability_z_{global_step:07d}.png",
                     diag_composability["z"],
@@ -4005,11 +3958,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     vis_composability_p_dir / f"composability_p_{global_step:07d}.png",
                     diag_p_series,
                     "p",
-                )
-                save_composability_plot(
-                    vis_composability_f_dir / f"composability_f_{global_step:07d}.png",
-                    diag_composability["f"],
-                    "f",
                 )
                 alignment_stats_z, alignment_debug_z, (cycle_errors_z, cycle_per_action_z) = _write_motion_bundle(
                     "z",
@@ -4038,15 +3986,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     diagnostics_alignment_p_centered_dir,
                     diagnostics_cycle_p_dir,
                 )
-                alignment_stats_f, alignment_debug_f, (cycle_errors_f, cycle_per_action_f) = _write_motion_bundle(
-                    "f",
-                    motion_f,
-                    diagnostics_delta_f_dir,
-                    diagnostics_alignment_f_dir,
-                    diagnostics_alignment_f_raw_dir,
-                    diagnostics_alignment_f_centered_dir,
-                    diagnostics_cycle_f_dir,
-                )
                 write_alignment_debug_csv(
                     diag_frames,
                     diag_actions,
@@ -4066,18 +4005,14 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 z_norm_mean, z_norm_p95 = _compute_norm_stats(diag_embeddings)
                 h_norm_mean, h_norm_p95 = _compute_norm_stats(diag_h_states)
                 p_norm_mean, p_norm_p95 = _compute_norm_stats(diag_p_embeddings)
-                f_norm_mean, f_norm_p95 = _compute_norm_stats(diag_f_embeddings)
                 if diag_h_states.shape[1] >= 2:
                     h_drift = diag_h_states[:, 1:] - diag_h_states[:, :-1]
                     p_drift = diag_p_embeddings[:, 1:] - diag_p_embeddings[:, :-1]
-                    f_drift = diag_f_embeddings[:, 1:] - diag_f_embeddings[:, :-1]
                     h_drift_mean = float(h_drift.norm(dim=-1).mean().item())
                     p_drift_mean = float(p_drift.norm(dim=-1).mean().item())
-                    f_drift_mean = float(f_drift.norm(dim=-1).mean().item())
                 else:
                     h_drift_mean = 0.0
                     p_drift_mean = 0.0
-                    f_drift_mean = 0.0
                 id_acc_p = 0.0
                 if diag_p_embeddings.shape[1] >= 2:
                     action_logits_p = model.inverse_dynamics_p(
@@ -4096,11 +4031,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         "h_norm_p95",
                         "p_norm_mean",
                         "p_norm_p95",
-                        "f_norm_mean",
-                        "f_norm_p95",
                         "h_drift_mean",
                         "p_drift_mean",
-                        "f_drift_mean",
                         "id_acc_p",
                     ],
                     [
@@ -4111,11 +4043,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         h_norm_p95,
                         p_norm_mean,
                         p_norm_p95,
-                        f_norm_mean,
-                        f_norm_p95,
                         h_drift_mean,
                         p_drift_mean,
-                        f_drift_mean,
                         id_acc_p,
                     ],
                 )
@@ -4129,8 +4058,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         h_p95_list: List[float] = []
                         p_mean_list: List[float] = []
                         p_p95_list: List[float] = []
-                        f_mean_list: List[float] = []
-                        f_p95_list: List[float] = []
                         for row in reader:
                             steps_list.append(int(float(row["step"])))
                             z_mean_list.append(float(row["z_norm_mean"]))
@@ -4139,8 +4066,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                             h_p95_list.append(float(row["h_norm_p95"]))
                             p_mean_list.append(float(row.get("p_norm_mean", row.get("s_norm_mean", 0.0))))
                             p_p95_list.append(float(row.get("p_norm_p95", row.get("s_norm_p95", 0.0))))
-                            f_mean_list.append(float(row.get("f_norm_mean", 0.0)))
-                            f_p95_list.append(float(row.get("f_norm_p95", 0.0)))
                     if steps_list:
                         save_norm_timeseries_plot(
                             diagnostics_norm_timeseries_dir / f"norm_timeseries_{global_step:07d}.png",
@@ -4151,8 +4076,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                             h_p95_list,
                             p_mean_list,
                             p_p95_list,
-                            f_mean_list,
-                            f_p95_list,
                         )
                 except OSError:
                     pass

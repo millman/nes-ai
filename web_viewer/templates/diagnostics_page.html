@@ -81,14 +81,6 @@
         <div class="diagnostic-status-label">ID acc (P)</div>
         <div class="diagnostic-status-value" data-status-metric="id_acc_p">—</div>
     </div>
-    <div class="diagnostic-status-item">
-        <div class="diagnostic-status-label">||f|| mean</div>
-        <div class="diagnostic-status-value" data-status-metric="f_norm_mean">—</div>
-    </div>
-    <div class="diagnostic-status-item">
-        <div class="diagnostic-status-label">||f|| p95</div>
-        <div class="diagnostic-status-value" data-status-metric="f_norm_p95">—</div>
-    </div>
 </div>
 <div class="plot-pin-wrapper mb-3" id="diagnostics-loss-wrapper">
     <button
@@ -354,28 +346,28 @@ document.addEventListener("DOMContentLoaded", () => {
     const viewLabel = "{{ view_label }}";
     const deltaKey = viewLabel === "h"
         ? "delta_h_pca"
-        : (viewLabel === "p" ? "delta_s_pca" : (viewLabel === "f" ? "delta_f_pca" : "delta_z_pca"));
+        : (viewLabel === "p" ? "delta_s_pca" : "delta_z_pca");
     const alignmentKey = viewLabel === "h"
         ? "action_alignment_detail_h"
-        : (viewLabel === "p" ? "action_alignment_detail_s" : (viewLabel === "f" ? "action_alignment_detail_f" : "action_alignment_detail"));
+        : (viewLabel === "p" ? "action_alignment_detail_s" : "action_alignment_detail");
     const cycleKey = viewLabel === "h"
         ? "cycle_error_h"
-        : (viewLabel === "p" ? "cycle_error_s" : (viewLabel === "f" ? "cycle_error_f" : "cycle_error"));
+        : (viewLabel === "p" ? "cycle_error_s" : "cycle_error");
     const selfDistanceKey = viewLabel === "h"
         ? "self_distance_h"
-        : (viewLabel === "p" ? "self_distance_p" : (viewLabel === "f" ? "self_distance_f" : "self_distance"));
+        : (viewLabel === "p" ? "self_distance_p" : "self_distance");
     const deltaTitle = viewLabel === "h"
         ? "Delta-h PCA"
-        : (viewLabel === "p" ? "Delta-p PCA" : (viewLabel === "f" ? "Delta-f PCA" : "Delta-z PCA"));
+        : (viewLabel === "p" ? "Delta-p PCA" : "Delta-z PCA");
     const alignmentTitle = viewLabel === "h"
         ? "Action alignment (H)"
-        : (viewLabel === "p" ? "Action alignment (P)" : (viewLabel === "f" ? "Action alignment (F)" : "Action alignment"));
+        : (viewLabel === "p" ? "Action alignment (P)" : "Action alignment");
     const cycleTitle = viewLabel === "h"
         ? "Cycle error (H)"
-        : (viewLabel === "p" ? "Cycle error (P)" : (viewLabel === "f" ? "Cycle error (F)" : "Cycle error (Z)"));
+        : (viewLabel === "p" ? "Cycle error (P)" : "Cycle error (Z)");
     const selfDistanceTitle = viewLabel === "h"
         ? "Self-distance (H)"
-        : (viewLabel === "p" ? "Self-distance (P)" : (viewLabel === "f" ? "Self-distance (F)" : "Self-distance (Z)"));
+        : (viewLabel === "p" ? "Self-distance (P)" : "Self-distance (Z)");
     const DIAGNOSTICS_CONFIG = {
         targets: {
             [deltaKey]: {

@@ -56,7 +56,7 @@
                     <li class="nav-item d-none d-lg-block text-white-50">|</li>
                     <li class="nav-item dropdown">
                         {% set diagnostics_active = current_nav in [
-                            'diagnostics', 'diagnostics_h', 'diagnostics_p', 'diagnostics_f', 'diagnostics_zhp',
+                            'diagnostics', 'diagnostics_h', 'diagnostics_p', 'diagnostics_zhp',
                             'graph_diagnostics_z', 'graph_diagnostics_h', 'graph_diagnostics_s', 'graph_diagnostics_zhp',
                             'odometry', 'vis_ctrl'
                         ] %}
@@ -66,23 +66,20 @@
                         <ul class="dropdown-menu dropdown-menu-end">
                             <li><h6 class="dropdown-header">Diagnostics</h6></li>
                             {% if active_experiment_id %}
-                            <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_zhp' else '' }}" href="{{ url_for('diagnostics_zhp', exp_id=active_experiment_id) }}">Z/H/P/F overview</a></li>
+                            <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_zhp' else '' }}" href="{{ url_for('diagnostics_zhp', exp_id=active_experiment_id) }}">Z/H/P overview</a></li>
                             <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics_z', exp_id=active_experiment_id) }}">Z diagnostics</a></li>
                             <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_h' else '' }}" href="{{ url_for('diagnostics_h', exp_id=active_experiment_id) }}">H diagnostics</a></li>
                             <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_p' else '' }}" href="{{ url_for('diagnostics_p', exp_id=active_experiment_id) }}">P diagnostics</a></li>
-                            <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_f' else '' }}" href="{{ url_for('diagnostics_f', exp_id=active_experiment_id) }}">F diagnostics</a></li>
                             {% elif first_experiment_id %}
-                            <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_zhp' else '' }}" href="{{ url_for('diagnostics_zhp', exp_id=first_experiment_id) }}">Z/H/P/F overview</a></li>
+                            <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_zhp' else '' }}" href="{{ url_for('diagnostics_zhp', exp_id=first_experiment_id) }}">Z/H/P overview</a></li>
                             <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics' else '' }}" href="{{ url_for('diagnostics_z', exp_id=first_experiment_id) }}">Z diagnostics</a></li>
                             <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_h' else '' }}" href="{{ url_for('diagnostics_h', exp_id=first_experiment_id) }}">H diagnostics</a></li>
                             <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_p' else '' }}" href="{{ url_for('diagnostics_p', exp_id=first_experiment_id) }}">P diagnostics</a></li>
-                            <li><a class="dropdown-item {{ 'active' if current_nav == 'diagnostics_f' else '' }}" href="{{ url_for('diagnostics_f', exp_id=first_experiment_id) }}">F diagnostics</a></li>
                             {% else %}
-                            <li><span class="dropdown-item disabled">Z/H/P/F overview</span></li>
+                            <li><span class="dropdown-item disabled">Z/H/P overview</span></li>
                             <li><span class="dropdown-item disabled">Z diagnostics</span></li>
                             <li><span class="dropdown-item disabled">H diagnostics</span></li>
                             <li><span class="dropdown-item disabled">P diagnostics</span></li>
-                            <li><span class="dropdown-item disabled">F diagnostics</span></li>
                             {% endif %}
                             <li><hr class="dropdown-divider"></li>
                             <li><h6 class="dropdown-header">Graph + rollout</h6></li>

@@ -39,13 +39,11 @@ from .experiments import (
     write_archived,
     _diagnostics_exists,
     _diagnostics_s_exists,
-    _diagnostics_f_exists,
     _graph_diagnostics_exists,
     _vis_ctrl_exists,
     _collect_visualization_steps,
     extract_alignment_summary,
     _quick_self_distance_p_csv,
-    _quick_self_distance_f_csv,
 )
 from .plots import build_overlay, build_ranking_accuracy_plot
 
@@ -740,77 +738,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
-    @app.route("/self_distance_f", defaults={"exp_id": None})
-    @app.route("/self_distance_f/<exp_id>")
-    def self_distance_f(exp_id: Optional[str]):
-        requested = exp_id or request.args.get("id")
-
-        def _latest_self_distance_f_id() -> Optional[str]:
-            index_rows = build_experiment_index(cfg.output_dir)
-            if not index_rows:
-                return None
-            sorted_rows = sorted(
-                index_rows,
-                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
-                reverse=True,
-            )
-            for row in sorted_rows:
-                if _quick_self_distance_f_csv(row.path):
-                    return row.id
-            return None
-
-        selected_id: Optional[str] = None
-        if requested:
-            requested_path = cfg.output_dir / requested
-            if requested_path.is_dir():
-                if _quick_self_distance_f_csv(requested_path):
-                    selected_id = requested
-        if selected_id is None:
-            selected_id = _latest_self_distance_f_id()
-
-        if selected_id is None:
-            return render_template(
-                "self_distance_page.html",
-                experiments=[],
-                experiment=None,
-                page_title="Self-distance (F)",
-                csv_name="self_distance_f.csv",
-                cfg=cfg,
-                active_nav="self_distance_f",
-                active_experiment_id=None,
-                first_experiment_id=None,
-            )
-
-        selected = load_experiment(
-            cfg.output_dir / selected_id,
-            include_self_distance_f=True,
-        )
-        if selected is None or selected.self_distance_f_csv is None:
-            abort(404, "Experiment not found for self-distance (F).")
-
-        figure = _build_single_experiment_figure(selected)
-
-        return render_template(
-            "self_distance_page.html",
-            experiments=[],
-            experiment=selected,
-            figure=figure,
-            page_title="Self-distance (F)",
-            csv_name="self_distance_f.csv",
-            csv_file=selected.self_distance_f_csv,
-            csv_url=url_for(
-                "serve_asset",
-                relative_path=f"{selected.id}/{selected.self_distance_f_csv.relative_to(selected.path)}",
-            ),
-            images_list=selected.self_distance_f_images,
-            images_folder="vis_self_distance_f",
-            redirect_url_base=url_for("self_distance_f"),
-            cfg=cfg,
-            active_nav="self_distance_f",
-            active_experiment_id=selected.id,
-            first_experiment_id=selected.id,
-        )
-
     @app.route("/self_distance_s", defaults={"exp_id": None})
     @app.route("/self_distance_s/<exp_id>")
     def self_distance_s(exp_id: Optional[str]):
@@ -989,13 +916,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 return old_dir
             return None
 
-        def _resolve_self_distance_f_csv_dir(exp_path: Path) -> Optional[Path]:
-            new_dir = exp_path / "self_distance_f"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_f_*.csv"))
-            if new_has:
-                return new_dir
-            return None
-
         def _resolve_self_distance_h_csv_dir(exp_path: Path) -> Optional[Path]:
             new_dir = exp_path / "self_distance_h"
             new_has = new_dir.exists() and any(new_dir.glob("self_distance_h_*.csv"))
@@ -1078,7 +998,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 "self_distance_zhp.html",
                 experiments=[],
                 experiment=None,
-                page_title="Self-distance (Z/H/P/F)",
+                page_title="Self-distance (Z/H/P)",
                 cfg=cfg,
                 active_nav="self_distance_zhp",
                 active_experiment_id=None,
@@ -1089,7 +1009,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg.output_dir / selected_id,
             include_self_distance=True,
             include_self_distance_p=True,
-            include_self_distance_f=True,
             include_state_embedding=True,
         )
         h_dir = _resolve_self_distance_h_csv_dir(selected.path) if selected else None
@@ -1109,19 +1028,16 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         figure = _build_single_experiment_figure(selected)
 
-        page_title = "Self-distance (Z/H/P/F)" if selected.self_distance_f_csv is not None else "Self-distance (Z/H/P)"
         return render_template(
             "self_distance_zhp.html",
             experiments=[],
             experiment=selected,
             figure=figure,
-            page_title=page_title,
+            page_title="Self-distance (Z/H/P)",
             self_distance_h_csv=latest_h_csv,
             self_distance_h_images=self_distance_h_images,
             self_distance_p_csv=selected.self_distance_p_csv,
             self_distance_p_images=selected.self_distance_p_images,
-            self_distance_f_csv=selected.self_distance_f_csv,
-            self_distance_f_images=selected.self_distance_f_images or [],
             cfg=cfg,
             active_nav="self_distance_zhp",
             active_experiment_id=selected.id,
@@ -1762,161 +1678,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             first_experiment_id=selected.id,
         )
 
-    @app.route("/diagnostics_f", defaults={"exp_id": None})
-    @app.route("/diagnostics_f/<exp_id>")
-    def diagnostics_f(exp_id: Optional[str]):
-        route_start = time.perf_counter()
-        requested = exp_id or request.args.get("id")
-
-        def _latest_diagnostics_f_id() -> Optional[str]:
-            index_rows = build_experiment_index(cfg.output_dir)
-            if not index_rows:
-                return None
-            sorted_rows = sorted(
-                index_rows,
-                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
-                reverse=True,
-            )
-            for row in sorted_rows:
-                if _diagnostics_f_exists(row.path):
-                    return row.id
-            return sorted_rows[0].id if sorted_rows else None
-
-        selected_id: Optional[str] = None
-        if requested:
-            requested_path = cfg.output_dir / requested
-            if requested_path.is_dir():
-                selected_id = requested
-        if selected_id is None:
-            selected_id = _latest_diagnostics_f_id()
-
-        if selected_id is None:
-            return render_template(
-                "diagnostics_page.html",
-                view_label="f",
-                page_title="Diagnostics (F)",
-                no_experiment_message="No experiment selected.",
-                experiments=[],
-                experiment=None,
-                diagnostics_map={},
-                diagnostics_csv_map={},
-                diagnostics_scalars={},
-                frame_map={},
-                cfg=cfg,
-                active_nav="diagnostics_f",
-                active_experiment_id=None,
-                first_experiment_id=None,
-            )
-
-        selected = load_experiment(
-            cfg.output_dir / selected_id,
-            include_diagnostics_frames=True,
-            include_diagnostics_f=True,
-        )
-        if selected is None:
-            abort(404, "Experiment not found for diagnostics (F).")
-
-        build_maps_start = time.perf_counter()
-        figure = _build_single_experiment_figure(selected)
-        diagnostics_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_f_images.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
-            if per_step:
-                diagnostics_map[name] = per_step
-
-        diagnostics_csv_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_f_csvs.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
-            if per_step:
-                diagnostics_csv_map[name] = per_step
-
-        if selected.self_distance_f_images:
-            per_step = {}
-            for path in selected.self_distance_f_images:
-                stem = path.stem
-                if "cosine" in stem:
-                    continue
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
-            if per_step:
-                diagnostics_map["self_distance_f"] = per_step
-
-        step_set: set[int] = set()
-        for per_step in diagnostics_map.values():
-            step_set.update(per_step.keys())
-        for per_step in diagnostics_csv_map.values():
-            step_set.update(per_step.keys())
-        diagnostics_steps = sorted(step_set) if step_set else selected.diagnostics_f_steps
-
-        frame_map: Dict[int, List[Dict[str, str]]] = {}
-        for step, frames in selected.diagnostics_frames.items():
-            entries: List[Dict[str, str]] = []
-            for img_path, src_path, action_label, action_id in frames:
-                try:
-                    rel = img_path.relative_to(selected.path)
-                except ValueError:
-                    continue
-                entries.append(
-                    {
-                        "url": url_for("serve_asset", relative_path=f"{selected.id}/{rel}"),
-                        "source": src_path or rel.as_posix(),
-                        "action": action_label or "",
-                        "action_id": "" if action_id is None else str(action_id),
-                    }
-                )
-            if entries:
-                frame_map[step] = entries
-
-        _log_timing(
-            "diagnostics_f.build_maps",
-            build_maps_start,
-            images=sum(len(v) for v in diagnostics_map.values()),
-            csvs=sum(len(v) for v in diagnostics_csv_map.values()),
-            frames=sum(len(v) for v in frame_map.values()),
-        )
-        _log_timing("diagnostics_f.total", route_start, selected=selected.id)
-        return render_template(
-            "diagnostics_page.html",
-            view_label="f",
-            page_title="Diagnostics (F)",
-            no_experiment_message="No experiment selected.",
-            experiments=[],
-            experiment=selected,
-            diagnostic_steps=diagnostics_steps,
-            diagnostics_map=diagnostics_map,
-            diagnostics_csv_map=diagnostics_csv_map,
-            diagnostics_scalars=_load_diagnostics_scalars(selected.path),
-            frame_map=frame_map,
-            figure=figure,
-            cfg=cfg,
-            active_nav="diagnostics_f",
-            active_experiment_id=selected.id,
-            first_experiment_id=selected.id,
-        )
-
     @app.route("/diagnostics_zhp", defaults={"exp_id": None})
     @app.route("/diagnostics_zhp/<exp_id>")
     def diagnostics_zhp(exp_id: Optional[str]):
@@ -1936,12 +1697,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             for row in sorted_rows:
                 has_z = _diagnostics_exists(row.path)
                 has_p = _diagnostics_s_exists(row.path)
-                has_f = _diagnostics_f_exists(row.path)
-                if has_z and has_p and has_f:
-                    return row.id
                 if has_z and has_p:
                     return row.id
-                if fallback is None and (has_z or has_p or has_f):
+                if fallback is None and (has_z or has_p):
                     fallback = row.id
             return fallback
 
@@ -1961,7 +1719,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 diagnostics_map_z={},
                 diagnostics_map_h={},
                 diagnostics_map_p={},
-                diagnostics_map_f={},
                 diagnostics_scalars={},
                 diagnostic_steps=[],
                 figure=None,
@@ -1976,10 +1733,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             include_self_distance=True,
             include_diagnostics_images=True,
             include_diagnostics_s=True,
-            include_diagnostics_f=True,
             include_state_embedding=True,
             include_self_distance_p=True,
-            include_self_distance_f=True,
         )
         if selected is None:
             abort(404, "Experiment not found for diagnostics.")
@@ -2033,21 +1788,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             if per_step:
                 diagnostics_map_p[name] = per_step
 
-        diagnostics_map_f: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_f_images.items():
-            per_step = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
-            if per_step:
-                diagnostics_map_f[name] = per_step
-
         pose_images = selected.self_distance_p_images or selected.state_embedding_images
         if pose_images:
             per_step = {}
@@ -2064,22 +1804,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
             if per_step:
                 diagnostics_map_p["self_distance_p"] = per_step
-
-        if selected.self_distance_f_images:
-            per_step = {}
-            for path in selected.self_distance_f_images:
-                stem = path.stem
-                if "cosine" in stem:
-                    continue
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
-            if per_step:
-                diagnostics_map_f["self_distance_f"] = per_step
 
         diagnostics_map_h: Dict[str, Dict[int, str]] = {}
         diagnostics_map_h["delta_h_pca"] = _collect_step_map_from_dir(
@@ -2111,8 +1835,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             step_set.update(per_step.keys())
         for per_step in diagnostics_map_p.values():
             step_set.update(per_step.keys())
-        for per_step in diagnostics_map_f.values():
-            step_set.update(per_step.keys())
         diagnostic_steps = sorted(step_set)
 
         _log_timing(
@@ -2122,7 +1844,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 sum(len(v) for v in diagnostics_map_z.values())
                 + sum(len(v) for v in diagnostics_map_h.values())
                 + sum(len(v) for v in diagnostics_map_p.values())
-                + sum(len(v) for v in diagnostics_map_f.values())
             ),
         )
         _log_timing("diagnostics_zhp.total", route_start, selected=selected.id)
@@ -2133,7 +1854,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             diagnostics_map_z=diagnostics_map_z,
             diagnostics_map_h=diagnostics_map_h,
             diagnostics_map_p=diagnostics_map_p,
-            diagnostics_map_f=diagnostics_map_f,
             diagnostics_scalars=_load_diagnostics_scalars(selected.path),
             diagnostic_steps=diagnostic_steps,
             figure=figure,
@@ -2760,11 +2480,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg.output_dir / selected_id,
             include_self_distance=True,
             include_self_distance_p=True,
-            include_self_distance_f=True,
             include_state_embedding=True,
             include_diagnostics_images=True,
             include_diagnostics_s=True,
-            include_diagnostics_f=True,
         )
         if selected is None:
             abort(404, "Experiment not found for assessment.")
@@ -3047,23 +2765,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             judgement=p_judgement,
             judgement_detail=p_thresholds,
         )
-        if selected.self_distance_f_csv:
-            f_metric = _self_distance_metric(selected.self_distance_f_csv)
-            f_judgement, f_thresholds = _judge_low(f_metric, 0.2, 0.4)
-            _add_row(
-                "self_distance_f",
-                "Self-distance (F)",
-                csv_files=[selected.self_distance_f_csv],
-                csv_prefixes=["self_distance_f_"],
-                image_paths=selected.self_distance_f_images,
-                image_prefixes=["self_distance_f_"],
-                image_skip=["cosine"],
-                diagnostic="Descriptor stability across time; lower drift is better.",
-                metric_label="cosine distance to prior",
-                metric_value=f_metric,
-                judgement=f_judgement,
-                judgement_detail=f_thresholds,
-            )
         delta_csvs = _pick_preferred_csv(
             selected.diagnostics_s_csvs.get("delta_s_pca", []),
             ["delta_p_pca_variance_", "delta_s_pca_variance_"],
@@ -3140,26 +2841,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             judgement=straight_judgement,
             judgement_detail=straight_thresholds,
         )
-        if selected.diagnostics_f_csvs.get("action_alignment_f"):
-            align_f_csvs = _pick_preferred_csv(
-                selected.diagnostics_f_csvs.get("action_alignment_f", []),
-                ["action_alignment_", "action_alignment_report_", "action_alignment_strength_"],
-            )
-            align_f_metric = _action_alignment_metric(align_f_csvs[-1]) if align_f_csvs else None
-            align_f_judgement, align_f_thresholds = _judge_high(align_f_metric, 0.6, 0.4)
-            _add_row(
-                "action_alignment_f",
-                "Action alignment (F)",
-                csv_files=align_f_csvs,
-                csv_prefixes=["action_alignment_"],
-                image_paths=selected.diagnostics_f_images.get("action_alignment_detail_f", []),
-                image_prefixes=["action_alignment_detail_"],
-                diagnostic="Descriptor alignment by action; moderate alignment is preferred.",
-                metric_label="mean cosine",
-                metric_value=align_f_metric,
-                judgement=align_f_judgement,
-                judgement_detail=align_f_thresholds,
-            )
         z_consistency_csvs = selected.diagnostics_csvs.get("z_consistency", [])
         z_consistency_metric, z_metric_label, z_judgement = _z_consistency_metric(
             z_consistency_csvs[-1] if z_consistency_csvs else None

@@ -243,7 +243,7 @@ const IMAGE_FOLDER_DESCRIPTIONS = {
   vis_straightline_s: "Straight-line action rays in P. Read: repeated actions trace straight paths; opposite actions mirror. Good: clean rays.",
   vis_h_ablation: "H ablation divergence. Read: compare rollout errors with normal vs zeroed H. Good: minimal gap in fully observable settings.",
   vis_h_drift_by_action: "H drift by action. Read: mean ||h_{t+1}-h_t|| grouped by action. Good: low, consistent drift.",
-  vis_norm_timeseries: "Norm stability for Z/H/P/F. Read: mean and p95 norms over steps. Good: stable, bounded lines.",
+  vis_norm_timeseries: "Norm stability for Z/H/P. Read: mean and p95 norms over steps. Good: stable, bounded lines.",
   vis_graph_rank1_cdf_z: "Rank-1 CDF for Z graph. Read: distribution of top-1 neighbor accuracy. Good: high values at low thresholds.",
   vis_graph_rank2_cdf_z: "Rank-2 CDF for Z graph. Read: distribution of top-2 neighbor accuracy. Good: high values at low thresholds.",
   vis_graph_neff_violin_z: "Neighborhood size (N_eff) for Z. Read: violin plot of effective neighbor counts. Good: consistent, moderate neighborhood sizes.",
