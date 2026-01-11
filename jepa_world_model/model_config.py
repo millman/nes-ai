@@ -12,12 +12,24 @@ class LayerNormConfig:
 
     h2z_projector: bool = False
     z2h_projector: bool = False
-    h2s_projector: bool = False
-    delta_projector: bool = False
-    action_delta_projector: bool = False
+    h2p_projector: bool = False
+
+    # Action deltas are learned residual updates applied repeatedly over rollout time,
+    # so their scale directly compounds. Poorly scaled deltas can explode gradients
+    # because each step adds another unnormalized update to h/p, amplifying errors and
+    # destabilizing training. LayerNorm is especially suitable here because it
+    # normalizes the additive update itself, keeping step-to-step residual magnitude
+    # consistent without constraining the base representation. In contrast, LayerNorm
+    # on core encoders/decoders or main state embeddings can wash out absolute scale or
+    # interfere with downstream losses that rely on raw feature magnitudes. The delta
+    # projector is the most "safe" place to normalize because it governs residual
+    # corrections rather than the primary representational content.
+    action_delta_projector_z: Optional[bool] = True
+    action_delta_projector_h: Optional[bool] = True
+    action_delta_projector_p: Optional[bool] = True
+
     inverse_dynamics: bool = False
     h_next: bool = False
-
 
 @dataclass
 class ModelConfig:

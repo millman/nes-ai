@@ -547,8 +547,10 @@ class LossWeights:
     inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
     inverse_dynamics_h: float = 1.0
-    # Inverse dynamics from consecutive h pairs (p_t, p_{t+1}).
-    inverse_dynamics_p: float = 1.0
+    # Inverse dynamics from consecutive p pairs (p_t, p_{t+1}).
+    # Keep at 0: pushes p to encode action identity/scale, which conflicts with geometric invariance
+    # (p should encode place/pose, allow no-motion steps, and stay bounded for planning).
+    inverse_dynamics_p: float = 0.0
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
@@ -586,7 +588,7 @@ class LossWeights:
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
-    rollout_kstep_h: float = 0.0
+    rollout_kstep_h: float = 1.0
 
     # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
@@ -787,14 +789,14 @@ class JEPAWorldModel(nn.Module):
             pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.state_embed_unit_norm,
-            use_layer_norm=cfg.layer_norms.h2s_projector,
+            use_layer_norm=cfg.layer_norms.h2p_projector,
         )
         self.h2f = HiddenToStateProjector(
             cfg.state_dim,
             desc_dim if desc_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.descriptor_unit_norm,
-            use_layer_norm=cfg.layer_norms.h2s_projector,
+            use_layer_norm=cfg.layer_norms.h2p_projector,
         )
         # Backwards-compatible aliases for legacy names.
         self.h_to_z = HiddenToZProjector(
@@ -827,23 +829,22 @@ class JEPAWorldModel(nn.Module):
             cfg.action_dim,
             use_layer_norm=cfg.layer_norms.inverse_dynamics,
         )
+        self.z_action_delta_projector = ActionDeltaProjector(
+            cfg.action_dim,
+            self.embedding_dim,
+            use_layer_norm=cfg.layer_norms.action_delta_projector_z,
+        )
         self.h_action_delta_projector = HiddenActionDeltaProjector(
             cfg.state_dim,
             cfg.action_dim,
             cfg.hidden_dim,
-            use_layer_norm=cfg.layer_norms.action_delta_projector,
+            use_layer_norm=cfg.layer_norms.action_delta_projector_h,
         )
         self.p_action_delta_projector = HiddenActionDeltaProjector(
             pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.action_dim,
             cfg.hidden_dim,
-            use_layer_norm=cfg.layer_norms.action_delta_projector,
-        )
-        self.s_action_delta_projector = self.p_action_delta_projector
-        self.z_action_delta_projector = ActionDeltaProjector(
-            cfg.action_dim,
-            self.embedding_dim,
-            use_layer_norm=cfg.layer_norms.action_delta_projector,
+            use_layer_norm=cfg.layer_norms.action_delta_projector_p,
         )
 
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -890,7 +891,7 @@ def _rollout_pose(
     actions: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build pose observations from h and integrate pose deltas over actions."""
-    pose_obs = model.h2p(h_states)
+    pose_obs = model.h2p(h_states.detach())
     bsz, steps, dim = pose_obs.shape
     if steps <= 1 or actions.shape[1] < 1:
         zero_delta = pose_obs.new_zeros((bsz, 0, dim))
