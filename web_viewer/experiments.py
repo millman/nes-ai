@@ -949,6 +949,9 @@ VIS_STEP_SPECS = [
     ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
     ("vis_cycle_error_h", "vis_cycle_error_h", "cycle_error_*.png", "cycle_error_"),
     ("vis_rollout_divergence", "vis_rollout_divergence", "rollout_divergence_*.png", "rollout_divergence_"),
+    ("vis_rollout_divergence_z", "vis_rollout_divergence_z", "rollout_divergence_z_*.png", "rollout_divergence_z_"),
+    ("vis_rollout_divergence_h", "vis_rollout_divergence_h", "rollout_divergence_h_*.png", "rollout_divergence_h_"),
+    ("vis_rollout_divergence_p", "vis_rollout_divergence_p", "rollout_divergence_p_*.png", "rollout_divergence_p_"),
     ("vis_z_consistency", "vis_z_consistency", "z_consistency_*.png", "z_consistency_"),
     ("vis_z_monotonicity", "vis_z_monotonicity", "z_monotonicity_*.png", "z_monotonicity_"),
     ("vis_path_independence", "vis_path_independence", "path_independence_*.png", "path_independence_"),
@@ -1277,11 +1280,17 @@ def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
         cycle_imgs = sorted(fallback_dir.glob("*.png")) if fallback_dir.exists() else []
     if cycle_imgs:
         images["cycle_error"] = cycle_imgs
-    rollout_dir = root / "vis_rollout_divergence"
+    rollout_dir = root / "vis_rollout_divergence_z"
+    rollout_imgs: List[Path] = []
     if rollout_dir.exists():
-        rollout_imgs = sorted(rollout_dir.glob("rollout_divergence_*.png"))
-        if rollout_imgs:
-            images["rollout_divergence"] = rollout_imgs
+        rollout_imgs = sorted(rollout_dir.glob("rollout_divergence_z_*.png"))
+    if not rollout_imgs:
+        fallback_dir = root / "vis_rollout_divergence"
+        if fallback_dir.exists():
+            rollout_imgs = sorted(fallback_dir.glob("rollout_divergence_*.png"))
+    if rollout_imgs:
+        images["rollout_divergence"] = rollout_imgs
+        images["rollout_divergence_z"] = rollout_imgs
     consistency_dir = root / "vis_z_consistency"
     if consistency_dir.exists():
         consistency_imgs = sorted(consistency_dir.glob("z_consistency_*.png"))
@@ -1325,6 +1334,13 @@ def _collect_diagnostics_images_s(root: Path) -> Dict[str, List[Path]]:
             root / "vis_straightline_s",
             "straightline_s_*.png",
         ),
+        (
+            "rollout_divergence_p",
+            root / "vis_rollout_divergence_p",
+            "rollout_divergence_p_*.png",
+            root / "vis_rollout_divergence_p",
+            "rollout_divergence_p_*.png",
+        ),
     ]
     images: Dict[str, List[Path]] = {}
     for name, folder, pattern, fallback_folder, fallback_pattern in diag_specs:
@@ -1351,6 +1367,9 @@ def _diagnostics_exists(root: Path) -> bool:
         root / "vis_cycle_error_p",
         root / "vis_diagnostics_frames",
         root / "vis_rollout_divergence",
+        root / "vis_rollout_divergence_z",
+        root / "vis_rollout_divergence_h",
+        root / "vis_rollout_divergence_p",
         root / "vis_z_consistency",
         root / "vis_z_monotonicity",
         root / "vis_path_independence",
@@ -1374,6 +1393,7 @@ def _diagnostics_s_exists(root: Path) -> bool:
         root / "vis_action_alignment_s",
         root / "vis_cycle_error_s",
         root / "vis_straightline_s",
+        root / "vis_rollout_divergence_p",
     ]
     suffixes = (".png", ".csv", ".txt")
     for folder in diag_dirs:
@@ -1413,6 +1433,7 @@ def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
         "cycle_error": cycle_dir,
         "frame_alignment": root / "vis_diagnostics_frames",
         "rollout_divergence": root / "vis_rollout_divergence",
+        "rollout_divergence_z": root / "vis_rollout_divergence_z",
         "z_consistency": root / "vis_z_consistency",
         "z_monotonicity": root / "vis_z_monotonicity",
         "path_independence": root / "vis_path_independence",
@@ -1431,6 +1452,7 @@ def _collect_diagnostics_csvs_s(root: Path) -> Dict[str, List[Path]]:
         ("delta_s_pca", root / "vis_delta_p_pca", root / "vis_delta_s_pca"),
         ("action_alignment_s", root / "vis_action_alignment_p", root / "vis_action_alignment_s"),
         ("cycle_error_s", root / "vis_cycle_error_p", root / "vis_cycle_error_s"),
+        ("rollout_divergence_p", root / "vis_rollout_divergence_p", root / "vis_rollout_divergence_p"),
     ]
     csvs: Dict[str, List[Path]] = {}
     for name, folder, fallback_folder in diag_dirs:

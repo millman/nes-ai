@@ -11,6 +11,9 @@ const FOLDER_GROUP_PRESETS = {
   rollout_r1: ["vis_rolling_1"],
   health_checks: [
     "vis_rollout_divergence",
+    "vis_rollout_divergence_z",
+    "vis_rollout_divergence_h",
+    "vis_rollout_divergence_p",
     "vis_h_ablation",
     "vis_h_drift_by_action",
     "vis_norm_timeseries",

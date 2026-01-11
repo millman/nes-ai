@@ -1818,6 +1818,13 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         diagnostics_map_h["self_distance_h"] = _collect_step_map_from_dir(
             selected.id, selected.path, "vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"
         )
+        diagnostics_map_h["rollout_divergence_h"] = _collect_step_map_from_dir(
+            selected.id,
+            selected.path,
+            "vis_rollout_divergence_h",
+            "rollout_divergence_h_*.png",
+            "rollout_divergence_h_",
+        )
         diagnostics_map_h["h_ablation"] = _collect_step_map_from_dir(
             selected.id, selected.path, "vis_h_ablation", "h_ablation_*.png", "h_ablation_"
         )

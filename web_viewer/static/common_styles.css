@@ -82,6 +82,14 @@
     height: 250px;
 }
 
+.compare-git-col {
+    min-width: 0;
+}
+
+.compare-git-row pre {
+    max-width: 100%;
+}
+
 .diagnostic-subtitle {
     font-size: 0.88em;
     color: #6c757d;

@@ -3104,7 +3104,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_cycle_p_dir = run_dir / "vis_cycle_error_p"
     diagnostics_cycle_h_dir = run_dir / "vis_cycle_error_h"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
-    diagnostics_rollout_divergence_dir = run_dir / "vis_rollout_divergence"
+    diagnostics_rollout_divergence_z_dir = run_dir / "vis_rollout_divergence_z"
+    diagnostics_rollout_divergence_h_dir = run_dir / "vis_rollout_divergence_h"
+    diagnostics_rollout_divergence_p_dir = run_dir / "vis_rollout_divergence_p"
     diagnostics_straightline_p_dir = run_dir / "vis_straightline_p"
     diagnostics_z_consistency_dir = run_dir / "vis_z_consistency"
     diagnostics_z_monotonicity_dir = run_dir / "vis_z_monotonicity"
@@ -3174,7 +3176,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         vis_composability_z_dir.mkdir(parents=True, exist_ok=True)
         vis_composability_p_dir.mkdir(parents=True, exist_ok=True)
         vis_composability_h_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_rollout_divergence_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_rollout_divergence_z_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_rollout_divergence_h_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_rollout_divergence_p_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_straightline_p_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_z_consistency_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_z_monotonicity_dir.mkdir(parents=True, exist_ok=True)
@@ -4181,7 +4185,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         sample_count = min(cfg.diagnostics.rollout_divergence_samples, total_positions)
                         perm = torch.randperm(total_positions, generator=diagnostics_generator)[:sample_count]
                         pixel_errors = torch.zeros(rollout_horizon, device=device)
-                        latent_errors = torch.zeros(rollout_horizon, device=device)
+                        z_errors = torch.zeros(rollout_horizon, device=device)
+                        h_errors = torch.zeros(rollout_horizon, device=device)
+                        p_errors = torch.zeros(rollout_horizon, device=device)
                         counts = torch.zeros(rollout_horizon, device=device)
                         for flat_idx in perm.tolist():
                             b = flat_idx // start_span
@@ -4201,25 +4207,61 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 h_t = h_next.squeeze(0)
                                 decoded = decoder(z_t.unsqueeze(0))
                                 pixel_errors[k] += RECON_LOSS(decoded, diag_frames_device[b, t0 + k + 1].unsqueeze(0))
+                                z_gt = diag_embeddings[b, t0 + k + 1]
+                                h_gt = diag_h_states[b, t0 + k + 1]
+                                z_errors[k] += (z_t - z_gt).norm()
+                                h_errors[k] += (h_t - h_gt).norm()
                                 p_pred = model.h2p(h_t.unsqueeze(0)).squeeze(0)
                                 p_gt = diag_p_embeddings[b, t0 + k + 1]
-                                latent_errors[k] += (p_pred - p_gt).norm()
+                                p_errors[k] += (p_pred - p_gt).norm()
                                 counts[k] += 1
                         counts = torch.clamp(counts, min=1.0)
                         pixel_mean = (pixel_errors / counts).detach().cpu().numpy().tolist()
-                        latent_mean = (latent_errors / counts).detach().cpu().numpy().tolist()
+                        z_mean = (z_errors / counts).detach().cpu().numpy().tolist()
+                        h_mean = (h_errors / counts).detach().cpu().numpy().tolist()
+                        p_mean = (p_errors / counts).detach().cpu().numpy().tolist()
                         horizons = list(range(1, rollout_horizon + 1))
                         save_rollout_divergence_plot(
-                            diagnostics_rollout_divergence_dir / f"rollout_divergence_{global_step:07d}.png",
+                            diagnostics_rollout_divergence_z_dir / f"rollout_divergence_z_{global_step:07d}.png",
                             horizons,
                             pixel_mean,
-                            latent_mean,
+                            z_mean,
+                            latent_label="Z error",
+                            title="Rollout divergence (Z)",
                         )
                         _write_step_csv(
-                            diagnostics_rollout_divergence_dir,
-                            f"rollout_divergence_{global_step:07d}.csv",
-                            ["k", "pixel_error", "latent_error"],
-                            zip(horizons, pixel_mean, latent_mean),
+                            diagnostics_rollout_divergence_z_dir,
+                            f"rollout_divergence_z_{global_step:07d}.csv",
+                            ["k", "pixel_error", "z_error"],
+                            zip(horizons, pixel_mean, z_mean),
+                        )
+                        save_rollout_divergence_plot(
+                            diagnostics_rollout_divergence_h_dir / f"rollout_divergence_h_{global_step:07d}.png",
+                            horizons,
+                            pixel_mean,
+                            h_mean,
+                            latent_label="H error",
+                            title="Rollout divergence (H)",
+                        )
+                        _write_step_csv(
+                            diagnostics_rollout_divergence_h_dir,
+                            f"rollout_divergence_h_{global_step:07d}.csv",
+                            ["k", "pixel_error", "h_error"],
+                            zip(horizons, pixel_mean, h_mean),
+                        )
+                        save_rollout_divergence_plot(
+                            diagnostics_rollout_divergence_p_dir / f"rollout_divergence_p_{global_step:07d}.png",
+                            horizons,
+                            pixel_mean,
+                            p_mean,
+                            latent_label="P error",
+                            title="Rollout divergence (P)",
+                        )
+                        _write_step_csv(
+                            diagnostics_rollout_divergence_p_dir,
+                            f"rollout_divergence_p_{global_step:07d}.csv",
+                            ["k", "pixel_error", "p_error"],
+                            zip(horizons, pixel_mean, p_mean),
                         )
 
                 z_consistency_samples = min(

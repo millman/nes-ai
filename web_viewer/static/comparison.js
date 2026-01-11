@@ -498,7 +498,7 @@ function buildExperimentGrid(experiments) {
   const metaRow = buildSectionRow(
     "Metadata",
     experiments,
-    (exp, index) => buildMetadataCell(exp, index)
+    (exp) => buildMetadataCell(exp)
   );
   container.appendChild(metaRow);
 
@@ -506,7 +506,8 @@ function buildExperimentGrid(experiments) {
   const gitMetaRow = buildSectionRow(
     "Git Metadata",
     experiments,
-    (exp) => buildGitMetadataCell(exp)
+    (exp) => buildGitMetadataCell(exp),
+    { rowClass: "compare-git-row", colClass: "compare-git-col" }
   );
   container.appendChild(gitMetaRow);
 
@@ -531,13 +532,13 @@ function buildPreviewRows(experiments, folderValues) {
   return container;
 }
 
-function buildSectionRow(title, experiments, cellBuilder) {
+function buildSectionRow(title, experiments, cellBuilder, options = {}) {
   const row = document.createElement("div");
-  row.className = "row g-3";
+  row.className = `row g-3 ${options.rowClass || ""}`.trim();
 
   experiments.forEach((exp, index) => {
     const col = document.createElement("div");
-    col.className = "col";
+    col.className = `col ${options.colClass || ""}`.trim();
     col.dataset.expColumn = exp.id;
     const cell = cellBuilder(exp, index);
     col.appendChild(cell);
@@ -775,32 +776,26 @@ function getIdsFromDataset() {
   return container.dataset.selectedIds.split(",").filter(Boolean);
 }
 
-function buildMetadataCell(exp, index) {
+function buildMetadataCell(exp) {
   const container = document.createElement("div");
   const pre = document.createElement("pre");
   pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
   pre.style.maxHeight = "280px";
-  if (index === 0) {
-    pre.textContent = exp.metadata;
-  } else {
-    pre.textContent = exp.metadata_diff || "(no diff)";
-  }
+  pre.textContent = exp.metadata || "(no metadata)";
   container.appendChild(pre);
   return container;
 }
 
 function buildGitMetadataCell(exp) {
-  const container = document.createElement("div");
-  container.style.overflow = "hidden";
   const pre = document.createElement("pre");
   pre.className = "bg-dark text-light p-2 rounded mb-0 small";
   pre.style.maxHeight = "280px";
-  pre.style.overflowX = "auto";
-  pre.style.overflowY = "auto";
+  pre.style.overflow = "auto";
   pre.style.whiteSpace = "pre";
+  pre.style.maxWidth = "100%";
+  pre.style.boxSizing = "border-box";
   pre.textContent = exp.git_metadata || "(no git metadata)";
-  container.appendChild(pre);
-  return container;
+  return pre;
 }
 
 function wireExperimentVisibilitySync(plotEl) {

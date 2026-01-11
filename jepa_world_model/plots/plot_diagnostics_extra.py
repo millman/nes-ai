@@ -23,11 +23,12 @@ def save_rollout_divergence_plot(
     horizons: Sequence[int],
     pixel_errors: Sequence[float],
     latent_errors: Sequence[float],
+    latent_label: str = "Latent error",
     title: str = "Rollout divergence",
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(6, 3.2))
     ax.plot(horizons, pixel_errors, marker="o", label="Pixel error")
-    ax.plot(horizons, latent_errors, marker="o", label="Latent error")
+    ax.plot(horizons, latent_errors, marker="o", label=latent_label)
     ax.set_xlabel("Rollout step k")
     ax.set_ylabel("Error")
     ax.set_title(title)
