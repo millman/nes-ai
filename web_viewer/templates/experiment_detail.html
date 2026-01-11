@@ -172,31 +172,15 @@
                     if (!opt) {
                         return { key: folderValue, folder: folderValue, prefix: "rollout_" };
                     }
-                    if (
-                        opt.preferredFolder
-                        && vizSteps
-                        && Array.isArray(vizSteps[opt.preferredFolder])
-                        && vizSteps[opt.preferredFolder].length
-                    ) {
-                        return {
-                            key: opt.preferredFolder,
-                            folder: opt.preferredFolderPath || opt.preferredFolder,
-                            prefix: opt.preferredPrefix || opt.prefix,
-                        };
+                    const candidates = getImageCandidates(opt);
+                    for (let i = 0; i < candidates.length; i++) {
+                        const candidate = candidates[i];
+                        if (vizSteps && Array.isArray(vizSteps[candidate.key]) && vizSteps[candidate.key].length) {
+                            return { key: candidate.key, folder: candidate.folder, prefix: candidate.prefix };
+                        }
                     }
-                    const directSteps = vizSteps && vizSteps[folderValue];
-                    if (
-                        opt.legacyFolder
-                        && (!Array.isArray(directSteps) || !directSteps.length)
-                        && vizSteps
-                        && Array.isArray(vizSteps[opt.legacyFolder])
-                        && vizSteps[opt.legacyFolder].length
-                    ) {
-                        return {
-                            key: opt.legacyFolder,
-                            folder: opt.legacyFolderPath || opt.legacyFolder,
-                            prefix: opt.legacyPrefix || opt.prefix,
-                        };
+                    if (candidates.length) {
+                        return { key: candidates[0].key, folder: candidates[0].folder, prefix: candidates[0].prefix };
                     }
                     return { key: folderValue, folder: opt.folder || opt.value, prefix: opt.prefix };
                 }

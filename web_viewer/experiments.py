@@ -1009,6 +1009,69 @@ def _parse_step_from_stem(stem: str, prefix: str) -> Optional[int]:
         return None
 
 
+def _first_existing_files(
+    root: Path,
+    candidates: Sequence[Tuple[str, str]],
+    *,
+    allow_multiple: bool = False,
+    conflict_label: str = "candidates",
+) -> List[Path]:
+    hits: List[List[Path]] = []
+    for folder_name, pattern in candidates:
+        folder = root / folder_name
+        if not folder.exists():
+            continue
+        files = sorted(folder.glob(pattern))
+        if files:
+            hits.append(files)
+            if allow_multiple:
+                break
+    if len(hits) > 1 and not allow_multiple:
+        raise ValueError(f"Multiple {conflict_label} contain files in {root}.")
+    return hits[0] if hits else []
+
+
+def _first_existing_csvs(
+    root: Path,
+    folders: Sequence[str],
+    *,
+    allow_multiple: bool = False,
+    conflict_label: str = "CSV folders",
+) -> List[Path]:
+    hits: List[List[Path]] = []
+    for folder_name in folders:
+        folder = root / folder_name
+        if not folder.exists():
+            continue
+        files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
+        if files:
+            hits.append(files)
+            if allow_multiple:
+                break
+    if len(hits) > 1 and not allow_multiple:
+        raise ValueError(f"Multiple {conflict_label} contain files in {root}.")
+    return hits[0] if hits else []
+
+
+def _first_existing_steps(
+    root: Path,
+    candidates: Sequence[Tuple[str, str, str]],
+) -> List[int]:
+    for folder_name, pattern, prefix in candidates:
+        folder = root / folder_name
+        if not folder.exists():
+            continue
+        steps: set[int] = set()
+        for png in folder.glob(pattern):
+            step = _parse_step_from_stem(png.stem, prefix)
+            if step is None:
+                continue
+            steps.add(step)
+        if steps:
+            return sorted(steps)
+    return []
+
+
 def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
     """Gather per-visualization step lists used for comparison previews."""
     step_map: Dict[str, List[int]] = {}
@@ -1028,45 +1091,41 @@ def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
         if steps:
             step_map[key] = sorted(steps)
     if "vis_self_distance_z" not in step_map:
-        fallback_folder = root / "vis_self_distance"
-        if fallback_folder.exists():
-            steps = set()
-            for png in fallback_folder.glob("self_distance_*.png"):
-                step = _parse_step_from_stem(png.stem, "self_distance_")
-                if step is not None:
-                    steps.add(step)
-            if steps:
-                step_map["vis_self_distance_z"] = sorted(steps)
+        steps = _first_existing_steps(
+            root,
+            [
+                ("vis_self_distance", "self_distance_*.png", "self_distance_"),
+            ],
+        )
+        if steps:
+            step_map["vis_self_distance_z"] = steps
     if "vis_self_distance_s" not in step_map:
-        fallback_folder = root / "vis_state_embedding"
-        if fallback_folder.exists():
-            steps = set()
-            for png in fallback_folder.glob("state_embedding_[0-9]*.png"):
-                step = _parse_step_from_stem(png.stem, "state_embedding_")
-                if step is not None:
-                    steps.add(step)
-            if steps:
-                step_map["vis_self_distance_s"] = sorted(steps)
+        steps = _first_existing_steps(
+            root,
+            [
+                ("vis_state_embedding", "state_embedding_[0-9]*.png", "state_embedding_"),
+            ],
+        )
+        if steps:
+            step_map["vis_self_distance_s"] = steps
     if "vis_action_alignment_detail_z" not in step_map:
-        fallback_folder = root / "vis_action_alignment"
-        if fallback_folder.exists():
-            steps = set()
-            for png in fallback_folder.glob("action_alignment_detail_*.png"):
-                step = _parse_step_from_stem(png.stem, "action_alignment_detail_")
-                if step is not None:
-                    steps.add(step)
-            if steps:
-                step_map["vis_action_alignment_detail_z"] = sorted(steps)
+        steps = _first_existing_steps(
+            root,
+            [
+                ("vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
+            ],
+        )
+        if steps:
+            step_map["vis_action_alignment_detail_z"] = steps
     if "vis_cycle_error" not in step_map:
-        fallback_folder = root / "vis_cycle_error"
-        if fallback_folder.exists():
-            steps = set()
-            for png in fallback_folder.glob("cycle_error_*.png"):
-                step = _parse_step_from_stem(png.stem, "cycle_error_")
-                if step is not None:
-                    steps.add(step)
-            if steps:
-                step_map["vis_cycle_error"] = sorted(steps)
+        steps = _first_existing_steps(
+            root,
+            [
+                ("vis_cycle_error", "cycle_error_*.png", "cycle_error_"),
+            ],
+        )
+        if steps:
+            step_map["vis_cycle_error"] = steps
     legacy_graph = root / "graph_diagnostics"
     if legacy_graph.exists():
         legacy_specs = [
@@ -1091,43 +1150,60 @@ def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
 
 
 def _collect_self_distance_images(root: Path) -> List[Path]:
-    new_folder = root / "vis_self_distance_z"
-    old_folder = root / "vis_self_distance"
-    new_files = sorted(new_folder.glob("self_distance_z_*.png")) if new_folder.exists() else []
-    old_files = sorted(old_folder.glob("self_distance_*.png")) if old_folder.exists() else []
-    if new_files and old_files:
-        raise ValueError("Both vis_self_distance_z and vis_self_distance contain self-distance images.")
-    return new_files or old_files
+    return _first_existing_files(
+        root,
+        [
+            ("vis_self_distance_z", "self_distance_z_*.png"),
+            ("vis_self_distance", "self_distance_*.png"),
+        ],
+        conflict_label="self-distance image folders",
+    )
 
 
 def _collect_self_distance_images_p(root: Path) -> List[Path]:
-    new_folder = root / "vis_self_distance_p"
-    legacy_folder = root / "vis_self_distance_s"
-    old_folder = root / "vis_state_embedding"
-    new_files = sorted(new_folder.glob("self_distance_p_*.png")) if new_folder.exists() else []
-    legacy_files = sorted(legacy_folder.glob("self_distance_s_*.png")) if legacy_folder.exists() else []
-    old_files = sorted(old_folder.glob("state_embedding_[0-9]*.png")) if old_folder.exists() else []
-    if new_files and legacy_files:
-        raise ValueError("Both vis_self_distance_p and vis_self_distance_s contain self-distance images.")
-    if new_files and old_files:
-        raise ValueError("Both vis_self_distance_p and vis_state_embedding contain self-distance images.")
-    if legacy_files and old_files:
-        raise ValueError("Both vis_self_distance_s and vis_state_embedding contain self-distance images.")
-    return new_files or legacy_files or old_files
+    return _first_existing_files(
+        root,
+        [
+            ("vis_self_distance_p", "self_distance_p_*.png"),
+            ("vis_self_distance_s", "self_distance_s_*.png"),
+            ("vis_state_embedding", "state_embedding_[0-9]*.png"),
+        ],
+        conflict_label="pose self-distance image folders",
+    )
 
 
 def _collect_state_embedding_images(root: Path) -> List[Path]:
     hist_folder = root / "vis_state_embedding"
     hist_files = sorted(hist_folder.glob("state_embedding_hist_*.png")) if hist_folder.exists() else []
-    new_folder = root / "vis_self_distance_s"
-    new_files = []
-    if new_folder.exists():
-        new_files = sorted(new_folder.glob("self_distance_cosine_*.png")) + sorted(new_folder.glob("self_distance_s_*.png"))
-    old_files = []
-    if hist_folder.exists():
-        old_files = (
-            sorted(hist_folder.glob("state_embedding_cosine_*.png"))
-            + sorted(hist_folder.glob("state_embedding_[0-9]*.png"))
+    new_files = _first_existing_files(
+        root,
+        [
+            ("vis_self_distance_s", "self_distance_cosine_*.png"),
+        ],
+        conflict_label="state embedding cosine images",
+    )
+    if new_files:
+        new_files += _first_existing_files(
+            root,
+            [
+                ("vis_self_distance_s", "self_distance_s_*.png"),
+            ],
+            conflict_label="state embedding distance images",
+        )
+    old_files = _first_existing_files(
+        root,
+        [
+            ("vis_state_embedding", "state_embedding_cosine_*.png"),
+        ],
+        conflict_label="legacy state embedding cosine images",
+    )
+    if old_files:
+        old_files += _first_existing_files(
+            root,
+            [
+                ("vis_state_embedding", "state_embedding_[0-9]*.png"),
+            ],
+            conflict_label="legacy state embedding distance images",
         )
     if new_files and old_files:
         raise ValueError("Both vis_state_embedding and vis_self_distance_s contain self-distance images.")
@@ -1142,39 +1218,37 @@ def _collect_odometry_images(root: Path) -> List[Path]:
 
 
 def _collect_state_embedding_csvs(root: Path) -> List[Path]:
-    new_folder = root / "self_distance_s"
-    old_folder = root / "state_embedding"
-    new_files = sorted(new_folder.glob("self_distance_s_*.csv")) if new_folder.exists() else []
-    old_files = sorted(old_folder.glob("state_embedding_*.csv")) if old_folder.exists() else []
-    if new_files and old_files:
-        raise ValueError("Both self_distance_s and state_embedding contain self-distance CSVs.")
-    return new_files or old_files
+    return _first_existing_files(
+        root,
+        [
+            ("self_distance_s", "self_distance_s_*.csv"),
+            ("state_embedding", "state_embedding_*.csv"),
+        ],
+        conflict_label="state embedding CSV folders",
+    )
 
 
 def _collect_self_distance_csvs(root: Path) -> List[Path]:
-    new_folder = root / "self_distance_z"
-    old_folder = root / "self_distance"
-    new_files = sorted(new_folder.glob("self_distance_z_*.csv")) if new_folder.exists() else []
-    old_files = sorted(old_folder.glob("self_distance_*.csv")) if old_folder.exists() else []
-    if new_files and old_files:
-        raise ValueError("Both self_distance_z and self_distance contain self-distance CSVs.")
-    return new_files or old_files
+    return _first_existing_files(
+        root,
+        [
+            ("self_distance_z", "self_distance_z_*.csv"),
+            ("self_distance", "self_distance_*.csv"),
+        ],
+        conflict_label="self-distance CSV folders",
+    )
 
 
 def _collect_self_distance_csvs_p(root: Path) -> List[Path]:
-    new_folder = root / "self_distance_p"
-    legacy_folder = root / "self_distance_s"
-    old_folder = root / "state_embedding"
-    new_files = sorted(new_folder.glob("self_distance_p_*.csv")) if new_folder.exists() else []
-    legacy_files = sorted(legacy_folder.glob("self_distance_s_*.csv")) if legacy_folder.exists() else []
-    old_files = sorted(old_folder.glob("state_embedding_*.csv")) if old_folder.exists() else []
-    if new_files and legacy_files:
-        raise ValueError("Both self_distance_p and self_distance_s contain self-distance CSVs.")
-    if new_files and old_files:
-        raise ValueError("Both self_distance_p and state_embedding contain self-distance CSVs.")
-    if legacy_files and old_files:
-        raise ValueError("Both self_distance_s and state_embedding contain self-distance CSVs.")
-    return new_files or legacy_files or old_files
+    return _first_existing_files(
+        root,
+        [
+            ("self_distance_p", "self_distance_p_*.csv"),
+            ("self_distance_s", "self_distance_s_*.csv"),
+            ("state_embedding", "state_embedding_*.csv"),
+        ],
+        conflict_label="pose self-distance CSV folders",
+    )
 
 
 def _ensure_model_diff(path: Path) -> str:
@@ -1265,29 +1339,35 @@ def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
         if spectrum_imgs:
             images["variance_spectrum"] = spectrum_imgs
 
-    alignment_dir = root / "vis_action_alignment_z"
-    alignment_imgs = sorted(alignment_dir.glob("action_alignment_detail_*.png")) if alignment_dir.exists() else []
-    if not alignment_imgs:
-        fallback_dir = root / "vis_action_alignment"
-        alignment_imgs = sorted(fallback_dir.glob("action_alignment_detail_*.png")) if fallback_dir.exists() else []
+    alignment_imgs = _first_existing_files(
+        root,
+        [
+            ("vis_action_alignment_z", "action_alignment_detail_*.png"),
+            ("vis_action_alignment", "action_alignment_detail_*.png"),
+        ],
+        conflict_label="action alignment (Z) folders",
+    )
     if alignment_imgs:
         images["action_alignment_detail"] = alignment_imgs
 
-    cycle_dir = root / "vis_cycle_error_z"
-    cycle_imgs = sorted(cycle_dir.glob("*.png")) if cycle_dir.exists() else []
-    if not cycle_imgs:
-        fallback_dir = root / "vis_cycle_error"
-        cycle_imgs = sorted(fallback_dir.glob("*.png")) if fallback_dir.exists() else []
+    cycle_imgs = _first_existing_files(
+        root,
+        [
+            ("vis_cycle_error_z", "*.png"),
+            ("vis_cycle_error", "*.png"),
+        ],
+        conflict_label="cycle error (Z) folders",
+    )
     if cycle_imgs:
         images["cycle_error"] = cycle_imgs
-    rollout_dir = root / "vis_rollout_divergence_z"
-    rollout_imgs: List[Path] = []
-    if rollout_dir.exists():
-        rollout_imgs = sorted(rollout_dir.glob("rollout_divergence_z_*.png"))
-    if not rollout_imgs:
-        fallback_dir = root / "vis_rollout_divergence"
-        if fallback_dir.exists():
-            rollout_imgs = sorted(fallback_dir.glob("rollout_divergence_*.png"))
+    rollout_imgs = _first_existing_files(
+        root,
+        [
+            ("vis_rollout_divergence_z", "rollout_divergence_z_*.png"),
+            ("vis_rollout_divergence", "rollout_divergence_*.png"),
+        ],
+        conflict_label="rollout divergence (Z) folders",
+    )
     if rollout_imgs:
         images["rollout_divergence"] = rollout_imgs
         images["rollout_divergence_z"] = rollout_imgs
@@ -1344,11 +1424,14 @@ def _collect_diagnostics_images_s(root: Path) -> Dict[str, List[Path]]:
     ]
     images: Dict[str, List[Path]] = {}
     for name, folder, pattern, fallback_folder, fallback_pattern in diag_specs:
-        imgs: List[Path] = []
-        if folder.exists():
-            imgs = sorted(folder.glob(pattern))
-        if not imgs and fallback_folder.exists():
-            imgs = sorted(fallback_folder.glob(fallback_pattern))
+        imgs = _first_existing_files(
+            root,
+            [
+                (folder.name, pattern),
+                (fallback_folder.name, fallback_pattern),
+            ],
+            conflict_label=f"{name} folders",
+        )
         if imgs:
             images[name] = imgs
     return images
@@ -1421,29 +1504,27 @@ def _collect_diagnostics_steps(diagnostics_images: Dict[str, List[Path]]) -> Lis
 
 
 def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
-    alignment_dir = root / "vis_action_alignment_z"
-    if not alignment_dir.exists():
-        alignment_dir = root / "vis_action_alignment"
-    cycle_dir = root / "vis_cycle_error_z"
-    if not cycle_dir.exists():
-        cycle_dir = root / "vis_cycle_error"
     diag_dirs = {
-        "delta_z_pca": root / "vis_delta_z_pca",
-        "action_alignment": alignment_dir,
-        "cycle_error": cycle_dir,
-        "frame_alignment": root / "vis_diagnostics_frames",
-        "rollout_divergence": root / "vis_rollout_divergence",
-        "rollout_divergence_z": root / "vis_rollout_divergence_z",
-        "z_consistency": root / "vis_z_consistency",
-        "z_monotonicity": root / "vis_z_monotonicity",
-        "path_independence": root / "vis_path_independence",
+        "delta_z_pca": ["vis_delta_z_pca"],
+        "action_alignment": ["vis_action_alignment_z", "vis_action_alignment"],
+        "cycle_error": ["vis_cycle_error_z", "vis_cycle_error"],
+        "frame_alignment": ["vis_diagnostics_frames"],
+        "rollout_divergence": ["vis_rollout_divergence_z", "vis_rollout_divergence"],
+        "rollout_divergence_z": ["vis_rollout_divergence_z", "vis_rollout_divergence"],
+        "z_consistency": ["vis_z_consistency"],
+        "z_monotonicity": ["vis_z_monotonicity"],
+        "path_independence": ["vis_path_independence"],
     }
     csvs: Dict[str, List[Path]] = {}
-    for name, folder in diag_dirs.items():
-        if folder.exists():
-            files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
-            if files:
-                csvs[name] = files
+    for name, folders in diag_dirs.items():
+        files = _first_existing_csvs(
+            root,
+            folders,
+            allow_multiple=True,
+            conflict_label=f"{name} CSV folders",
+        )
+        if files:
+            csvs[name] = files
     return csvs
 
 
@@ -1456,11 +1537,12 @@ def _collect_diagnostics_csvs_s(root: Path) -> Dict[str, List[Path]]:
     ]
     csvs: Dict[str, List[Path]] = {}
     for name, folder, fallback_folder in diag_dirs:
-        files: List[Path] = []
-        if folder.exists():
-            files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
-        if not files and fallback_folder.exists():
-            files = sorted(fallback_folder.glob("*.csv")) + sorted(fallback_folder.glob("*.txt"))
+        files = _first_existing_csvs(
+            root,
+            [folder.name, fallback_folder.name],
+            allow_multiple=True,
+            conflict_label=f"{name} CSV folders",
+        )
         if files:
             csvs[name] = files
     return csvs
@@ -1562,15 +1644,15 @@ def _collect_vis_ctrl_images(root: Path) -> Dict[str, List[Path]]:
 
 
 def _collect_vis_ctrl_csvs(root: Path) -> List[Path]:
-    metrics_dir = root / "metrics"
-    if metrics_dir.exists():
-        history = metrics_dir / "vis_ctrl_metrics.csv"
-        if history.exists():
-            return [history]
-    folder = root / "vis_ctrl"
-    if not folder.exists():
-        return []
-    return sorted(folder.glob("vis_ctrl_metrics_*.csv"))
+    return _first_existing_files(
+        root,
+        [
+            ("metrics", "vis_ctrl_metrics.csv"),
+            ("vis_ctrl", "vis_ctrl_metrics_*.csv"),
+        ],
+        allow_multiple=True,
+        conflict_label="vis ctrl CSV folders",
+    )
 
 
 def _vis_ctrl_exists(root: Path) -> bool:

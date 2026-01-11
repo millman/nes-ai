@@ -6,15 +6,25 @@ const IMAGE_FOLDER_OPTIONS = [
   { value: "vis_fixed_1", label: "Rollouts:Fixed 1", prefix: "rollout_", folder: "vis_fixed_1" },
   { value: "vis_rolling_0", label: "Rollouts:Rolling 0", prefix: "rollout_", folder: "vis_rolling_0" },
   { value: "vis_rolling_1", label: "Rollouts:Rolling 1", prefix: "rollout_", folder: "vis_rolling_1" },
-  { value: "pca_z", label: "Diagnostics:PCA (Z)", prefix: "pca_z_", folder: "pca_z", legacyPrefix: "embeddings_", legacyFolder: "embeddings" },
+  {
+    value: "pca_z",
+    label: "Diagnostics:PCA (Z)",
+    prefix: "pca_z_",
+    folder: "pca_z",
+    candidates: [
+      { key: "pca_z", folder: "pca_z", prefix: "pca_z_" },
+      { key: "embeddings", folder: "embeddings", prefix: "embeddings_" },
+    ],
+  },
   {
     value: "pca_s",
     label: "Diagnostics:PCA (P)",
     prefix: "pca_s_",
     folder: "pca_s",
-    preferredFolder: "pca_p",
-    preferredFolderPath: "pca_p",
-    preferredPrefix: "pca_p_",
+    candidates: [
+      { key: "pca_p", folder: "pca_p", prefix: "pca_p_" },
+      { key: "pca_s", folder: "pca_s", prefix: "pca_s_" },
+    ],
   },
   { value: "pca_h", label: "Diagnostics:PCA (H)", prefix: "pca_h_", folder: "pca_h" },
   { value: "samples_hard", label: "Samples:Hard", prefix: "hard_", folder: "samples_hard" },
@@ -24,9 +34,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Self-distance:Distance (P)",
     prefix: "self_distance_s_",
     folder: "vis_self_distance_s",
-    preferredFolder: "vis_self_distance_p",
-    preferredFolderPath: "vis_self_distance_p",
-    preferredPrefix: "self_distance_p_",
+    candidates: [
+      { key: "vis_self_distance_p", folder: "vis_self_distance_p", prefix: "self_distance_p_" },
+      { key: "vis_self_distance_s", folder: "vis_self_distance_s", prefix: "self_distance_s_" },
+    ],
   },
   { value: "vis_self_distance_h", label: "Self-distance:Distance (H)", prefix: "self_distance_h_", folder: "vis_self_distance_h" },
   { value: "vis_delta_z_pca", label: "Diagnostics:Delta-z PCA", prefix: "delta_z_pca_", folder: "vis_delta_z_pca" },
@@ -35,9 +46,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Diagnostics:Delta-p PCA",
     prefix: "delta_s_pca_",
     folder: "vis_delta_s_pca",
-    preferredFolder: "vis_delta_p_pca",
-    preferredFolderPath: "vis_delta_p_pca",
-    preferredPrefix: "delta_p_pca_",
+    candidates: [
+      { key: "vis_delta_p_pca", folder: "vis_delta_p_pca", prefix: "delta_p_pca_" },
+      { key: "vis_delta_s_pca", folder: "vis_delta_s_pca", prefix: "delta_s_pca_" },
+    ],
   },
   { value: "vis_delta_h_pca", label: "Diagnostics:Delta-h PCA", prefix: "delta_h_pca_", folder: "vis_delta_h_pca" },
   { value: "vis_odometry_current_z", label: "Odometry:Cumulative sum of Δz PCA/ICA/t-SNE", prefix: "odometry_z_", folder: "vis_odometry" },
@@ -46,8 +58,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Odometry:Cumulative sum of Δp PCA/ICA/t-SNE",
     prefix: "odometry_s_",
     folder: "vis_odometry",
-    preferredFolder: "vis_odometry_current_p",
-    preferredPrefix: "odometry_p_",
+    candidates: [
+      { key: "vis_odometry_current_p", folder: "vis_odometry", prefix: "odometry_p_" },
+      { key: "vis_odometry_current_s", folder: "vis_odometry", prefix: "odometry_s_" },
+    ],
   },
   { value: "vis_odometry_current_h", label: "Odometry:Cumulative sum of Δh PCA/ICA/t-SNE", prefix: "odometry_h_", folder: "vis_odometry" },
   { value: "vis_odometry_z_vs_z_hat", label: "Odometry:||z - z_hat|| + scatter", prefix: "z_vs_z_hat_", folder: "vis_odometry" },
@@ -56,8 +70,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Odometry:||p - p_hat|| + scatter",
     prefix: "s_vs_s_hat_",
     folder: "vis_odometry",
-    preferredFolder: "vis_odometry_p_vs_p_hat",
-    preferredPrefix: "p_vs_p_hat_",
+    candidates: [
+      { key: "vis_odometry_p_vs_p_hat", folder: "vis_odometry", prefix: "p_vs_p_hat_" },
+      { key: "vis_odometry_s_vs_s_hat", folder: "vis_odometry", prefix: "s_vs_s_hat_" },
+    ],
   },
   { value: "vis_odometry_h_vs_h_hat", label: "Odometry:||h - h_hat|| + scatter", prefix: "h_vs_h_hat_", folder: "vis_odometry" },
   { value: "vis_action_alignment_detail_z", label: "Diagnostics:Action alignment of PCA (Z)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_z" },
@@ -68,24 +84,30 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Diagnostics:Action alignment of PCA (P)",
     prefix: "action_alignment_detail_",
     folder: "vis_action_alignment_s",
-    preferredFolder: "vis_action_alignment_detail_p",
-    preferredFolderPath: "vis_action_alignment_p",
+    candidates: [
+      { key: "vis_action_alignment_detail_p", folder: "vis_action_alignment_p", prefix: "action_alignment_detail_" },
+      { key: "vis_action_alignment_detail_s", folder: "vis_action_alignment_s", prefix: "action_alignment_detail_" },
+    ],
   },
   {
     value: "vis_action_alignment_detail_raw_s",
     label: "Diagnostics:Action alignment of raw delta (P)",
     prefix: "action_alignment_detail_",
     folder: "vis_action_alignment_s_raw",
-    preferredFolder: "vis_action_alignment_detail_raw_p",
-    preferredFolderPath: "vis_action_alignment_p_raw",
+    candidates: [
+      { key: "vis_action_alignment_detail_raw_p", folder: "vis_action_alignment_p_raw", prefix: "action_alignment_detail_" },
+      { key: "vis_action_alignment_detail_raw_s", folder: "vis_action_alignment_s_raw", prefix: "action_alignment_detail_" },
+    ],
   },
   {
     value: "vis_action_alignment_detail_centered_s",
     label: "Diagnostics:Action alignment of centered delta (P)",
     prefix: "action_alignment_detail_",
     folder: "vis_action_alignment_s_centered",
-    preferredFolder: "vis_action_alignment_detail_centered_p",
-    preferredFolderPath: "vis_action_alignment_p_centered",
+    candidates: [
+      { key: "vis_action_alignment_detail_centered_p", folder: "vis_action_alignment_p_centered", prefix: "action_alignment_detail_" },
+      { key: "vis_action_alignment_detail_centered_s", folder: "vis_action_alignment_s_centered", prefix: "action_alignment_detail_" },
+    ],
   },
   { value: "vis_action_alignment_detail_h", label: "Diagnostics:Action alignment of PCA (H)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_h" },
   { value: "vis_action_alignment_detail_raw_h", label: "Diagnostics:Action alignment of raw delta (H)", prefix: "action_alignment_detail_", folder: "vis_action_alignment_h_raw" },
@@ -96,9 +118,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Vis v Ctrl:Local smoothness (P)",
     prefix: "smoothness_s_",
     folder: "vis_vis_ctrl",
-    preferredFolder: "vis_ctrl_smoothness_p",
-    preferredFolderPath: "vis_vis_ctrl",
-    preferredPrefix: "smoothness_p_",
+    candidates: [
+      { key: "vis_ctrl_smoothness_p", folder: "vis_vis_ctrl", prefix: "smoothness_p_" },
+      { key: "vis_ctrl_smoothness_s", folder: "vis_vis_ctrl", prefix: "smoothness_s_" },
+    ],
   },
   { value: "vis_ctrl_smoothness_h", label: "Vis v Ctrl:Local smoothness (H)", prefix: "smoothness_h_", folder: "vis_vis_ctrl" },
   { value: "vis_ctrl_composition_z", label: "Vis v Ctrl:Two-step composition error (Z)", prefix: "composition_error_z_", folder: "vis_vis_ctrl" },
@@ -107,9 +130,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Vis v Ctrl:Two-step composition error (P)",
     prefix: "composition_error_s_",
     folder: "vis_vis_ctrl",
-    preferredFolder: "vis_ctrl_composition_p",
-    preferredFolderPath: "vis_vis_ctrl",
-    preferredPrefix: "composition_error_p_",
+    candidates: [
+      { key: "vis_ctrl_composition_p", folder: "vis_vis_ctrl", prefix: "composition_error_p_" },
+      { key: "vis_ctrl_composition_s", folder: "vis_vis_ctrl", prefix: "composition_error_s_" },
+    ],
   },
   { value: "vis_ctrl_composition_h", label: "Vis v Ctrl:Two-step composition error (H)", prefix: "composition_error_h_", folder: "vis_vis_ctrl" },
   { value: "vis_composability_z", label: "Composability:Two-step (Z)", prefix: "composability_z_", folder: "vis_composability_z" },
@@ -118,9 +142,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Composability:Two-step (P)",
     prefix: "composability_s_",
     folder: "vis_composability_s",
-    preferredFolder: "vis_composability_p",
-    preferredFolderPath: "vis_composability_p",
-    preferredPrefix: "composability_p_",
+    candidates: [
+      { key: "vis_composability_p", folder: "vis_composability_p", prefix: "composability_p_" },
+      { key: "vis_composability_s", folder: "vis_composability_s", prefix: "composability_s_" },
+    ],
   },
   { value: "vis_composability_h", label: "Composability:Two-step (H)", prefix: "composability_h_", folder: "vis_composability_h" },
   { value: "vis_off_manifold", label: "Diagnostics:Off-manifold (rollout)", prefix: "off_manifold_", folder: "vis_off_manifold" },
@@ -130,9 +155,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Vis v Ctrl:Neighborhood stability (P)",
     prefix: "stability_s_",
     folder: "vis_vis_ctrl",
-    preferredFolder: "vis_ctrl_stability_p",
-    preferredFolderPath: "vis_vis_ctrl",
-    preferredPrefix: "stability_p_",
+    candidates: [
+      { key: "vis_ctrl_stability_p", folder: "vis_vis_ctrl", prefix: "stability_p_" },
+      { key: "vis_ctrl_stability_s", folder: "vis_vis_ctrl", prefix: "stability_s_" },
+    ],
   },
   { value: "vis_ctrl_stability_h", label: "Vis v Ctrl:Neighborhood stability (H)", prefix: "stability_h_", folder: "vis_vis_ctrl" },
   { value: "vis_cycle_error", label: "Diagnostics:Cycle error (Z)", prefix: "cycle_error_", folder: "vis_cycle_error_z" },
@@ -141,8 +167,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Diagnostics:Cycle error (P)",
     prefix: "cycle_error_",
     folder: "vis_cycle_error_s",
-    preferredFolder: "vis_cycle_error_p",
-    preferredFolderPath: "vis_cycle_error_p",
+    candidates: [
+      { key: "vis_cycle_error_p", folder: "vis_cycle_error_p", prefix: "cycle_error_" },
+      { key: "vis_cycle_error_s", folder: "vis_cycle_error_s", prefix: "cycle_error_" },
+    ],
   },
   { value: "vis_cycle_error_h", label: "Diagnostics:Cycle error (H)", prefix: "cycle_error_", folder: "vis_cycle_error_h" },
   { value: "vis_rollout_divergence", label: "Diagnostics:Rollout divergence", prefix: "rollout_divergence_", folder: "vis_rollout_divergence" },
@@ -157,9 +185,10 @@ const IMAGE_FOLDER_OPTIONS = [
     label: "Diagnostics:Straight-line P",
     prefix: "straightline_s_",
     folder: "vis_straightline_s",
-    preferredFolder: "vis_straightline_p",
-    preferredFolderPath: "vis_straightline_p",
-    preferredPrefix: "straightline_p_",
+    candidates: [
+      { key: "vis_straightline_p", folder: "vis_straightline_p", prefix: "straightline_p_" },
+      { key: "vis_straightline_s", folder: "vis_straightline_s", prefix: "straightline_s_" },
+    ],
   },
   { value: "vis_h_ablation", label: "Diagnostics:H ablation divergence", prefix: "h_ablation_", folder: "vis_h_ablation" },
   { value: "vis_h_drift_by_action", label: "Diagnostics:H drift by action", prefix: "h_drift_by_action_", folder: "vis_h_drift_by_action" },
@@ -269,6 +298,28 @@ const IMAGE_FOLDER_DESCRIPTIONS = {
   vis_graph_edge_consistency_s: "Edge consistency for P graph. Read: measures if similar nodes share edges. Good: high consistency indicates reliable graph structure.",
   vis_graph_metrics_history_s: "Graph metrics history for P. Read: how graph quality metrics evolve over training. Good: improving or stable metrics.",
 };
+
+function getImageCandidates(option) {
+  if (!option) return [];
+  const candidates = [];
+  const seen = new Set();
+  const pushCandidate = (candidate) => {
+    if (!candidate) return;
+    const key = candidate.key || candidate.value || option.value;
+    const folder = candidate.folder || key || option.folder || option.value;
+    const prefix = candidate.prefix || option.prefix;
+    const signature = `${key}:${folder}:${prefix}`;
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    candidates.push({ key, folder, prefix });
+  };
+  if (Array.isArray(option.candidates) && option.candidates.length) {
+    option.candidates.forEach((candidate) => pushCandidate(candidate));
+    return candidates;
+  }
+  pushCandidate({ key: option.value, folder: option.folder || option.value, prefix: option.prefix });
+  return candidates;
+}
 
 // Get option by folder value
 function getImageOption(folderValue) {
