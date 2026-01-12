@@ -398,7 +398,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             exp_start = time.perf_counter()
             exp = load_experiment(
                 row.path,
-                include_odometry=True,
                 include_max_step=False,
                 include_model_diff=True,
                 include_model_diff_generation=True,
@@ -414,7 +413,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             exp_start = time.perf_counter()
             exp = load_experiment(
                 cfg.output_dir / exp_id,
-                include_odometry=True,
                 include_max_step=False,
                 include_model_diff=True,
                 include_model_diff_generation=True,

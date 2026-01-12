@@ -1310,7 +1310,10 @@ def _load_experiment_odometry(
     section_start = time.perf_counter()
     if include_odometry:
         experiment.odometry_images = _collect_from_spec(path, VIS_ODOMETRY_IMAGES_SPEC)
-    experiment.has_odometry_images = bool(experiment.odometry_images)
+        probe = experiment.odometry_images
+    else:
+        probe = _collect_from_spec(path, VIS_ODOMETRY_IMAGES_SPEC, collect_all=False)
+    experiment.has_odometry_images = bool(probe)
     _profile(
         "load_experiment.odometry",
         section_start,
