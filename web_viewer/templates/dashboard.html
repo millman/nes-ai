@@ -356,7 +356,7 @@
                 {% set diff_missing = exp.model_diff_text and exp.model_diff_text.startswith('model_diff.txt missing') %}
                 {% if diff_missing %}
                 <span class="text-muted fst-italic small">missing diff</span>
-                {% elif exp.model_diff_items %}
+                {% elif exp.has_model_diff %}
                 <div class="dashboard-model-diff-content small d-flex align-items-center gap-2">
                     {% for display, full, shortened in exp.model_diff_items %}
                     <span
@@ -469,7 +469,7 @@
                             <path d="M8 4.5c-2.8 0-5.2 1.7-6.5 3.5C2.8 9.8 5.2 11.5 8 11.5s5.2-1.7 6.5-3.5C13.2 6.2 10.8 4.5 8 4.5m0 6c-1.4 0-2.5-1.1-2.5-2.5S6.6 5.5 8 5.5 10.5 6.6 10.5 8 9.4 10.5 8 10.5m0-4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3"/>
                         </svg>
                         </a>
-                        {% if exp.odometry_images %}
+                        {% if exp.has_odometry_images %}
                         <a
                             href="{{ url_for('odometry', exp_id=exp.id) }}"
                             class="btn btn-outline-primary btn-sm"
@@ -487,9 +487,9 @@
                             </svg>
                         </button>
                         {% endif %}
-                        {% set has_diag_z = exp.diagnostics_z_steps %}
-                        {% set has_diag_h = exp.diagnostics_h_steps %}
-                        {% set has_diag_p = exp.diagnostics_p_steps %}
+                        {% set has_diag_z = exp.has_diagnostics_z_steps %}
+                        {% set has_diag_h = exp.has_diagnostics_h_steps %}
+                        {% set has_diag_p = exp.has_diagnostics_p_steps %}
                         {% if has_diag_z or has_diag_h or has_diag_p %}
                         <a
                             href="{{ url_for('diagnostics_zhp', exp_id=exp.id) }}"

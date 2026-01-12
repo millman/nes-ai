@@ -23,28 +23,6 @@ def _first_matching_file(folder: Path, *, exact_name: Optional[str], pattern: st
     return None
 
 
-def _first_existing_matches(
-    root: Path,
-    candidates: Sequence[Tuple[str, Sequence[str]]],
-    *,
-    conflict_label: str = "candidates",
-) -> List[Path]:
-    hits: List[List[Path]] = []
-    for folder_name, patterns in candidates:
-        folder = root / folder_name
-        if not folder.exists():
-            continue
-        files: List[Path] = []
-        for pattern in patterns:
-            files.extend(sorted(folder.glob(pattern)))
-        if files:
-            hits.append(files)
-            break
-    if len(hits) > 1:
-        raise ValueError(f"Multiple {conflict_label} contain files in {root}.")
-    return hits[0] if hits else []
-
-
 def _first_matching_csv_candidate(
     root: Path,
     candidates: Sequence[Tuple[str, str, str, str]],
