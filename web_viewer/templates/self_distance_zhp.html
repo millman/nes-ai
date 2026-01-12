@@ -35,7 +35,7 @@
 <div class="text-muted fst-italic">No matching self-distance outputs found.</div>
 {% else %}
 <div class="small text-muted mb-2">
-    Loaded from {{ experiment.self_distance_csv.name }}, {{ self_distance_h_csv.name }}, {{ self_distance_p_csv.name }}.
+    Loaded from {{ experiment.self_distance_z_csv.name }}, {{ self_distance_h_csv.name }}, {{ self_distance_p_csv.name }}.
 </div>
 <div class="row gy-1 gx-3 mt-3">
     <div class="col-12 col-lg-6">
@@ -169,7 +169,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         return;
     }
-    const zCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.self_distance_csv.relative_to(experiment.path)) }}";
+    const zCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.self_distance_z_csv.relative_to(experiment.path)) }}";
     const hCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_h_csv.relative_to(experiment.path)) }}";
     const pCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_p_csv.relative_to(experiment.path)) }}";
     const plotConfig = buildPlotlyConfig({});
@@ -202,8 +202,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const stepMapZ = {};
     const stepMapH = {};
     const stepMapP = {};
-    {% if experiment.self_distance_images %}
-    {% for img in experiment.self_distance_images %}
+    {% if experiment.self_distance_z_images %}
+    {% for img in experiment.self_distance_z_images %}
     {% if "cosine" not in img.stem %}
     {% set rel_img = img.relative_to(experiment.path) %}
     {% set stem = img.stem.split('_')|last %}
@@ -251,8 +251,8 @@ document.addEventListener("DOMContentLoaded", () => {
     };
 
     const selfDistanceMapZ = {};
-    {% if experiment.self_distance_images %}
-    {% for img in experiment.self_distance_images %}
+    {% if experiment.self_distance_z_images %}
+    {% for img in experiment.self_distance_z_images %}
     {% if "cosine" not in img.stem %}
     {% set rel_img = img.relative_to(experiment.path) %}
     {% set stem = img.stem.split('_')|last %}

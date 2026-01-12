@@ -1,7 +1,7 @@
 // Shared folder selector component for image preview selection
 // Used by Compare and Detail pages
 
-// Uses IMAGE_FOLDER_OPTIONS, getImageOption from image_card_common.js
+// Uses IMAGE_FOLDER_SPECS, getImageOption from image_card_common.js
 
 // Folder group presets - maps group names to folder arrays
 const FOLDER_GROUP_PRESETS = {
@@ -23,18 +23,18 @@ const FOLDER_GROUP_PRESETS = {
   // Diags: Action alignment of PCA, Distance, Cumulative sum
   diags_z: ["vis_action_alignment_detail_z", "vis_self_distance_z", "vis_odometry_current_z"],
   diags_h: ["vis_action_alignment_detail_h", "vis_self_distance_h", "vis_odometry_current_h"],
-  diags_s: ["vis_action_alignment_detail_s", "vis_self_distance_s", "vis_odometry_current_s"],
+  diags_s: ["vis_action_alignment_detail_p", "vis_self_distance_p", "vis_odometry_current_p"],
   // Action: centered delta, PCA, raw delta
   action_z: ["vis_action_alignment_detail_centered_z", "vis_action_alignment_detail_z", "vis_action_alignment_detail_raw_z"],
   action_h: ["vis_action_alignment_detail_centered_h", "vis_action_alignment_detail_h", "vis_action_alignment_detail_raw_h"],
-  action_s: ["vis_action_alignment_detail_centered_s", "vis_action_alignment_detail_s", "vis_action_alignment_detail_raw_s"],
+  action_s: ["vis_action_alignment_detail_centered_p", "vis_action_alignment_detail_p", "vis_action_alignment_detail_raw_p"],
   // Self-distance: distance plots
   self_distance_z: ["vis_self_distance_z"],
   self_distance_h: ["vis_self_distance_h"],
-  self_distance_s: ["vis_self_distance_s"],
+  self_distance_s: ["vis_self_distance_p"],
   composability_z: ["vis_composability_z"],
   composability_h: ["vis_composability_h"],
-  composability_s: ["vis_composability_s"],
+  composability_s: ["vis_composability_p"],
 };
 
 /**
@@ -137,7 +137,7 @@ function createFolderSelector(config) {
   }
 
   function buildDropdownItems() {
-    return IMAGE_FOLDER_OPTIONS.map((opt) => {
+    return IMAGE_FOLDER_SPECS.map((opt) => {
       const item = document.createElement("label");
       item.className = "dropdown-item d-flex align-items-center gap-2";
       item.dataset.value = opt.value;

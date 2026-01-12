@@ -241,7 +241,7 @@
 document.addEventListener("DOMContentLoaded", () => {
     const steps = {{ steps | tojson }};
     const mapZ = {{ vis_ctrl_map_z | tojson }};
-    const mapS = {{ vis_ctrl_map_s | tojson }};
+    const mapP = {{ vis_ctrl_map_p | tojson }};
     const mapH = {{ vis_ctrl_map_h | tojson }};
     const history = {{ history | tojson }};
     const figure = {{ figure | tojson if figure else 'null' }};
@@ -253,15 +253,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const targets = [
         { key: "alignment_z", img: "vis-ctrl-align-z-img", caption: "vis-ctrl-align-z-caption", map: mapZ },
-        { key: "alignment_s", img: "vis-ctrl-align-s-img", caption: "vis-ctrl-align-s-caption", map: mapS },
+        { key: "alignment_p", img: "vis-ctrl-align-s-img", caption: "vis-ctrl-align-s-caption", map: mapP },
         { key: "smoothness_z", img: "vis-ctrl-smooth-z-img", caption: "vis-ctrl-smooth-z-caption", map: mapZ },
-        { key: "smoothness_s", img: "vis-ctrl-smooth-s-img", caption: "vis-ctrl-smooth-s-caption", map: mapS },
+        { key: "smoothness_p", img: "vis-ctrl-smooth-s-img", caption: "vis-ctrl-smooth-s-caption", map: mapP },
         { key: "smoothness_h", img: "vis-ctrl-smooth-h-img", caption: "vis-ctrl-smooth-h-caption", map: mapH },
         { key: "composition_z", img: "vis-ctrl-comp-z-img", caption: "vis-ctrl-comp-z-caption", map: mapZ },
-        { key: "composition_s", img: "vis-ctrl-comp-s-img", caption: "vis-ctrl-comp-s-caption", map: mapS },
+        { key: "composition_p", img: "vis-ctrl-comp-s-img", caption: "vis-ctrl-comp-s-caption", map: mapP },
         { key: "composition_h", img: "vis-ctrl-comp-h-img", caption: "vis-ctrl-comp-h-caption", map: mapH },
         { key: "stability_z", img: "vis-ctrl-stability-z-img", caption: "vis-ctrl-stability-z-caption", map: mapZ },
-        { key: "stability_s", img: "vis-ctrl-stability-s-img", caption: "vis-ctrl-stability-s-caption", map: mapS },
+        { key: "stability_p", img: "vis-ctrl-stability-s-img", caption: "vis-ctrl-stability-s-caption", map: mapP },
         { key: "stability_h", img: "vis-ctrl-stability-h-img", caption: "vis-ctrl-stability-h-caption", map: mapH },
     ];
 

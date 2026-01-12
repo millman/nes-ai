@@ -216,7 +216,7 @@
         const stateEmbeddingMap = {};
         {% if experiment.state_embedding_images %}
         {% for img in experiment.state_embedding_images %}
-        {% if "hist" not in img.stem and "cosine" not in img.stem %}
+        {% if "cosine" not in img.stem %}
         {% set rel_img = img.relative_to(experiment.path) %}
         {% set stem = img.stem.split('_')|last %}
         {% set step = stem|int %}
@@ -233,8 +233,8 @@
             .sort((a, b) => a - b);
 
         const stateEmbeddingHistMap = {};
-        {% if experiment.state_embedding_images %}
-        {% for img in experiment.state_embedding_images %}
+        {% if experiment.state_embedding_hist_images %}
+        {% for img in experiment.state_embedding_hist_images %}
         {% if "hist" in img.stem %}
         {% set rel_img = img.relative_to(experiment.path) %}
         {% set stem = img.stem.split('_')|last %}

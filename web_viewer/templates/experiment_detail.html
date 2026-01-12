@@ -4,6 +4,9 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+<script>
+    window.IMAGE_FOLDER_SPECS = {{ image_folder_specs | tojson }};
+</script>
 <script src="{{ url_for('static', filename='image_card_common.js') }}"></script>
 <script src="{{ url_for('static', filename='folder_selector.js') }}"></script>
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>
@@ -32,9 +35,9 @@
 
 {% if figure %}
 <script>
-    // Uses IMAGE_FOLDER_OPTIONS, IMAGE_FOLDER_DESCRIPTIONS, getImageOption,
-    // getImageDisplayTitle, getImageDescription, buildImagePreviewCard,
-    // initializeImageCardTooltips from image_card_common.js
+    // Uses IMAGE_FOLDER_SPECS, IMAGE_FOLDER_DESCRIPTIONS, getImageOption,
+    // getImageDisplayTitle, getImageDescription, getResolvedImageSpec,
+    // buildImagePreviewCard, initializeImageCardTooltips from image_card_common.js
     // Uses createFolderSelector from folder_selector.js
 
                 let lastPreviewStep = null;
@@ -167,22 +170,9 @@
                     });
                 });
 
-                function resolveFolderSpec(folderValue, vizSteps) {
-                    const opt = getImageOption(folderValue);
-                    if (!opt) {
-                        return { key: folderValue, folder: folderValue, prefix: "rollout_" };
-                    }
-                    const candidates = getImageCandidates(opt);
-                    for (let i = 0; i < candidates.length; i++) {
-                        const candidate = candidates[i];
-                        if (vizSteps && Array.isArray(vizSteps[candidate.key]) && vizSteps[candidate.key].length) {
-                            return { key: candidate.key, folder: candidate.folder, prefix: candidate.prefix };
-                        }
-                    }
-                    if (candidates.length) {
-                        return { key: candidates[0].key, folder: candidates[0].folder, prefix: candidates[0].prefix };
-                    }
-                    return { key: folderValue, folder: opt.folder || opt.value, prefix: opt.prefix };
+                function resolveFolderSpec(folderValue) {
+                    const resolved = getResolvedImageSpec(folderValue, window.IMAGE_FOLDER_SPECS);
+                    return { key: folderValue, folder: resolved.folder, prefix: resolved.prefix };
                 }
 
                 function nearestStepAtOrBelow(target, list) {
@@ -250,7 +240,7 @@
                 function updatePreviewsAtStep(step, rolloutSteps, vizSteps) {
                     Object.values(currentPreviewMap).forEach((preview) => {
                         const { img, missing, folderValue, expId, stepLabelEl } = preview;
-                        const spec = resolveFolderSpec(folderValue, vizSteps || {});
+                        const spec = resolveFolderSpec(folderValue);
                         const folderSteps = (vizSteps && vizSteps[spec.key]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
                         const target = step !== null ? Math.max(0, Math.round(step)) : (folderSteps.length ? folderSteps[folderSteps.length - 1] : null);
                         const matched = target !== null ? nearestStepAtOrBelow(target, folderSteps) : null;
@@ -297,7 +287,7 @@
                     const renderLatest = () => {
                         const folders = getSelectedFolders();
                         const folderValue = folders[0] || "vis_fixed_0";
-                        const spec = resolveFolderSpec(folderValue, vizSteps || {});
+                        const spec = resolveFolderSpec(folderValue);
                         const stepsForFolder = (vizSteps && vizSteps[spec.key]) || (vizSteps && vizSteps.__fallback) || rolloutSteps || [];
                         const lastStep = Array.isArray(stepsForFolder) && stepsForFolder.length
                             ? stepsForFolder[stepsForFolder.length - 1]

@@ -5,6 +5,7 @@ let pendingInitialPreviewStep = null;
 let currentPreviewMap = {};
 let currentStepsByExp = {};
 let currentExperiments = [];
+let currentSpecsByExp = {};
 let compareStickyInitialized = false;
 let folderSelector = null;
 
@@ -14,9 +15,9 @@ let cumulativeFlops = [];
 let elapsedSeconds = [];
 let hasElapsedSeconds = false;
 
-// Uses IMAGE_FOLDER_OPTIONS, IMAGE_FOLDER_DESCRIPTIONS, getImageOption,
-// getImageDisplayTitle, getImageDescription, buildImagePreviewCard,
-// initializeImageCardTooltips from image_card_common.js
+// Uses IMAGE_FOLDER_SPECS, IMAGE_FOLDER_DESCRIPTIONS, getImageOption,
+// getImageDisplayTitle, getImageDescription, getResolvedImageSpec,
+// buildImagePreviewCard, initializeImageCardTooltips from image_card_common.js
 // Uses createFolderSelector from folder_selector.js
 
 // Helper to get current selected folders
@@ -24,35 +25,10 @@ function getSelectedFolders() {
   return folderSelector ? folderSelector.getSelectedFolders() : ["vis_fixed_0"];
 }
 
-function resolveImageSpec(folderValue, stepsMap, expId) {
-  const option = getImageOption(folderValue);
-  if (!option) {
-    return { stepsKey: folderValue, folderPath: folderValue, prefix: "rollout_" };
-  }
-  const map = stepsMap?.[expId];
-  const candidates = getImageCandidates(option);
-  for (let i = 0; i < candidates.length; i++) {
-    const candidate = candidates[i];
-    if (Array.isArray(map?.[candidate.key]) && map[candidate.key].length) {
-      return {
-        stepsKey: candidate.key,
-        folderPath: candidate.folder,
-        prefix: candidate.prefix,
-      };
-    }
-  }
-  if (candidates.length) {
-    return {
-      stepsKey: candidates[0].key,
-      folderPath: candidates[0].folder,
-      prefix: candidates[0].prefix,
-    };
-  }
-  return {
-    stepsKey: folderValue,
-    folderPath: option.folder || option.value,
-    prefix: option.prefix,
-  };
+function resolveImageSpec(folderValue, expId) {
+  const options = currentSpecsByExp?.[expId];
+  const resolved = getResolvedImageSpec(folderValue, options);
+  return { stepsKey: folderValue, folderPath: resolved.folder, prefix: resolved.prefix };
 }
 
 function getStepsForFolder(stepsMap, expId, folderValue) {
@@ -60,8 +36,7 @@ function getStepsForFolder(stepsMap, expId, folderValue) {
   if (!map) {
     return [];
   }
-  const spec = resolveImageSpec(folderValue, stepsMap, expId);
-  const direct = map[spec.stepsKey];
+  const direct = map[folderValue];
   if (Array.isArray(direct) && direct.length) {
     return direct;
   }
@@ -121,7 +96,7 @@ function renderPreviewsAtStep(step, previews, stepsMap) {
     if (!expId || !folderValue) {
       return;
     }
-    const spec = resolveImageSpec(folderValue, stepsMap, expId);
+    const spec = resolveImageSpec(folderValue, expId);
     const available = getStepsForFolder(stepsMap, expId, folderValue);
     const matched = targetStep !== null ? nearestStepAtOrBelow(targetStep, available) : (available.length ? available[available.length - 1] : null);
     if (matched === null) {
@@ -221,6 +196,7 @@ function renderComparison(payload) {
   }
   const experiments = payload.experiments;
   const availableStepsByExp = {};
+  const specsByExp = {};
   experiments.forEach((exp) => {
     const map = exp.visualization_steps && typeof exp.visualization_steps === "object" ? { ...exp.visualization_steps } : {};
     const rollout = Array.isArray(exp.rollout_steps) ? exp.rollout_steps : [];
@@ -231,8 +207,10 @@ function renderComparison(payload) {
       map.__fallback = rollout;
     }
     availableStepsByExp[exp.id] = map;
+    specsByExp[exp.id] = Array.isArray(exp.image_folder_specs) ? exp.image_folder_specs : [];
   });
   currentStepsByExp = availableStepsByExp;
+  currentSpecsByExp = specsByExp;
   currentExperiments = experiments;
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
@@ -732,7 +710,7 @@ function refreshPreviewImages(container, stepsMap) {
       }
       return;
     }
-    const spec = resolveImageSpec(folderValue, stepsMap, expId);
+    const spec = resolveImageSpec(folderValue, expId);
     preview.img.src = `/assets/${expId}/${spec.folderPath}/${spec.prefix}${latestStep}.png`;
     preview.img.alt = `Rollout ${latestStep} for ${preview.displayTitle}`;
     preview.img.classList.remove("d-none");

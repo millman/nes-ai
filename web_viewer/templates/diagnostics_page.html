@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% set frame_steps = frame_map.keys()|list|sort if frame_map is defined else [] %}
-{% set steps = diagnostic_steps if diagnostic_steps is defined else (experiment.diagnostics_steps if experiment and experiment.diagnostics_steps else frame_steps) %}
+{% set steps = diagnostic_steps if diagnostic_steps is defined else (experiment.diagnostics_z_steps if experiment and experiment.diagnostics_z_steps else frame_steps) %}
 {% set step_count = steps|length %}
 {% set view_label = view_label if view_label is defined else "" %}
 
@@ -346,13 +346,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const viewLabel = "{{ view_label }}";
     const deltaKey = viewLabel === "h"
         ? "delta_h_pca"
-        : (viewLabel === "p" ? "delta_s_pca" : "delta_z_pca");
+        : (viewLabel === "p" ? "delta_p_pca" : "delta_z_pca");
     const alignmentKey = viewLabel === "h"
         ? "action_alignment_detail_h"
-        : (viewLabel === "p" ? "action_alignment_detail_s" : "action_alignment_detail");
+        : (viewLabel === "p" ? "action_alignment_detail_p" : "action_alignment_detail");
     const cycleKey = viewLabel === "h"
         ? "cycle_error_h"
-        : (viewLabel === "p" ? "cycle_error_s" : "cycle_error");
+        : (viewLabel === "p" ? "cycle_error_p" : "cycle_error");
     const selfDistanceKey = viewLabel === "h"
         ? "self_distance_h"
         : (viewLabel === "p" ? "self_distance_p" : "self_distance");
@@ -426,7 +426,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 title: "Path independence",
                 label: "vis_path_independence",
             },
-            straightline_s: {
+            straightline_p: {
                 img: document.getElementById("diagnostics-straightline-img"),
                 caption: document.getElementById("diagnostics-straightline-caption"),
                 header: document.getElementById("diagnostics-straightline-header"),

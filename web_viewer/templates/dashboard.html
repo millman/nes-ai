@@ -487,10 +487,10 @@
                             </svg>
                         </button>
                         {% endif %}
-                        {% set has_diag_z = exp.diagnostics_steps %}
-                        {% set has_diag_h = exp.asset_exists("vis_delta_h_pca") or exp.asset_exists("vis_action_alignment_h") or exp.asset_exists("vis_cycle_error_h") or exp.asset_exists("vis_self_distance_h") %}
-                        {% set has_diag_s = exp.diagnostics_s_steps %}
-                        {% if has_diag_z or has_diag_h or has_diag_s %}
+                        {% set has_diag_z = exp.diagnostics_z_steps %}
+                        {% set has_diag_h = exp.diagnostics_h_steps %}
+                        {% set has_diag_p = exp.diagnostics_p_steps %}
+                        {% if has_diag_z or has_diag_h or has_diag_p %}
                         <a
                             href="{{ url_for('diagnostics_zhp', exp_id=exp.id) }}"
                             class="btn btn-outline-primary btn-sm"
@@ -508,10 +508,10 @@
                             </svg>
                         </button>
                         {% endif %}
-                        {% set has_self_z = exp.self_distance_csv %}
-                        {% set has_self_h = exp.asset_exists("self_distance_h") or exp.asset_exists("vis_self_distance_h") %}
-                        {% set has_self_s = exp.state_embedding_csv %}
-                        {% if has_self_z or has_self_h or has_self_s %}
+                        {% set has_self_z = exp.has_self_distance_z_csv %}
+                        {% set has_self_h = exp.has_self_distance_h_csv %}
+                        {% set has_self_p = exp.has_self_distance_p_csv %}
+                        {% if has_self_z or has_self_h or has_self_p %}
                         <a
                             href="{{ url_for('self_distance_zhp', exp_id=exp.id) }}"
                             class="btn btn-outline-primary btn-sm"

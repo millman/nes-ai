@@ -4,6 +4,9 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='common_styles.css') }}">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script src="{{ url_for('static', filename='plotly_utils.js') }}"></script>
+<script>
+    window.IMAGE_FOLDER_SPECS = {{ image_folder_specs | tojson }};
+</script>
 <script src="{{ url_for('static', filename='image_card_common.js') }}"></script>
 <script src="{{ url_for('static', filename='folder_selector.js') }}"></script>
 <script defer src="{{ url_for('static', filename='grid.js') }}"></script>

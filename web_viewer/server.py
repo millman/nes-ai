@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import time
 from datetime import datetime, timedelta
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 from math import ceil
 
 from flask import (
@@ -23,6 +24,7 @@ from werkzeug.utils import safe_join
 
 from .config import ViewerConfig
 from .csv_utils import get_max_step
+from .experiments import DIAGNOSTICS_H_PATTERNS
 from .diffing import diff_metadata
 from .experiments import (
     Experiment,
@@ -37,18 +39,148 @@ from .experiments import (
     write_title,
     write_starred,
     write_archived,
-    _diagnostics_exists,
-    _diagnostics_s_exists,
-    _graph_diagnostics_exists,
-    _vis_ctrl_exists,
     _collect_visualization_steps,
     extract_alignment_summary,
-    _quick_self_distance_p_csv,
+    _diagnostics_suffix_exists,
+    DIAGNOSTICS_P_DIRS,
+    DIAGNOSTICS_Z_DIRS,
+    _first_matching_csv_candidate,
+    QUICK_SELF_DISTANCE_P_CSV_CANDIDATES,
+    _any_existing_paths,
+    _any_folder_pattern_exists,
+    GRAPH_DIAGNOSTICS_H_FOLDER_CANDIDATES,
+    GRAPH_DIAGNOSTICS_P_FOLDER_CANDIDATES,
+    GRAPH_DIAGNOSTICS_Z_FOLDER_CANDIDATES,
+    _resolve_first_existing_folder,
+    _folder_has_any_file,
+    get_image_folder_specs,
 )
 from .plots import build_overlay, build_ranking_accuracy_plot
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 DEFAULT_PAGE_SIZE = 25
+
+SELF_DISTANCE_Z_CSV_CANDIDATES = [
+    ("self_distance_z", "self_distance_z", "self_distance_z_0000000.csv", "self_distance_z_*.csv"),
+    ("self_distance", "self_distance", "self_distance_0000000.csv", "self_distance_*.csv"),
+]
+SELF_DISTANCE_S_CSV_CANDIDATES = [
+    ("self_distance_s", "self_distance_s", "self_distance_s_0000000.csv", "self_distance_s_*.csv"),
+    ("state_embedding", "state_embedding", "state_embedding_0000000.csv", "state_embedding_*.csv"),
+]
+SELF_DISTANCE_P_CSV_CANDIDATES = [
+    ("self_distance_p", "self_distance_p", "self_distance_p_0000000.csv", "self_distance_p_*.csv"),
+    ("self_distance_s", "self_distance_s", "self_distance_s_0000000.csv", "self_distance_s_*.csv"),
+    ("state_embedding", "state_embedding", "state_embedding_0000000.csv", "state_embedding_*.csv"),
+]
+SELF_DISTANCE_H_CSV_CANDIDATES = [
+    ("self_distance_h", "self_distance_h", "self_distance_h_0000000.csv", "self_distance_h_*.csv"),
+]
+SELF_DISTANCE_Z_IMAGE_CANDIDATES = [
+    ("vis_self_distance_z", "vis_self_distance_z", "self_distance_z_0000000.png", "self_distance_z_*.png"),
+    ("vis_self_distance", "vis_self_distance", "self_distance_0000000.png", "self_distance_*.png"),
+]
+SELF_DISTANCE_S_IMAGE_CANDIDATES = [
+    ("vis_state_embedding", "vis_state_embedding", "state_embedding_0000000.png", "state_embedding_[0-9]*.png"),
+    ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_0000000.png", "self_distance_s_*.png"),
+]
+SELF_DISTANCE_P_IMAGE_CANDIDATES = [
+    ("vis_self_distance_p", "vis_self_distance_p", "self_distance_p_0000000.png", "self_distance_p_*.png"),
+    ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_0000000.png", "self_distance_s_*.png"),
+    ("vis_state_embedding", "vis_state_embedding", "state_embedding_0000000.png", "state_embedding_[0-9]*.png"),
+]
+
+
+def _first_matching_file(folder: Path, *, exact_name: Optional[str], pattern: str) -> Optional[Path]:
+    if exact_name:
+        exact_path = folder / exact_name
+        if exact_path.exists():
+            return exact_path
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue
+                if fnmatch.fnmatch(entry.name, pattern):
+                    return Path(entry.path)
+    except OSError:
+        return None
+    return None
+
+
+def _has_matching_file(folder: Path, *, exact_name: Optional[str], pattern: str) -> bool:
+    if not folder.exists():
+        return False
+    return _first_matching_file(folder, exact_name=exact_name, pattern=pattern) is not None
+
+
+def _latest_experiment_id_from_index(
+    output_dir: Path,
+    *,
+    match: Callable[[Path], bool],
+    fallback: Optional[Callable[[Path], bool]] = None,
+    fallback_to_latest: bool = False,
+) -> Optional[str]:
+    index_rows = build_experiment_index(output_dir)
+    if not index_rows:
+        return None
+    sorted_rows = sorted(
+        index_rows,
+        key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+        reverse=True,
+    )
+    fallback_id = None
+    for row in sorted_rows:
+        if match(row.path):
+            return row.id
+        if fallback is not None and fallback_id is None and fallback(row.path):
+            fallback_id = row.id
+    if fallback_id is not None:
+        return fallback_id
+    if fallback_to_latest:
+        return sorted_rows[0].id
+    return None
+
+
+def _diagnostics_z_exists(exp_path: Path) -> bool:
+    return _diagnostics_suffix_exists(exp_path, DIAGNOSTICS_Z_DIRS)
+
+
+def _diagnostics_p_exists(exp_path: Path) -> bool:
+    return _diagnostics_suffix_exists(exp_path, DIAGNOSTICS_P_DIRS)
+
+
+def _diagnostics_h_exists(exp_path: Path) -> bool:
+    for folder_name, pattern in DIAGNOSTICS_H_PATTERNS:
+        folder = exp_path / folder_name
+        if _first_matching_file(folder, exact_name=None, pattern=pattern):
+            return True
+    return False
+
+
+def _diagnostics_zhp_match(exp_path: Path) -> bool:
+    return _diagnostics_z_exists(exp_path) and _diagnostics_p_exists(exp_path)
+
+
+def _diagnostics_zhp_fallback(exp_path: Path) -> bool:
+    return _diagnostics_z_exists(exp_path) or _diagnostics_p_exists(exp_path)
+
+
+def _find_candidate_dir(
+    exp_path: Path,
+    candidates: List[Tuple[str, str, str, str]],
+    *,
+    conflict_label: str,
+) -> Optional[Path]:
+    matches: List[Tuple[str, Path]] = []
+    for label, folder_name, exact_name, pattern in candidates:
+        folder = exp_path / folder_name
+        if _has_matching_file(folder, exact_name=exact_name, pattern=pattern):
+            matches.append((label, folder))
+    if len(matches) > 1:
+        labels = ", ".join(label for label, _ in matches)
+        raise RuntimeError(f"Found multiple {conflict_label} outputs in {exp_path}: {labels}.")
+    return matches[0][1] if matches else None
 
 
 def _format_last_modified(dt: Optional[datetime]) -> str:
@@ -357,12 +489,14 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected_map = {exp.id: exp for exp in experiments}
         selected_ids = [eid for eid in selected_ids if eid in selected_map]
+        image_folder_specs = get_image_folder_specs(experiments[0].path) if experiments else []
         return render_template(
             "comparison.html",
             experiments=experiments,
             cfg=cfg,
             selected_ids=selected_ids,
             selected_map=selected_map,
+            image_folder_specs=image_folder_specs,
             active_nav="comparison",
             first_experiment_id=selected_ids[0] if selected_ids else (index_rows[0].id if index_rows else None),
         )
@@ -372,6 +506,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         experiment = _get_experiment_or_404(exp_id, include_rollout_steps=True)
         figure = _build_single_experiment_figure(experiment)
         viz_steps = _collect_visualization_steps(experiment.path)
+        image_folder_specs = get_image_folder_specs(experiment.path)
         if experiment.rollout_steps:
             viz_steps.setdefault("vis_fixed_0", experiment.rollout_steps)
             viz_steps.setdefault("__fallback", experiment.rollout_steps)
@@ -381,6 +516,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg=cfg,
             figure=figure,
             visualization_steps=viz_steps,
+            image_folder_specs=image_folder_specs,
             active_nav="detail",
             active_experiment_id=experiment.id,
             first_experiment_id=experiment.id,
@@ -490,29 +626,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def self_distance_z(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
-        def _resolve_self_distance_csv_dir(exp_path: Path) -> Optional[Path]:
-            """Support legacy self_distance outputs while preferring self_distance_z; error if both exist."""
-            new_dir = exp_path / "self_distance_z"
-            old_dir = exp_path / "self_distance"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.csv"))
-            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.csv"))
-            if new_has and old_has:
-                raise RuntimeError(f"Found both self_distance_z and self_distance outputs in {exp_path}.")
-            if new_has:
-                return new_dir
-            if old_has:
-                return old_dir
-            return None
-
-        def _self_distance_z_image_conflict(exp_path: Path) -> None:
-            """Prefer vis_self_distance_z images but fail if legacy+new images both exist."""
-            new_dir = exp_path / "vis_self_distance_z"
-            old_dir = exp_path / "vis_self_distance"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.png"))
-            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.png"))
-            if new_has and old_has:
-                raise RuntimeError(f"Found both vis_self_distance_z and vis_self_distance images in {exp_path}.")
-
         def _latest_self_distance_id() -> Optional[str]:
             index_rows = build_experiment_index(cfg.output_dir)
             if not index_rows:
@@ -523,10 +636,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                csv_dir = _resolve_self_distance_csv_dir(row.path)
-                if csv_dir is None:
-                    continue
-                if any(csv_dir.glob("self_distance_z_*.csv")) or any(csv_dir.glob("self_distance_*.csv")):
+                csv_dir = _find_candidate_dir(
+                    row.path,
+                    SELF_DISTANCE_Z_CSV_CANDIDATES,
+                    conflict_label="self-distance CSV",
+                )
+                if csv_dir is not None:
                     return row.id
             return None
 
@@ -534,10 +649,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                csv_dir = _resolve_self_distance_csv_dir(requested_path)
-                if csv_dir is not None and (
-                    any(csv_dir.glob("self_distance_z_*.csv")) or any(csv_dir.glob("self_distance_*.csv"))
-                ):
+                csv_dir = _find_candidate_dir(
+                    requested_path,
+                    SELF_DISTANCE_Z_CSV_CANDIDATES,
+                    conflict_label="self-distance CSV",
+                )
+                if csv_dir is not None:
                     selected_id = requested
         if selected_id is None:
             selected_id = _latest_self_distance_id()
@@ -559,9 +676,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg.output_dir / selected_id,
             include_self_distance=True,
         )
-        if selected is None or selected.self_distance_csv is None:
+        if selected is None or selected.self_distance_z_csv is None:
             abort(404, "Experiment not found for self-distance.")
-        _self_distance_z_image_conflict(selected.path)
+        _find_candidate_dir(selected.path, SELF_DISTANCE_Z_IMAGE_CANDIDATES, conflict_label="self-distance image")
 
         figure = _build_single_experiment_figure(selected)
 
@@ -572,9 +689,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             figure=figure,
             page_title="Self-distance (Z)",
             csv_name="self_distance_z.csv",
-            csv_file=selected.self_distance_csv,
-            csv_url=url_for('serve_asset', relative_path=f"{selected.id}/{selected.self_distance_csv.relative_to(selected.path)}"),
-            images_list=selected.self_distance_images,
+            csv_file=selected.self_distance_z_csv,
+            csv_url=url_for('serve_asset', relative_path=f"{selected.id}/{selected.self_distance_z_csv.relative_to(selected.path)}"),
+            images_list=selected.self_distance_z_images,
             images_folder="vis_self_distance_z",
             redirect_url_base=url_for('self_distance_z'),
             cfg=cfg,
@@ -588,13 +705,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def self_distance_h(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
-        def _resolve_self_distance_h_csv_dir(exp_path: Path) -> Optional[Path]:
-            new_dir = exp_path / "self_distance_h"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_h_*.csv"))
-            if new_has:
-                return new_dir
-            return None
-
         def _latest_self_distance_h_id() -> Optional[str]:
             index_rows = build_experiment_index(cfg.output_dir)
             if not index_rows:
@@ -605,10 +715,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                csv_dir = _resolve_self_distance_h_csv_dir(row.path)
-                if csv_dir is None:
-                    continue
-                if any(csv_dir.glob("self_distance_h_*.csv")):
+                csv_dir = _find_candidate_dir(
+                    row.path,
+                    SELF_DISTANCE_H_CSV_CANDIDATES,
+                    conflict_label="self-distance (H) CSV",
+                )
+                if csv_dir is not None:
                     return row.id
             return None
 
@@ -616,8 +728,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                csv_dir = _resolve_self_distance_h_csv_dir(requested_path)
-                if csv_dir is not None and any(csv_dir.glob("self_distance_h_*.csv")):
+                csv_dir = _find_candidate_dir(
+                    requested_path,
+                    SELF_DISTANCE_H_CSV_CANDIDATES,
+                    conflict_label="self-distance (H) CSV",
+                )
+                if csv_dir is not None:
                     selected_id = requested
         if selected_id is None:
             selected_id = _latest_self_distance_h_id()
@@ -640,7 +756,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         if selected is None:
             abort(404, "Experiment not found for self-distance (H).")
-        csv_dir = _resolve_self_distance_h_csv_dir(selected.path)
+        csv_dir = _find_candidate_dir(
+            selected.path,
+            SELF_DISTANCE_H_CSV_CANDIDATES,
+            conflict_label="self-distance (H) CSV",
+        )
         h_csvs = sorted(csv_dir.glob("self_distance_h_*.csv")) if csv_dir is not None else []
         latest_h_csv = h_csvs[-1] if h_csvs else None
         if latest_h_csv is None:
@@ -682,7 +802,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                if _quick_self_distance_p_csv(row.path):
+                if _first_matching_csv_candidate(
+                    row.path,
+                    QUICK_SELF_DISTANCE_P_CSV_CANDIDATES,
+                    conflict_label="self-distance (P)",
+                ):
                     return row.id
             return None
 
@@ -690,7 +814,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                if _quick_self_distance_p_csv(requested_path):
+                if _first_matching_csv_candidate(
+                    requested_path,
+                    QUICK_SELF_DISTANCE_P_CSV_CANDIDATES,
+                    conflict_label="self-distance (P)",
+                ):
                     selected_id = requested
         if selected_id is None:
             selected_id = _latest_self_distance_p_id()
@@ -743,29 +871,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def self_distance_s(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
-        def _resolve_self_distance_s_csv_dir(exp_path: Path) -> Optional[Path]:
-            """Support legacy state_embedding outputs while preferring self_distance_s; error if both exist."""
-            new_dir = exp_path / "self_distance_s"
-            old_dir = exp_path / "state_embedding"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.csv"))
-            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_*.csv"))
-            if new_has and old_has:
-                raise RuntimeError(f"Found both self_distance_s and state_embedding outputs in {exp_path}.")
-            if new_has:
-                return new_dir
-            if old_has:
-                return old_dir
-            return None
-
-        def _self_distance_s_image_conflict(exp_path: Path) -> None:
-            """Avoid ambiguous self-distance (S) image sources between legacy and renamed folders."""
-            old_dir = exp_path / "vis_state_embedding"
-            new_dir = exp_path / "vis_self_distance_s"
-            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_[0-9]*.png"))
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.png"))
-            if old_has and new_has:
-                raise RuntimeError(f"Found both vis_state_embedding and vis_self_distance_s images in {exp_path}.")
-
         def _latest_state_embedding_id() -> Optional[str]:
             index_rows = build_experiment_index(cfg.output_dir)
             if not index_rows:
@@ -776,10 +881,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                csv_dir = _resolve_self_distance_s_csv_dir(row.path)
-                if csv_dir is not None and (
-                    any(csv_dir.glob("self_distance_s_*.csv")) or any(csv_dir.glob("state_embedding_*.csv"))
-                ):
+                csv_dir = _find_candidate_dir(
+                    row.path,
+                    SELF_DISTANCE_S_CSV_CANDIDATES,
+                    conflict_label="self-distance (S) CSV",
+                )
+                if csv_dir is not None:
                     return row.id
             return None
 
@@ -787,10 +894,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                csv_dir = _resolve_self_distance_s_csv_dir(requested_path)
-                if csv_dir is not None and (
-                    any(csv_dir.glob("self_distance_s_*.csv")) or any(csv_dir.glob("state_embedding_*.csv"))
-                ):
+                csv_dir = _find_candidate_dir(
+                    requested_path,
+                    SELF_DISTANCE_S_CSV_CANDIDATES,
+                    conflict_label="self-distance (S) CSV",
+                )
+                if csv_dir is not None:
                     selected_id = requested
         if selected_id is None:
             selected_id = _latest_state_embedding_id()
@@ -818,37 +927,27 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         if selected is None or selected.state_embedding_csv is None:
             abort(404, "Experiment not found for state embedding diagnostics.")
-        _self_distance_s_image_conflict(selected.path)
+        _find_candidate_dir(selected.path, SELF_DISTANCE_S_IMAGE_CANDIDATES, conflict_label="self-distance (S) image")
 
         figure = _build_single_experiment_figure(selected)
 
-        state_map: Dict[str, Dict[int, str]] = {"state_embedding": {}, "state_embedding_hist": {}}
-        steps: List[int] = []
+        distance_paths: List[Path] = []
         for path in selected.state_embedding_images:
             stem = path.stem
-            try:
-                rel = path.relative_to(selected.path)
-            except ValueError:
+            if stem.startswith("self_distance_cosine_") or stem.startswith("state_embedding_cosine_"):
                 continue
-            if stem.startswith("state_embedding_hist_"):
-                key = "state_embedding_hist"
-                prefix = "state_embedding_hist_"
-            elif stem.startswith("self_distance_s_") or stem.startswith("state_embedding_"):
-                key = "state_embedding"
-                prefix = "self_distance_s_" if stem.startswith("self_distance_s_") else "state_embedding_"
-            elif stem.startswith("self_distance_cosine_") or stem.startswith("state_embedding_cosine_"):
-                continue
-            else:
-                continue
-            suffix = stem[len(prefix) :]
-            try:
-                step = int(suffix)
-            except ValueError:
-                continue
-            state_map[key][step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
-            if key == "state_embedding":
-                steps.append(step)
-        steps = sorted(set(steps))
+            if stem.startswith("self_distance_s_") or stem.startswith("state_embedding_"):
+                distance_paths.append(path)
+        state_map = {
+            "state_embedding": _build_step_map(distance_paths, selected.id, selected.path),
+            "state_embedding_hist": _build_step_map(
+                selected.state_embedding_hist_images,
+                selected.id,
+                selected.path,
+                prefix="state_embedding_hist_",
+            ),
+        }
+        steps = sorted(state_map["state_embedding"].keys())
 
         return render_template(
             "state_embedding_page.html",
@@ -869,90 +968,6 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
     def self_distance_zhp(exp_id: Optional[str]):
         requested = exp_id or request.args.get("id")
 
-        def _resolve_self_distance_z_csv_dir(exp_path: Path) -> Optional[Path]:
-            new_dir = exp_path / "self_distance_z"
-            old_dir = exp_path / "self_distance"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.csv"))
-            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.csv"))
-            if new_has and old_has:
-                raise RuntimeError(f"Found both self_distance_z and self_distance outputs in {exp_path}.")
-            if new_has:
-                return new_dir
-            if old_has:
-                return old_dir
-            return None
-
-        def _resolve_self_distance_s_csv_dir(exp_path: Path) -> Optional[Path]:
-            new_dir = exp_path / "self_distance_s"
-            old_dir = exp_path / "state_embedding"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.csv"))
-            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_*.csv"))
-            if new_has and old_has:
-                raise RuntimeError(f"Found both self_distance_s and state_embedding outputs in {exp_path}.")
-            if new_has:
-                return new_dir
-            if old_has:
-                return old_dir
-            return None
-
-        def _resolve_self_distance_p_csv_dir(exp_path: Path) -> Optional[Path]:
-            new_dir = exp_path / "self_distance_p"
-            legacy_dir = exp_path / "self_distance_s"
-            old_dir = exp_path / "state_embedding"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_p_*.csv"))
-            legacy_has = legacy_dir.exists() and any(legacy_dir.glob("self_distance_s_*.csv"))
-            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_*.csv"))
-            if new_has and legacy_has:
-                raise RuntimeError(f"Found both self_distance_p and self_distance_s outputs in {exp_path}.")
-            if new_has and old_has:
-                raise RuntimeError(f"Found both self_distance_p and state_embedding outputs in {exp_path}.")
-            if legacy_has and old_has:
-                raise RuntimeError(f"Found both self_distance_s and state_embedding outputs in {exp_path}.")
-            if new_has:
-                return new_dir
-            if legacy_has:
-                return legacy_dir
-            if old_has:
-                return old_dir
-            return None
-
-        def _resolve_self_distance_h_csv_dir(exp_path: Path) -> Optional[Path]:
-            new_dir = exp_path / "self_distance_h"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_h_*.csv"))
-            if new_has:
-                return new_dir
-            return None
-
-        def _self_distance_z_image_conflict(exp_path: Path) -> None:
-            new_dir = exp_path / "vis_self_distance_z"
-            old_dir = exp_path / "vis_self_distance"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_z_*.png"))
-            old_has = old_dir.exists() and any(old_dir.glob("self_distance_*.png"))
-            if new_has and old_has:
-                raise RuntimeError(f"Found both vis_self_distance_z and vis_self_distance images in {exp_path}.")
-
-        def _self_distance_s_image_conflict(exp_path: Path) -> None:
-            old_dir = exp_path / "vis_state_embedding"
-            new_dir = exp_path / "vis_self_distance_s"
-            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_[0-9]*.png"))
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_s_*.png"))
-            if old_has and new_has:
-                raise RuntimeError(f"Found both vis_state_embedding and vis_self_distance_s images in {exp_path}.")
-
-        def _self_distance_p_image_conflict(exp_path: Path) -> None:
-            new_dir = exp_path / "vis_self_distance_p"
-            legacy_dir = exp_path / "vis_self_distance_s"
-            old_dir = exp_path / "vis_state_embedding"
-            new_has = new_dir.exists() and any(new_dir.glob("self_distance_p_*.png"))
-            legacy_has = legacy_dir.exists() and any(legacy_dir.glob("self_distance_s_*.png"))
-            old_has = old_dir.exists() and any(old_dir.glob("state_embedding_[0-9]*.png"))
-            if new_has and legacy_has:
-                raise RuntimeError(f"Found both vis_self_distance_p and vis_self_distance_s images in {exp_path}.")
-            if new_has and old_has:
-                raise RuntimeError(f"Found both vis_self_distance_p and vis_state_embedding images in {exp_path}.")
-            if legacy_has and old_has:
-                raise RuntimeError(f"Found both vis_self_distance_s and vis_state_embedding images in {exp_path}.")
-
         def _latest_self_distance_zhp_id() -> Optional[str]:
             index_rows = build_experiment_index(cfg.output_dir)
             if not index_rows:
@@ -963,19 +978,58 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                z_dir = _resolve_self_distance_z_csv_dir(row.path)
-                p_dir = _resolve_self_distance_p_csv_dir(row.path)
-                h_dir = _resolve_self_distance_h_csv_dir(row.path)
+                z_dir = _find_candidate_dir(
+                    row.path,
+                    SELF_DISTANCE_Z_CSV_CANDIDATES,
+                    conflict_label="self-distance CSV",
+                )
+                p_dir = _find_candidate_dir(
+                    row.path,
+                    SELF_DISTANCE_P_CSV_CANDIDATES,
+                    conflict_label="self-distance (P) CSV",
+                )
+                h_dir = _find_candidate_dir(
+                    row.path,
+                    SELF_DISTANCE_H_CSV_CANDIDATES,
+                    conflict_label="self-distance (H) CSV",
+                )
                 if z_dir is None or p_dir is None or h_dir is None:
                     continue
-                if not (any(z_dir.glob("self_distance_z_*.csv")) or any(z_dir.glob("self_distance_*.csv"))):
+                if not (
+                    _has_matching_file(
+                        z_dir,
+                        exact_name="self_distance_z_0000000.csv",
+                        pattern="self_distance_z_*.csv",
+                    )
+                    or _has_matching_file(
+                        z_dir,
+                        exact_name="self_distance_0000000.csv",
+                        pattern="self_distance_*.csv",
+                    )
+                ):
                     continue
-                if not any(h_dir.glob("self_distance_h_*.csv")):
+                if not _has_matching_file(
+                    h_dir,
+                    exact_name="self_distance_h_0000000.csv",
+                    pattern="self_distance_h_*.csv",
+                ):
                     continue
                 if not (
-                    any(p_dir.glob("self_distance_p_*.csv"))
-                    or any(p_dir.glob("self_distance_s_*.csv"))
-                    or any(p_dir.glob("state_embedding_*.csv"))
+                    _has_matching_file(
+                        p_dir,
+                        exact_name="self_distance_p_0000000.csv",
+                        pattern="self_distance_p_*.csv",
+                    )
+                    or _has_matching_file(
+                        p_dir,
+                        exact_name="self_distance_s_0000000.csv",
+                        pattern="self_distance_s_*.csv",
+                    )
+                    or _has_matching_file(
+                        p_dir,
+                        exact_name="state_embedding_0000000.csv",
+                        pattern="state_embedding_*.csv",
+                    )
                 ):
                     continue
                 return row.id
@@ -985,9 +1039,21 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                z_dir = _resolve_self_distance_z_csv_dir(requested_path)
-                p_dir = _resolve_self_distance_p_csv_dir(requested_path)
-                h_dir = _resolve_self_distance_h_csv_dir(requested_path)
+                z_dir = _find_candidate_dir(
+                    requested_path,
+                    SELF_DISTANCE_Z_CSV_CANDIDATES,
+                    conflict_label="self-distance CSV",
+                )
+                p_dir = _find_candidate_dir(
+                    requested_path,
+                    SELF_DISTANCE_P_CSV_CANDIDATES,
+                    conflict_label="self-distance (P) CSV",
+                )
+                h_dir = _find_candidate_dir(
+                    requested_path,
+                    SELF_DISTANCE_H_CSV_CANDIDATES,
+                    conflict_label="self-distance (H) CSV",
+                )
                 if z_dir is not None and p_dir is not None and h_dir is not None:
                     selected_id = requested
         if selected_id is None:
@@ -1011,19 +1077,27 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             include_self_distance_p=True,
             include_state_embedding=True,
         )
-        h_dir = _resolve_self_distance_h_csv_dir(selected.path) if selected else None
+        h_dir = (
+            _find_candidate_dir(
+                selected.path,
+                SELF_DISTANCE_H_CSV_CANDIDATES,
+                conflict_label="self-distance (H) CSV",
+            )
+            if selected
+            else None
+        )
         h_csvs = sorted(h_dir.glob("self_distance_h_*.csv")) if h_dir is not None else []
         latest_h_csv = h_csvs[-1] if h_csvs else None
         if (
             selected is None
-            or selected.self_distance_csv is None
+            or selected.self_distance_z_csv is None
             or selected.self_distance_p_csv is None
             or latest_h_csv is None
         ):
             abort(404, "Experiment not found for self-distance (Z/H/P).")
-        _self_distance_z_image_conflict(selected.path)
-        _self_distance_s_image_conflict(selected.path)
-        _self_distance_p_image_conflict(selected.path)
+        _find_candidate_dir(selected.path, SELF_DISTANCE_Z_IMAGE_CANDIDATES, conflict_label="self-distance image")
+        _find_candidate_dir(selected.path, SELF_DISTANCE_S_IMAGE_CANDIDATES, conflict_label="self-distance (S) image")
+        _find_candidate_dir(selected.path, SELF_DISTANCE_P_IMAGE_CANDIDATES, conflict_label="self-distance (P) image")
         self_distance_h_images = sorted((selected.path / "vis_self_distance_h").glob("self_distance_h_*.png"))
 
         figure = _build_single_experiment_figure(selected)
@@ -1175,23 +1249,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         requested = exp_id or request.args.get("id")
 
         def _latest_diagnostics_id() -> Optional[str]:
-            index_rows = build_experiment_index(cfg.output_dir)
-            if not index_rows:
-                return None
-            sorted_rows = sorted(
-                index_rows,
-                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
-                reverse=True,
-            )
-            for row in sorted_rows:
-                if _diagnostics_exists(row.path):
-                    return row.id
-            return None
+            return _latest_experiment_id_from_index(cfg.output_dir, match=_diagnostics_z_exists)
 
         selected_id: Optional[str] = None
         if requested:
             requested_path = cfg.output_dir / requested
-            if requested_path.is_dir() and _diagnostics_exists(requested_path):
+            if requested_path.is_dir() and _diagnostics_z_exists(requested_path):
                 selected_id = requested
         if selected_id is None:
             selected_id = _latest_diagnostics_id()
@@ -1226,72 +1289,64 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         build_maps_start = time.perf_counter()
         figure = _build_single_experiment_figure(selected)
+        diagnostics_images = {
+            "delta_z_pca": selected.diagnostics_delta_z_pca_images,
+            "variance_spectrum": selected.diagnostics_variance_spectrum_images,
+            "action_alignment_detail": selected.diagnostics_action_alignment_detail_images,
+            "cycle_error": selected.diagnostics_cycle_error_images,
+            "rollout_divergence": selected.diagnostics_rollout_divergence_images,
+            "rollout_divergence_z": selected.diagnostics_rollout_divergence_z_images,
+            "z_consistency": selected.diagnostics_z_consistency_images,
+            "z_monotonicity": selected.diagnostics_z_monotonicity_images,
+            "path_independence": selected.diagnostics_path_independence_images,
+        }
         diagnostics_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_images.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in diagnostics_images.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 diagnostics_map[name] = per_step
 
         # Add self-distance images keyed by step (matching self_distance_page)
-        if selected.self_distance_images:
-            per_step: Dict[int, str] = {}
-            for path in selected.self_distance_images:
-                stem = path.stem
-                if "cosine" in stem:
-                    continue
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        if selected.self_distance_z_images:
+            per_step = _build_step_map(
+                selected.self_distance_z_images,
+                selected.id,
+                selected.path,
+                skip_tokens=["cosine"],
+            )
             if per_step:
                 diagnostics_map["self_distance"] = per_step
 
         # Add state embedding self-distance images (S) keyed by step.
         if selected.state_embedding_images:
-            per_step = {}
-            for path in selected.state_embedding_images:
-                stem = path.stem
-                if "hist" in stem or "cosine" in stem:
-                    continue
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            per_step = _build_step_map(
+                selected.state_embedding_images,
+                selected.id,
+                selected.path,
+                skip_tokens=["hist", "cosine"],
+            )
             if per_step:
                 diagnostics_map["self_distance_s"] = per_step
 
+        diagnostics_csvs = {
+            "delta_z_pca": selected.diagnostics_delta_z_pca_csvs,
+            "action_alignment": selected.diagnostics_action_alignment_csvs,
+            "cycle_error": selected.diagnostics_cycle_error_csvs,
+            "frame_alignment": selected.diagnostics_frame_alignment_csvs,
+            "rollout_divergence": selected.diagnostics_rollout_divergence_csvs,
+            "rollout_divergence_z": selected.diagnostics_rollout_divergence_z_csvs,
+            "z_consistency": selected.diagnostics_z_consistency_csvs,
+            "z_monotonicity": selected.diagnostics_z_monotonicity_csvs,
+            "path_independence": selected.diagnostics_path_independence_csvs,
+        }
         diagnostics_csv_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_csvs.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in diagnostics_csvs.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 diagnostics_csv_map[name] = per_step
 
         frame_map: Dict[int, List[Dict[str, str]]] = {}
-        for step, frames in selected.diagnostics_frames.items():
+        for step, frames in zip(selected.diagnostics_frame_steps, selected.diagnostics_frame_entries):
             entries: List[Dict[str, str]] = []
             for img_path, src_path, action_label, action_id in frames:
                 try:
@@ -1305,7 +1360,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                         "action": action_label or "",
                         "action_id": "" if action_id is None else str(action_id),
                     }
-                    )
+                )
             if entries:
                 frame_map[step] = entries
 
@@ -1370,19 +1425,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         route_start = time.perf_counter()
         requested = exp_id or request.args.get("id")
 
-        def _latest_diagnostics_s_id() -> Optional[str]:
-            index_rows = build_experiment_index(cfg.output_dir)
-            if not index_rows:
-                return None
-            sorted_rows = sorted(
-                index_rows,
-                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
-                reverse=True,
+        def _latest_diagnostics_p_id() -> Optional[str]:
+            return _latest_experiment_id_from_index(
+                cfg.output_dir,
+                match=_diagnostics_p_exists,
+                fallback_to_latest=True,
             )
-            for row in sorted_rows:
-                if _diagnostics_s_exists(row.path):
-                    return row.id
-            return sorted_rows[0].id if sorted_rows else None
 
         selected_id: Optional[str] = None
         if requested:
@@ -1390,7 +1438,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             if requested_path.is_dir():
                 selected_id = requested
         if selected_id is None:
-            selected_id = _latest_diagnostics_s_id()
+            selected_id = _latest_diagnostics_p_id()
 
         if selected_id is None:
             return render_template(
@@ -1413,7 +1461,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         selected = load_experiment(
             cfg.output_dir / selected_id,
             include_diagnostics_frames=True,
-            include_diagnostics_s=True,
+            include_diagnostics_p=True,
             include_state_embedding=True,
             include_self_distance_p=True,
         )
@@ -1422,51 +1470,41 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         build_maps_start = time.perf_counter()
         figure = _build_single_experiment_figure(selected)
+        diagnostics_p_images = {
+            "delta_p_pca": selected.diagnostics_p_delta_p_pca_images,
+            "variance_spectrum_p": selected.diagnostics_p_variance_spectrum_images,
+            "action_alignment_detail_p": selected.diagnostics_p_action_alignment_detail_images,
+            "cycle_error_p": selected.diagnostics_p_cycle_error_images,
+            "straightline_p": selected.diagnostics_p_straightline_images,
+            "rollout_divergence_p": selected.diagnostics_p_rollout_divergence_images,
+        }
         diagnostics_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_s_images.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in diagnostics_p_images.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 diagnostics_map[name] = per_step
 
         # Add pose self-distance images keyed by step (fallback to legacy state embedding images).
         pose_images = selected.self_distance_p_images or selected.state_embedding_images
         if pose_images:
-            per_step = {}
-            for path in pose_images:
-                stem = path.stem
-                if "hist" in stem or "cosine" in stem:
-                    continue
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            per_step = _build_step_map(
+                pose_images,
+                selected.id,
+                selected.path,
+                skip_tokens=["hist", "cosine"],
+            )
             if per_step:
                 diagnostics_map["self_distance_p"] = per_step
 
+        diagnostics_p_csvs = {
+            "delta_p_pca": selected.diagnostics_p_delta_p_pca_csvs,
+            "action_alignment_p": selected.diagnostics_p_action_alignment_csvs,
+            "cycle_error_p": selected.diagnostics_p_cycle_error_csvs,
+            "rollout_divergence_p": selected.diagnostics_p_rollout_divergence_csvs,
+        }
         diagnostics_csv_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_s_csvs.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in diagnostics_p_csvs.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 diagnostics_csv_map[name] = per_step
 
@@ -1475,10 +1513,10 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             step_set.update(per_step.keys())
         for per_step in diagnostics_csv_map.values():
             step_set.update(per_step.keys())
-        diagnostics_steps = sorted(step_set) if step_set else selected.diagnostics_s_steps
+        diagnostics_steps = sorted(step_set) if step_set else selected.diagnostics_p_steps
 
         frame_map: Dict[int, List[Dict[str, str]]] = {}
-        for step, frames in selected.diagnostics_frames.items():
+        for step, frames in zip(selected.diagnostics_frame_steps, selected.diagnostics_frame_entries):
             entries: List[Dict[str, str]] = []
             for img_path, src_path, action_label, action_id in frames:
                 try:
@@ -1492,18 +1530,18 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                         "action": action_label or "",
                         "action_id": "" if action_id is None else str(action_id),
                     }
-                    )
+                )
             if entries:
                 frame_map[step] = entries
 
         _log_timing(
-            "diagnostics_s.build_maps",
+            "diagnostics_p.build_maps",
             build_maps_start,
             images=sum(len(v) for v in diagnostics_map.values()),
             csvs=sum(len(v) for v in diagnostics_csv_map.values()),
             frames=sum(len(v) for v in frame_map.values()),
         )
-        _log_timing("diagnostics_s.total", route_start, selected=selected.id)
+        _log_timing("diagnostics_p.total", route_start, selected=selected.id)
         return render_template(
             "diagnostics_page.html",
             view_label="p",
@@ -1539,35 +1577,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         route_start = time.perf_counter()
         requested = exp_id or request.args.get("id")
 
-        def _diagnostics_h_exists(exp_path: Path) -> bool:
-            checks = [
-                ("vis_delta_h_pca", "delta_h_pca_*.png"),
-                ("vis_action_alignment_h", "action_alignment_detail_*.png"),
-                ("vis_cycle_error_h", "cycle_error_*.png"),
-                ("vis_self_distance_h", "self_distance_h_*.png"),
-                ("vis_h_ablation", "h_ablation_*.png"),
-                ("vis_h_drift_by_action", "h_drift_by_action_*.png"),
-                ("vis_norm_timeseries", "norm_timeseries_*.png"),
-            ]
-            for folder, pattern in checks:
-                target = exp_path / folder
-                if target.exists() and any(target.glob(pattern)):
-                    return True
-            return False
-
         def _latest_diagnostics_h_id() -> Optional[str]:
-            index_rows = build_experiment_index(cfg.output_dir)
-            if not index_rows:
-                return None
-            sorted_rows = sorted(
-                index_rows,
-                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
-                reverse=True,
+            return _latest_experiment_id_from_index(
+                cfg.output_dir,
+                match=_diagnostics_h_exists,
+                fallback_to_latest=True,
             )
-            for row in sorted_rows:
-                if _diagnostics_h_exists(row.path):
-                    return row.id
-            return sorted_rows[0].id if sorted_rows else None
 
         selected_id: Optional[str] = None
         if requested:
@@ -1634,7 +1649,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         diagnostic_steps = sorted(step_set)
 
         frame_map: Dict[int, List[Dict[str, str]]] = {}
-        for step, frames in selected.diagnostics_frames.items():
+        for step, frames in zip(selected.diagnostics_frame_steps, selected.diagnostics_frame_entries):
             entries: List[Dict[str, str]] = []
             for img_path, src_path, action_label, action_id in frames:
                 try:
@@ -1685,23 +1700,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         requested = exp_id or request.args.get("id")
 
         def _latest_diagnostics_zhp_id() -> Optional[str]:
-            index_rows = build_experiment_index(cfg.output_dir)
-            if not index_rows:
-                return None
-            sorted_rows = sorted(
-                index_rows,
-                key=lambda row: row.last_modified or datetime.fromtimestamp(0),
-                reverse=True,
+            return _latest_experiment_id_from_index(
+                cfg.output_dir,
+                match=_diagnostics_zhp_match,
+                fallback=_diagnostics_zhp_fallback,
             )
-            fallback = None
-            for row in sorted_rows:
-                has_z = _diagnostics_exists(row.path)
-                has_p = _diagnostics_s_exists(row.path)
-                if has_z and has_p:
-                    return row.id
-                if fallback is None and (has_z or has_p):
-                    fallback = row.id
-            return fallback
 
         selected_id: Optional[str] = None
         if requested:
@@ -1732,7 +1735,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg.output_dir / selected_id,
             include_self_distance=True,
             include_diagnostics_images=True,
-            include_diagnostics_s=True,
+            include_diagnostics_p=True,
             include_state_embedding=True,
             include_self_distance_p=True,
         )
@@ -1742,66 +1745,55 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         build_maps_start = time.perf_counter()
         figure = _build_single_experiment_figure(selected)
 
+        diagnostics_images = {
+            "delta_z_pca": selected.diagnostics_delta_z_pca_images,
+            "variance_spectrum": selected.diagnostics_variance_spectrum_images,
+            "action_alignment_detail": selected.diagnostics_action_alignment_detail_images,
+            "cycle_error": selected.diagnostics_cycle_error_images,
+            "rollout_divergence": selected.diagnostics_rollout_divergence_images,
+            "rollout_divergence_z": selected.diagnostics_rollout_divergence_z_images,
+            "z_consistency": selected.diagnostics_z_consistency_images,
+            "z_monotonicity": selected.diagnostics_z_monotonicity_images,
+            "path_independence": selected.diagnostics_path_independence_images,
+        }
         diagnostics_map_z: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_images.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in diagnostics_images.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 diagnostics_map_z[name] = per_step
 
-        if selected.self_distance_images:
-            per_step = {}
-            for path in selected.self_distance_images:
-                stem = path.stem
-                if "cosine" in stem:
-                    continue
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        if selected.self_distance_z_images:
+            per_step = _build_step_map(
+                selected.self_distance_z_images,
+                selected.id,
+                selected.path,
+                skip_tokens=["cosine"],
+            )
             if per_step:
                 diagnostics_map_z["self_distance"] = per_step
 
         diagnostics_map_p: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.diagnostics_s_images.items():
-            per_step = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        diagnostics_p_images = {
+            "delta_p_pca": selected.diagnostics_p_delta_p_pca_images,
+            "variance_spectrum_p": selected.diagnostics_p_variance_spectrum_images,
+            "action_alignment_detail_p": selected.diagnostics_p_action_alignment_detail_images,
+            "cycle_error_p": selected.diagnostics_p_cycle_error_images,
+            "straightline_p": selected.diagnostics_p_straightline_images,
+            "rollout_divergence_p": selected.diagnostics_p_rollout_divergence_images,
+        }
+        for name, paths in diagnostics_p_images.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 diagnostics_map_p[name] = per_step
 
         pose_images = selected.self_distance_p_images or selected.state_embedding_images
         if pose_images:
-            per_step = {}
-            for path in pose_images:
-                stem = path.stem
-                if "hist" in stem or "cosine" in stem:
-                    continue
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                rel = path.relative_to(selected.path)
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+            per_step = _build_step_map(
+                pose_images,
+                selected.id,
+                selected.path,
+                skip_tokens=["hist", "cosine"],
+            )
             if per_step:
                 diagnostics_map_p["self_distance_p"] = per_step
 
@@ -1886,7 +1878,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                if _graph_diagnostics_exists(row.path):
+                graph_folder = _resolve_first_existing_folder(
+                    row.path,
+                    GRAPH_DIAGNOSTICS_Z_FOLDER_CANDIDATES,
+                )
+                if graph_folder and _folder_has_any_file(graph_folder, (".png", ".csv")):
                     return row.id
             return None
 
@@ -1925,29 +1921,26 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         figure = _build_single_experiment_figure(selected)
 
+        graph_images = {
+            "rank1_cdf": selected.graph_diagnostics_rank1_cdf_z_images,
+            "rank2_cdf": selected.graph_diagnostics_rank2_cdf_z_images,
+            "neff_violin": selected.graph_diagnostics_neff_violin_z_images,
+            "in_degree_hist": selected.graph_diagnostics_in_degree_hist_z_images,
+            "edge_consistency": selected.graph_diagnostics_edge_consistency_z_images,
+            "metrics_history": selected.graph_diagnostics_metrics_history_z_images,
+            "metrics_history_latest": selected.graph_diagnostics_metrics_history_latest_z_images,
+        }
         graph_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.graph_diagnostics_images.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                try:
-                    rel = path.relative_to(selected.path)
-                except ValueError:
-                    continue
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in graph_images.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 graph_map[name] = per_step
 
-        graph_steps = selected.graph_diagnostics_steps
+        graph_steps = selected.graph_diagnostics_z_steps
         history_rows: List[Dict[str, float]] = []
         history_url: Optional[str] = None
         history_plot_url: Optional[str] = None
-        history_files = selected.graph_diagnostics_csvs.get("metrics_history", [])
+        history_files = selected.graph_diagnostics_metrics_history_z_csvs
         if history_files:
             latest_hist = history_files[-1]
             history_rows = _parse_graph_history_csv(latest_hist)
@@ -1956,8 +1949,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 history_url = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
             except ValueError:
                 history_url = None
-        history_images = selected.graph_diagnostics_images.get("metrics_history", [])
-        latest_history_images = selected.graph_diagnostics_images.get("metrics_history_latest", [])
+        history_images = graph_images.get("metrics_history", [])
+        latest_history_images = graph_images.get("metrics_history_latest", [])
         plot_path: Optional[Path] = None
         if latest_history_images:
             plot_path = latest_history_images[-1]
@@ -2014,7 +2007,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                if _graph_diagnostics_exists(row.path, folder_name="graph_diagnostics_h"):
+                graph_folder = _resolve_first_existing_folder(
+                    row.path,
+                    GRAPH_DIAGNOSTICS_H_FOLDER_CANDIDATES,
+                )
+                if graph_folder and _folder_has_any_file(graph_folder, (".png", ".csv")):
                     return row.id
             return None
 
@@ -2053,21 +2050,18 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         figure = _build_single_experiment_figure(selected)
 
+        graph_images = {
+            "rank1_cdf": selected.graph_diagnostics_rank1_cdf_h_images,
+            "rank2_cdf": selected.graph_diagnostics_rank2_cdf_h_images,
+            "neff_violin": selected.graph_diagnostics_neff_violin_h_images,
+            "in_degree_hist": selected.graph_diagnostics_in_degree_hist_h_images,
+            "edge_consistency": selected.graph_diagnostics_edge_consistency_h_images,
+            "metrics_history": selected.graph_diagnostics_metrics_history_h_images,
+            "metrics_history_latest": selected.graph_diagnostics_metrics_history_latest_h_images,
+        }
         graph_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.graph_diagnostics_h_images.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                try:
-                    rel = path.relative_to(selected.path)
-                except ValueError:
-                    continue
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in graph_images.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 graph_map[name] = per_step
 
@@ -2075,7 +2069,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         history_rows: List[Dict[str, float]] = []
         history_url: Optional[str] = None
         history_plot_url: Optional[str] = None
-        history_files = selected.graph_diagnostics_h_csvs.get("metrics_history", [])
+        history_files = selected.graph_diagnostics_metrics_history_h_csvs
         if history_files:
             latest_hist = history_files[-1]
             history_rows = _parse_graph_history_csv(latest_hist)
@@ -2084,8 +2078,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 history_url = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
             except ValueError:
                 history_url = None
-        history_images = selected.graph_diagnostics_h_images.get("metrics_history", [])
-        latest_history_images = selected.graph_diagnostics_h_images.get("metrics_history_latest", [])
+        history_images = graph_images.get("metrics_history", [])
+        latest_history_images = graph_images.get("metrics_history_latest", [])
         plot_path: Optional[Path] = None
         if latest_history_images:
             plot_path = latest_history_images[-1]
@@ -2142,7 +2136,11 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                if _graph_diagnostics_exists(row.path, folder_name="graph_diagnostics_s"):
+                graph_folder = _resolve_first_existing_folder(
+                    row.path,
+                    GRAPH_DIAGNOSTICS_P_FOLDER_CANDIDATES,
+                )
+                if graph_folder and _folder_has_any_file(graph_folder, (".png", ".csv")):
                     return row.id
             return None
 
@@ -2174,36 +2172,33 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
 
         selected = load_experiment(
             cfg.output_dir / selected_id,
-            include_graph_diagnostics_s=True,
+            include_graph_diagnostics_p=True,
         )
         if selected is None:
             abort(404, "Experiment not found for graph diagnostics.")
 
         figure = _build_single_experiment_figure(selected)
 
+        graph_images = {
+            "rank1_cdf": selected.graph_diagnostics_rank1_cdf_p_images,
+            "rank2_cdf": selected.graph_diagnostics_rank2_cdf_p_images,
+            "neff_violin": selected.graph_diagnostics_neff_violin_p_images,
+            "in_degree_hist": selected.graph_diagnostics_in_degree_hist_p_images,
+            "edge_consistency": selected.graph_diagnostics_edge_consistency_p_images,
+            "metrics_history": selected.graph_diagnostics_metrics_history_p_images,
+            "metrics_history_latest": selected.graph_diagnostics_metrics_history_latest_p_images,
+        }
         graph_map: Dict[str, Dict[int, str]] = {}
-        for name, paths in selected.graph_diagnostics_s_images.items():
-            per_step: Dict[int, str] = {}
-            for path in paths:
-                stem = path.stem
-                suffix = stem.split("_")[-1] if "_" in stem else stem
-                try:
-                    step = int(suffix)
-                except ValueError:
-                    continue
-                try:
-                    rel = path.relative_to(selected.path)
-                except ValueError:
-                    continue
-                per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+        for name, paths in graph_images.items():
+            per_step = _build_step_map(paths, selected.id, selected.path)
             if per_step:
                 graph_map[name] = per_step
 
-        graph_steps = selected.graph_diagnostics_s_steps
+        graph_steps = selected.graph_diagnostics_p_steps
         history_rows: List[Dict[str, float]] = []
         history_url: Optional[str] = None
         history_plot_url: Optional[str] = None
-        history_files = selected.graph_diagnostics_s_csvs.get("metrics_history", [])
+        history_files = selected.graph_diagnostics_metrics_history_p_csvs
         if history_files:
             latest_hist = history_files[-1]
             history_rows = _parse_graph_history_csv(latest_hist)
@@ -2212,8 +2207,8 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 history_url = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
             except ValueError:
                 history_url = None
-        history_images = selected.graph_diagnostics_s_images.get("metrics_history", [])
-        latest_history_images = selected.graph_diagnostics_s_images.get("metrics_history_latest", [])
+        history_images = graph_images.get("metrics_history", [])
+        latest_history_images = graph_images.get("metrics_history_latest", [])
         plot_path: Optional[Path] = None
         if latest_history_images:
             plot_path = latest_history_images[-1]
@@ -2229,7 +2224,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             graph_steps = [int(row.get("step", 0)) for row in history_rows if "step" in row]
 
         _log_timing(
-            "graph_diagnostics_s.total",
+            "graph_diagnostics_p.total",
             route_start,
             selected=selected.id,
             images=sum(len(v) for v in graph_map.values()),
@@ -2270,7 +2265,20 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                if _graph_diagnostics_exists(row.path) and _graph_diagnostics_exists(row.path, folder_name="graph_diagnostics_s"):
+                graph_z_folder = _resolve_first_existing_folder(
+                    row.path,
+                    GRAPH_DIAGNOSTICS_Z_FOLDER_CANDIDATES,
+                )
+                graph_s_folder = _resolve_first_existing_folder(
+                    row.path,
+                    GRAPH_DIAGNOSTICS_P_FOLDER_CANDIDATES,
+                )
+                if (
+                    graph_z_folder
+                    and _folder_has_any_file(graph_z_folder, (".png", ".csv"))
+                    and graph_s_folder
+                    and _folder_has_any_file(graph_s_folder, (".png", ".csv"))
+                ):
                     return row.id
             return None
 
@@ -2278,7 +2286,20 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if requested:
             requested_path = cfg.output_dir / requested
             if requested_path.is_dir():
-                if _graph_diagnostics_exists(requested_path) and _graph_diagnostics_exists(requested_path, folder_name="graph_diagnostics_s"):
+                graph_z_folder = _resolve_first_existing_folder(
+                    requested_path,
+                    GRAPH_DIAGNOSTICS_Z_FOLDER_CANDIDATES,
+                )
+                graph_s_folder = _resolve_first_existing_folder(
+                    requested_path,
+                    GRAPH_DIAGNOSTICS_P_FOLDER_CANDIDATES,
+                )
+                if (
+                    graph_z_folder
+                    and _folder_has_any_file(graph_z_folder, (".png", ".csv"))
+                    and graph_s_folder
+                    and _folder_has_any_file(graph_s_folder, (".png", ".csv"))
+                ):
                     selected_id = requested
         if selected_id is None:
             selected_id = _latest_graph_zhp_id()
@@ -2314,39 +2335,54 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             cfg.output_dir / selected_id,
             include_graph_diagnostics=True,
             include_graph_diagnostics_h=True,
-            include_graph_diagnostics_s=True,
+            include_graph_diagnostics_p=True,
         )
         if selected is None:
             abort(404, "Experiment not found for graph diagnostics (Z/H/P).")
 
         figure = _build_single_experiment_figure(selected)
+        graph_images_z = {
+            "rank1_cdf": selected.graph_diagnostics_rank1_cdf_z_images,
+            "rank2_cdf": selected.graph_diagnostics_rank2_cdf_z_images,
+            "neff_violin": selected.graph_diagnostics_neff_violin_z_images,
+            "in_degree_hist": selected.graph_diagnostics_in_degree_hist_z_images,
+            "edge_consistency": selected.graph_diagnostics_edge_consistency_z_images,
+            "metrics_history": selected.graph_diagnostics_metrics_history_z_images,
+            "metrics_history_latest": selected.graph_diagnostics_metrics_history_latest_z_images,
+        }
+        graph_images_h = {
+            "rank1_cdf": selected.graph_diagnostics_rank1_cdf_h_images,
+            "rank2_cdf": selected.graph_diagnostics_rank2_cdf_h_images,
+            "neff_violin": selected.graph_diagnostics_neff_violin_h_images,
+            "in_degree_hist": selected.graph_diagnostics_in_degree_hist_h_images,
+            "edge_consistency": selected.graph_diagnostics_edge_consistency_h_images,
+            "metrics_history": selected.graph_diagnostics_metrics_history_h_images,
+            "metrics_history_latest": selected.graph_diagnostics_metrics_history_latest_h_images,
+        }
+        graph_images_p = {
+            "rank1_cdf": selected.graph_diagnostics_rank1_cdf_p_images,
+            "rank2_cdf": selected.graph_diagnostics_rank2_cdf_p_images,
+            "neff_violin": selected.graph_diagnostics_neff_violin_p_images,
+            "in_degree_hist": selected.graph_diagnostics_in_degree_hist_p_images,
+            "edge_consistency": selected.graph_diagnostics_edge_consistency_p_images,
+            "metrics_history": selected.graph_diagnostics_metrics_history_p_images,
+            "metrics_history_latest": selected.graph_diagnostics_metrics_history_latest_p_images,
+        }
 
         def _build_graph_map(paths_by_name: Dict[str, List[Path]]) -> Dict[str, Dict[int, str]]:
             out: Dict[str, Dict[int, str]] = {}
             for name, paths in paths_by_name.items():
-                per_step: Dict[int, str] = {}
-                for path in paths:
-                    stem = path.stem
-                    suffix = stem.split("_")[-1] if "_" in stem else stem
-                    try:
-                        step = int(suffix)
-                    except ValueError:
-                        continue
-                    try:
-                        rel = path.relative_to(selected.path)
-                    except ValueError:
-                        continue
-                    per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
+                per_step = _build_step_map(paths, selected.id, selected.path)
                 if per_step:
                     out[name] = per_step
             return out
 
-        graph_map_z = _build_graph_map(selected.graph_diagnostics_images)
-        graph_map_h = _build_graph_map(selected.graph_diagnostics_h_images)
-        graph_map_s = _build_graph_map(selected.graph_diagnostics_s_images)
-        steps_z = selected.graph_diagnostics_steps
+        graph_map_z = _build_graph_map(graph_images_z)
+        graph_map_h = _build_graph_map(graph_images_h)
+        graph_map_s = _build_graph_map(graph_images_p)
+        steps_z = selected.graph_diagnostics_z_steps
         steps_h = selected.graph_diagnostics_h_steps
-        steps_s = selected.graph_diagnostics_s_steps
+        steps_s = selected.graph_diagnostics_p_steps
 
         history_rows_z: List[Dict[str, float]] = []
         history_rows_h: List[Dict[str, float]] = []
@@ -2358,7 +2394,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         history_plot_url_h: Optional[str] = None
         history_plot_url_s: Optional[str] = None
 
-        history_files_z = selected.graph_diagnostics_csvs.get("metrics_history", [])
+        history_files_z = selected.graph_diagnostics_metrics_history_z_csvs
         if history_files_z:
             latest_hist = history_files_z[-1]
             history_rows_z = _parse_graph_history_csv(latest_hist)
@@ -2368,7 +2404,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             except ValueError:
                 history_url_z = None
 
-        history_files_s = selected.graph_diagnostics_s_csvs.get("metrics_history", [])
+        history_files_s = selected.graph_diagnostics_metrics_history_p_csvs
         if history_files_s:
             latest_hist = history_files_s[-1]
             history_rows_s = _parse_graph_history_csv(latest_hist)
@@ -2378,7 +2414,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             except ValueError:
                 history_url_s = None
 
-        history_files_h = selected.graph_diagnostics_h_csvs.get("metrics_history", [])
+        history_files_h = selected.graph_diagnostics_metrics_history_h_csvs
         if history_files_h:
             latest_hist = history_files_h[-1]
             history_rows_h = _parse_graph_history_csv(latest_hist)
@@ -2404,9 +2440,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             except ValueError:
                 return None
 
-        history_plot_url_z = _latest_history_plot(selected.graph_diagnostics_images)
-        history_plot_url_h = _latest_history_plot(selected.graph_diagnostics_h_images)
-        history_plot_url_s = _latest_history_plot(selected.graph_diagnostics_s_images)
+        history_plot_url_z = _latest_history_plot(graph_images_z)
+        history_plot_url_h = _latest_history_plot(graph_images_h)
+        history_plot_url_s = _latest_history_plot(graph_images_p)
 
         _log_timing(
             "graph_diagnostics_zhp.total",
@@ -2489,7 +2525,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             include_self_distance_p=True,
             include_state_embedding=True,
             include_diagnostics_images=True,
-            include_diagnostics_s=True,
+            include_diagnostics_p=True,
         )
         if selected is None:
             abort(404, "Experiment not found for assessment.")
@@ -2722,14 +2758,14 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             dist = _last_value(rows, ["distance_mean", "mean_distance", "distance"])
             return dist, "mean distance", _judge_low(dist, 0.2, 0.4)
 
-        z_metric = _self_distance_metric(selected.self_distance_csv)
+        z_metric = _self_distance_metric(selected.self_distance_z_csv)
         z_judgement, z_thresholds = _judge_low(z_metric, 0.2, 0.4)
         _add_row(
             "self_distance_z",
             "Self-distance (Z)",
-            csv_files=[selected.self_distance_csv] if selected.self_distance_csv else [],
+            csv_files=[selected.self_distance_z_csv] if selected.self_distance_z_csv else [],
             csv_prefixes=["self_distance_z_", "self_distance_"],
-            image_paths=selected.self_distance_images,
+            image_paths=selected.self_distance_z_images,
             image_prefixes=["self_distance_z_", "self_distance_"],
             image_skip=["cosine"],
             diagnostic="Stability of Z embeddings across time; lower drift indicates smoother dynamics.",
@@ -2773,7 +2809,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             judgement_detail=p_thresholds,
         )
         delta_csvs = _pick_preferred_csv(
-            selected.diagnostics_s_csvs.get("delta_s_pca", []),
+            selected.diagnostics_p_delta_p_pca_csvs,
             ["delta_p_pca_variance_", "delta_s_pca_variance_"],
         )
         delta_metric = _delta_variance_metric(delta_csvs[-1]) if delta_csvs else None
@@ -2783,7 +2819,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "Delta-p PCA",
             csv_files=delta_csvs,
             csv_prefixes=["delta_p_pca_variance_", "delta_s_pca_variance_"],
-            image_paths=selected.diagnostics_s_images.get("delta_s_pca", []),
+            image_paths=selected.diagnostics_p_delta_p_pca_images,
             image_prefixes=["delta_p_pca_", "delta_s_pca_"],
             diagnostic="Pose deltas clustered by action; separation suggests distinct action effects.",
             metric_label="top-3 variance ratio",
@@ -2792,7 +2828,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             judgement_detail=delta_thresholds,
         )
         align_csvs = _pick_preferred_csv(
-            selected.diagnostics_s_csvs.get("action_alignment_s", []),
+            selected.diagnostics_p_action_alignment_csvs,
             ["action_alignment_", "action_alignment_report_", "action_alignment_strength_"],
         )
         align_metric = _action_alignment_metric(align_csvs[-1]) if align_csvs else None
@@ -2802,7 +2838,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "Action alignment (P)",
             csv_files=align_csvs,
             csv_prefixes=["action_alignment_"],
-            image_paths=selected.diagnostics_s_images.get("action_alignment_detail_s", []),
+            image_paths=selected.diagnostics_p_action_alignment_detail_images,
             image_prefixes=["action_alignment_detail_"],
             diagnostic="Mean alignment of pose deltas per action; higher mean cosine is better.",
             metric_label="mean cosine",
@@ -2811,7 +2847,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             judgement_detail=align_thresholds,
         )
         cycle_csvs = _pick_preferred_csv(
-            selected.diagnostics_s_csvs.get("cycle_error_s", []),
+            selected.diagnostics_p_cycle_error_csvs,
             ["cycle_error_summary_", "cycle_error_values_"],
         )
         cycle_metric = _cycle_error_metric(cycle_csvs[-1]) if cycle_csvs else None
@@ -2821,7 +2857,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "Cycle error (P)",
             csv_files=cycle_csvs,
             csv_prefixes=["cycle_error_"],
-            image_paths=selected.diagnostics_s_images.get("cycle_error_s", []),
+            image_paths=selected.diagnostics_p_cycle_error_images,
             image_prefixes=["cycle_error_"],
             diagnostic="Average cycle error by action; lower means inverse actions cancel cleanly.",
             metric_label="mean cycle error",
@@ -2830,7 +2866,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             judgement_detail=cycle_thresholds,
         )
         straight_csvs = _pick_preferred_csv(
-            selected.diagnostics_s_csvs.get("straightline_s", []),
+            [],
             ["straightline_", "straightline_summary_"],
         )
         straight_metric = _last_value(_read_csv_rows(straight_csvs[-1]), ["curvature_mean", "mean_curvature"]) if straight_csvs else None
@@ -2840,7 +2876,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "Straight-line rays (P)",
             csv_files=straight_csvs,
             csv_prefixes=["straightline_p_", "straightline_s_"],
-            image_paths=selected.diagnostics_s_images.get("straightline_s", []),
+            image_paths=selected.diagnostics_p_straightline_images,
             image_prefixes=["straightline_p_", "straightline_s_"],
             diagnostic="Repeated actions should trace straight rays; curvature indicates drift.",
             metric_label="mean curvature",
@@ -2848,7 +2884,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             judgement=straight_judgement,
             judgement_detail=straight_thresholds,
         )
-        z_consistency_csvs = selected.diagnostics_csvs.get("z_consistency", [])
+        z_consistency_csvs = selected.diagnostics_z_consistency_csvs
         z_consistency_metric, z_metric_label, z_judgement = _z_consistency_metric(
             z_consistency_csvs[-1] if z_consistency_csvs else None
         )
@@ -2858,7 +2894,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "Z consistency",
             csv_files=z_consistency_csvs,
             csv_prefixes=["z_consistency_"],
-            image_paths=selected.diagnostics_images.get("z_consistency", []),
+            image_paths=selected.diagnostics_z_consistency_images,
             image_prefixes=["z_consistency_"],
             diagnostic="Same-frame consistency under noise; higher cosine (or lower distance) is better.",
             metric_label=z_metric_label,
@@ -2894,7 +2930,12 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 reverse=True,
             )
             for row in sorted_rows:
-                if _vis_ctrl_exists(row.path):
+                if _any_folder_pattern_exists(
+                    row.path,
+                    [
+                        ("vis_vis_ctrl", "smoothness_z_0000000.png", "smoothness_z_*.png"),
+                    ],
+                ) or _any_existing_paths(row.path, ["metrics/vis_ctrl_metrics.csv"]):
                     return row.id
             return None
 
@@ -2913,7 +2954,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                 experiment=None,
                 steps=[],
                 vis_ctrl_map_z={},
-                vis_ctrl_map_s={},
+                vis_ctrl_map_p={},
                 vis_ctrl_map_h={},
                 csv_url=None,
                 cfg=cfg,
@@ -2930,35 +2971,43 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             abort(404, "Experiment not found for Vis v Ctrl outputs.")
 
         def _build_vis_ctrl_map(
-            paths_by_name: Dict[str, List[Path]]
+            *paths_by_name_list: Dict[str, List[Path]],
         ) -> Tuple[Dict[str, Dict[int, str]], Dict[str, Dict[int, str]], Dict[str, Dict[int, str]]]:
             map_z: Dict[str, Dict[int, str]] = {}
-            map_s: Dict[str, Dict[int, str]] = {}
+            map_p: Dict[str, Dict[int, str]] = {}
             map_h: Dict[str, Dict[int, str]] = {}
-            for name, paths in paths_by_name.items():
-                target = (
-                    map_z if name.endswith("_z") else map_s if name.endswith("_s") else map_h if name.endswith("_h") else None
-                )
-                if target is None:
-                    continue
-                per_step: Dict[int, str] = {}
-                for path in paths:
-                    stem = path.stem
-                    suffix = stem.split("_")[-1] if "_" in stem else stem
-                    try:
-                        step = int(suffix)
-                    except ValueError:
+            for paths_by_name in paths_by_name_list:
+                for name, paths in paths_by_name.items():
+                    target = (
+                        map_z if name.endswith("_z") else map_p if name.endswith("_p") else map_h if name.endswith("_h") else None
+                    )
+                    if target is None:
                         continue
-                    try:
-                        rel = path.relative_to(selected.path)
-                    except ValueError:
-                        continue
-                    per_step[step] = url_for("serve_asset", relative_path=f"{selected.id}/{rel}")
-                if per_step:
-                    target[name] = per_step
-            return map_z, map_s, map_h
+                    per_step = _build_step_map(paths, selected.id, selected.path)
+                    if per_step:
+                        target[name] = per_step
+            return map_z, map_p, map_h
 
-        vis_ctrl_map_z, vis_ctrl_map_s, vis_ctrl_map_h = _build_vis_ctrl_map(selected.vis_ctrl_images)
+        vis_ctrl_core_images = {
+            "smoothness_z": selected.vis_ctrl_smoothness_z_images,
+            "smoothness_p": selected.vis_ctrl_smoothness_p_images,
+            "smoothness_h": selected.vis_ctrl_smoothness_h_images,
+            "composition_z": selected.vis_ctrl_composition_z_images,
+            "composition_p": selected.vis_ctrl_composition_p_images,
+            "composition_h": selected.vis_ctrl_composition_h_images,
+            "stability_z": selected.vis_ctrl_stability_z_images,
+            "stability_p": selected.vis_ctrl_stability_p_images,
+            "stability_h": selected.vis_ctrl_stability_h_images,
+        }
+        vis_ctrl_alignment_z = {"alignment_z": selected.vis_ctrl_alignment_z_images}
+        vis_ctrl_alignment_p = {"alignment_p": selected.vis_ctrl_alignment_p_images}
+        vis_ctrl_alignment_h = {"alignment_h": selected.vis_ctrl_alignment_h_images}
+        vis_ctrl_map_z, vis_ctrl_map_p, vis_ctrl_map_h = _build_vis_ctrl_map(
+            vis_ctrl_core_images,
+            vis_ctrl_alignment_z,
+            vis_ctrl_alignment_p,
+            vis_ctrl_alignment_h,
+        )
         steps = selected.vis_ctrl_steps
         csv_url: Optional[str] = None
         history_rows: List[Dict[str, float]] = []
@@ -2978,7 +3027,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             experiment=selected,
             steps=steps,
             vis_ctrl_map_z=vis_ctrl_map_z,
-            vis_ctrl_map_s=vis_ctrl_map_s,
+            vis_ctrl_map_p=vis_ctrl_map_p,
             vis_ctrl_map_h=vis_ctrl_map_h,
             csv_url=csv_url,
             history=history_rows,
@@ -3039,6 +3088,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
         if idx > 0:
             diff_text = diff_metadata(base_metadata, exp.metadata_text)
         viz_steps = _collect_visualization_steps(exp.path)
+        image_folder_specs = get_image_folder_specs(exp.path)
         max_step = exp.max_step
         if max_step is None:
             max_step = _safe_get_max_step(exp.loss_csv)
@@ -3051,6 +3101,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "tags": exp.tags,
                 "rollout_steps": exp.rollout_steps,
                 "visualization_steps": viz_steps,
+                "image_folder_specs": image_folder_specs,
                 "max_step": max_step,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
@@ -3143,10 +3194,14 @@ def _build_step_map(
     exp_id: str,
     exp_path: Path,
     prefix: str = "",
+    skip_tokens: Optional[List[str]] = None,
 ) -> Dict[int, str]:
     per_step: Dict[int, str] = {}
     for path in paths:
-        step = _parse_step_suffix(path.stem, prefix)
+        stem = path.stem
+        if skip_tokens and any(token in stem for token in skip_tokens):
+            continue
+        step = _parse_step_suffix(stem, prefix)
         if step is None:
             continue
         try:

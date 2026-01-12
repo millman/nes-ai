@@ -3137,19 +3137,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     self_distance_h_dir = run_dir / "self_distance_h"
     checkpoints_dir = run_dir / "checkpoints"
 
-    # Legacy aliases: keep _s variable names for backward-compat while writing to new _p outputs.
-    pca_s_dir = pca_p_dir
-    diagnostics_delta_s_dir = diagnostics_delta_p_dir
-    diagnostics_alignment_s_dir = diagnostics_alignment_p_dir
-    diagnostics_alignment_s_raw_dir = diagnostics_alignment_p_raw_dir
-    diagnostics_alignment_s_centered_dir = diagnostics_alignment_p_centered_dir
-    diagnostics_cycle_s_dir = diagnostics_cycle_p_dir
-    diagnostics_straightline_s_dir = diagnostics_straightline_p_dir
-    vis_composability_s_dir = vis_composability_p_dir
-    vis_self_distance_s_dir = vis_self_distance_p_dir
-    self_distance_s_dir = self_distance_p_dir
-    graph_diagnostics_s_dir = graph_diagnostics_p_dir
-
     print(f"[run] Writing outputs to {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)

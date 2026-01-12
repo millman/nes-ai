@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,11 +9,31 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import csv
+from itertools import chain
 import re
-import tomli
-import tomli_w
 
 from .csv_utils import get_max_step
+from .experiments_action_alignment import extract_alignment_summary
+from .first_matches import (
+    _first_existing_matches,
+    _first_existing_steps,
+    _first_matching_csv_candidate,
+    _first_matching_file,
+)
+from .experiments_git import _extract_git_commit
+from .experiments_last_modified import _get_last_modified, _quick_last_modified
+from .experiments_metadata import (
+    _extract_data_root_from_metadata,
+    _read_metadata,
+    _read_model_metadata,
+    _read_or_create_notes,
+    write_archived,
+    write_notes,
+    write_starred,
+    write_tags,
+    write_title,
+)
+from .experiments_model_diff import _ensure_model_diff, _parse_model_diff_items, _render_model_diff
 
 ALL_ZERO_EPS = 1e-12
 PROFILE_ENABLED = os.environ.get("VIEWER_PROFILE", "").lower() in {"1", "true", "yes", "on"}
@@ -35,59 +54,929 @@ def _profile(label: str, start_time: float, path: Optional[Path] = None, **field
     PROFILE_LOGGER.info(" ".join(parts))
 
 
-_MODEL_DIFF_SHORTNAMES: Dict[str, str] = {
-    "loss_normalization_enabled": "norm",
-    "image_size": "img",
+@dataclass(frozen=True)
+class VisSpec:
+    label: Optional[str]
+    candidates: List[Tuple[str, str] | Tuple[str, str, str]]
+
+
+VIS_STEP_SPECS: Dict[str, VisSpec] = {
+    'vis_fixed_0': VisSpec(
+        label='Rollouts:Fixed 0',
+        candidates=[('vis_fixed_0', 'rollout_*.png', 'rollout_')],
+    ),
+    'vis_fixed_1': VisSpec(
+        label='Rollouts:Fixed 1',
+        candidates=[('vis_fixed_1', 'rollout_*.png', 'rollout_')],
+    ),
+    'vis_rolling_0': VisSpec(
+        label='Rollouts:Rolling 0',
+        candidates=[('vis_rolling_0', 'rollout_*.png', 'rollout_')],
+    ),
+    'vis_rolling_1': VisSpec(
+        label='Rollouts:Rolling 1',
+        candidates=[('vis_rolling_1', 'rollout_*.png', 'rollout_')],
+    ),
+    'embeddings': VisSpec(
+        label=None,
+        candidates=[('embeddings', 'embeddings_*.png', 'embeddings_')],
+    ),
+    'pca_z': VisSpec(
+        label='Diagnostics:PCA (Z)',
+        candidates=[
+            ('pca_z', 'pca_z_*.png', 'pca_z_'),
+            ('embeddings', 'embeddings_*.png', 'embeddings_'),
+        ],
+    ),
+    'pca_p': VisSpec(
+        label='Diagnostics:PCA (P)',
+        candidates=[
+            ('pca_p', 'pca_p_*.png', 'pca_p_'),
+            ('pca_s', 'pca_s_*.png', 'pca_s_'),
+        ],
+    ),
+    'pca_s': VisSpec(
+        label=None,
+        candidates=[('pca_s', 'pca_s_*.png', 'pca_s_')],
+    ),
+    'pca_h': VisSpec(
+        label='Diagnostics:PCA (H)',
+        candidates=[('pca_h', 'pca_h_*.png', 'pca_h_')],
+    ),
+    'samples_hard': VisSpec(
+        label='Samples:Hard',
+        candidates=[('samples_hard', 'hard_*.png', 'hard_')],
+    ),
+    'vis_self_distance_z': VisSpec(
+        label='Self-distance:Distance (Z)',
+        candidates=[
+            ('vis_self_distance_z', 'self_distance_z_*.png', 'self_distance_z_'),
+            ('vis_self_distance', 'self_distance_*.png', 'self_distance_'),
+        ],
+    ),
+    'vis_self_distance_p': VisSpec(
+        label='Self-distance:Distance (P)',
+        candidates=[
+            ('vis_self_distance_p', 'self_distance_p_*.png', 'self_distance_p_'),
+            ('vis_self_distance_s', 'self_distance_s_*.png', 'self_distance_s_'),
+            ('vis_state_embedding', 'state_embedding_[0-9]*.png', 'state_embedding_'),
+        ],
+    ),
+    'vis_self_distance_s': VisSpec(
+        label=None,
+        candidates=[
+            ('vis_self_distance_s', 'self_distance_s_*.png', 'self_distance_s_'),
+            ('vis_state_embedding', 'state_embedding_[0-9]*.png', 'state_embedding_'),
+        ],
+    ),
+    'vis_self_distance_h': VisSpec(
+        label='Self-distance:Distance (H)',
+        candidates=[('vis_self_distance_h', 'self_distance_h_*.png', 'self_distance_h_')],
+    ),
+    'vis_delta_z_pca': VisSpec(
+        label='Diagnostics:Delta-z PCA',
+        candidates=[('vis_delta_z_pca', 'delta_z_pca_*.png', 'delta_z_pca_')],
+    ),
+    'vis_delta_p_pca': VisSpec(
+        label='Diagnostics:Delta-p PCA',
+        candidates=[
+            ('vis_delta_p_pca', 'delta_p_pca_*.png', 'delta_p_pca_'),
+            ('vis_delta_s_pca', 'delta_s_pca_*.png', 'delta_s_pca_'),
+        ],
+    ),
+    'vis_delta_s_pca': VisSpec(
+        label=None,
+        candidates=[('vis_delta_s_pca', 'delta_s_pca_*.png', 'delta_s_pca_')],
+    ),
+    'vis_delta_h_pca': VisSpec(
+        label='Diagnostics:Delta-h PCA',
+        candidates=[('vis_delta_h_pca', 'delta_h_pca_*.png', 'delta_h_pca_')],
+    ),
+    'vis_odometry_current_z': VisSpec(
+        label='Odometry:Cumulative sum of Δz PCA/ICA/t-SNE',
+        candidates=[('vis_odometry', 'odometry_z_*.png', 'odometry_z_')],
+    ),
+    'vis_odometry_current_p': VisSpec(
+        label='Odometry:Cumulative sum of Δp PCA/ICA/t-SNE',
+        candidates=[
+            ('vis_odometry', 'odometry_p_*.png', 'odometry_p_'),
+            ('vis_odometry', 'odometry_s_*.png', 'odometry_s_'),
+        ],
+    ),
+    'vis_odometry_current_s': VisSpec(
+        label=None,
+        candidates=[('vis_odometry', 'odometry_s_*.png', 'odometry_s_')],
+    ),
+    'vis_odometry_current_h': VisSpec(
+        label='Odometry:Cumulative sum of Δh PCA/ICA/t-SNE',
+        candidates=[('vis_odometry', 'odometry_h_*.png', 'odometry_h_')],
+    ),
+    'vis_odometry_z_vs_z_hat': VisSpec(
+        label='Odometry:||z - z_hat|| + scatter',
+        candidates=[('vis_odometry', 'z_vs_z_hat_*.png', 'z_vs_z_hat_')],
+    ),
+    'vis_odometry_p_vs_p_hat': VisSpec(
+        label='Odometry:||p - p_hat|| + scatter',
+        candidates=[
+            ('vis_odometry', 'p_vs_p_hat_*.png', 'p_vs_p_hat_'),
+            ('vis_odometry', 's_vs_s_hat_*.png', 's_vs_s_hat_'),
+        ],
+    ),
+    'vis_odometry_s_vs_s_hat': VisSpec(
+        label=None,
+        candidates=[('vis_odometry', 's_vs_s_hat_*.png', 's_vs_s_hat_')],
+    ),
+    'vis_odometry_h_vs_h_hat': VisSpec(
+        label='Odometry:||h - h_hat|| + scatter',
+        candidates=[('vis_odometry', 'h_vs_h_hat_*.png', 'h_vs_h_hat_')],
+    ),
+    'vis_action_alignment_detail_z': VisSpec(
+        label='Diagnostics:Action alignment of PCA (Z)',
+        candidates=[
+            ('vis_action_alignment_z', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+            ('vis_action_alignment', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+        ],
+    ),
+    'vis_action_alignment_detail_raw_z': VisSpec(
+        label='Diagnostics:Action alignment of raw delta (Z)',
+        candidates=[('vis_action_alignment_z_raw', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_action_alignment_detail_centered_z': VisSpec(
+        label='Diagnostics:Action alignment of centered delta (Z)',
+        candidates=[('vis_action_alignment_z_centered', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_action_alignment_detail_p': VisSpec(
+        label='Diagnostics:Action alignment of PCA (P)',
+        candidates=[
+            ('vis_action_alignment_p', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+            ('vis_action_alignment_s', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+        ],
+    ),
+    'vis_action_alignment_detail_raw_p': VisSpec(
+        label='Diagnostics:Action alignment of raw delta (P)',
+        candidates=[
+            ('vis_action_alignment_p_raw', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+            ('vis_action_alignment_s_raw', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+        ],
+    ),
+    'vis_action_alignment_detail_centered_p': VisSpec(
+        label='Diagnostics:Action alignment of centered delta (P)',
+        candidates=[
+            ('vis_action_alignment_p_centered', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+            ('vis_action_alignment_s_centered', 'action_alignment_detail_*.png', 'action_alignment_detail_'),
+        ],
+    ),
+    'vis_action_alignment_detail_s': VisSpec(
+        label=None,
+        candidates=[('vis_action_alignment_s', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_action_alignment_detail_raw_s': VisSpec(
+        label=None,
+        candidates=[('vis_action_alignment_s_raw', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_action_alignment_detail_centered_s': VisSpec(
+        label=None,
+        candidates=[('vis_action_alignment_s_centered', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_action_alignment_detail_h': VisSpec(
+        label='Diagnostics:Action alignment of PCA (H)',
+        candidates=[('vis_action_alignment_h', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_action_alignment_detail_raw_h': VisSpec(
+        label='Diagnostics:Action alignment of raw delta (H)',
+        candidates=[('vis_action_alignment_h_raw', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_action_alignment_detail_centered_h': VisSpec(
+        label='Diagnostics:Action alignment of centered delta (H)',
+        candidates=[('vis_action_alignment_h_centered', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
+    ),
+    'vis_cycle_error': VisSpec(
+        label='Diagnostics:Cycle error (Z)',
+        candidates=[
+            ('vis_cycle_error_z', 'cycle_error_*.png', 'cycle_error_'),
+            ('vis_cycle_error', 'cycle_error_*.png', 'cycle_error_'),
+        ],
+    ),
+    'vis_cycle_error_p': VisSpec(
+        label='Diagnostics:Cycle error (P)',
+        candidates=[
+            ('vis_cycle_error_p', 'cycle_error_*.png', 'cycle_error_'),
+            ('vis_cycle_error_s', 'cycle_error_*.png', 'cycle_error_'),
+        ],
+    ),
+    'vis_cycle_error_s': VisSpec(
+        label=None,
+        candidates=[('vis_cycle_error_s', 'cycle_error_*.png', 'cycle_error_')],
+    ),
+    'vis_cycle_error_h': VisSpec(
+        label='Diagnostics:Cycle error (H)',
+        candidates=[('vis_cycle_error_h', 'cycle_error_*.png', 'cycle_error_')],
+    ),
+    'vis_rollout_divergence': VisSpec(
+        label='Diagnostics:Rollout divergence',
+        candidates=[('vis_rollout_divergence', 'rollout_divergence_*.png', 'rollout_divergence_')],
+    ),
+    'vis_rollout_divergence_z': VisSpec(
+        label='Diagnostics:Rollout divergence (Z)',
+        candidates=[('vis_rollout_divergence_z', 'rollout_divergence_z_*.png', 'rollout_divergence_z_')],
+    ),
+    'vis_rollout_divergence_h': VisSpec(
+        label='Diagnostics:Rollout divergence (H)',
+        candidates=[('vis_rollout_divergence_h', 'rollout_divergence_h_*.png', 'rollout_divergence_h_')],
+    ),
+    'vis_rollout_divergence_p': VisSpec(
+        label='Diagnostics:Rollout divergence (P)',
+        candidates=[('vis_rollout_divergence_p', 'rollout_divergence_p_*.png', 'rollout_divergence_p_')],
+    ),
+    'vis_z_consistency': VisSpec(
+        label='Diagnostics:Z consistency',
+        candidates=[('vis_z_consistency', 'z_consistency_*.png', 'z_consistency_')],
+    ),
+    'vis_z_monotonicity': VisSpec(
+        label='Diagnostics:Z monotonicity',
+        candidates=[('vis_z_monotonicity', 'z_monotonicity_*.png', 'z_monotonicity_')],
+    ),
+    'vis_path_independence': VisSpec(
+        label='Diagnostics:Path independence',
+        candidates=[('vis_path_independence', 'path_independence_*.png', 'path_independence_')],
+    ),
+    'vis_straightline_p': VisSpec(
+        label='Diagnostics:Straight-line P',
+        candidates=[
+            ('vis_straightline_p', 'straightline_p_*.png', 'straightline_p_'),
+            ('vis_straightline_s', 'straightline_s_*.png', 'straightline_s_'),
+        ],
+    ),
+    'vis_straightline_s': VisSpec(
+        label=None,
+        candidates=[('vis_straightline_s', 'straightline_s_*.png', 'straightline_s_')],
+    ),
+    'vis_h_ablation': VisSpec(
+        label='Diagnostics:H ablation divergence',
+        candidates=[('vis_h_ablation', 'h_ablation_*.png', 'h_ablation_')],
+    ),
+    'vis_h_drift_by_action': VisSpec(
+        label='Diagnostics:H drift by action',
+        candidates=[('vis_h_drift_by_action', 'h_drift_by_action_*.png', 'h_drift_by_action_')],
+    ),
+    'vis_norm_timeseries': VisSpec(
+        label='Diagnostics:Norm stability',
+        candidates=[('vis_norm_timeseries', 'norm_timeseries_*.png', 'norm_timeseries_')],
+    ),
+    'vis_graph_rank1_cdf_z': VisSpec(
+        label='Graph Diagnostics:Rank-1 CDF (Z)',
+        candidates=[
+            ('graph_diagnostics_z', 'rank1_cdf_*.png', 'rank1_cdf_'),
+            ('graph_diagnostics', 'rank1_cdf_*.png', 'rank1_cdf_'),
+        ],
+    ),
+    'vis_graph_rank2_cdf_z': VisSpec(
+        label='Graph Diagnostics:Rank-2 CDF (Z)',
+        candidates=[
+            ('graph_diagnostics_z', 'rank2_cdf_*.png', 'rank2_cdf_'),
+            ('graph_diagnostics', 'rank2_cdf_*.png', 'rank2_cdf_'),
+        ],
+    ),
+    'vis_graph_neff_violin_z': VisSpec(
+        label='Graph Diagnostics:Neighborhood size (Z)',
+        candidates=[
+            ('graph_diagnostics_z', 'neff_violin_*.png', 'neff_violin_'),
+            ('graph_diagnostics', 'neff_violin_*.png', 'neff_violin_'),
+        ],
+    ),
+    'vis_graph_in_degree_hist_z': VisSpec(
+        label='Graph Diagnostics:In-degree (Z)',
+        candidates=[
+            ('graph_diagnostics_z', 'in_degree_hist_*.png', 'in_degree_hist_'),
+            ('graph_diagnostics', 'in_degree_hist_*.png', 'in_degree_hist_'),
+        ],
+    ),
+    'vis_graph_edge_consistency_z': VisSpec(
+        label='Graph Diagnostics:Edge consistency (Z)',
+        candidates=[
+            ('graph_diagnostics_z', 'edge_consistency_*.png', 'edge_consistency_'),
+            ('graph_diagnostics', 'edge_consistency_*.png', 'edge_consistency_'),
+        ],
+    ),
+    'vis_graph_metrics_history_z': VisSpec(
+        label='Graph Diagnostics:Metrics history (Z)',
+        candidates=[
+            ('graph_diagnostics_z', 'metrics_history_*.png', 'metrics_history_'),
+            ('graph_diagnostics', 'metrics_history_*.png', 'metrics_history_'),
+        ],
+    ),
+    'vis_graph_rank1_cdf_h': VisSpec(
+        label='Graph Diagnostics:Rank-1 CDF (H)',
+        candidates=[('graph_diagnostics_h', 'rank1_cdf_*.png', 'rank1_cdf_')],
+    ),
+    'vis_graph_rank2_cdf_h': VisSpec(
+        label='Graph Diagnostics:Rank-2 CDF (H)',
+        candidates=[('graph_diagnostics_h', 'rank2_cdf_*.png', 'rank2_cdf_')],
+    ),
+    'vis_graph_neff_violin_h': VisSpec(
+        label='Graph Diagnostics:Neighborhood size (H)',
+        candidates=[('graph_diagnostics_h', 'neff_violin_*.png', 'neff_violin_')],
+    ),
+    'vis_graph_in_degree_hist_h': VisSpec(
+        label='Graph Diagnostics:In-degree (H)',
+        candidates=[('graph_diagnostics_h', 'in_degree_hist_*.png', 'in_degree_hist_')],
+    ),
+    'vis_graph_edge_consistency_h': VisSpec(
+        label='Graph Diagnostics:Edge consistency (H)',
+        candidates=[('graph_diagnostics_h', 'edge_consistency_*.png', 'edge_consistency_')],
+    ),
+    'vis_graph_metrics_history_h': VisSpec(
+        label='Graph Diagnostics:Metrics history (H)',
+        candidates=[('graph_diagnostics_h', 'metrics_history_*.png', 'metrics_history_')],
+    ),
+    'vis_graph_rank1_cdf_p': VisSpec(
+        label='Graph Diagnostics:Rank-1 CDF (P)',
+        candidates=[
+            ('graph_diagnostics_p', 'rank1_cdf_*.png', 'rank1_cdf_'),
+            ('graph_diagnostics_s', 'rank1_cdf_*.png', 'rank1_cdf_'),
+        ],
+    ),
+    'vis_graph_rank2_cdf_p': VisSpec(
+        label='Graph Diagnostics:Rank-2 CDF (P)',
+        candidates=[
+            ('graph_diagnostics_p', 'rank2_cdf_*.png', 'rank2_cdf_'),
+            ('graph_diagnostics_s', 'rank2_cdf_*.png', 'rank2_cdf_'),
+        ],
+    ),
+    'vis_graph_neff_violin_p': VisSpec(
+        label='Graph Diagnostics:Neighborhood size (P)',
+        candidates=[
+            ('graph_diagnostics_p', 'neff_violin_*.png', 'neff_violin_'),
+            ('graph_diagnostics_s', 'neff_violin_*.png', 'neff_violin_'),
+        ],
+    ),
+    'vis_graph_in_degree_hist_p': VisSpec(
+        label='Graph Diagnostics:In-degree (P)',
+        candidates=[
+            ('graph_diagnostics_p', 'in_degree_hist_*.png', 'in_degree_hist_'),
+            ('graph_diagnostics_s', 'in_degree_hist_*.png', 'in_degree_hist_'),
+        ],
+    ),
+    'vis_graph_edge_consistency_p': VisSpec(
+        label='Graph Diagnostics:Edge consistency (P)',
+        candidates=[
+            ('graph_diagnostics_p', 'edge_consistency_*.png', 'edge_consistency_'),
+            ('graph_diagnostics_s', 'edge_consistency_*.png', 'edge_consistency_'),
+        ],
+    ),
+    'vis_graph_metrics_history_p': VisSpec(
+        label='Graph Diagnostics:Metrics history (P)',
+        candidates=[
+            ('graph_diagnostics_p', 'metrics_history_*.png', 'metrics_history_'),
+            ('graph_diagnostics_s', 'metrics_history_*.png', 'metrics_history_'),
+        ],
+    ),
+    'vis_graph_rank1_cdf_s': VisSpec(
+        label=None,
+        candidates=[('graph_diagnostics_s', 'rank1_cdf_*.png', 'rank1_cdf_')],
+    ),
+    'vis_graph_rank2_cdf_s': VisSpec(
+        label=None,
+        candidates=[('graph_diagnostics_s', 'rank2_cdf_*.png', 'rank2_cdf_')],
+    ),
+    'vis_graph_neff_violin_s': VisSpec(
+        label=None,
+        candidates=[('graph_diagnostics_s', 'neff_violin_*.png', 'neff_violin_')],
+    ),
+    'vis_graph_in_degree_hist_s': VisSpec(
+        label=None,
+        candidates=[('graph_diagnostics_s', 'in_degree_hist_*.png', 'in_degree_hist_')],
+    ),
+    'vis_graph_edge_consistency_s': VisSpec(
+        label=None,
+        candidates=[('graph_diagnostics_s', 'edge_consistency_*.png', 'edge_consistency_')],
+    ),
+    'vis_graph_metrics_history_s': VisSpec(
+        label=None,
+        candidates=[('graph_diagnostics_s', 'metrics_history_*.png', 'metrics_history_')],
+    ),
+    'vis_ctrl_smoothness_z': VisSpec(
+        label='Vis v Ctrl:Local smoothness (Z)',
+        candidates=[('vis_vis_ctrl', 'smoothness_z_*.png', 'smoothness_z_')],
+    ),
+    'vis_ctrl_smoothness_p': VisSpec(
+        label='Vis v Ctrl:Local smoothness (P)',
+        candidates=[
+            ('vis_vis_ctrl', 'smoothness_p_*.png', 'smoothness_p_'),
+            ('vis_vis_ctrl', 'smoothness_s_*.png', 'smoothness_s_'),
+        ],
+    ),
+    'vis_ctrl_smoothness_s': VisSpec(
+        label=None,
+        candidates=[('vis_vis_ctrl', 'smoothness_s_*.png', 'smoothness_s_')],
+    ),
+    'vis_ctrl_smoothness_h': VisSpec(
+        label='Vis v Ctrl:Local smoothness (H)',
+        candidates=[('vis_vis_ctrl', 'smoothness_h_*.png', 'smoothness_h_')],
+    ),
+    'vis_ctrl_composition_z': VisSpec(
+        label='Vis v Ctrl:Two-step composition error (Z)',
+        candidates=[('vis_vis_ctrl', 'composition_error_z_*.png', 'composition_error_z_')],
+    ),
+    'vis_ctrl_composition_p': VisSpec(
+        label='Vis v Ctrl:Two-step composition error (P)',
+        candidates=[
+            ('vis_vis_ctrl', 'composition_error_p_*.png', 'composition_error_p_'),
+            ('vis_vis_ctrl', 'composition_error_s_*.png', 'composition_error_s_'),
+        ],
+    ),
+    'vis_ctrl_composition_s': VisSpec(
+        label=None,
+        candidates=[('vis_vis_ctrl', 'composition_error_s_*.png', 'composition_error_s_')],
+    ),
+    'vis_ctrl_composition_h': VisSpec(
+        label='Vis v Ctrl:Two-step composition error (H)',
+        candidates=[('vis_vis_ctrl', 'composition_error_h_*.png', 'composition_error_h_')],
+    ),
+    'vis_composability_z': VisSpec(
+        label='Composability:Two-step (Z)',
+        candidates=[('vis_composability_z', 'composability_z_*.png', 'composability_z_')],
+    ),
+    'vis_composability_p': VisSpec(
+        label='Composability:Two-step (P)',
+        candidates=[
+            ('vis_composability_p', 'composability_p_*.png', 'composability_p_'),
+            ('vis_composability_s', 'composability_s_*.png', 'composability_s_'),
+        ],
+    ),
+    'vis_composability_s': VisSpec(
+        label=None,
+        candidates=[('vis_composability_s', 'composability_s_*.png', 'composability_s_')],
+    ),
+    'vis_composability_h': VisSpec(
+        label='Composability:Two-step (H)',
+        candidates=[('vis_composability_h', 'composability_h_*.png', 'composability_h_')],
+    ),
+    'vis_ctrl_stability_z': VisSpec(
+        label='Vis v Ctrl:Neighborhood stability (Z)',
+        candidates=[('vis_vis_ctrl', 'stability_z_*.png', 'stability_z_')],
+    ),
+    'vis_ctrl_stability_p': VisSpec(
+        label='Vis v Ctrl:Neighborhood stability (P)',
+        candidates=[
+            ('vis_vis_ctrl', 'stability_p_*.png', 'stability_p_'),
+            ('vis_vis_ctrl', 'stability_s_*.png', 'stability_s_'),
+        ],
+    ),
+    'vis_ctrl_stability_s': VisSpec(
+        label=None,
+        candidates=[('vis_vis_ctrl', 'stability_s_*.png', 'stability_s_')],
+    ),
+    'vis_ctrl_stability_h': VisSpec(
+        label='Vis v Ctrl:Neighborhood stability (H)',
+        candidates=[('vis_vis_ctrl', 'stability_h_*.png', 'stability_h_')],
+    ),
 }
 
 
-def _parse_model_diff_items(text: str) -> List[Tuple[str, str, bool]]:
-    """Return display, full text, shortened? tuples for model diff entries."""
-    stripped = text.strip()
-    if not stripped or stripped.startswith("model_diff.txt missing"):
-        return []
-    items: List[Tuple[str, str, bool]] = []
-    for line in text.splitlines():
-        trimmed = line.strip()
-        if not trimmed:
+
+def _image_folder_sort_key(option: Dict[str, object]) -> Tuple[str, str, str]:
+    label = str(option.get("label", ""))
+    group = label.split(":")[0].strip() if label else ""
+    return group, label, str(option.get("value", ""))
+
+
+def get_image_folder_specs(root: Path) -> List[Dict[str, object]]:
+    options = [
+        {"value": value, "label": spec.label}
+        for value, spec in VIS_STEP_SPECS.items()
+        if spec.label
+    ]
+    resolved_options: List[Dict[str, object]] = []
+    for option in sorted(options, key=_image_folder_sort_key):
+        value = str(option.get("value", ""))
+        if not value:
             continue
-        normalized = trimmed.lstrip("+- ").lower()
-        if normalized.startswith("data_root"):
+        spec = VIS_STEP_SPECS.get(value)
+        if spec is None:
             continue
-        display = trimmed
-        shortened = False
-        sep = None
-        key = None
-        for candidate in ("=", ":"):
-            if candidate in trimmed:
-                key, rest = trimmed.split(candidate, 1)
-                sep = candidate
+        candidates = spec.candidates
+        selected = None
+        for folder_name, pattern, prefix in candidates:
+            folder = root / folder_name
+            if _first_matching_file(folder, exact_name=None, pattern=pattern) is not None:
+                selected = (folder_name, prefix)
                 break
-        if key:
-            key_clean = key.strip()
-            short = _MODEL_DIFF_SHORTNAMES.get(key_clean)
-            if short and sep is not None:
-                display = f"{short}{sep}{rest.strip()}"
-                shortened = True
-        items.append((display, trimmed, shortened))
-    return items
+        if selected is None and candidates:
+            folder_name, _, prefix = candidates[0]
+            selected = (folder_name, prefix)
+        if selected is None:
+            continue
+        folder_name, prefix = selected
+        resolved_options.append(
+            {
+                "value": value,
+                "label": option.get("label"),
+                "folder": folder_name,
+                "prefix": prefix,
+            }
+        )
+    return resolved_options
 
+DIAGNOSTICS_SUFFIXES = (".png", ".csv", ".txt")
+DIAGNOSTICS_Z_DIRS = [
+    "vis_delta_z_pca",
+    "vis_delta_p_pca",
+    "vis_action_alignment_z",
+    "vis_action_alignment",
+    "vis_action_alignment_p",
+    "vis_cycle_error_z",
+    "vis_cycle_error",
+    "vis_cycle_error_p",
+    "vis_diagnostics_frames",
+    "vis_rollout_divergence",
+    "vis_rollout_divergence_z",
+    "vis_rollout_divergence_h",
+    "vis_rollout_divergence_p",
+    "vis_z_consistency",
+    "vis_z_monotonicity",
+    "vis_path_independence",
+]
+DIAGNOSTICS_P_DIRS = [
+    "vis_delta_p_pca",
+    "vis_action_alignment_p",
+    "vis_cycle_error_p",
+    "vis_straightline_p",
+    "vis_delta_s_pca",
+    "vis_action_alignment_s",
+    "vis_cycle_error_s",
+    "vis_straightline_s",
+    "vis_rollout_divergence_p",
+    "vis_rollout_divergence_s",
+]
+DIAGNOSTICS_H_PATTERNS = [
+    ("vis_delta_h_pca", "delta_h_pca_*.png"),
+    ("vis_action_alignment_h", "action_alignment_detail_*.png"),
+    ("vis_cycle_error_h", "cycle_error_*.png"),
+    ("vis_self_distance_h", "self_distance_h_*.png"),
+    ("vis_h_ablation", "h_ablation_*.png"),
+    ("vis_h_drift_by_action", "h_drift_by_action_*.png"),
+    ("vis_norm_timeseries", "norm_timeseries_*.png"),
+]
+GRAPH_DIAGNOSTICS_Z_FOLDER_CANDIDATES = ["graph_diagnostics_z", "graph_diagnostics"]
+GRAPH_DIAGNOSTICS_H_FOLDER_CANDIDATES = ["graph_diagnostics_h"]
+GRAPH_DIAGNOSTICS_P_FOLDER_CANDIDATES = ["graph_diagnostics_p", "graph_diagnostics_s"]
+GRAPH_DIAGNOSTICS_Z_RANK1_CDF_SPEC = VisSpec(
+    label="graph diagnostics rank1 cdf z images",
+    candidates=[
+        ("graph_diagnostics_z", "rank1_cdf_*.png"),
+        ("graph_diagnostics", "rank1_cdf_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_Z_RANK2_CDF_SPEC = VisSpec(
+    label="graph diagnostics rank2 cdf z images",
+    candidates=[
+        ("graph_diagnostics_z", "rank2_cdf_*.png"),
+        ("graph_diagnostics", "rank2_cdf_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_Z_NEFF_VIOLIN_SPEC = VisSpec(
+    label="graph diagnostics neff violin z images",
+    candidates=[
+        ("graph_diagnostics_z", "neff_violin_*.png"),
+        ("graph_diagnostics", "neff_violin_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_Z_IN_DEGREE_HIST_SPEC = VisSpec(
+    label="graph diagnostics in degree hist z images",
+    candidates=[
+        ("graph_diagnostics_z", "in_degree_hist_*.png"),
+        ("graph_diagnostics", "in_degree_hist_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_Z_EDGE_CONSISTENCY_SPEC = VisSpec(
+    label="graph diagnostics edge consistency z images",
+    candidates=[
+        ("graph_diagnostics_z", "edge_consistency_*.png"),
+        ("graph_diagnostics", "edge_consistency_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_Z_METRICS_HISTORY_SPEC = VisSpec(
+    label="graph diagnostics metrics history z images",
+    candidates=[
+        ("graph_diagnostics_z", "metrics_history_*.png"),
+        ("graph_diagnostics", "metrics_history_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_Z_METRICS_HISTORY_LATEST_SPEC = VisSpec(
+    label="graph diagnostics metrics history latest z images",
+    candidates=[
+        ("graph_diagnostics_z", "metrics_history_latest.png"),
+        ("graph_diagnostics", "metrics_history_latest.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_Z_METRICS_HISTORY_CSV_SPEC = VisSpec(
+    label="graph diagnostics metrics history z csvs",
+    candidates=[
+        ("graph_diagnostics_z", "metrics_history*.csv"),
+        ("graph_diagnostics", "metrics_history*.csv"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_RANK1_CDF_SPEC = VisSpec(
+    label="graph diagnostics rank1 cdf h images",
+    candidates=[
+        ("graph_diagnostics_h", "rank1_cdf_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_RANK2_CDF_SPEC = VisSpec(
+    label="graph diagnostics rank2 cdf h images",
+    candidates=[
+        ("graph_diagnostics_h", "rank2_cdf_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_NEFF_VIOLIN_SPEC = VisSpec(
+    label="graph diagnostics neff violin h images",
+    candidates=[
+        ("graph_diagnostics_h", "neff_violin_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_IN_DEGREE_HIST_SPEC = VisSpec(
+    label="graph diagnostics in degree hist h images",
+    candidates=[
+        ("graph_diagnostics_h", "in_degree_hist_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_EDGE_CONSISTENCY_SPEC = VisSpec(
+    label="graph diagnostics edge consistency h images",
+    candidates=[
+        ("graph_diagnostics_h", "edge_consistency_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_METRICS_HISTORY_SPEC = VisSpec(
+    label="graph diagnostics metrics history h images",
+    candidates=[
+        ("graph_diagnostics_h", "metrics_history_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_METRICS_HISTORY_LATEST_SPEC = VisSpec(
+    label="graph diagnostics metrics history latest h images",
+    candidates=[
+        ("graph_diagnostics_h", "metrics_history_latest.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_H_METRICS_HISTORY_CSV_SPEC = VisSpec(
+    label="graph diagnostics metrics history h csvs",
+    candidates=[
+        ("graph_diagnostics_h", "metrics_history*.csv"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_RANK1_CDF_SPEC = VisSpec(
+    label="graph diagnostics rank1 cdf p images",
+    candidates=[
+        ("graph_diagnostics_p", "rank1_cdf_*.png"),
+        ("graph_diagnostics_s", "rank1_cdf_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_RANK2_CDF_SPEC = VisSpec(
+    label="graph diagnostics rank2 cdf p images",
+    candidates=[
+        ("graph_diagnostics_p", "rank2_cdf_*.png"),
+        ("graph_diagnostics_s", "rank2_cdf_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_NEFF_VIOLIN_SPEC = VisSpec(
+    label="graph diagnostics neff violin p images",
+    candidates=[
+        ("graph_diagnostics_p", "neff_violin_*.png"),
+        ("graph_diagnostics_s", "neff_violin_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_IN_DEGREE_HIST_SPEC = VisSpec(
+    label="graph diagnostics in degree hist p images",
+    candidates=[
+        ("graph_diagnostics_p", "in_degree_hist_*.png"),
+        ("graph_diagnostics_s", "in_degree_hist_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_EDGE_CONSISTENCY_SPEC = VisSpec(
+    label="graph diagnostics edge consistency p images",
+    candidates=[
+        ("graph_diagnostics_p", "edge_consistency_*.png"),
+        ("graph_diagnostics_s", "edge_consistency_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_METRICS_HISTORY_SPEC = VisSpec(
+    label="graph diagnostics metrics history p images",
+    candidates=[
+        ("graph_diagnostics_p", "metrics_history_*.png"),
+        ("graph_diagnostics_s", "metrics_history_*.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_METRICS_HISTORY_LATEST_SPEC = VisSpec(
+    label="graph diagnostics metrics history latest p images",
+    candidates=[
+        ("graph_diagnostics_p", "metrics_history_latest.png"),
+        ("graph_diagnostics_s", "metrics_history_latest.png"),
+    ],
+)
+GRAPH_DIAGNOSTICS_P_METRICS_HISTORY_CSV_SPEC = VisSpec(
+    label="graph diagnostics metrics history p csvs",
+    candidates=[
+        ("graph_diagnostics_p", "metrics_history*.csv"),
+        ("graph_diagnostics_s", "metrics_history*.csv"),
+    ],
+)
+SELF_DISTANCE_Z_IMAGES_SPEC = VisSpec(
+    label="self-distance image folders",
+    candidates=[
+        ("vis_self_distance_z", "self_distance_z_*.png"),
+        ("vis_self_distance", "self_distance_*.png"),
+    ],
+)
+SELF_DISTANCE_P_IMAGES_SPEC = VisSpec(
+    label="pose self-distance image folders",
+    candidates=[
+        ("vis_self_distance_p", "self_distance_p_*.png"),
+        ("vis_self_distance_s", "self_distance_s_*.png"),
+        ("vis_state_embedding", "state_embedding_[0-9]*.png"),
+    ],
+)
+SELF_DISTANCE_H_IMAGES_SPEC = VisSpec(
+    label="self-distance H image folders",
+    candidates=[
+        ("vis_self_distance_h", "self_distance_h_*.png"),
+    ],
+)
+STATE_EMBEDDING_CSVS_SPEC = VisSpec(
+    label="state embedding CSV folders",
+    candidates=[
+        ("self_distance_s", "self_distance_s_*.csv"),
+        ("state_embedding", "state_embedding_*.csv"),
+    ],
+)
+SELF_DISTANCE_Z_CSVS_SPEC = VisSpec(
+    label="self-distance CSV folders",
+    candidates=[
+        ("self_distance_z", "self_distance_z_*.csv"),
+        ("self_distance", "self_distance_*.csv"),
+    ],
+)
+SELF_DISTANCE_P_CSVS_SPEC = VisSpec(
+    label="pose self-distance CSV folders",
+    candidates=[
+        ("self_distance_p", "self_distance_p_*.csv"),
+        ("self_distance_s", "self_distance_s_*.csv"),
+        ("state_embedding", "state_embedding_*.csv"),
+    ],
+)
+SELF_DISTANCE_H_CSVS_SPEC = VisSpec(
+    label="self-distance H CSV folders",
+    candidates=[
+        ("self_distance_h", "self_distance_h_*.csv"),
+    ],
+)
+VIS_CTRL_METRICS_CSV_SPEC = VisSpec(
+    label="vis ctrl CSV folders",
+    candidates=[
+        ("metrics", "vis_ctrl_metrics.csv"),
+    ],
+)
+VIS_CTRL_VIS_CTRL_CSV_SPEC = VisSpec(
+    label="vis ctrl CSV folders",
+    candidates=[
+        ("vis_ctrl", "vis_ctrl_metrics_*.csv"),
+    ],
+)
+DIAGNOSTICS_DELTA_Z_PCA_CSV_FOLDERS = ["vis_delta_z_pca"]
+DIAGNOSTICS_ACTION_ALIGNMENT_CSV_FOLDERS = ["vis_action_alignment_z", "vis_action_alignment"]
+DIAGNOSTICS_CYCLE_ERROR_CSV_FOLDERS = ["vis_cycle_error_z", "vis_cycle_error"]
+DIAGNOSTICS_FRAME_ALIGNMENT_CSV_FOLDERS = ["vis_diagnostics_frames"]
+DIAGNOSTICS_ROLLOUT_DIVERGENCE_CSV_FOLDERS = ["vis_rollout_divergence_z", "vis_rollout_divergence"]
+DIAGNOSTICS_ROLLOUT_DIVERGENCE_Z_CSV_FOLDERS = ["vis_rollout_divergence_z", "vis_rollout_divergence"]
+DIAGNOSTICS_Z_CONSISTENCY_CSV_FOLDERS = ["vis_z_consistency"]
+DIAGNOSTICS_Z_MONOTONICITY_CSV_FOLDERS = ["vis_z_monotonicity"]
+DIAGNOSTICS_PATH_INDEPENDENCE_CSV_FOLDERS = ["vis_path_independence"]
+DIAGNOSTICS_P_DELTA_P_PCA_CSV_FOLDERS = ["vis_delta_p_pca", "vis_delta_s_pca"]
+DIAGNOSTICS_P_ACTION_ALIGNMENT_CSV_FOLDERS = ["vis_action_alignment_p", "vis_action_alignment_s"]
+DIAGNOSTICS_P_CYCLE_ERROR_CSV_FOLDERS = ["vis_cycle_error_p", "vis_cycle_error_s"]
+DIAGNOSTICS_P_ROLLOUT_DIVERGENCE_CSV_FOLDERS = ["vis_rollout_divergence_p", "vis_rollout_divergence_s"]
 
-def _render_model_diff(text: str) -> str:
-    items = _parse_model_diff_items(text)
-    if not text.strip():
-        return "—"
-    if text.strip().startswith("model_diff.txt missing"):
-        return text.strip()
-    if not items:
-        return "—"
-    return ", ".join(display for display, _, _ in items)
+STATE_EMBEDDING_HIST_IMAGE_SPEC = VisSpec(
+    label="state embedding hist images",
+    candidates=[("vis_state_embedding", "state_embedding_hist_*.png")],
+)
+STATE_EMBEDDING_COSINE_IMAGE_SPEC = VisSpec(
+    label="state embedding cosine images",
+    candidates=[
+        ("vis_self_distance_s", "self_distance_cosine_*.png"),
+        ("vis_state_embedding", "state_embedding_cosine_*.png"),
+    ],
+)
+STATE_EMBEDDING_DISTANCE_IMAGE_SPEC = VisSpec(
+    label="state embedding distance images",
+    candidates=[
+        ("vis_self_distance_s", "self_distance_s_*.png"),
+        ("vis_state_embedding", "state_embedding_[0-9]*.png"),
+    ],
+)
+DIAGNOSTICS_P_DELTA_P_PCA_IMAGE_SPEC = VisSpec(
+    label="delta_p_pca image folders",
+    candidates=[
+        ("vis_delta_p_pca", "delta_p_pca_*.png"),
+        ("vis_delta_s_pca", "delta_s_pca_*.png"),
+    ],
+)
+DIAGNOSTICS_P_VARIANCE_SPECTRUM_IMAGE_SPEC = VisSpec(
+    label="variance_spectrum_p image folders",
+    candidates=[
+        ("vis_delta_p_pca", "delta_p_variance_spectrum_*.png"),
+        ("vis_delta_s_pca", "delta_s_variance_spectrum_*.png"),
+    ],
+)
+DIAGNOSTICS_P_ACTION_ALIGNMENT_DETAIL_IMAGE_SPEC = VisSpec(
+    label="action_alignment_detail_p image folders",
+    candidates=[
+        ("vis_action_alignment_p", "action_alignment_detail_*.png"),
+        ("vis_action_alignment_s", "action_alignment_detail_*.png"),
+    ],
+)
+DIAGNOSTICS_P_CYCLE_ERROR_IMAGE_SPEC = VisSpec(
+    label="cycle_error_p image folders",
+    candidates=[
+        ("vis_cycle_error_p", "*.png"),
+        ("vis_cycle_error_s", "*.png"),
+    ],
+)
+DIAGNOSTICS_P_STRAIGHTLINE_IMAGE_SPEC = VisSpec(
+    label="straightline_p image folders",
+    candidates=[
+        ("vis_straightline_p", "straightline_p_*.png"),
+        ("vis_straightline_s", "straightline_s_*.png"),
+    ],
+)
+DIAGNOSTICS_P_ROLLOUT_DIVERGENCE_IMAGE_SPEC = VisSpec(
+    label="rollout_divergence_p image folders",
+    candidates=[
+        ("vis_rollout_divergence_p", "rollout_divergence_p_*.png"),
+        ("vis_rollout_divergence_s", "rollout_divergence_s_*.png"),
+    ],
+)
+DIAGNOSTICS_DELTA_Z_PCA_IMAGE_SPEC = VisSpec(
+    label="delta_z_pca image folders",
+    candidates=[("vis_delta_z_pca", "delta_z_pca_*.png")],
+)
+DIAGNOSTICS_VARIANCE_SPECTRUM_IMAGE_SPEC = VisSpec(
+    label="variance_spectrum image folders",
+    candidates=[("vis_delta_z_pca", "delta_z_variance_spectrum_*.png")],
+)
+DIAGNOSTICS_ACTION_ALIGNMENT_DETAIL_IMAGE_SPEC = VisSpec(
+    label="action_alignment_detail image folders",
+    candidates=[
+        ("vis_action_alignment_z", "action_alignment_detail_*.png"),
+        ("vis_action_alignment", "action_alignment_detail_*.png"),
+    ],
+)
+DIAGNOSTICS_CYCLE_ERROR_IMAGE_SPEC = VisSpec(
+    label="cycle_error image folders",
+    candidates=[
+        ("vis_cycle_error_z", "*.png"),
+        ("vis_cycle_error", "*.png"),
+    ],
+)
+DIAGNOSTICS_ROLLOUT_DIVERGENCE_IMAGE_SPEC = VisSpec(
+    label="rollout_divergence image folders",
+    candidates=[
+        ("vis_rollout_divergence_z", "rollout_divergence_z_*.png"),
+        ("vis_rollout_divergence", "rollout_divergence_*.png"),
+    ],
+)
+DIAGNOSTICS_Z_CONSISTENCY_IMAGE_SPEC = VisSpec(
+    label="z_consistency image folders",
+    candidates=[("vis_z_consistency", "z_consistency_*.png")],
+)
+DIAGNOSTICS_Z_MONOTONICITY_IMAGE_SPEC = VisSpec(
+    label="z_monotonicity image folders",
+    candidates=[("vis_z_monotonicity", "z_monotonicity_*.png")],
+)
+DIAGNOSTICS_PATH_INDEPENDENCE_IMAGE_SPEC = VisSpec(
+    label="path_independence image folders",
+    candidates=[("vis_path_independence", "path_independence_*.png")],
+)
+QUICK_SELF_DISTANCE_Z_CSV_CANDIDATES = [
+    ("self_distance_z", "self_distance_z", "self_distance_z_0000000.csv", "self_distance_z_*.csv"),
+    ("self_distance", "self_distance", "self_distance_0000000.csv", "self_distance_*.csv"),
+]
+QUICK_SELF_DISTANCE_P_CSV_CANDIDATES = [
+    ("self_distance_p", "self_distance_p", "self_distance_p_0000000.csv", "self_distance_p_*.csv"),
+    ("self_distance_s", "self_distance_s", "self_distance_s_0000000.csv", "self_distance_s_*.csv"),
+    ("state_embedding", "state_embedding", "state_embedding_0000000.csv", "state_embedding_*.csv"),
+]
+QUICK_STATE_EMBEDDING_CSV_CANDIDATES = [
+    ("self_distance_s", "self_distance_s", "self_distance_s_0000000.csv", "self_distance_s_*.csv"),
+    ("state_embedding", "state_embedding", "state_embedding_0000000.csv", "state_embedding_*.csv"),
+]
 
 
 @dataclass
 class Experiment:
     """Metadata bundled for rendering experiment summaries."""
 
+    # Core metadata and filesystem references.
     id: str
     name: str
     path: Path
@@ -102,6 +991,8 @@ class Experiment:
     tags: str
     starred: bool
     archived: bool
+
+    # Global training curves and rollout steps.
     loss_image: Optional[Path]
     loss_csv: Optional[Path]
     rollout_steps: List[int]
@@ -109,35 +1000,119 @@ class Experiment:
     last_modified: Optional[datetime]
     total_params: Optional[int]
     flops_per_step: Optional[int]
-    self_distance_csv: Optional[Path]
-    self_distance_images: List[Path]
-    self_distance_csvs: List[Path]
+
+    # Self-distance + state-embedding assets (Z/P/S).
+    self_distance_z_csv: Optional[Path]
+    self_distance_z_images: List[Path]
+    self_distance_z_csvs: List[Path]
+    self_distance_h_csv: Optional[Path]
+    self_distance_h_images: List[Path]
+    self_distance_h_csvs: List[Path]
     self_distance_p_csv: Optional[Path]
     self_distance_p_images: List[Path]
     self_distance_p_csvs: List[Path]
     state_embedding_csv: Optional[Path]
     state_embedding_images: List[Path]
+    state_embedding_hist_images: List[Path]
     state_embedding_csvs: List[Path]
+
+    # Odometry visuals.
     odometry_images: List[Path]
-    diagnostics_images: Dict[str, List[Path]]
-    diagnostics_steps: List[int]
-    diagnostics_csvs: Dict[str, List[Path]]
-    diagnostics_frames: Dict[int, List[Tuple[Path, str, str, Optional[int]]]]
-    diagnostics_s_images: Dict[str, List[Path]]
-    diagnostics_s_steps: List[int]
-    diagnostics_s_csvs: Dict[str, List[Path]]
-    graph_diagnostics_images: Dict[str, List[Path]]
-    graph_diagnostics_steps: List[int]
-    graph_diagnostics_csvs: Dict[str, List[Path]]
-    graph_diagnostics_h_images: Dict[str, List[Path]]
+
+    # Diagnostics images (Z).
+    diagnostics_delta_z_pca_images: List[Path]
+    diagnostics_variance_spectrum_images: List[Path]
+    diagnostics_action_alignment_detail_images: List[Path]
+    diagnostics_cycle_error_images: List[Path]
+    diagnostics_rollout_divergence_images: List[Path]
+    diagnostics_rollout_divergence_z_images: List[Path]
+    diagnostics_z_consistency_images: List[Path]
+    diagnostics_z_monotonicity_images: List[Path]
+    diagnostics_path_independence_images: List[Path]
+    diagnostics_z_steps: List[int]
+
+    # Diagnostics CSVs (Z).
+    diagnostics_delta_z_pca_csvs: List[Path]
+    diagnostics_action_alignment_csvs: List[Path]
+    diagnostics_cycle_error_csvs: List[Path]
+    diagnostics_frame_alignment_csvs: List[Path]
+    diagnostics_rollout_divergence_csvs: List[Path]
+    diagnostics_rollout_divergence_z_csvs: List[Path]
+    diagnostics_z_consistency_csvs: List[Path]
+    diagnostics_z_monotonicity_csvs: List[Path]
+    diagnostics_path_independence_csvs: List[Path]
+
+    # Diagnostics frames (parallel arrays: steps -> entries).
+    diagnostics_frame_steps: List[int]
+    diagnostics_frame_entries: List[List[Tuple[Path, str, str, Optional[int]]]]
+
+    # Diagnostics images (P).
+    diagnostics_p_delta_p_pca_images: List[Path]
+    diagnostics_p_variance_spectrum_images: List[Path]
+    diagnostics_p_action_alignment_detail_images: List[Path]
+    diagnostics_p_cycle_error_images: List[Path]
+    diagnostics_p_straightline_images: List[Path]
+    diagnostics_p_rollout_divergence_images: List[Path]
+    diagnostics_p_steps: List[int]
+    diagnostics_h_steps: List[int]
+
+    # Diagnostics CSVs (P).
+    diagnostics_p_delta_p_pca_csvs: List[Path]
+    diagnostics_p_action_alignment_csvs: List[Path]
+    diagnostics_p_cycle_error_csvs: List[Path]
+    diagnostics_p_rollout_divergence_csvs: List[Path]
+
+    # Graph diagnostics images (Z/H/P).
+    graph_diagnostics_rank1_cdf_z_images: List[Path]
+    graph_diagnostics_rank1_cdf_h_images: List[Path]
+    graph_diagnostics_rank1_cdf_p_images: List[Path]
+    graph_diagnostics_rank2_cdf_z_images: List[Path]
+    graph_diagnostics_rank2_cdf_h_images: List[Path]
+    graph_diagnostics_rank2_cdf_p_images: List[Path]
+    graph_diagnostics_neff_violin_z_images: List[Path]
+    graph_diagnostics_neff_violin_h_images: List[Path]
+    graph_diagnostics_neff_violin_p_images: List[Path]
+    graph_diagnostics_in_degree_hist_z_images: List[Path]
+    graph_diagnostics_in_degree_hist_h_images: List[Path]
+    graph_diagnostics_in_degree_hist_p_images: List[Path]
+    graph_diagnostics_edge_consistency_z_images: List[Path]
+    graph_diagnostics_edge_consistency_h_images: List[Path]
+    graph_diagnostics_edge_consistency_p_images: List[Path]
+    graph_diagnostics_metrics_history_z_images: List[Path]
+    graph_diagnostics_metrics_history_h_images: List[Path]
+    graph_diagnostics_metrics_history_p_images: List[Path]
+    graph_diagnostics_metrics_history_latest_z_images: List[Path]
+    graph_diagnostics_metrics_history_latest_h_images: List[Path]
+    graph_diagnostics_metrics_history_latest_p_images: List[Path]
+
+    # Graph diagnostics steps + CSVs (parallel per axis).
+    graph_diagnostics_z_steps: List[int]
+    graph_diagnostics_metrics_history_z_csvs: List[Path]
     graph_diagnostics_h_steps: List[int]
-    graph_diagnostics_h_csvs: Dict[str, List[Path]]
-    graph_diagnostics_s_images: Dict[str, List[Path]]
-    graph_diagnostics_s_steps: List[int]
-    graph_diagnostics_s_csvs: Dict[str, List[Path]]
-    vis_ctrl_images: Dict[str, List[Path]]
+    graph_diagnostics_metrics_history_h_csvs: List[Path]
+    graph_diagnostics_p_steps: List[int]
+    graph_diagnostics_metrics_history_p_csvs: List[Path]
+
+    # Vis ctrl images (Z/P/H) + steps.
+    vis_ctrl_smoothness_z_images: List[Path]
+    vis_ctrl_smoothness_p_images: List[Path]
+    vis_ctrl_smoothness_h_images: List[Path]
+    vis_ctrl_composition_z_images: List[Path]
+    vis_ctrl_composition_p_images: List[Path]
+    vis_ctrl_composition_h_images: List[Path]
+    vis_ctrl_stability_z_images: List[Path]
+    vis_ctrl_stability_p_images: List[Path]
+    vis_ctrl_stability_h_images: List[Path]
+    vis_ctrl_alignment_z_images: List[Path]
+    vis_ctrl_alignment_p_images: List[Path]
+    vis_ctrl_alignment_h_images: List[Path]
     vis_ctrl_steps: List[int]
     vis_ctrl_csvs: List[Path]
+
+    # Convenience flags for dashboard gating.
+    has_self_distance_z_csv: bool
+    has_self_distance_h_csv: bool
+    has_self_distance_p_csv: bool
 
     def asset_exists(self, relative: str) -> bool:
         return (self.path / relative).exists()
@@ -196,188 +1171,508 @@ def build_experiment_index(output_dir: Path) -> List[ExperimentIndex]:
     return index
 
 
-def load_experiment(
+def _load_experiment_graph_diagnostics_z(
+    experiment: Experiment,
     path: Path,
-    include_self_distance: bool = False,
-    include_self_distance_p: bool = False,
-    include_diagnostics_images: bool = False,
-    include_diagnostics_frames: bool = False,
-    include_diagnostics_s: bool = False,
-    include_graph_diagnostics: bool = False,
-    include_vis_ctrl: bool = False,
-    include_state_embedding: bool = False,
-    include_odometry: bool = False,
-    include_graph_diagnostics_s: bool = False,
-    include_graph_diagnostics_h: bool = False,
-    include_last_modified: bool = False,
-    include_rollout_steps: bool = False,
-    include_max_step: bool = False,
-    include_model_diff: bool = False,
-    include_model_diff_generation: bool = False,
-) -> Optional[Experiment]:
-    if not path.is_dir():
-        return None
-    start_time = time.perf_counter()
-    section_start = start_time
-    metadata_path = path / "metadata.txt"
-    metadata_git_path = path / "metadata_git.txt"
-    metadata_model_diff_path = path / "server_cache" / "model_diff.txt"
-    metadata_model_path = path / "metadata_model.txt"
-    metrics_dir = path / "metrics"
-    loss_png = metrics_dir / "loss_curves.png"
-    loss_csv = _resolve_loss_csv(metrics_dir)
-    _profile("load_experiment.paths", start_time, path, metrics_dir=metrics_dir)
-    section_start = time.perf_counter()
-
-    self_distance_csvs: List[Path] = []
-    latest_self_distance_csv: Optional[Path] = None
-    self_distance_images: List[Path] = []
-    if include_self_distance:
-        self_distance_csvs = _collect_self_distance_csvs(path)
-        latest_self_distance_csv = self_distance_csvs[-1] if self_distance_csvs else None
-        self_distance_images = _collect_self_distance_images(path)
+    *,
+    include_graph_diagnostics: bool,
+) -> None:
+    if include_graph_diagnostics:
+        experiment.graph_diagnostics_rank1_cdf_z_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_Z_RANK1_CDF_SPEC)
+        experiment.graph_diagnostics_rank2_cdf_z_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_Z_RANK2_CDF_SPEC)
+        experiment.graph_diagnostics_neff_violin_z_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_Z_NEFF_VIOLIN_SPEC)
+        experiment.graph_diagnostics_in_degree_hist_z_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_Z_IN_DEGREE_HIST_SPEC
+        )
+        experiment.graph_diagnostics_edge_consistency_z_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_Z_EDGE_CONSISTENCY_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_z_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_Z_METRICS_HISTORY_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_latest_z_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_Z_METRICS_HISTORY_LATEST_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_z_csvs = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_Z_METRICS_HISTORY_CSV_SPEC
+        )
+        experiment.graph_diagnostics_z_steps = _merge_steps(
+            _collect_steps_from_path_list(experiment.graph_diagnostics_rank1_cdf_z_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_rank2_cdf_z_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_neff_violin_z_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_in_degree_hist_z_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_edge_consistency_z_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_metrics_history_z_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_metrics_history_latest_z_images),
+        )
     else:
-        latest_self_distance_csv = _quick_self_distance_csv(path)
+        graph_folder = _resolve_first_existing_folder(path, GRAPH_DIAGNOSTICS_Z_FOLDER_CANDIDATES)
+        experiment.graph_diagnostics_z_steps = (
+            [0] if graph_folder and _folder_has_any_file(graph_folder, (".png", ".csv")) else []
+        )
+
+
+def _load_experiment_graph_diagnostics_h(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_graph_diagnostics_h: bool,
+) -> None:
+    if include_graph_diagnostics_h:
+        experiment.graph_diagnostics_rank1_cdf_h_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_H_RANK1_CDF_SPEC)
+        experiment.graph_diagnostics_rank2_cdf_h_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_H_RANK2_CDF_SPEC)
+        experiment.graph_diagnostics_neff_violin_h_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_H_NEFF_VIOLIN_SPEC)
+        experiment.graph_diagnostics_in_degree_hist_h_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_H_IN_DEGREE_HIST_SPEC
+        )
+        experiment.graph_diagnostics_edge_consistency_h_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_H_EDGE_CONSISTENCY_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_h_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_H_METRICS_HISTORY_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_latest_h_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_H_METRICS_HISTORY_LATEST_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_h_csvs = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_H_METRICS_HISTORY_CSV_SPEC
+        )
+        experiment.graph_diagnostics_h_steps = _merge_steps(
+            _collect_steps_from_path_list(experiment.graph_diagnostics_rank1_cdf_h_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_rank2_cdf_h_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_neff_violin_h_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_in_degree_hist_h_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_edge_consistency_h_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_metrics_history_h_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_metrics_history_latest_h_images),
+        )
+    else:
+        graph_h_folder = _resolve_first_existing_folder(path, GRAPH_DIAGNOSTICS_H_FOLDER_CANDIDATES)
+        experiment.graph_diagnostics_h_steps = (
+            [0] if graph_h_folder and _folder_has_any_file(graph_h_folder, (".png", ".csv")) else []
+        )
+
+
+def _load_experiment_graph_diagnostics_p(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_graph_diagnostics_p: bool,
+) -> None:
+    if include_graph_diagnostics_p:
+        experiment.graph_diagnostics_rank1_cdf_p_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_P_RANK1_CDF_SPEC)
+        experiment.graph_diagnostics_rank2_cdf_p_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_P_RANK2_CDF_SPEC)
+        experiment.graph_diagnostics_neff_violin_p_images = _collect_from_spec(path, GRAPH_DIAGNOSTICS_P_NEFF_VIOLIN_SPEC)
+        experiment.graph_diagnostics_in_degree_hist_p_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_P_IN_DEGREE_HIST_SPEC
+        )
+        experiment.graph_diagnostics_edge_consistency_p_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_P_EDGE_CONSISTENCY_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_p_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_P_METRICS_HISTORY_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_latest_p_images = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_P_METRICS_HISTORY_LATEST_SPEC
+        )
+        experiment.graph_diagnostics_metrics_history_p_csvs = _collect_from_spec(
+            path, GRAPH_DIAGNOSTICS_P_METRICS_HISTORY_CSV_SPEC
+        )
+        experiment.graph_diagnostics_p_steps = _merge_steps(
+            _collect_steps_from_path_list(experiment.graph_diagnostics_rank1_cdf_p_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_rank2_cdf_p_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_neff_violin_p_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_in_degree_hist_p_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_edge_consistency_p_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_metrics_history_p_images),
+            _collect_steps_from_path_list(experiment.graph_diagnostics_metrics_history_latest_p_images),
+        )
+    else:
+        graph_p_folder = _resolve_first_existing_folder(path, GRAPH_DIAGNOSTICS_P_FOLDER_CANDIDATES)
+        experiment.graph_diagnostics_p_steps = (
+            [0] if graph_p_folder and _folder_has_any_file(graph_p_folder, (".png", ".csv")) else []
+        )
+
+
+def _load_experiment_self_distance(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_self_distance: bool,
+) -> None:
+    section_start = time.perf_counter()
+    if include_self_distance:
+        csvs = _collect_from_spec(path, SELF_DISTANCE_Z_CSVS_SPEC)
+        experiment.self_distance_z_csvs = csvs
+        experiment.self_distance_z_csv = csvs[-1] if csvs else None
+        experiment.self_distance_z_images = _collect_from_spec(path, SELF_DISTANCE_Z_IMAGES_SPEC)
+    else:
+        experiment.self_distance_z_csv = _first_matching_csv_candidate(
+            path,
+            QUICK_SELF_DISTANCE_Z_CSV_CANDIDATES,
+            conflict_label="self-distance",
+        )
     _profile(
         "load_experiment.self_distance",
         section_start,
         path,
-        csvs=len(self_distance_csvs),
-        images=len(self_distance_images),
+        csvs=len(experiment.self_distance_z_csvs),
+        images=len(experiment.self_distance_z_images),
         included=include_self_distance,
     )
-    section_start = time.perf_counter()
 
-    self_distance_p_csvs: List[Path] = []
-    latest_self_distance_p_csv: Optional[Path] = None
-    self_distance_p_images: List[Path] = []
+
+def _load_experiment_self_distance_p(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_self_distance_p: bool,
+) -> None:
+    section_start = time.perf_counter()
     if include_self_distance_p:
-        self_distance_p_csvs = _collect_self_distance_csvs_p(path)
-        latest_self_distance_p_csv = self_distance_p_csvs[-1] if self_distance_p_csvs else None
-        self_distance_p_images = _collect_self_distance_images_p(path)
+        csvs = _collect_from_spec(path, SELF_DISTANCE_P_CSVS_SPEC)
+        experiment.self_distance_p_csvs = csvs
+        experiment.self_distance_p_csv = csvs[-1] if csvs else None
+        experiment.self_distance_p_images = _collect_from_spec(path, SELF_DISTANCE_P_IMAGES_SPEC)
     else:
-        latest_self_distance_p_csv = _quick_self_distance_p_csv(path)
+        experiment.self_distance_p_csv = _first_matching_csv_candidate(
+            path,
+            QUICK_SELF_DISTANCE_P_CSV_CANDIDATES,
+            conflict_label="self-distance (P)",
+        )
     _profile(
         "load_experiment.self_distance_p",
         section_start,
         path,
-        csvs=len(self_distance_p_csvs),
-        images=len(self_distance_p_images),
+        csvs=len(experiment.self_distance_p_csvs),
+        images=len(experiment.self_distance_p_images),
         included=include_self_distance_p,
     )
-    section_start = time.perf_counter()
 
-    state_embedding_images: List[Path] = []
-    state_embedding_csvs: List[Path] = []
-    latest_state_embedding_csv: Optional[Path] = None
+
+def _load_experiment_state_embedding(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_state_embedding: bool,
+) -> None:
+    section_start = time.perf_counter()
     if include_state_embedding:
-        state_embedding_images = _collect_state_embedding_images(path)
-        state_embedding_csvs = _collect_state_embedding_csvs(path)
-        latest_state_embedding_csv = state_embedding_csvs[-1] if state_embedding_csvs else None
+        experiment.state_embedding_hist_images = _collect_from_spec(path, STATE_EMBEDDING_HIST_IMAGE_SPEC)
+        experiment.state_embedding_images = _collect_state_embedding_distance_images(path)
+        csvs = _collect_from_spec(path, STATE_EMBEDDING_CSVS_SPEC)
+        experiment.state_embedding_csvs = csvs
+        experiment.state_embedding_csv = csvs[-1] if csvs else None
     else:
-        latest_state_embedding_csv = _quick_state_embedding_csv(path)
+        experiment.state_embedding_csv = _first_matching_csv_candidate(
+            path,
+            QUICK_STATE_EMBEDDING_CSV_CANDIDATES,
+            conflict_label="state embedding",
+        )
     _profile(
         "load_experiment.state_embedding",
         section_start,
         path,
-        images=len(state_embedding_images),
-        csvs=len(state_embedding_csvs),
+        images=len(experiment.state_embedding_images) + len(experiment.state_embedding_hist_images),
+        csvs=len(experiment.state_embedding_csvs),
         included=include_state_embedding,
     )
-    section_start = time.perf_counter()
 
-    odometry_images: List[Path] = []
+
+def _load_experiment_odometry(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_odometry: bool,
+) -> None:
+    section_start = time.perf_counter()
     if include_odometry:
-        odometry_images = _collect_odometry_images(path)
+        experiment.odometry_images = _first_existing_matches(
+            path,
+            [("vis_odometry", ["*.png"])],
+            conflict_label="vis_odometry images",
+        )
     _profile(
         "load_experiment.odometry",
         section_start,
         path,
-        images=len(odometry_images),
+        images=len(experiment.odometry_images),
         included=include_odometry,
     )
-    section_start = time.perf_counter()
 
-    diagnostics_images: Dict[str, List[Path]] = {}
-    diagnostics_steps: List[int] = []
-    diagnostics_csvs: Dict[str, List[Path]] = {}
-    diagnostics_frames: Dict[int, List[Tuple[Path, str]]] = {}
+
+def _load_experiment_diagnostics(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_diagnostics_images: bool,
+    include_diagnostics_frames: bool,
+) -> int:
     if include_diagnostics_images:
-        diagnostics_images = _collect_diagnostics_images(path)
-        diagnostics_steps = _collect_diagnostics_steps(diagnostics_images)
-        diagnostics_csvs = _collect_diagnostics_csvs(path)
+        experiment.diagnostics_delta_z_pca_images = _collect_from_spec(path, DIAGNOSTICS_DELTA_Z_PCA_IMAGE_SPEC)
+        experiment.diagnostics_variance_spectrum_images = _collect_from_spec(path, DIAGNOSTICS_VARIANCE_SPECTRUM_IMAGE_SPEC)
+        experiment.diagnostics_action_alignment_detail_images = _collect_from_spec(
+            path, DIAGNOSTICS_ACTION_ALIGNMENT_DETAIL_IMAGE_SPEC
+        )
+        experiment.diagnostics_cycle_error_images = _collect_from_spec(path, DIAGNOSTICS_CYCLE_ERROR_IMAGE_SPEC)
+        experiment.diagnostics_rollout_divergence_images = _collect_from_spec(path, DIAGNOSTICS_ROLLOUT_DIVERGENCE_IMAGE_SPEC)
+        experiment.diagnostics_rollout_divergence_z_images = experiment.diagnostics_rollout_divergence_images
+        experiment.diagnostics_z_consistency_images = _collect_from_spec(path, DIAGNOSTICS_Z_CONSISTENCY_IMAGE_SPEC)
+        experiment.diagnostics_z_monotonicity_images = _collect_from_spec(path, DIAGNOSTICS_Z_MONOTONICITY_IMAGE_SPEC)
+        experiment.diagnostics_path_independence_images = _collect_from_spec(path, DIAGNOSTICS_PATH_INDEPENDENCE_IMAGE_SPEC)
+        experiment.diagnostics_z_steps = _merge_steps(
+            _collect_steps_from_path_list(experiment.diagnostics_delta_z_pca_images),
+            _collect_steps_from_path_list(experiment.diagnostics_variance_spectrum_images),
+            _collect_steps_from_path_list(experiment.diagnostics_action_alignment_detail_images),
+            _collect_steps_from_path_list(experiment.diagnostics_cycle_error_images),
+            _collect_steps_from_path_list(experiment.diagnostics_rollout_divergence_images),
+            _collect_steps_from_path_list(experiment.diagnostics_rollout_divergence_z_images),
+            _collect_steps_from_path_list(experiment.diagnostics_z_consistency_images),
+            _collect_steps_from_path_list(experiment.diagnostics_z_monotonicity_images),
+            _collect_steps_from_path_list(experiment.diagnostics_path_independence_images),
+        )
+        experiment.diagnostics_delta_z_pca_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_DELTA_Z_PCA_CSV_FOLDERS)
+        experiment.diagnostics_action_alignment_csvs = _collect_csvs_by_folders(
+            path, DIAGNOSTICS_ACTION_ALIGNMENT_CSV_FOLDERS
+        )
+        experiment.diagnostics_cycle_error_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_CYCLE_ERROR_CSV_FOLDERS)
+        experiment.diagnostics_frame_alignment_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_FRAME_ALIGNMENT_CSV_FOLDERS)
+        experiment.diagnostics_rollout_divergence_csvs = _collect_csvs_by_folders(
+            path, DIAGNOSTICS_ROLLOUT_DIVERGENCE_CSV_FOLDERS
+        )
+        experiment.diagnostics_rollout_divergence_z_csvs = _collect_csvs_by_folders(
+            path, DIAGNOSTICS_ROLLOUT_DIVERGENCE_Z_CSV_FOLDERS
+        )
+        experiment.diagnostics_z_consistency_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_Z_CONSISTENCY_CSV_FOLDERS)
+        experiment.diagnostics_z_monotonicity_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_Z_MONOTONICITY_CSV_FOLDERS)
+        experiment.diagnostics_path_independence_csvs = _collect_csvs_by_folders(
+            path, DIAGNOSTICS_PATH_INDEPENDENCE_CSV_FOLDERS
+        )
     else:
-        diagnostics_steps = [0] if _diagnostics_exists(path) else []
-    diagnostics_frames = _collect_diagnostics_frames(path) if include_diagnostics_frames else {}
+        experiment.diagnostics_z_steps = [0] if _diagnostics_suffix_exists(path, DIAGNOSTICS_Z_DIRS) else []
 
-    diagnostics_s_images: Dict[str, List[Path]] = {}
-    diagnostics_s_steps: List[int] = []
-    diagnostics_s_csvs: Dict[str, List[Path]] = {}
-    if include_diagnostics_s:
-        diagnostics_s_images = _collect_diagnostics_images_s(path)
-        diagnostics_s_steps = _collect_diagnostics_steps(diagnostics_s_images)
-        diagnostics_s_csvs = _collect_diagnostics_csvs_s(path)
+    diagnostics_frames = _collect_diagnostics_frames(path) if include_diagnostics_frames else {}
+    if diagnostics_frames:
+        experiment.diagnostics_frame_steps = sorted(diagnostics_frames)
+        experiment.diagnostics_frame_entries = [diagnostics_frames[step] for step in experiment.diagnostics_frame_steps]
+    _load_experiment_diagnostics_h(experiment, path)
+    return (
+        len(experiment.diagnostics_delta_z_pca_csvs)
+        + len(experiment.diagnostics_action_alignment_csvs)
+        + len(experiment.diagnostics_cycle_error_csvs)
+        + len(experiment.diagnostics_frame_alignment_csvs)
+        + len(experiment.diagnostics_rollout_divergence_csvs)
+        + len(experiment.diagnostics_rollout_divergence_z_csvs)
+        + len(experiment.diagnostics_z_consistency_csvs)
+        + len(experiment.diagnostics_z_monotonicity_csvs)
+        + len(experiment.diagnostics_path_independence_csvs)
+    )
+
+
+def _load_experiment_diagnostics_h(experiment: Experiment, path: Path) -> None:
+    experiment.diagnostics_h_steps = _merge_steps(
+        _collect_steps_from_path_list(
+            list((path / "vis_delta_h_pca").glob("delta_h_pca_*.png")),
+            prefix="delta_h_pca_",
+        ),
+        _collect_steps_from_path_list(
+            list((path / "vis_action_alignment_h").glob("action_alignment_detail_*.png")),
+            prefix="action_alignment_detail_",
+        ),
+        _collect_steps_from_path_list(
+            list((path / "vis_cycle_error_h").glob("cycle_error_*.png")),
+            prefix="cycle_error_",
+        ),
+        _collect_steps_from_path_list(
+            list((path / "vis_self_distance_h").glob("self_distance_h_*.png")),
+            prefix="self_distance_h_",
+        ),
+    )
+
+
+def _load_experiment_diagnostics_p(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_diagnostics_p: bool,
+) -> None:
+    if include_diagnostics_p:
+        experiment.diagnostics_p_delta_p_pca_images = _collect_from_spec(path, DIAGNOSTICS_P_DELTA_P_PCA_IMAGE_SPEC)
+        experiment.diagnostics_p_variance_spectrum_images = _collect_from_spec(path, DIAGNOSTICS_P_VARIANCE_SPECTRUM_IMAGE_SPEC)
+        experiment.diagnostics_p_action_alignment_detail_images = _collect_from_spec(
+            path, DIAGNOSTICS_P_ACTION_ALIGNMENT_DETAIL_IMAGE_SPEC
+        )
+        experiment.diagnostics_p_cycle_error_images = _collect_from_spec(path, DIAGNOSTICS_P_CYCLE_ERROR_IMAGE_SPEC)
+        experiment.diagnostics_p_straightline_images = _collect_from_spec(path, DIAGNOSTICS_P_STRAIGHTLINE_IMAGE_SPEC)
+        experiment.diagnostics_p_rollout_divergence_images = _collect_from_spec(
+            path, DIAGNOSTICS_P_ROLLOUT_DIVERGENCE_IMAGE_SPEC
+        )
+        experiment.diagnostics_p_steps = _merge_steps(
+            _collect_steps_from_path_list(experiment.diagnostics_p_delta_p_pca_images),
+            _collect_steps_from_path_list(experiment.diagnostics_p_variance_spectrum_images),
+            _collect_steps_from_path_list(experiment.diagnostics_p_action_alignment_detail_images),
+            _collect_steps_from_path_list(experiment.diagnostics_p_cycle_error_images),
+            _collect_steps_from_path_list(experiment.diagnostics_p_straightline_images),
+            _collect_steps_from_path_list(experiment.diagnostics_p_rollout_divergence_images),
+        )
+        experiment.diagnostics_p_delta_p_pca_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_P_DELTA_P_PCA_CSV_FOLDERS)
+        experiment.diagnostics_p_action_alignment_csvs = _collect_csvs_by_folders(
+            path, DIAGNOSTICS_P_ACTION_ALIGNMENT_CSV_FOLDERS
+        )
+        experiment.diagnostics_p_cycle_error_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_P_CYCLE_ERROR_CSV_FOLDERS)
+        experiment.diagnostics_p_rollout_divergence_csvs = _collect_csvs_by_folders(
+            path, DIAGNOSTICS_P_ROLLOUT_DIVERGENCE_CSV_FOLDERS
+        )
     else:
-        diagnostics_s_steps = [0] if _diagnostics_s_exists(path) else []
-    graph_diagnostics_images: Dict[str, List[Path]] = {}
-    graph_diagnostics_steps: List[int] = []
-    graph_diagnostics_csvs: Dict[str, List[Path]] = {}
-    graph_diagnostics_h_images: Dict[str, List[Path]] = {}
-    graph_diagnostics_h_steps: List[int] = []
-    graph_diagnostics_h_csvs: Dict[str, List[Path]] = {}
-    graph_diagnostics_s_images: Dict[str, List[Path]] = {}
-    graph_diagnostics_s_steps: List[int] = []
-    graph_diagnostics_s_csvs: Dict[str, List[Path]] = {}
-    if include_graph_diagnostics:
-        graph_diagnostics_images = _collect_graph_diagnostics_images(path)
-        graph_diagnostics_steps = _collect_graph_diagnostics_steps(graph_diagnostics_images)
-        graph_diagnostics_csvs = _collect_graph_diagnostics_csvs(path)
-    else:
-        graph_diagnostics_steps = [0] if _graph_diagnostics_exists(path) else []
-    if include_graph_diagnostics_h:
-        graph_diagnostics_h_images = _collect_graph_diagnostics_images(path, folder_name="graph_diagnostics_h")
-        graph_diagnostics_h_steps = _collect_graph_diagnostics_steps(graph_diagnostics_h_images)
-        graph_diagnostics_h_csvs = _collect_graph_diagnostics_csvs(path, folder_name="graph_diagnostics_h")
-    else:
-        graph_diagnostics_h_steps = [0] if _graph_diagnostics_exists(path, folder_name="graph_diagnostics_h") else []
-    if include_graph_diagnostics_s:
-        graph_diagnostics_s_images = _collect_graph_diagnostics_images(path, folder_name="graph_diagnostics_s")
-        graph_diagnostics_s_steps = _collect_graph_diagnostics_steps(graph_diagnostics_s_images)
-        graph_diagnostics_s_csvs = _collect_graph_diagnostics_csvs(path, folder_name="graph_diagnostics_s")
-    else:
-        graph_diagnostics_s_steps = [0] if _graph_diagnostics_exists(path, folder_name="graph_diagnostics_s") else []
-    vis_ctrl_images: Dict[str, List[Path]] = {}
-    vis_ctrl_steps: List[int] = []
-    vis_ctrl_csvs: List[Path] = []
+        experiment.diagnostics_p_steps = [0] if _diagnostics_suffix_exists(path, DIAGNOSTICS_P_DIRS) else []
+
+
+def _load_experiment_vis_ctrl(
+    experiment: Experiment,
+    path: Path,
+    *,
+    include_vis_ctrl: bool,
+) -> None:
+    section_start = time.perf_counter()
     if include_vis_ctrl:
-        vis_ctrl_images = _collect_vis_ctrl_images(path)
-        vis_ctrl_steps = _collect_diagnostics_steps(vis_ctrl_images)
-        vis_ctrl_csvs = _collect_vis_ctrl_csvs(path)
+        experiment.vis_ctrl_smoothness_z_images = _first_existing_matches(
+            path,
+            [("vis_vis_ctrl", ["smoothness_z_*.png"])],
+            conflict_label="vis_ctrl smoothness_z images",
+        )
+        experiment.vis_ctrl_smoothness_p_images = _first_existing_matches(
+            path,
+            [
+                ("vis_vis_ctrl", ["smoothness_p_*.png"]),
+                ("vis_vis_ctrl", ["smoothness_s_*.png"]),
+            ],
+            conflict_label="vis_ctrl smoothness_p images",
+        )
+        experiment.vis_ctrl_smoothness_h_images = _first_existing_matches(
+            path,
+            [("vis_vis_ctrl", ["smoothness_h_*.png"])],
+            conflict_label="vis_ctrl smoothness_h images",
+        )
+        experiment.vis_ctrl_composition_z_images = _first_existing_matches(
+            path,
+            [("vis_vis_ctrl", ["composition_error_z_*.png"])],
+            conflict_label="vis_ctrl composition_z images",
+        )
+        experiment.vis_ctrl_composition_p_images = _first_existing_matches(
+            path,
+            [
+                ("vis_vis_ctrl", ["composition_error_p_*.png"]),
+                ("vis_vis_ctrl", ["composition_error_s_*.png"]),
+            ],
+            conflict_label="vis_ctrl composition_p images",
+        )
+        experiment.vis_ctrl_composition_h_images = _first_existing_matches(
+            path,
+            [("vis_vis_ctrl", ["composition_error_h_*.png"])],
+            conflict_label="vis_ctrl composition_h images",
+        )
+        experiment.vis_ctrl_stability_z_images = _first_existing_matches(
+            path,
+            [("vis_vis_ctrl", ["stability_z_*.png"])],
+            conflict_label="vis_ctrl stability_z images",
+        )
+        experiment.vis_ctrl_stability_p_images = _first_existing_matches(
+            path,
+            [
+                ("vis_vis_ctrl", ["stability_p_*.png"]),
+                ("vis_vis_ctrl", ["stability_s_*.png"]),
+            ],
+            conflict_label="vis_ctrl stability_p images",
+        )
+        experiment.vis_ctrl_stability_h_images = _first_existing_matches(
+            path,
+            [("vis_vis_ctrl", ["stability_h_*.png"])],
+            conflict_label="vis_ctrl stability_h images",
+        )
+        experiment.vis_ctrl_alignment_z_images = _first_existing_matches(
+            path,
+            [("vis_action_alignment_z", ["action_alignment_detail_*.png"])],
+            conflict_label="vis_ctrl alignment_z images",
+        )
+        experiment.vis_ctrl_alignment_p_images = _first_existing_matches(
+            path,
+            [
+                ("vis_action_alignment_p", ["action_alignment_detail_*.png"]),
+                ("vis_action_alignment_s", ["action_alignment_detail_*.png"]),
+            ],
+            conflict_label="vis_ctrl alignment_p images",
+        )
+        experiment.vis_ctrl_alignment_h_images = _first_existing_matches(
+            path,
+            [("vis_action_alignment_h", ["action_alignment_detail_*.png"])],
+            conflict_label="vis_ctrl alignment_h images",
+        )
+        experiment.vis_ctrl_steps = _merge_steps(
+            _collect_steps_from_path_list(experiment.vis_ctrl_smoothness_z_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_smoothness_p_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_smoothness_h_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_composition_z_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_composition_p_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_composition_h_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_stability_z_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_stability_p_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_stability_h_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_alignment_z_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_alignment_p_images),
+            _collect_steps_from_path_list(experiment.vis_ctrl_alignment_h_images),
+        )
+        experiment.vis_ctrl_csvs = _collect_from_spec(path, VIS_CTRL_METRICS_CSV_SPEC) + _collect_from_spec(
+            path, VIS_CTRL_VIS_CTRL_CSV_SPEC
+        )
     else:
-        vis_ctrl_steps = [0] if _vis_ctrl_exists(path) else []
+        experiment.vis_ctrl_steps = (
+            [0]
+            if (
+                _any_folder_pattern_exists(
+                    path,
+                    [
+                        ("vis_vis_ctrl", "smoothness_z_0000000.png", "smoothness_z_*.png"),
+                    ],
+                )
+                or _any_existing_paths(path, ["metrics/vis_ctrl_metrics.csv"])
+            )
+            else []
+        )
     _profile(
-        "load_experiment.diagnostics",
+        "load_experiment.vis_ctrl",
         section_start,
         path,
-        images=sum(len(v) for v in diagnostics_images.values()),
-        steps=len(diagnostics_steps),
-        csvs=sum(len(v) for v in diagnostics_csvs.values()),
-        frames=sum(len(v) for v in diagnostics_frames.values()),
-        include_frames=include_diagnostics_frames,
-        graph_images=sum(len(v) for v in graph_diagnostics_images.values()),
-        graph_steps=len(graph_diagnostics_steps),
-        graph_csvs=sum(len(v) for v in graph_diagnostics_csvs.values()),
-        graph_h_images=sum(len(v) for v in graph_diagnostics_h_images.values()),
-        graph_h_steps=len(graph_diagnostics_h_steps),
-        graph_h_csvs=sum(len(v) for v in graph_diagnostics_h_csvs.values()),
-        graph_s_images=sum(len(v) for v in graph_diagnostics_s_images.values()),
-        graph_s_steps=len(graph_diagnostics_s_steps),
-        graph_s_csvs=sum(len(v) for v in graph_diagnostics_s_csvs.values()),
-        include_graph=include_graph_diagnostics,
-        include_images=include_diagnostics_images,
+        steps=len(experiment.vis_ctrl_steps),
+        csvs=len(experiment.vis_ctrl_csvs),
+        included=include_vis_ctrl,
     )
-    section_start = time.perf_counter()
 
+
+def _load_experiment_self_distance_flags(experiment: Experiment, path: Path) -> None:
+    experiment.has_self_distance_z_csv = experiment.self_distance_z_csv is not None
+    experiment.has_self_distance_p_csv = experiment.self_distance_p_csv is not None
+    _load_experiment_self_distance_h(experiment, path)
+
+
+def _load_experiment_self_distance_h(experiment: Experiment, path: Path) -> None:
+    csvs = _collect_from_spec(path, SELF_DISTANCE_H_CSVS_SPEC)
+    experiment.self_distance_h_csvs = csvs
+    experiment.self_distance_h_csv = csvs[-1] if csvs else None
+    experiment.has_self_distance_h_csv = experiment.self_distance_h_csv is not None
+    experiment.self_distance_h_images = _collect_from_spec(path, SELF_DISTANCE_H_IMAGES_SPEC)
+
+
+def _load_experiment_metadata(
+    experiment: Experiment,
+    path: Path,
+    *,
+    metadata_path: Path,
+    metadata_git_path: Path,
+    metadata_model_diff_path: Path,
+    include_model_diff: bool,
+    include_model_diff_generation: bool,
+) -> None:
+    section_start = time.perf_counter()
     notes_path = path / "notes.txt"
     metadata_custom_path = path / "experiment_metadata.txt"
     meta_start = time.perf_counter()
@@ -406,82 +1701,329 @@ def load_experiment(
     notes_text = _read_or_create_notes(notes_path)
     _profile("load_experiment.text_meta.notes", meta_start, path)
     _profile("load_experiment.text_meta", section_start, path)
-    section_start = time.perf_counter()
+    experiment.title = title
+    experiment.tags = tags
+    experiment.starred = starred
+    experiment.archived = archived
+    experiment.metadata_text = metadata_text
+    experiment.data_root = metadata_data_root
+    experiment.model_diff_text = metadata_model_diff_text
+    experiment.model_diff_items = metadata_model_diff_items
+    experiment.git_metadata_text = git_metadata_text
+    experiment.git_commit = git_commit or "Unknown commit"
+    experiment.notes_text = notes_text
 
-    rollout_steps = _collect_rollout_steps(path) if include_rollout_steps else []
-    max_step = get_max_step(loss_csv) if include_max_step and loss_csv and loss_csv.exists() else None
-    last_modified = _get_last_modified(path) if include_last_modified else _quick_last_modified(path)
-    total_params, flops_per_step = _read_model_metadata(metadata_model_path)
+
+def _load_experiment_metrics(
+    experiment: Experiment,
+    path: Path,
+    *,
+    loss_png: Path,
+    loss_csv: Optional[Path],
+    include_rollout_steps: bool,
+    include_max_step: bool,
+    include_last_modified: bool,
+) -> None:
+    section_start = time.perf_counter()
+    experiment.loss_image = loss_png if loss_png.exists() else None
+    experiment.loss_csv = loss_csv if loss_csv and loss_csv.exists() else None
+    experiment.rollout_steps = (
+        _collect_steps_from_path_list(list(path.glob("vis_fixed_*/rollout_*.png")), prefix="rollout_")
+        if include_rollout_steps
+        else []
+    )
+    experiment.max_step = (
+        get_max_step(experiment.loss_csv)
+        if include_max_step and experiment.loss_csv and experiment.loss_csv.exists()
+        else None
+    )
+    experiment.last_modified = (
+        _get_last_modified(path, profile=_profile) if include_last_modified else _quick_last_modified(path)
+    )
+    experiment.total_params, experiment.flops_per_step = _read_model_metadata(path / "metadata_model.txt")
     _profile(
         "load_experiment.metrics",
         section_start,
         path,
-        rollout_steps=len(rollout_steps),
-        max_step=max_step if max_step is not None else "",
-        loss_csv=bool(loss_csv and loss_csv.exists()),
+        rollout_steps=len(experiment.rollout_steps),
+        max_step=experiment.max_step if experiment.max_step is not None else "",
+        loss_csv=bool(experiment.loss_csv and experiment.loss_csv.exists()),
         last_modified_mode="deep" if include_last_modified else "quick",
+    )
+
+
+def load_experiment(
+    path: Path,
+    include_self_distance: bool = False,
+    include_self_distance_p: bool = False,
+    include_diagnostics_images: bool = False,
+    include_diagnostics_frames: bool = False,
+    include_diagnostics_p: bool = False,
+    include_graph_diagnostics: bool = False,
+    include_vis_ctrl: bool = False,
+    include_state_embedding: bool = False,
+    include_odometry: bool = False,
+    include_graph_diagnostics_p: bool = False,
+    include_graph_diagnostics_h: bool = False,
+    include_last_modified: bool = False,
+    include_rollout_steps: bool = False,
+    include_max_step: bool = False,
+    include_model_diff: bool = False,
+    include_model_diff_generation: bool = False,
+) -> Optional[Experiment]:
+    if not path.is_dir():
+        return None
+    start_time = time.perf_counter()
+    section_start = start_time
+    metadata_path = path / "metadata.txt"
+    metadata_git_path = path / "metadata_git.txt"
+    metadata_model_diff_path = path / "server_cache" / "model_diff.txt"
+    metrics_dir = path / "metrics"
+    loss_png = metrics_dir / "loss_curves.png"
+    loss_csv = (
+        _resolve_first_existing_folder(metrics_dir, ["loss_curves.csv", "loss.csv"])
+        if metrics_dir.exists()
+        else None
+    )
+    _profile("load_experiment.paths", start_time, path, metrics_dir=metrics_dir)
+    section_start = time.perf_counter()
+
+    experiment = Experiment(
+        id=path.name,
+        name=path.name,
+        path=path,
+        metadata_text="",
+        data_root=None,
+        model_diff_text="—",
+        model_diff_items=[],
+        git_metadata_text="",
+        git_commit="Unknown commit",
+        notes_text="",
+        title="",
+        tags="",
+        starred=False,
+        archived=False,
+        loss_image=None,
+        loss_csv=None,
+        rollout_steps=[],
+        max_step=None,
+        last_modified=None,
+        total_params=None,
+        flops_per_step=None,
+        self_distance_z_csv=None,
+        self_distance_z_images=[],
+        self_distance_z_csvs=[],
+        self_distance_h_csv=None,
+        self_distance_h_images=[],
+        self_distance_h_csvs=[],
+        self_distance_p_csv=None,
+        self_distance_p_images=[],
+        self_distance_p_csvs=[],
+        state_embedding_csv=None,
+        state_embedding_images=[],
+        state_embedding_hist_images=[],
+        state_embedding_csvs=[],
+        odometry_images=[],
+        diagnostics_delta_z_pca_images=[],
+        diagnostics_variance_spectrum_images=[],
+        diagnostics_action_alignment_detail_images=[],
+        diagnostics_cycle_error_images=[],
+        diagnostics_rollout_divergence_images=[],
+        diagnostics_rollout_divergence_z_images=[],
+        diagnostics_z_consistency_images=[],
+        diagnostics_z_monotonicity_images=[],
+        diagnostics_path_independence_images=[],
+        diagnostics_z_steps=[],
+        diagnostics_delta_z_pca_csvs=[],
+        diagnostics_action_alignment_csvs=[],
+        diagnostics_cycle_error_csvs=[],
+        diagnostics_frame_alignment_csvs=[],
+        diagnostics_rollout_divergence_csvs=[],
+        diagnostics_rollout_divergence_z_csvs=[],
+        diagnostics_z_consistency_csvs=[],
+        diagnostics_z_monotonicity_csvs=[],
+        diagnostics_path_independence_csvs=[],
+        diagnostics_frame_steps=[],
+        diagnostics_frame_entries=[],
+        diagnostics_p_delta_p_pca_images=[],
+        diagnostics_p_variance_spectrum_images=[],
+        diagnostics_p_action_alignment_detail_images=[],
+        diagnostics_p_cycle_error_images=[],
+        diagnostics_p_straightline_images=[],
+        diagnostics_p_rollout_divergence_images=[],
+        diagnostics_p_steps=[],
+        diagnostics_h_steps=[],
+        diagnostics_p_delta_p_pca_csvs=[],
+        diagnostics_p_action_alignment_csvs=[],
+        diagnostics_p_cycle_error_csvs=[],
+        diagnostics_p_rollout_divergence_csvs=[],
+        graph_diagnostics_rank1_cdf_z_images=[],
+        graph_diagnostics_rank1_cdf_h_images=[],
+        graph_diagnostics_rank1_cdf_p_images=[],
+        graph_diagnostics_rank2_cdf_z_images=[],
+        graph_diagnostics_rank2_cdf_h_images=[],
+        graph_diagnostics_rank2_cdf_p_images=[],
+        graph_diagnostics_neff_violin_z_images=[],
+        graph_diagnostics_neff_violin_h_images=[],
+        graph_diagnostics_neff_violin_p_images=[],
+        graph_diagnostics_in_degree_hist_z_images=[],
+        graph_diagnostics_in_degree_hist_h_images=[],
+        graph_diagnostics_in_degree_hist_p_images=[],
+        graph_diagnostics_edge_consistency_z_images=[],
+        graph_diagnostics_edge_consistency_h_images=[],
+        graph_diagnostics_edge_consistency_p_images=[],
+        graph_diagnostics_metrics_history_z_images=[],
+        graph_diagnostics_metrics_history_h_images=[],
+        graph_diagnostics_metrics_history_p_images=[],
+        graph_diagnostics_metrics_history_latest_z_images=[],
+        graph_diagnostics_metrics_history_latest_h_images=[],
+        graph_diagnostics_metrics_history_latest_p_images=[],
+        graph_diagnostics_z_steps=[],
+        graph_diagnostics_metrics_history_z_csvs=[],
+        graph_diagnostics_h_steps=[],
+        graph_diagnostics_metrics_history_h_csvs=[],
+        graph_diagnostics_p_steps=[],
+        graph_diagnostics_metrics_history_p_csvs=[],
+        vis_ctrl_smoothness_z_images=[],
+        vis_ctrl_smoothness_p_images=[],
+        vis_ctrl_smoothness_h_images=[],
+        vis_ctrl_composition_z_images=[],
+        vis_ctrl_composition_p_images=[],
+        vis_ctrl_composition_h_images=[],
+        vis_ctrl_stability_z_images=[],
+        vis_ctrl_stability_p_images=[],
+        vis_ctrl_stability_h_images=[],
+        vis_ctrl_alignment_z_images=[],
+        vis_ctrl_alignment_p_images=[],
+        vis_ctrl_alignment_h_images=[],
+        vis_ctrl_steps=[],
+        vis_ctrl_csvs=[],
+        has_self_distance_z_csv=False,
+        has_self_distance_h_csv=False,
+        has_self_distance_p_csv=False,
+    )
+    _load_experiment_metadata(
+        experiment,
+        path,
+        metadata_path=metadata_path,
+        metadata_git_path=metadata_git_path,
+        metadata_model_diff_path=metadata_model_diff_path,
+        include_model_diff=include_model_diff,
+        include_model_diff_generation=include_model_diff_generation,
+    )
+    _load_experiment_metrics(
+        experiment,
+        path,
+        loss_png=loss_png,
+        loss_csv=loss_csv,
+        include_rollout_steps=include_rollout_steps,
+        include_max_step=include_max_step,
+        include_last_modified=include_last_modified,
+    )
+    _load_experiment_self_distance(experiment, path, include_self_distance=include_self_distance)
+    _load_experiment_self_distance_p(experiment, path, include_self_distance_p=include_self_distance_p)
+    _load_experiment_state_embedding(experiment, path, include_state_embedding=include_state_embedding)
+    _load_experiment_odometry(experiment, path, include_odometry=include_odometry)
+    diagnostics_start = time.perf_counter()
+    diagnostics_csv_count = _load_experiment_diagnostics(
+        experiment,
+        path,
+        include_diagnostics_images=include_diagnostics_images,
+        include_diagnostics_frames=include_diagnostics_frames,
+    )
+    _load_experiment_diagnostics_p(experiment, path, include_diagnostics_p=include_diagnostics_p)
+    _load_experiment_graph_diagnostics_z(
+        experiment,
+        path,
+        include_graph_diagnostics=include_graph_diagnostics,
+    )
+    _load_experiment_graph_diagnostics_h(
+        experiment,
+        path,
+        include_graph_diagnostics_h=include_graph_diagnostics_h,
+    )
+    _load_experiment_graph_diagnostics_p(
+        experiment,
+        path,
+        include_graph_diagnostics_p=include_graph_diagnostics_p,
+    )
+    _load_experiment_vis_ctrl(experiment, path, include_vis_ctrl=include_vis_ctrl)
+    _load_experiment_self_distance_flags(experiment, path)
+    _profile(
+        "load_experiment.diagnostics",
+        diagnostics_start,
+        path,
+        images=(
+            len(experiment.diagnostics_delta_z_pca_images)
+            + len(experiment.diagnostics_variance_spectrum_images)
+            + len(experiment.diagnostics_action_alignment_detail_images)
+            + len(experiment.diagnostics_cycle_error_images)
+            + len(experiment.diagnostics_rollout_divergence_images)
+            + len(experiment.diagnostics_rollout_divergence_z_images)
+            + len(experiment.diagnostics_z_consistency_images)
+            + len(experiment.diagnostics_z_monotonicity_images)
+            + len(experiment.diagnostics_path_independence_images)
+        ),
+        steps=len(experiment.diagnostics_z_steps),
+        csvs=diagnostics_csv_count,
+        frames=sum(len(entries) for entries in experiment.diagnostics_frame_entries),
+        include_frames=include_diagnostics_frames,
+        graph_images=(
+            len(experiment.graph_diagnostics_rank1_cdf_z_images)
+            + len(experiment.graph_diagnostics_rank2_cdf_z_images)
+            + len(experiment.graph_diagnostics_neff_violin_z_images)
+            + len(experiment.graph_diagnostics_in_degree_hist_z_images)
+            + len(experiment.graph_diagnostics_edge_consistency_z_images)
+            + len(experiment.graph_diagnostics_metrics_history_z_images)
+            + len(experiment.graph_diagnostics_metrics_history_latest_z_images)
+        ),
+        graph_steps=len(experiment.graph_diagnostics_z_steps),
+        graph_csvs=len(experiment.graph_diagnostics_metrics_history_z_csvs),
+        graph_h_images=(
+            len(experiment.graph_diagnostics_rank1_cdf_h_images)
+            + len(experiment.graph_diagnostics_rank2_cdf_h_images)
+            + len(experiment.graph_diagnostics_neff_violin_h_images)
+            + len(experiment.graph_diagnostics_in_degree_hist_h_images)
+            + len(experiment.graph_diagnostics_edge_consistency_h_images)
+            + len(experiment.graph_diagnostics_metrics_history_h_images)
+            + len(experiment.graph_diagnostics_metrics_history_latest_h_images)
+        ),
+        graph_h_steps=len(experiment.graph_diagnostics_h_steps),
+        graph_h_csvs=len(experiment.graph_diagnostics_metrics_history_h_csvs),
+        graph_p_images=(
+            len(experiment.graph_diagnostics_rank1_cdf_p_images)
+            + len(experiment.graph_diagnostics_rank2_cdf_p_images)
+            + len(experiment.graph_diagnostics_neff_violin_p_images)
+            + len(experiment.graph_diagnostics_in_degree_hist_p_images)
+            + len(experiment.graph_diagnostics_edge_consistency_p_images)
+            + len(experiment.graph_diagnostics_metrics_history_p_images)
+            + len(experiment.graph_diagnostics_metrics_history_latest_p_images)
+        ),
+        graph_p_steps=len(experiment.graph_diagnostics_p_steps),
+        graph_p_csvs=len(experiment.graph_diagnostics_metrics_history_p_csvs),
+        include_graph=include_graph_diagnostics,
+        include_images=include_diagnostics_images,
     )
     _profile(
         "load_experiment",
         start_time,
         path,
-        diagnostics_images=sum(len(v) for v in diagnostics_images.values()),
-        diagnostics_frames=sum(len(v) for v in diagnostics_frames.values()),
-        diagnostics_csvs=sum(len(v) for v in diagnostics_csvs.values()),
+        diagnostics_images=(
+            len(experiment.diagnostics_delta_z_pca_images)
+            + len(experiment.diagnostics_variance_spectrum_images)
+            + len(experiment.diagnostics_action_alignment_detail_images)
+            + len(experiment.diagnostics_cycle_error_images)
+            + len(experiment.diagnostics_rollout_divergence_images)
+            + len(experiment.diagnostics_rollout_divergence_z_images)
+            + len(experiment.diagnostics_z_consistency_images)
+            + len(experiment.diagnostics_z_monotonicity_images)
+            + len(experiment.diagnostics_path_independence_images)
+        ),
+        diagnostics_frames=sum(len(entries) for entries in experiment.diagnostics_frame_entries),
+        diagnostics_csvs=diagnostics_csv_count,
         include_frames=include_diagnostics_frames,
     )
-    return Experiment(
-        id=path.name,
-        name=path.name,
-        path=path,
-        metadata_text=metadata_text,
-        data_root=metadata_data_root,
-        model_diff_text=metadata_model_diff_text,
-        model_diff_items=metadata_model_diff_items,
-        git_metadata_text=git_metadata_text,
-        git_commit=git_commit or "Unknown commit",
-        notes_text=notes_text,
-        title=title,
-        tags=tags,
-        starred=starred,
-        archived=archived,
-        loss_image=loss_png if loss_png.exists() else None,
-        loss_csv=loss_csv if loss_csv and loss_csv.exists() else None,
-        rollout_steps=rollout_steps,
-        max_step=max_step,
-        last_modified=last_modified,
-        total_params=total_params,
-        flops_per_step=flops_per_step,
-        self_distance_csv=latest_self_distance_csv,
-        self_distance_images=self_distance_images,
-        self_distance_csvs=self_distance_csvs,
-        self_distance_p_csv=latest_self_distance_p_csv,
-        self_distance_p_images=self_distance_p_images,
-        self_distance_p_csvs=self_distance_p_csvs,
-        state_embedding_csv=latest_state_embedding_csv,
-        state_embedding_images=state_embedding_images,
-        state_embedding_csvs=state_embedding_csvs,
-        odometry_images=odometry_images,
-        diagnostics_images=diagnostics_images,
-        diagnostics_steps=diagnostics_steps,
-        diagnostics_csvs=diagnostics_csvs,
-        diagnostics_frames=diagnostics_frames,
-        diagnostics_s_images=diagnostics_s_images,
-        diagnostics_s_steps=diagnostics_s_steps,
-        diagnostics_s_csvs=diagnostics_s_csvs,
-        graph_diagnostics_images=graph_diagnostics_images,
-        graph_diagnostics_steps=graph_diagnostics_steps,
-        graph_diagnostics_csvs=graph_diagnostics_csvs,
-        graph_diagnostics_h_images=graph_diagnostics_h_images,
-        graph_diagnostics_h_steps=graph_diagnostics_h_steps,
-        graph_diagnostics_h_csvs=graph_diagnostics_h_csvs,
-        graph_diagnostics_s_images=graph_diagnostics_s_images,
-        graph_diagnostics_s_steps=graph_diagnostics_s_steps,
-        graph_diagnostics_s_csvs=graph_diagnostics_s_csvs,
-        vis_ctrl_images=vis_ctrl_images,
-        vis_ctrl_steps=vis_ctrl_steps,
-        vis_ctrl_csvs=vis_ctrl_csvs,
-    )
+    return experiment
 
 
 def load_loss_curves(csv_path: Path) -> Optional[LossCurveData]:
@@ -532,469 +2074,6 @@ def load_loss_curves(csv_path: Path) -> Optional[LossCurveData]:
     )
 
 
-def _step_from_filename(path: Path) -> Optional[int]:
-    """Extract trailing integer step from a filename like foo_0000100.txt."""
-    stem = path.stem
-    suffix = stem.split("_")[-1] if "_" in stem else stem
-    try:
-        return int(suffix)
-    except ValueError:
-        return None
-
-
-def _parse_tabbed_lines(text: str) -> List[Dict[str, str]]:
-    """Parse tab-delimited diagnostics text into dictionaries."""
-    rows: List[Dict[str, str]] = []
-    headers: Optional[List[str]] = None
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("Action alignment") or line.startswith("Per-action"):
-            continue
-        if line.lower().startswith("no actions"):
-            break
-        if line.startswith("action_id"):
-            headers = line.split("\t")
-            continue
-        if headers is None:
-            continue
-        parts = line.split("\t")
-        if len(parts) < len(headers):
-            parts.extend([""] * (len(headers) - len(parts)))
-        rows.append({key: value for key, value in zip(headers, parts)})
-    return rows
-
-
-def _to_int(value: str) -> Optional[int]:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_float(value: str) -> Optional[float]:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _parse_action_alignment_report(path: Path) -> List[Dict[str, object]]:
-    """Return parsed rows from action_alignment_report_*.txt."""
-    try:
-        content = path.read_text()
-    except OSError:
-        return []
-    rows = _parse_tabbed_lines(content)
-    parsed: List[Dict[str, object]] = []
-    for row in rows:
-        aid = _to_int(row.get("action_id", ""))
-        if aid is None:
-            continue
-        parsed.append(
-            {
-                "action_id": aid,
-                "label": row.get("label", ""),
-                "count": _to_int(row.get("count", "")) or 0,
-                "mean": _to_float(row.get("mean", "")),
-                "median": _to_float(row.get("median", "")),
-                "pct_high": _to_float(row.get("pct_gt_thr", "")),
-                "std": _to_float(row.get("std", "")),
-                "frac_neg": _to_float(row.get("frac_neg", "")),
-                "delta_norm_median": _to_float(row.get("delta_norm_median", "")),
-                "delta_norm_p90": _to_float(row.get("delta_norm_p90", "")),
-                "inverse_alignment": _to_float(row.get("inverse_alignment", "")),
-                "note": row.get("notes", "") or "",
-            }
-        )
-    return parsed
-
-
-def _parse_action_alignment_strength(path: Path) -> List[Dict[str, object]]:
-    """Return parsed rows from action_alignment_strength_*.txt."""
-    try:
-        content = path.read_text()
-    except OSError:
-        return []
-    rows = _parse_tabbed_lines(content)
-    parsed: List[Dict[str, object]] = []
-    for row in rows:
-        aid = _to_int(row.get("action_id", ""))
-        if aid is None:
-            continue
-        parsed.append(
-            {
-                "action_id": aid,
-                "label": row.get("label", ""),
-                "count": _to_int(row.get("count", "")) or 0,
-                "mean": _to_float(row.get("mean_cos", "")),
-                "std": _to_float(row.get("std", "")),
-                "frac_neg": _to_float(row.get("frac_neg", "")),
-                "mean_dir_norm": _to_float(row.get("mean_dir_norm", "")),
-                "delta_norm_median": _to_float(row.get("delta_norm_median", "")),
-                "strength_ratio": _to_float(row.get("strength_ratio", "")),
-                "note": row.get("note", "") or "",
-            }
-        )
-    return parsed
-
-
-def extract_alignment_summary(experiment: Experiment) -> Optional[Dict[str, object]]:
-    """Build a merged per-action summary from the latest alignment report/strength files."""
-    files = experiment.diagnostics_csvs.get("action_alignment", [])
-    if not files:
-        return None
-
-    report_files = [p for p in files if "action_alignment_report_" in p.name]
-    strength_files = [p for p in files if "action_alignment_strength_" in p.name]
-    if not report_files:
-        return None
-
-    def _latest(paths: List[Path]) -> Optional[Path]:
-        return max(paths, key=lambda p: _step_from_filename(p) or -1, default=None)
-
-    latest_report = _latest(report_files)
-    if latest_report is None:
-        return None
-    report_step = _step_from_filename(latest_report)
-
-    strength_for_step = None
-    if report_step is not None:
-        for candidate in strength_files:
-            if _step_from_filename(candidate) == report_step:
-                strength_for_step = candidate
-                break
-    if strength_for_step is None and strength_files:
-        strength_for_step = _latest(strength_files)
-
-    report_rows = _parse_action_alignment_report(latest_report)
-    strength_rows = _parse_action_alignment_strength(strength_for_step) if strength_for_step else []
-    if not report_rows:
-        return None
-
-    strength_by_id = {row["action_id"]: row for row in strength_rows if "action_id" in row}
-    merged_rows: List[Dict[str, object]] = []
-    for row in report_rows:
-        aid = row.get("action_id")
-        merged = dict(row)
-        strength_row = strength_by_id.get(aid)
-        if strength_row:
-            merged["strength_ratio"] = strength_row.get("strength_ratio")
-            if strength_row.get("note"):
-                merged["strength_note"] = strength_row["note"]
-        merged_rows.append(merged)
-
-    merged_rows.sort(key=lambda r: r.get("count", 0), reverse=True)
-    return {
-        "step": report_step,
-        "rows": merged_rows,
-        "report_path": latest_report,
-        "strength_path": strength_for_step,
-    }
-
-
-def write_notes(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    normalized = text.replace("\r\n", "\n")
-    path.write_text(normalized)
-
-
-def write_title(path: Path, title: str) -> None:
-    _write_metadata(path, title=title)
-
-
-def write_tags(path: Path, tags: str) -> None:
-    _write_metadata(path, tags=tags)
-
-
-def _read_or_create_notes(path: Path) -> str:
-    if not path.exists():
-        path.write_text("")
-        return ""
-    return path.read_text()
-
-
-def _read_title(path: Path) -> str:
-    title, _, _, _ = _read_metadata(path)
-    return title
-
-
-def _read_metadata(path: Path) -> tuple[str, str, bool, bool]:
-    """Read custom metadata (title, tags, starred, archived) with sane defaults."""
-    if not path.exists():
-        return "Untitled", "", False, False
-    try:
-        data = tomli.loads(path.read_text())
-    except (tomli.TOMLDecodeError, OSError) as exc:
-        raise ValueError(f"Invalid metadata file: {path}") from exc
-    raw_title = data.get("title")
-    raw_tags = data.get("tags")
-    title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else "Untitled"
-    tags = _normalize_tags(raw_tags)
-    starred = _coerce_bool(data.get("starred"))
-    archived = _coerce_bool(data.get("archived"))
-    return title, tags, starred, archived
-
-
-def _normalize_tags(raw_tags) -> str:
-    """Normalize tags from string or list to a single string."""
-    if isinstance(raw_tags, str):
-        return raw_tags.strip()
-    if isinstance(raw_tags, list):
-        cleaned = []
-        for item in raw_tags:
-            if isinstance(item, str) and item.strip():
-                cleaned.append(item.strip())
-        return ", ".join(cleaned)
-    return ""
-
-
-def _coerce_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    if isinstance(value, int):
-        return value != 0
-    return False
-
-
-def _write_metadata(
-    path: Path,
-    title: Optional[str] = None,
-    tags: Optional[str] = None,
-    starred: Optional[bool] = None,
-    archived: Optional[bool] = None,
-) -> None:
-    """Write combined metadata, preserving existing values."""
-    current_title, current_tags, current_starred, current_archived = _read_metadata(path)
-    existing_data: Dict[str, object] = {}
-    if path.exists():
-        try:
-            parsed = tomli.loads(path.read_text())
-            if isinstance(parsed, dict):
-                existing_data = dict(parsed)
-        except (tomli.TOMLDecodeError, OSError) as exc:
-            raise ValueError(f"Invalid metadata file: {path}") from exc
-    next_title = title.strip() if isinstance(title, str) else None
-    next_tags = tags.strip() if isinstance(tags, str) else None
-    next_starred = current_starred if starred is None else _coerce_bool(starred)
-    next_archived = current_archived if archived is None else _coerce_bool(archived)
-    payload = dict(existing_data)
-    payload.update({
-        "title": (next_title if next_title is not None and next_title else current_title or "Untitled"),
-        "tags": (next_tags if next_tags is not None else current_tags),
-        "starred": next_starred,
-        "archived": next_archived,
-    })
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(tomli_w.dumps(payload))
-
-
-def write_starred(path: Path, starred: bool) -> None:
-    _write_metadata(path, starred=starred)
-
-
-def write_archived(path: Path, archived: bool) -> None:
-    _write_metadata(path, archived=archived)
-
-
-def _extract_data_root_from_metadata(metadata_text: str) -> Optional[str]:
-    """Return the first data_root value found within a TOML metadata blob."""
-    try:
-        parsed = tomli.loads(metadata_text)
-    except (tomli.TOMLDecodeError, OSError) as exc:
-        raise ValueError("Invalid metadata.txt TOML") from exc
-
-    def _walk(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key == "data_root" and isinstance(value, str) and value.strip():
-                    return value.strip()
-                found = _walk(value)
-                if found:
-                    return found
-        elif isinstance(node, list):
-            for item in node:
-                found = _walk(item)
-                if found:
-                    return found
-        return None
-
-    return _walk(parsed)
-
-
-def _extract_git_commit(metadata_git_text: str) -> str:
-    lines = metadata_git_text.splitlines()
-    found_commit_block = False
-    for line in lines:
-        stripped = line.strip()
-        if not found_commit_block:
-            if stripped.lower().startswith("git commit"):
-                found_commit_block = True
-            continue
-        if stripped:
-            return stripped
-    return ""
-
-
-def _read_model_metadata(path: Path) -> Tuple[Optional[int], Optional[int]]:
-    """Read total_params and flops_per_step from metadata_model.txt."""
-    if not path.exists():
-        return None, None
-    try:
-        data = tomli.loads(path.read_text())
-    except (tomli.TOMLDecodeError, OSError) as exc:
-        raise ValueError(f"Invalid metadata_model.txt TOML: {path}") from exc
-    total_params = None
-    flops_per_step = None
-    params_section = data.get("parameters")
-    if isinstance(params_section, dict):
-        total = params_section.get("total")
-        if isinstance(total, int):
-            total_params = total
-    flops_section = data.get("flops")
-    if isinstance(flops_section, dict):
-        per_step = flops_section.get("per_step")
-        if isinstance(per_step, int):
-            flops_per_step = per_step
-    return total_params, flops_per_step
-
-
-def _resolve_loss_csv(metrics_dir: Path) -> Optional[Path]:
-    if not metrics_dir.exists():
-        return None
-    preferred = metrics_dir / "loss_curves.csv"
-    if preferred.exists():
-        return preferred
-    legacy = metrics_dir / "loss.csv"
-    if legacy.exists():
-        return legacy
-    return None
-
-
-def _collect_rollout_steps(root: Path) -> List[int]:
-    steps: set[int] = set()
-    for png in root.glob("vis_fixed_*/rollout_*.png"):
-        stem = png.stem
-        if not stem.startswith("rollout_"):
-            continue
-        suffix = stem[len("rollout_") :]
-        try:
-            steps.add(int(suffix))
-        except ValueError:
-            continue
-    return sorted(steps)
-
-VIS_STEP_SPECS = [
-    ("vis_fixed_0", "vis_fixed_0", "rollout_*.png", "rollout_"),
-    ("vis_fixed_1", "vis_fixed_1", "rollout_*.png", "rollout_"),
-    ("vis_rolling_0", "vis_rolling_0", "rollout_*.png", "rollout_"),
-    ("vis_rolling_1", "vis_rolling_1", "rollout_*.png", "rollout_"),
-    ("embeddings", "embeddings", "embeddings_*.png", "embeddings_"),
-    ("pca_z", "pca_z", "pca_z_*.png", "pca_z_"),
-    ("pca_p", "pca_p", "pca_p_*.png", "pca_p_"),
-    ("pca_s", "pca_s", "pca_s_*.png", "pca_s_"),
-    ("pca_h", "pca_h", "pca_h_*.png", "pca_h_"),
-    ("samples_hard", "samples_hard", "hard_*.png", "hard_"),
-    ("vis_self_distance_z", "vis_self_distance_z", "self_distance_z_*.png", "self_distance_z_"),
-    ("vis_self_distance_p", "vis_self_distance_p", "self_distance_p_*.png", "self_distance_p_"),
-    ("vis_self_distance_s", "vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),
-    ("vis_self_distance_h", "vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"),
-    ("vis_delta_z_pca", "vis_delta_z_pca", "delta_z_pca_*.png", "delta_z_pca_"),
-    ("vis_delta_p_pca", "vis_delta_p_pca", "delta_p_pca_*.png", "delta_p_pca_"),
-    ("vis_delta_s_pca", "vis_delta_s_pca", "delta_s_pca_*.png", "delta_s_pca_"),
-    ("vis_delta_h_pca", "vis_delta_h_pca", "delta_h_pca_*.png", "delta_h_pca_"),
-    ("vis_odometry_current_z", "vis_odometry", "odometry_z_*.png", "odometry_z_"),
-    ("vis_odometry_current_p", "vis_odometry", "odometry_p_*.png", "odometry_p_"),
-    ("vis_odometry_current_s", "vis_odometry", "odometry_s_*.png", "odometry_s_"),
-    ("vis_odometry_current_h", "vis_odometry", "odometry_h_*.png", "odometry_h_"),
-    ("vis_odometry_z_vs_z_hat", "vis_odometry", "z_vs_z_hat_*.png", "z_vs_z_hat_"),
-    ("vis_odometry_p_vs_p_hat", "vis_odometry", "p_vs_p_hat_*.png", "p_vs_p_hat_"),
-    ("vis_odometry_s_vs_s_hat", "vis_odometry", "s_vs_s_hat_*.png", "s_vs_s_hat_"),
-    ("vis_odometry_h_vs_h_hat", "vis_odometry", "h_vs_h_hat_*.png", "h_vs_h_hat_"),
-    ("vis_action_alignment_detail_z", "vis_action_alignment_z", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    ("vis_action_alignment_detail_raw_z", "vis_action_alignment_z_raw", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    (
-        "vis_action_alignment_detail_centered_z",
-        "vis_action_alignment_z_centered",
-        "action_alignment_detail_*.png",
-        "action_alignment_detail_",
-    ),
-    ("vis_action_alignment_detail_p", "vis_action_alignment_p", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    ("vis_action_alignment_detail_raw_p", "vis_action_alignment_p_raw", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    (
-        "vis_action_alignment_detail_centered_p",
-        "vis_action_alignment_p_centered",
-        "action_alignment_detail_*.png",
-        "action_alignment_detail_",
-    ),
-    ("vis_action_alignment_detail_s", "vis_action_alignment_s", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    ("vis_action_alignment_detail_raw_s", "vis_action_alignment_s_raw", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    (
-        "vis_action_alignment_detail_centered_s",
-        "vis_action_alignment_s_centered",
-        "action_alignment_detail_*.png",
-        "action_alignment_detail_",
-    ),
-    ("vis_action_alignment_detail_h", "vis_action_alignment_h", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    ("vis_action_alignment_detail_raw_h", "vis_action_alignment_h_raw", "action_alignment_detail_*.png", "action_alignment_detail_"),
-    (
-        "vis_action_alignment_detail_centered_h",
-        "vis_action_alignment_h_centered",
-        "action_alignment_detail_*.png",
-        "action_alignment_detail_",
-    ),
-    ("vis_cycle_error", "vis_cycle_error_z", "cycle_error_*.png", "cycle_error_"),
-    ("vis_cycle_error_p", "vis_cycle_error_p", "cycle_error_*.png", "cycle_error_"),
-    ("vis_cycle_error_s", "vis_cycle_error_s", "cycle_error_*.png", "cycle_error_"),
-    ("vis_cycle_error_h", "vis_cycle_error_h", "cycle_error_*.png", "cycle_error_"),
-    ("vis_rollout_divergence", "vis_rollout_divergence", "rollout_divergence_*.png", "rollout_divergence_"),
-    ("vis_rollout_divergence_z", "vis_rollout_divergence_z", "rollout_divergence_z_*.png", "rollout_divergence_z_"),
-    ("vis_rollout_divergence_h", "vis_rollout_divergence_h", "rollout_divergence_h_*.png", "rollout_divergence_h_"),
-    ("vis_rollout_divergence_p", "vis_rollout_divergence_p", "rollout_divergence_p_*.png", "rollout_divergence_p_"),
-    ("vis_z_consistency", "vis_z_consistency", "z_consistency_*.png", "z_consistency_"),
-    ("vis_z_monotonicity", "vis_z_monotonicity", "z_monotonicity_*.png", "z_monotonicity_"),
-    ("vis_path_independence", "vis_path_independence", "path_independence_*.png", "path_independence_"),
-    ("vis_straightline_p", "vis_straightline_p", "straightline_p_*.png", "straightline_p_"),
-    ("vis_straightline_s", "vis_straightline_s", "straightline_s_*.png", "straightline_s_"),
-    ("vis_h_ablation", "vis_h_ablation", "h_ablation_*.png", "h_ablation_"),
-    ("vis_h_drift_by_action", "vis_h_drift_by_action", "h_drift_by_action_*.png", "h_drift_by_action_"),
-    ("vis_norm_timeseries", "vis_norm_timeseries", "norm_timeseries_*.png", "norm_timeseries_"),
-    ("vis_graph_rank1_cdf_z", "graph_diagnostics_z", "rank1_cdf_*.png", "rank1_cdf_"),
-    ("vis_graph_rank2_cdf_z", "graph_diagnostics_z", "rank2_cdf_*.png", "rank2_cdf_"),
-    ("vis_graph_neff_violin_z", "graph_diagnostics_z", "neff_violin_*.png", "neff_violin_"),
-    ("vis_graph_in_degree_hist_z", "graph_diagnostics_z", "in_degree_hist_*.png", "in_degree_hist_"),
-    ("vis_graph_edge_consistency_z", "graph_diagnostics_z", "edge_consistency_*.png", "edge_consistency_"),
-    ("vis_graph_metrics_history_z", "graph_diagnostics_z", "metrics_history_*.png", "metrics_history_"),
-    ("vis_graph_rank1_cdf_h", "graph_diagnostics_h", "rank1_cdf_*.png", "rank1_cdf_"),
-    ("vis_graph_rank2_cdf_h", "graph_diagnostics_h", "rank2_cdf_*.png", "rank2_cdf_"),
-    ("vis_graph_neff_violin_h", "graph_diagnostics_h", "neff_violin_*.png", "neff_violin_"),
-    ("vis_graph_in_degree_hist_h", "graph_diagnostics_h", "in_degree_hist_*.png", "in_degree_hist_"),
-    ("vis_graph_edge_consistency_h", "graph_diagnostics_h", "edge_consistency_*.png", "edge_consistency_"),
-    ("vis_graph_metrics_history_h", "graph_diagnostics_h", "metrics_history_*.png", "metrics_history_"),
-    ("vis_graph_rank1_cdf_s", "graph_diagnostics_s", "rank1_cdf_*.png", "rank1_cdf_"),
-    ("vis_graph_rank2_cdf_s", "graph_diagnostics_s", "rank2_cdf_*.png", "rank2_cdf_"),
-    ("vis_graph_neff_violin_s", "graph_diagnostics_s", "neff_violin_*.png", "neff_violin_"),
-    ("vis_graph_in_degree_hist_s", "graph_diagnostics_s", "in_degree_hist_*.png", "in_degree_hist_"),
-    ("vis_graph_edge_consistency_s", "graph_diagnostics_s", "edge_consistency_*.png", "edge_consistency_"),
-    ("vis_graph_metrics_history_s", "graph_diagnostics_s", "metrics_history_*.png", "metrics_history_"),
-    ("vis_ctrl_smoothness_z", "vis_vis_ctrl", "smoothness_z_*.png", "smoothness_z_"),
-    ("vis_ctrl_smoothness_p", "vis_vis_ctrl", "smoothness_p_*.png", "smoothness_p_"),
-    ("vis_ctrl_smoothness_s", "vis_vis_ctrl", "smoothness_s_*.png", "smoothness_s_"),
-    ("vis_ctrl_smoothness_h", "vis_vis_ctrl", "smoothness_h_*.png", "smoothness_h_"),
-    ("vis_ctrl_composition_z", "vis_vis_ctrl", "composition_error_z_*.png", "composition_error_z_"),
-    ("vis_ctrl_composition_p", "vis_vis_ctrl", "composition_error_p_*.png", "composition_error_p_"),
-    ("vis_ctrl_composition_s", "vis_vis_ctrl", "composition_error_s_*.png", "composition_error_s_"),
-    ("vis_ctrl_composition_h", "vis_vis_ctrl", "composition_error_h_*.png", "composition_error_h_"),
-    ("vis_composability_z", "vis_composability_z", "composability_z_*.png", "composability_z_"),
-    ("vis_composability_p", "vis_composability_p", "composability_p_*.png", "composability_p_"),
-    ("vis_composability_s", "vis_composability_s", "composability_s_*.png", "composability_s_"),
-    ("vis_composability_h", "vis_composability_h", "composability_h_*.png", "composability_h_"),
-    ("vis_ctrl_stability_z", "vis_vis_ctrl", "stability_z_*.png", "stability_z_"),
-    ("vis_ctrl_stability_p", "vis_vis_ctrl", "stability_p_*.png", "stability_p_"),
-    ("vis_ctrl_stability_s", "vis_vis_ctrl", "stability_s_*.png", "stability_s_"),
-    ("vis_ctrl_stability_h", "vis_vis_ctrl", "stability_h_*.png", "stability_h_"),
-]
 
 
 def _parse_step_from_stem(stem: str, prefix: str) -> Optional[int]:
@@ -1009,543 +2088,147 @@ def _parse_step_from_stem(stem: str, prefix: str) -> Optional[int]:
         return None
 
 
-def _first_existing_files(
-    root: Path,
-    candidates: Sequence[Tuple[str, str]],
-    *,
-    allow_multiple: bool = False,
-    conflict_label: str = "candidates",
-) -> List[Path]:
-    hits: List[List[Path]] = []
-    for folder_name, pattern in candidates:
-        folder = root / folder_name
-        if not folder.exists():
+def _collect_steps_from_path_list(paths: Sequence[Path], *, prefix: Optional[str] = None) -> List[int]:
+    steps: set[int] = set()
+    for path in paths:
+        stem = path.stem
+        if prefix is not None and not stem.startswith(prefix):
             continue
+        step = _parse_step_from_stem(stem, prefix or "")
+        if step is None:
+            continue
+        steps.add(step)
+    return sorted(steps)
+
+
+def _merge_steps(*steps: Sequence[int]) -> List[int]:
+    merged: set[int] = set()
+    for values in steps:
+        merged.update(values)
+    return sorted(merged)
+
+
+def _collect_from_spec(root: Path, spec: VisSpec) -> List[Path]:
+    return _first_existing_matches(
+        root,
+        [(folder_name, [pattern]) for folder_name, pattern, *_ in spec.candidates],
+        conflict_label=spec.label or "candidates",
+    )
+
+
+def _collect_named_paths_in_first_existing_folder(
+    root: Path,
+    candidates: Sequence[str],
+    specs: Sequence[Tuple[str, str]],
+    *,
+    latest: Optional[Tuple[str, str]] = None,
+) -> Dict[str, List[Path]]:
+    """Collect named file lists from the first existing folder; optionally append a single latest file.
+
+    Example (graph diagnostics):
+    - root/
+      - graph_diagnostics_z/
+        - metrics_history_0000100.png
+        - metrics_history_0000200.png
+        - metrics_history_latest.png
+    Usage:
+    _collect_named_paths_in_first_existing_folder(
+        root,
+        ["graph_diagnostics_z", "graph_diagnostics"],
+        [("metrics_history", "metrics_history_*.png")],
+        latest=("metrics_history_latest", "metrics_history_latest.png"),
+    )
+    """
+    folder = _resolve_first_existing_folder(root, candidates)
+    if folder is None:
+        return {}
+    paths: Dict[str, List[Path]] = {}
+    for name, pattern in specs:
         files = sorted(folder.glob(pattern))
         if files:
-            hits.append(files)
-            if allow_multiple:
-                break
-    if len(hits) > 1 and not allow_multiple:
-        raise ValueError(f"Multiple {conflict_label} contain files in {root}.")
-    return hits[0] if hits else []
+            paths[name] = files
+    if latest:
+        latest_name, latest_filename = latest
+        latest_path = folder / latest_filename
+        if latest_path.exists():
+            paths.setdefault(latest_name, []).append(latest_path)
+    return paths
 
 
-def _first_existing_csvs(
+def _diagnostics_suffix_exists(root: Path, folder_names: Sequence[str]) -> bool:
+    return any(
+        _folder_has_any_file(root / folder_name, DIAGNOSTICS_SUFFIXES)
+        for folder_name in folder_names
+    )
+
+
+def _resolve_first_existing_folder(root: Path, candidates: Sequence[str]) -> Optional[Path]:
+    for folder_name in candidates:
+        folder = root / folder_name
+        if folder.exists():
+            return folder
+    return None
+
+
+def _any_existing_paths(root: Path, relative_paths: Sequence[str]) -> bool:
+    return any((root / rel_path).exists() for rel_path in relative_paths)
+
+
+def _any_folder_pattern_exists(
     root: Path,
-    folders: Sequence[str],
-    *,
-    allow_multiple: bool = False,
-    conflict_label: str = "CSV folders",
+    checks: Sequence[Tuple[str, Optional[str], str]],
+) -> bool:
+    for folder_name, exact_name, pattern in checks:
+        folder = root / folder_name
+        if _first_matching_file(folder, exact_name=exact_name, pattern=pattern) is not None:
+            return True
+    return False
+
+
+def _collect_csvs_by_folders(
+    root: Path,
+    spec: Sequence[str],
 ) -> List[Path]:
-    hits: List[List[Path]] = []
-    for folder_name in folders:
+    if not spec:
+        return []
+    for folder_name in spec:
         folder = root / folder_name
         if not folder.exists():
             continue
-        files = sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt"))
+        files: List[Path] = []
+        files.extend(sorted(folder.glob("*.csv")))
+        files.extend(sorted(folder.glob("*.txt")))
         if files:
-            hits.append(files)
-            if allow_multiple:
-                break
-    if len(hits) > 1 and not allow_multiple:
-        raise ValueError(f"Multiple {conflict_label} contain files in {root}.")
-    return hits[0] if hits else []
-
-
-def _first_existing_steps(
-    root: Path,
-    candidates: Sequence[Tuple[str, str, str]],
-) -> List[int]:
-    for folder_name, pattern, prefix in candidates:
-        folder = root / folder_name
-        if not folder.exists():
-            continue
-        steps: set[int] = set()
-        for png in folder.glob(pattern):
-            step = _parse_step_from_stem(png.stem, prefix)
-            if step is None:
-                continue
-            steps.add(step)
-        if steps:
-            return sorted(steps)
+            return files
     return []
 
 
 def _collect_visualization_steps(root: Path) -> Dict[str, List[int]]:
     """Gather per-visualization step lists used for comparison previews."""
     step_map: Dict[str, List[int]] = {}
-    for key, folder_name, pattern, prefix in VIS_STEP_SPECS:
-        folder = root / folder_name
-        if not folder.exists():
-            continue
-        steps: set[int] = set()
-        try:
-            for png in folder.glob(pattern):
-                step = _parse_step_from_stem(png.stem, prefix)
-                if step is None:
-                    continue
-                steps.add(step)
-        except OSError:
-            continue
-        if steps:
-            step_map[key] = sorted(steps)
-    if "vis_self_distance_z" not in step_map:
-        steps = _first_existing_steps(
-            root,
-            [
-                ("vis_self_distance", "self_distance_*.png", "self_distance_"),
-            ],
-        )
-        if steps:
-            step_map["vis_self_distance_z"] = steps
-    if "vis_self_distance_s" not in step_map:
-        steps = _first_existing_steps(
-            root,
-            [
-                ("vis_state_embedding", "state_embedding_[0-9]*.png", "state_embedding_"),
-            ],
-        )
-        if steps:
-            step_map["vis_self_distance_s"] = steps
-    if "vis_action_alignment_detail_z" not in step_map:
-        steps = _first_existing_steps(
-            root,
-            [
-                ("vis_action_alignment", "action_alignment_detail_*.png", "action_alignment_detail_"),
-            ],
-        )
-        if steps:
-            step_map["vis_action_alignment_detail_z"] = steps
-    if "vis_cycle_error" not in step_map:
-        steps = _first_existing_steps(
-            root,
-            [
-                ("vis_cycle_error", "cycle_error_*.png", "cycle_error_"),
-            ],
-        )
-        if steps:
-            step_map["vis_cycle_error"] = steps
-    legacy_graph = root / "graph_diagnostics"
-    if legacy_graph.exists():
-        legacy_specs = [
-            ("vis_graph_rank1_cdf_z", "rank1_cdf_", "rank1_cdf_*.png"),
-            ("vis_graph_rank2_cdf_z", "rank2_cdf_", "rank2_cdf_*.png"),
-            ("vis_graph_neff_violin_z", "neff_violin_", "neff_violin_*.png"),
-            ("vis_graph_in_degree_hist_z", "in_degree_hist_", "in_degree_hist_*.png"),
-            ("vis_graph_edge_consistency_z", "edge_consistency_", "edge_consistency_*.png"),
-            ("vis_graph_metrics_history_z", "metrics_history_", "metrics_history_*.png"),
-        ]
-        for key, prefix, pattern in legacy_specs:
-            if key in step_map:
+    for key, spec in VIS_STEP_SPECS.items():
+        for folder_name, pattern, prefix in spec.candidates:
+            folder = root / folder_name
+            if not folder.exists():
                 continue
-            steps = set()
-            for png in legacy_graph.glob(pattern):
-                step = _parse_step_from_stem(png.stem, prefix)
-                if step is not None:
-                    steps.add(step)
+            try:
+                steps = _collect_steps_from_path_list(list(folder.glob(pattern)), prefix=prefix)
+            except OSError:
+                steps = []
             if steps:
-                step_map[key] = sorted(steps)
+                step_map[key] = steps
+                break
     return step_map
 
 
-def _collect_self_distance_images(root: Path) -> List[Path]:
-    return _first_existing_files(
-        root,
-        [
-            ("vis_self_distance_z", "self_distance_z_*.png"),
-            ("vis_self_distance", "self_distance_*.png"),
-        ],
-        conflict_label="self-distance image folders",
-    )
-
-
-def _collect_self_distance_images_p(root: Path) -> List[Path]:
-    return _first_existing_files(
-        root,
-        [
-            ("vis_self_distance_p", "self_distance_p_*.png"),
-            ("vis_self_distance_s", "self_distance_s_*.png"),
-            ("vis_state_embedding", "state_embedding_[0-9]*.png"),
-        ],
-        conflict_label="pose self-distance image folders",
-    )
-
-
-def _collect_state_embedding_images(root: Path) -> List[Path]:
-    hist_folder = root / "vis_state_embedding"
-    hist_files = sorted(hist_folder.glob("state_embedding_hist_*.png")) if hist_folder.exists() else []
-    new_files = _first_existing_files(
-        root,
-        [
-            ("vis_self_distance_s", "self_distance_cosine_*.png"),
-        ],
-        conflict_label="state embedding cosine images",
-    )
-    if new_files:
-        new_files += _first_existing_files(
-            root,
-            [
-                ("vis_self_distance_s", "self_distance_s_*.png"),
-            ],
-            conflict_label="state embedding distance images",
-        )
-    old_files = _first_existing_files(
-        root,
-        [
-            ("vis_state_embedding", "state_embedding_cosine_*.png"),
-        ],
-        conflict_label="legacy state embedding cosine images",
-    )
-    if old_files:
-        old_files += _first_existing_files(
-            root,
-            [
-                ("vis_state_embedding", "state_embedding_[0-9]*.png"),
-            ],
-            conflict_label="legacy state embedding distance images",
-        )
-    if new_files and old_files:
-        raise ValueError("Both vis_state_embedding and vis_self_distance_s contain self-distance images.")
-    return hist_files + (new_files or old_files)
-
-
-def _collect_odometry_images(root: Path) -> List[Path]:
-    folder = root / "vis_odometry"
-    if not folder.exists():
-        return []
-    return sorted(folder.glob("*.png"))
-
-
-def _collect_state_embedding_csvs(root: Path) -> List[Path]:
-    return _first_existing_files(
-        root,
-        [
-            ("self_distance_s", "self_distance_s_*.csv"),
-            ("state_embedding", "state_embedding_*.csv"),
-        ],
-        conflict_label="state embedding CSV folders",
-    )
-
-
-def _collect_self_distance_csvs(root: Path) -> List[Path]:
-    return _first_existing_files(
-        root,
-        [
-            ("self_distance_z", "self_distance_z_*.csv"),
-            ("self_distance", "self_distance_*.csv"),
-        ],
-        conflict_label="self-distance CSV folders",
-    )
-
-
-def _collect_self_distance_csvs_p(root: Path) -> List[Path]:
-    return _first_existing_files(
-        root,
-        [
-            ("self_distance_p", "self_distance_p_*.csv"),
-            ("self_distance_s", "self_distance_s_*.csv"),
-            ("state_embedding", "state_embedding_*.csv"),
-        ],
-        conflict_label="pose self-distance CSV folders",
-    )
-
-
-def _ensure_model_diff(path: Path) -> str:
-    cache_path = path / "server_cache" / "model_diff.txt"
-    if cache_path.exists():
-        try:
-            return cache_path.read_text()
-        except OSError:
-            pass
-
-    repo_root = Path(__file__).resolve().parent.parent
-    script_path = repo_root / "web_viewer" / "model_diff.py"
-    cmd = [
-        "uv",
-        "run",
-        "python",
-        str(script_path),
-        "--experiment",
-        str(path),
-        "--repo-root",
-        str(repo_root),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_root))
-    if result.returncode != 0:
-        failure = result.stderr.strip() or result.stdout.strip() or "unknown failure"
-        return f"model diff generation failed: {failure}"
-    try:
-        return cache_path.read_text()
-    except OSError as exc:
-        return f"model diff cache missing after generation: {exc}"
-
-
-def _quick_self_distance_csv(root: Path) -> Optional[Path]:
-    """Cheap existence check for self-distance outputs."""
-    new_folder = root / "self_distance_z"
-    old_folder = root / "self_distance"
-    new_file = next(new_folder.glob("self_distance_z_*.csv"), None) if new_folder.exists() else None
-    old_file = next(old_folder.glob("self_distance_*.csv"), None) if old_folder.exists() else None
-    if new_file and old_file:
-        raise ValueError("Both self_distance_z and self_distance contain self-distance CSVs.")
-    if new_file:
-        return new_file
-    if old_file:
-        return old_file
-    return None
-
-
-def _quick_self_distance_p_csv(root: Path) -> Optional[Path]:
-    """Cheap existence check for pose self-distance outputs."""
-    new_folder = root / "self_distance_p"
-    legacy_folder = root / "self_distance_s"
-    old_folder = root / "state_embedding"
-    new_file = next(new_folder.glob("self_distance_p_*.csv"), None) if new_folder.exists() else None
-    legacy_file = next(legacy_folder.glob("self_distance_s_*.csv"), None) if legacy_folder.exists() else None
-    old_file = next(old_folder.glob("state_embedding_*.csv"), None) if old_folder.exists() else None
-    if new_file and legacy_file:
-        raise ValueError("Both self_distance_p and self_distance_s contain self-distance CSVs.")
-    if new_file and old_file:
-        raise ValueError("Both self_distance_p and state_embedding contain self-distance CSVs.")
-    if legacy_file and old_file:
-        raise ValueError("Both self_distance_s and state_embedding contain self-distance CSVs.")
-    return new_file or legacy_file or old_file
-
-
-def _quick_state_embedding_csv(root: Path) -> Optional[Path]:
-    """Cheap existence check for state embedding outputs."""
-    new_folder = root / "self_distance_s"
-    old_folder = root / "state_embedding"
-    new_file = next(new_folder.glob("self_distance_s_*.csv"), None) if new_folder.exists() else None
-    old_file = next(old_folder.glob("state_embedding_*.csv"), None) if old_folder.exists() else None
-    if new_file and old_file:
-        raise ValueError("Both self_distance_s and state_embedding contain self-distance CSVs.")
-    if new_file:
-        return new_file
-    if old_file:
-        return old_file
-    return None
-
-
-def _collect_diagnostics_images(root: Path) -> Dict[str, List[Path]]:
-    images: Dict[str, List[Path]] = {}
-    delta_dir = root / "vis_delta_z_pca"
-    if delta_dir.exists():
-        delta_imgs = sorted(delta_dir.glob("delta_z_pca_*.png"))
-        if delta_imgs:
-            images["delta_z_pca"] = delta_imgs
-        spectrum_imgs = sorted(delta_dir.glob("delta_z_variance_spectrum_*.png"))
-        if spectrum_imgs:
-            images["variance_spectrum"] = spectrum_imgs
-
-    alignment_imgs = _first_existing_files(
-        root,
-        [
-            ("vis_action_alignment_z", "action_alignment_detail_*.png"),
-            ("vis_action_alignment", "action_alignment_detail_*.png"),
-        ],
-        conflict_label="action alignment (Z) folders",
-    )
-    if alignment_imgs:
-        images["action_alignment_detail"] = alignment_imgs
-
-    cycle_imgs = _first_existing_files(
-        root,
-        [
-            ("vis_cycle_error_z", "*.png"),
-            ("vis_cycle_error", "*.png"),
-        ],
-        conflict_label="cycle error (Z) folders",
-    )
-    if cycle_imgs:
-        images["cycle_error"] = cycle_imgs
-    rollout_imgs = _first_existing_files(
-        root,
-        [
-            ("vis_rollout_divergence_z", "rollout_divergence_z_*.png"),
-            ("vis_rollout_divergence", "rollout_divergence_*.png"),
-        ],
-        conflict_label="rollout divergence (Z) folders",
-    )
-    if rollout_imgs:
-        images["rollout_divergence"] = rollout_imgs
-        images["rollout_divergence_z"] = rollout_imgs
-    consistency_dir = root / "vis_z_consistency"
-    if consistency_dir.exists():
-        consistency_imgs = sorted(consistency_dir.glob("z_consistency_*.png"))
-        if consistency_imgs:
-            images["z_consistency"] = consistency_imgs
-    monotonicity_dir = root / "vis_z_monotonicity"
-    if monotonicity_dir.exists():
-        monotonicity_imgs = sorted(monotonicity_dir.glob("z_monotonicity_*.png"))
-        if monotonicity_imgs:
-            images["z_monotonicity"] = monotonicity_imgs
-    path_dir = root / "vis_path_independence"
-    if path_dir.exists():
-        path_imgs = sorted(path_dir.glob("path_independence_*.png"))
-        if path_imgs:
-            images["path_independence"] = path_imgs
-    return images
-
-
-def _collect_diagnostics_images_s(root: Path) -> Dict[str, List[Path]]:
-    diag_specs = [
-        ("delta_s_pca", root / "vis_delta_p_pca", "delta_p_pca_*.png", root / "vis_delta_s_pca", "delta_s_pca_*.png"),
-        (
-            "variance_spectrum_s",
-            root / "vis_delta_p_pca",
-            "delta_p_variance_spectrum_*.png",
-            root / "vis_delta_s_pca",
-            "delta_s_variance_spectrum_*.png",
-        ),
-        (
-            "action_alignment_detail_s",
-            root / "vis_action_alignment_p",
-            "action_alignment_detail_*.png",
-            root / "vis_action_alignment_s",
-            "action_alignment_detail_*.png",
-        ),
-        ("cycle_error_s", root / "vis_cycle_error_p", "*.png", root / "vis_cycle_error_s", "*.png"),
-        (
-            "straightline_s",
-            root / "vis_straightline_p",
-            "straightline_p_*.png",
-            root / "vis_straightline_s",
-            "straightline_s_*.png",
-        ),
-        (
-            "rollout_divergence_p",
-            root / "vis_rollout_divergence_p",
-            "rollout_divergence_p_*.png",
-            root / "vis_rollout_divergence_p",
-            "rollout_divergence_p_*.png",
-        ),
-    ]
-    images: Dict[str, List[Path]] = {}
-    for name, folder, pattern, fallback_folder, fallback_pattern in diag_specs:
-        imgs = _first_existing_files(
-            root,
-            [
-                (folder.name, pattern),
-                (fallback_folder.name, fallback_pattern),
-            ],
-            conflict_label=f"{name} folders",
-        )
-        if imgs:
-            images[name] = imgs
-    return images
-
-
-def _diagnostics_exists(root: Path) -> bool:
-    """Cheap check for any diagnostics output without globbing everything."""
-    diag_dirs = [
-        root / "vis_delta_z_pca",
-        root / "vis_delta_p_pca",
-        root / "vis_action_alignment_z",
-        root / "vis_action_alignment",
-        root / "vis_action_alignment_p",
-        root / "vis_cycle_error_z",
-        root / "vis_cycle_error",
-        root / "vis_cycle_error_p",
-        root / "vis_diagnostics_frames",
-        root / "vis_rollout_divergence",
-        root / "vis_rollout_divergence_z",
-        root / "vis_rollout_divergence_h",
-        root / "vis_rollout_divergence_p",
-        root / "vis_z_consistency",
-        root / "vis_z_monotonicity",
-        root / "vis_path_independence",
-    ]
-    suffixes = (".png", ".csv", ".txt")
-    for folder in diag_dirs:
-        if not folder.exists():
-            continue
-        if _folder_has_any_file(folder, suffixes):
-            return True
-    return False
-
-
-def _diagnostics_s_exists(root: Path) -> bool:
-    diag_dirs = [
-        root / "vis_delta_p_pca",
-        root / "vis_action_alignment_p",
-        root / "vis_cycle_error_p",
-        root / "vis_straightline_p",
-        root / "vis_delta_s_pca",
-        root / "vis_action_alignment_s",
-        root / "vis_cycle_error_s",
-        root / "vis_straightline_s",
-        root / "vis_rollout_divergence_p",
-    ]
-    suffixes = (".png", ".csv", ".txt")
-    for folder in diag_dirs:
-        if not folder.exists():
-            continue
-        if _folder_has_any_file(folder, suffixes):
-            return True
-    return False
-
-
-def _collect_diagnostics_steps(diagnostics_images: Dict[str, List[Path]]) -> List[int]:
-    steps: set[int] = set()
-    for paths in diagnostics_images.values():
-        for path in paths:
-            stem = path.stem
-            parts = stem.split("_")
-            if not parts:
-                continue
-            suffix = parts[-1]
-            try:
-                steps.add(int(suffix))
-            except ValueError:
-                continue
-    return sorted(steps)
-
-
-def _collect_diagnostics_csvs(root: Path) -> Dict[str, List[Path]]:
-    diag_dirs = {
-        "delta_z_pca": ["vis_delta_z_pca"],
-        "action_alignment": ["vis_action_alignment_z", "vis_action_alignment"],
-        "cycle_error": ["vis_cycle_error_z", "vis_cycle_error"],
-        "frame_alignment": ["vis_diagnostics_frames"],
-        "rollout_divergence": ["vis_rollout_divergence_z", "vis_rollout_divergence"],
-        "rollout_divergence_z": ["vis_rollout_divergence_z", "vis_rollout_divergence"],
-        "z_consistency": ["vis_z_consistency"],
-        "z_monotonicity": ["vis_z_monotonicity"],
-        "path_independence": ["vis_path_independence"],
-    }
-    csvs: Dict[str, List[Path]] = {}
-    for name, folders in diag_dirs.items():
-        files = _first_existing_csvs(
-            root,
-            folders,
-            allow_multiple=True,
-            conflict_label=f"{name} CSV folders",
-        )
-        if files:
-            csvs[name] = files
-    return csvs
-
-
-def _collect_diagnostics_csvs_s(root: Path) -> Dict[str, List[Path]]:
-    diag_dirs = [
-        ("delta_s_pca", root / "vis_delta_p_pca", root / "vis_delta_s_pca"),
-        ("action_alignment_s", root / "vis_action_alignment_p", root / "vis_action_alignment_s"),
-        ("cycle_error_s", root / "vis_cycle_error_p", root / "vis_cycle_error_s"),
-        ("rollout_divergence_p", root / "vis_rollout_divergence_p", root / "vis_rollout_divergence_p"),
-    ]
-    csvs: Dict[str, List[Path]] = {}
-    for name, folder, fallback_folder in diag_dirs:
-        files = _first_existing_csvs(
-            root,
-            [folder.name, fallback_folder.name],
-            allow_multiple=True,
-            conflict_label=f"{name} CSV folders",
-        )
-        if files:
-            csvs[name] = files
-    return csvs
+def _collect_state_embedding_distance_images(root: Path) -> List[Path]:
+    distance_files = _collect_from_spec(root, STATE_EMBEDDING_DISTANCE_IMAGE_SPEC)
+    cosine_files = _collect_from_spec(root, STATE_EMBEDDING_COSINE_IMAGE_SPEC)
+    if cosine_files:
+        cosine_folder = cosine_files[0].parent.name
+        filtered_distance = [path for path in distance_files if path.parent.name == cosine_folder]
+        return filtered_distance or distance_files
+    return distance_files
 
 
 def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str, str, Optional[int]]]]:
@@ -1606,132 +2289,6 @@ def _collect_diagnostics_frames(root: Path) -> Dict[int, List[Tuple[Path, str, s
     return frame_map
 
 
-def _collect_vis_ctrl_images(root: Path) -> Dict[str, List[Path]]:
-    images: Dict[str, List[Path]] = {}
-    vis_dir = root / "vis_vis_ctrl"
-    specs = [
-        ("smoothness_z", "smoothness_z_*.png"),
-        ("smoothness_s", "smoothness_s_*.png"),
-        ("smoothness_h", "smoothness_h_*.png"),
-        ("composition_z", "composition_error_z_*.png"),
-        ("composition_s", "composition_error_s_*.png"),
-        ("composition_h", "composition_error_h_*.png"),
-        ("stability_z", "stability_z_*.png"),
-        ("stability_s", "stability_s_*.png"),
-        ("stability_h", "stability_h_*.png"),
-    ]
-    if vis_dir.exists():
-        for name, pattern in specs:
-            files = sorted(vis_dir.glob(pattern))
-            if files:
-                images[name] = files
-    alignment_z = root / "vis_action_alignment_z"
-    alignment_s = root / "vis_action_alignment_s"
-    alignment_h = root / "vis_action_alignment_h"
-    if alignment_z.exists():
-        files = sorted(alignment_z.glob("action_alignment_detail_*.png"))
-        if files:
-            images["alignment_z"] = files
-    if alignment_s.exists():
-        files = sorted(alignment_s.glob("action_alignment_detail_*.png"))
-        if files:
-            images["alignment_s"] = files
-    if alignment_h.exists():
-        files = sorted(alignment_h.glob("action_alignment_detail_*.png"))
-        if files:
-            images["alignment_h"] = files
-    return images
-
-
-def _collect_vis_ctrl_csvs(root: Path) -> List[Path]:
-    return _first_existing_files(
-        root,
-        [
-            ("metrics", "vis_ctrl_metrics.csv"),
-            ("vis_ctrl", "vis_ctrl_metrics_*.csv"),
-        ],
-        allow_multiple=True,
-        conflict_label="vis ctrl CSV folders",
-    )
-
-
-def _vis_ctrl_exists(root: Path) -> bool:
-    vis_dir = root / "vis_vis_ctrl"
-    if vis_dir.exists() and any(vis_dir.glob("smoothness_z_*.png")):
-        return True
-    metrics_dir = root / "metrics"
-    if metrics_dir.exists() and (metrics_dir / "vis_ctrl_metrics.csv").exists():
-        return True
-    return False
-
-
-def _resolve_graph_diagnostics_folder(root: Path, folder_name: str) -> Optional[Path]:
-    if folder_name == "graph_diagnostics_z":
-        preferred = root / "graph_diagnostics_z"
-        legacy = root / "graph_diagnostics"
-        if preferred.exists():
-            return preferred
-        if legacy.exists():
-            return legacy
-        return None
-    folder = root / folder_name
-    return folder if folder.exists() else None
-
-
-def _collect_graph_diagnostics_images(root: Path, folder_name: str = "graph_diagnostics_z") -> Dict[str, List[Path]]:
-    folder = _resolve_graph_diagnostics_folder(root, folder_name)
-    if folder is None:
-        return {}
-    specs = [
-        ("rank1_cdf", "rank1_cdf_*.png"),
-        ("rank2_cdf", "rank2_cdf_*.png"),
-        ("neff_violin", "neff_violin_*.png"),
-        ("in_degree_hist", "in_degree_hist_*.png"),
-        ("edge_consistency", "edge_consistency_*.png"),
-        ("metrics_history", "metrics_history_*.png"),
-    ]
-    images: Dict[str, List[Path]] = {}
-    for name, pattern in specs:
-        files = sorted(folder.glob(pattern))
-        if files:
-            images[name] = files
-    latest = folder / "metrics_history_latest.png"
-    if latest.exists():
-        images.setdefault("metrics_history_latest", []).append(latest)
-    return images
-
-
-def _collect_graph_diagnostics_steps(graph_images: Dict[str, List[Path]]) -> List[int]:
-    steps: set[int] = set()
-    for paths in graph_images.values():
-        for path in paths:
-            stem = path.stem
-            suffix = stem.split("_")[-1] if "_" in stem else stem
-            try:
-                steps.add(int(suffix))
-            except ValueError:
-                continue
-    return sorted(steps)
-
-
-def _collect_graph_diagnostics_csvs(root: Path, folder_name: str = "graph_diagnostics_z") -> Dict[str, List[Path]]:
-    folder = _resolve_graph_diagnostics_folder(root, folder_name)
-    if folder is None:
-        return {}
-    csvs: Dict[str, List[Path]] = {}
-    metrics_csvs = sorted(folder.glob("metrics_history*.csv"))
-    if metrics_csvs:
-        csvs["metrics_history"] = metrics_csvs
-    return csvs
-
-
-def _graph_diagnostics_exists(root: Path, folder_name: str = "graph_diagnostics_z") -> bool:
-    folder = _resolve_graph_diagnostics_folder(root, folder_name)
-    if folder is None:
-        return False
-    return _folder_has_any_file(folder, (".png", ".csv"))
-
-
 def _folder_has_any_file(folder: Path, suffixes: Tuple[str, ...]) -> bool:
     """Return True if folder contains any file with a matching suffix."""
     try:
@@ -1744,61 +2301,6 @@ def _folder_has_any_file(folder: Path, suffixes: Tuple[str, ...]) -> bool:
     except OSError:
         return False
     return False
-
-
-def _get_last_modified(path: Path) -> Optional[datetime]:
-    """Get the most recent modification time for files under metrics/."""
-    if not path.is_dir():
-        return None
-    metrics_dir = path / "metrics"
-    if not metrics_dir.is_dir():
-        return None
-    start_time = time.perf_counter()
-    latest_mtime: Optional[float] = None
-    files_scanned = 0
-    try:
-        for item in metrics_dir.rglob("*"):
-            if item.is_file():
-                try:
-                    mtime = item.stat().st_mtime
-                    files_scanned += 1
-                    if latest_mtime is None or mtime > latest_mtime:
-                        latest_mtime = mtime
-                except OSError:
-                    continue
-    except OSError:
-        return None
-    if latest_mtime is None:
-        try:
-            return datetime.fromtimestamp(metrics_dir.stat().st_mtime)
-        except OSError:
-            return None
-    _profile("last_modified.rglob", start_time, metrics_dir, files=files_scanned)
-    return datetime.fromtimestamp(latest_mtime)
-
-
-def _quick_last_modified(path: Path) -> Optional[datetime]:
-    """Fast last-modified using depth-1 files under metrics/."""
-    metrics_dir = path / "metrics"
-    if not metrics_dir.is_dir():
-        return None
-    latest_mtime: Optional[float] = None
-    try:
-        for child in metrics_dir.iterdir():
-            try:
-                mtime = child.stat().st_mtime
-                if latest_mtime is None or mtime > latest_mtime:
-                    latest_mtime = mtime
-            except OSError:
-                continue
-    except OSError:
-        return None
-    if latest_mtime is None:
-        try:
-            return datetime.fromtimestamp(metrics_dir.stat().st_mtime)
-        except OSError:
-            return None
-    return datetime.fromtimestamp(latest_mtime)
 
 
 def _is_all_zero(values: Iterable[float]) -> bool:
