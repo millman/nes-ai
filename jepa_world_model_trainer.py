@@ -730,7 +730,7 @@ class TrainConfig:
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
     detach_decoder: bool = False
-    detach_z_inputs_jepa: bool = False
+    detach_z_from_h_and_p: bool = False
 
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
@@ -1313,7 +1313,7 @@ def _compute_losses_and_metrics(
         encode_outputs,
         a_seq,
         use_z2h_init=weights.z2h > 0,
-        detach_z_inputs=cfg.detach_z_inputs_jepa,
+        detach_z_inputs=cfg.detach_z_from_h_and_p,
     )
 
     z_for_decoder = z_embeddings.detach() if cfg.detach_decoder else z_embeddings
@@ -1500,9 +1500,10 @@ def _compute_losses_and_metrics(
         )
 
     if weights.rollout_kstep_h > 0:
+        z_for_rollout_h = z_embeddings.detach() if cfg.detach_z_from_h_and_p else z_embeddings
         loss_rollout_kstep_h = rollout_h_loss(
             model,
-            z_embeddings,
+            z_for_rollout_h,
             a_seq,
             h_states,
             cfg.rollout_horizon,
