@@ -28,7 +28,10 @@ class LayerNormConfig:
     action_delta_projector_h: Optional[bool] = True
     action_delta_projector_p: Optional[bool] = True
 
-    inverse_dynamics: bool = False
+    inverse_dynamics_z: bool = False
+    inverse_dynamics_h: bool = False
+    inverse_dynamics_p: bool = False
+
     h_next: bool = False
 
 @dataclass

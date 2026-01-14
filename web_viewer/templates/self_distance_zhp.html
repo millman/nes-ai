@@ -37,28 +37,62 @@
 <div class="small text-muted mb-2">
     Loaded from {{ experiment.self_distance_z_csv.name }}, {{ self_distance_h_csv.name }}, {{ self_distance_p_csv.name }}.
 </div>
-<div class="row gy-1 gx-3 mt-3">
-    <div class="col-12 col-lg-6">
-        <div id="self-distance-z-first-cos" class="plot-area self-distance-plot"></div>
+<ul class="nav nav-tabs" id="self-distance-plot-tabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="self-distance-cos-tab" data-bs-toggle="tab" data-bs-target="#self-distance-cos-pane" type="button" role="tab" aria-controls="self-distance-cos-pane" aria-selected="true">Cosine distance</button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="self-distance-l2-tab" data-bs-toggle="tab" data-bs-target="#self-distance-l2-pane" type="button" role="tab" aria-controls="self-distance-l2-pane" aria-selected="false">L2 distance</button>
+    </li>
+</ul>
+<div class="tab-content mt-2">
+    <div class="tab-pane fade show active" id="self-distance-cos-pane" role="tabpanel" aria-labelledby="self-distance-cos-tab" tabindex="0">
+        <div class="row gy-1 gx-3 mt-3">
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-z-first-cos" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-h-first-cos" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-p-first-cos" class="plot-area self-distance-plot"></div>
+            </div>
+        </div>
+        <div class="row gy-1 gx-3 mt-1">
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-z-prior-cos" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-h-prior-cos" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-p-prior-cos" class="plot-area self-distance-plot"></div>
+            </div>
+        </div>
     </div>
-    <div class="col-12 col-lg-6">
-        <div id="self-distance-z-prior-cos" class="plot-area self-distance-plot"></div>
-    </div>
-</div>
-<div class="row gy-1 gx-3 mt-1">
-    <div class="col-12 col-lg-6">
-        <div id="self-distance-h-first-cos" class="plot-area self-distance-plot"></div>
-    </div>
-    <div class="col-12 col-lg-6">
-        <div id="self-distance-h-prior-cos" class="plot-area self-distance-plot"></div>
-    </div>
-</div>
-<div class="row gy-1 gx-3 mt-1">
-    <div class="col-12 col-lg-6">
-        <div id="self-distance-s-first-cos" class="plot-area self-distance-plot"></div>
-    </div>
-    <div class="col-12 col-lg-6">
-        <div id="self-distance-s-prior-cos" class="plot-area self-distance-plot"></div>
+    <div class="tab-pane fade" id="self-distance-l2-pane" role="tabpanel" aria-labelledby="self-distance-l2-tab" tabindex="0">
+        <div class="row gy-1 gx-3 mt-3">
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-z-first-l2" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-h-first-l2" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-p-first-l2" class="plot-area self-distance-plot"></div>
+            </div>
+        </div>
+        <div class="row gy-1 gx-3 mt-1">
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-z-prior-l2" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-h-prior-l2" class="plot-area self-distance-plot"></div>
+            </div>
+            <div class="col-12 col-lg-4">
+                <div id="self-distance-p-prior-l2" class="plot-area self-distance-plot"></div>
+            </div>
+        </div>
     </div>
 </div>
 <div class="row g-3 mt-3" id="self-distance-frame-row">
@@ -173,12 +207,18 @@ document.addEventListener("DOMContentLoaded", () => {
     const hCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_h_csv.relative_to(experiment.path)) }}";
     const pCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_p_csv.relative_to(experiment.path)) }}";
     const plotConfig = buildPlotlyConfig({});
-    const zFirstPlot = document.getElementById("self-distance-z-first-cos");
-    const zPriorPlot = document.getElementById("self-distance-z-prior-cos");
-    const hFirstPlot = document.getElementById("self-distance-h-first-cos");
-    const hPriorPlot = document.getElementById("self-distance-h-prior-cos");
-    const pFirstPlot = document.getElementById("self-distance-s-first-cos");
-    const pPriorPlot = document.getElementById("self-distance-s-prior-cos");
+    const zFirstPlotCos = document.getElementById("self-distance-z-first-cos");
+    const zPriorPlotCos = document.getElementById("self-distance-z-prior-cos");
+    const hFirstPlotCos = document.getElementById("self-distance-h-first-cos");
+    const hPriorPlotCos = document.getElementById("self-distance-h-prior-cos");
+    const pFirstPlotCos = document.getElementById("self-distance-p-first-cos");
+    const pPriorPlotCos = document.getElementById("self-distance-p-prior-cos");
+    const zFirstPlotL2 = document.getElementById("self-distance-z-first-l2");
+    const zPriorPlotL2 = document.getElementById("self-distance-z-prior-l2");
+    const hFirstPlotL2 = document.getElementById("self-distance-h-first-l2");
+    const hPriorPlotL2 = document.getElementById("self-distance-h-prior-l2");
+    const pFirstPlotL2 = document.getElementById("self-distance-p-first-l2");
+    const pPriorPlotL2 = document.getElementById("self-distance-p-prior-l2");
     const firstImg = document.getElementById("self-distance-first-img");
     const priorImg = document.getElementById("self-distance-prior-img");
     const currentImg = document.getElementById("self-distance-current-img");
@@ -384,9 +424,6 @@ document.addEventListener("DOMContentLoaded", () => {
             setImage(firstImg, firstLabel, firstAction, firstPath, `first: ${frameLabelText}`, firstActionText);
             setImage(priorImg, priorLabel, priorAction, priorPath, `prior: t=${Math.max(0, step - 1)}`, priorActionText);
             setImage(currentImg, currentLabel, currentAction, framePath, headerText, actionText);
-            updateSelfDistanceImage(step, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepLabelZ, "Z");
-            updateSelfDistanceImage(step, selfDistanceMapH, selfDistanceStepsH, stepImgH, stepLabelH, "H");
-            updateSelfDistanceImage(step, selfDistanceMapP, selfDistanceStepsP, stepImgP, stepLabelP, "P");
         });
     };
 
@@ -480,6 +517,93 @@ document.addEventListener("DOMContentLoaded", () => {
         ).then(() => attachHover(priorEl, actionMap));
     };
 
+    const buildL2Plots = (rows, firstEl, priorEl, label, axisLabel, titlePrefix) => {
+        if (!rows.length) {
+            if (firstEl) firstEl.innerHTML = `<p class='text-muted fst-italic'>No rows in ${label} CSV.</p>`;
+            if (priorEl) priorEl.innerHTML = "";
+            return;
+        }
+        const steps = rows.map(r => Number(r.timestep));
+        const distFirst = rows.map(r => Number(r.distance_to_first ?? 0));
+        const distPrior = rows.map(r => Number(r.distance_to_prior ?? 0));
+        const custom = rows.map(r => [
+            r.trajectory,
+            Number(r.timestep),
+            r.frame_path,
+            r.first_frame_path,
+            r.prior_frame_path,
+            r.frame_label,
+            r.action_label || "",
+        ]);
+
+        const layoutBase = {
+            margin: { t: 32, r: 16, l: 50, b: 50 },
+            template: "plotly_white",
+            height: 240,
+            title: { font: { size: 12 } },
+            font: { size: 11 },
+        };
+
+        const layoutLineChart = {
+            ...layoutBase,
+            hovermode: "x unified",
+            xaxis: {
+                title: "timestep",
+                showspikes: true,
+                spikemode: "across",
+                spikethickness: 1,
+                spikedash: "dot",
+                spikecolor: "#999",
+            },
+        };
+
+        const actionMap = buildActionMap(rows);
+
+        Plotly.newPlot(
+            firstEl,
+            [
+                {
+                    x: steps,
+                    y: distFirst,
+                    mode: "lines+markers",
+                    name: "l2 distance to first",
+                    marker: { size: 4, color: cosineFirstColor },
+                    line: { width: 1.5, color: cosineFirstColor },
+                    customdata: custom,
+                    hovertemplate: "%{y:.4f}<extra></extra>",
+                },
+            ],
+            {
+                ...layoutLineChart,
+                title: `${titlePrefix} L2 distance to first latent`,
+                yaxis: { title: `||${axisLabel}0 - ${axisLabel}t||` },
+            },
+            plotConfig,
+        ).then(() => attachHover(firstEl, actionMap));
+
+        Plotly.newPlot(
+            priorEl,
+            [
+                {
+                    x: steps,
+                    y: distPrior,
+                    mode: "lines+markers",
+                    name: "l2 distance to prior",
+                    marker: { size: 4, color: cosinePriorColor },
+                    line: { width: 1.5, color: cosinePriorColor },
+                    customdata: custom,
+                    hovertemplate: "%{y:.4f}<extra></extra>",
+                },
+            ],
+            {
+                ...layoutLineChart,
+                title: `${titlePrefix} L2 distance to prior latent`,
+                yaxis: { title: `||${axisLabel}(t-1) - ${axisLabel}t||` },
+            },
+            plotConfig,
+        ).then(() => attachHover(priorEl, actionMap));
+    };
+
     const updatePinState = (nextState) => {
         diagLossPinned = nextState;
         if (!diagLossWrapper || !diagLossPin) return;
@@ -533,9 +657,12 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     Promise.all([loadCsv(zCsvUrl), loadCsv(hCsvUrl), loadCsv(pCsvUrl)]).then(([zRows, hRows, pRows]) => {
-        buildCosinePlots(zRows, zFirstPlot, zPriorPlot, "self_distance_z.csv", "z", "Z ·");
-        buildCosinePlots(hRows, hFirstPlot, hPriorPlot, "self_distance_h.csv", "h", "H ·");
-        buildCosinePlots(pRows, pFirstPlot, pPriorPlot, "self_distance_p.csv", "p", "P ·");
+        buildCosinePlots(zRows, zFirstPlotCos, zPriorPlotCos, "self_distance_z.csv", "z", "Z ·");
+        buildCosinePlots(hRows, hFirstPlotCos, hPriorPlotCos, "self_distance_h.csv", "h", "H ·");
+        buildCosinePlots(pRows, pFirstPlotCos, pPriorPlotCos, "self_distance_p.csv", "p", "P ·");
+        buildL2Plots(zRows, zFirstPlotL2, zPriorPlotL2, "self_distance_z.csv", "z", "Z ·");
+        buildL2Plots(hRows, hFirstPlotL2, hPriorPlotL2, "self_distance_h.csv", "h", "H ·");
+        buildL2Plots(pRows, pFirstPlotL2, pPriorPlotL2, "self_distance_p.csv", "p", "P ·");
         const initialStep = zRows.length ? Number(zRows[zRows.length - 1].timestep) : 0;
         updateSelfDistanceImage(initialStep, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepLabelZ, "Z");
         updateSelfDistanceImage(initialStep, selfDistanceMapH, selfDistanceStepsH, stepImgH, stepLabelH, "H");

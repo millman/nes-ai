@@ -815,19 +815,19 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
             cfg.action_dim,
-            use_layer_norm=cfg.layer_norms.inverse_dynamics,
+            use_layer_norm=cfg.layer_norms.inverse_dynamics_z,
         )
         self.inverse_dynamics_h = InverseDynamicsHead(
             cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
-            use_layer_norm=cfg.layer_norms.inverse_dynamics,
+            use_layer_norm=cfg.layer_norms.inverse_dynamics_h,
         )
         self.inverse_dynamics_p = InverseDynamicsHead(
             pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.action_dim,
-            use_layer_norm=cfg.layer_norms.inverse_dynamics,
+            use_layer_norm=cfg.layer_norms.inverse_dynamics_p,
         )
         self.z_action_delta_projector = ActionDeltaProjector(
             cfg.action_dim,
@@ -1456,9 +1456,9 @@ def _compute_losses_and_metrics(
         loss_inverse_dynamics_h = INVERSE_DYNAMICS_LOSS(action_logits_h, a_seq[:, :-1])
 
     if weights.inverse_dynamics_p > 0:
-        assert h_states.shape[1] >= 2
-        # NOTE: inverse dynamics on s should not backprop into h/dynamics.
-        p_for_inverse = pose_obs.detach()
+        assert pose_obs.shape[1] >= 2
+        # NOTE: inverse dynamics on p trains h2p but does not backprop into h/dynamics.
+        p_for_inverse = pose_obs
         action_logits_p = model.inverse_dynamics_p(p_for_inverse[:, :-1], p_for_inverse[:, 1:])
         loss_inverse_dynamics_p = INVERSE_DYNAMICS_LOSS(action_logits_p, a_seq[:, :-1])
 
@@ -2259,42 +2259,45 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     color_cycle = default_cycle.by_key().get("color", []) if default_cycle is not None else []
 
     def _color(idx: int) -> str:
+        if not color_cycle:
+            return "C0"
         return color_cycle[idx % len(color_cycle)]
 
-    color_map = {
-        "world": _color(0),
-        "jepa": _color(1),
-        "sigreg": _color(2),
-        "recon": _color(3),
-        "geometry_rank_accuracy": _color(17),
-    }
-    plt.plot(history.steps, history.world, label="world", color=color_map["world"])
-    if any(val != 0.0 for val in history.val_world):
-        plt.plot(history.steps, history.val_world, label="val_world", color=_color(11))
-    if any(val != 0.0 for val in history.val_recon):
-        plt.plot(history.steps, history.val_recon, label="val_recon", color=_color(12))
-    if any(val != 0.0 for val in history.val_recon_multi_gauss):
-        plt.plot(history.steps, history.val_recon_multi_gauss, label="val_recon_multi_gauss", color=_color(13))
-    if any(val != 0.0 for val in history.val_recon_multi_box):
-        plt.plot(history.steps, history.val_recon_multi_box, label="val_recon_multi_box", color=_color(14))
-    if any(val != 0.0 for val in history.val_recon_patch):
-        plt.plot(history.steps, history.val_recon_patch, label="val_recon_patch", color=_color(15))
-    plt.plot(history.steps, history.jepa, label="jepa", color=color_map["jepa"])
-    plt.plot(history.steps, history.sigreg, label="sigreg", color=color_map["sigreg"])
-    plt.plot(history.steps, history.recon, label="recon", color=color_map["recon"])
-    if any(val != 0.0 for val in history.geometry_rank_accuracy):
-        plt.plot(
-            history.steps,
-            history.geometry_rank_accuracy,
-            label="geometry_rank_accuracy",
-            color=color_map["geometry_rank_accuracy"],
-        )
-    if any(val != 0.0 for val in history.recon_patch):
-        plt.plot(history.steps, history.recon_patch, label="recon_patch", color=_color(8))
-    if any(val != 0.0 for val in history.recon_multi_gauss):
-        plt.plot(history.steps, history.recon_multi_gauss, label="recon_multi_gauss", color=_color(9))
-    if any(val != 0.0 for val in history.recon_multi_box):
-        plt.plot(history.steps, history.recon_multi_box, label="recon_multi_box", color=_color(10))
+    loss_series = [
+        ("world", history.world),
+        ("val_world", history.val_world),
+        ("val_recon", history.val_recon),
+        ("val_recon_multi_gauss", history.val_recon_multi_gauss),
+        ("val_recon_multi_box", history.val_recon_multi_box),
+        ("val_recon_patch", history.val_recon_patch),
+        ("jepa", history.jepa),
+        ("sigreg", history.sigreg),
+        ("recon", history.recon),
+        ("recon_multi_gauss", history.recon_multi_gauss),
+        ("recon_multi_box", history.recon_multi_box),
+        ("recon_patch", history.recon_patch),
+        ("pixel_delta", history.pixel_delta),
+        ("h2z", history.h2z),
+        ("z2h", history.z2h),
+        ("loss_geometry_rank", history.geometry_rank),
+        ("loss_inverse_dynamics_z", history.inverse_dynamics_z),
+        ("loss_inverse_dynamics_h", history.inverse_dynamics_h),
+        ("loss_inverse_dynamics_p", history.inverse_dynamics_p),
+        ("loss_action_delta_z", history.action_delta_z),
+        ("loss_action_delta_h", history.action_delta_h),
+        ("loss_action_delta_p", history.action_delta_p),
+        ("loss_rollout_kstep_z", history.rollout_kstep_z),
+        ("loss_rollout_recon_z", history.rollout_recon_z),
+        ("loss_rollout_project_z", history.rollout_project_z),
+        ("loss_rollout_kstep_h", history.rollout_kstep_h),
+        ("loss_rollout_kstep_p", history.rollout_kstep_p),
+        ("loss_additivity_h", history.additivity_h),
+        ("loss_additivity_p", history.additivity_p),
+        ("loss_mag_p", history.mag_p),
+    ]
+    for idx, (label, series) in enumerate(loss_series):
+        if any(val != 0.0 for val in series):
+            plt.plot(history.steps, series, label=label, color=_color(idx))
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.yscale("log")

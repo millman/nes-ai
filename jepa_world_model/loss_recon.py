@@ -20,6 +20,7 @@ __all__ = [
     "build_feature_pyramid",
     "multi_scale_hardness_loss_gaussian",
     "multi_scale_hardness_loss_box",
+    "multi_scale_mse_loss_box",
 ]
 
 
@@ -316,5 +317,43 @@ def multi_scale_hardness_loss_box(
         weight = (per_pixel_detached / norm).pow(beta).clamp(max=max_weight)
         weighted_sum = (weight * per_pixel_l1).sum()
         scale_loss = weighted_sum / coverage.sum()
+        total = total + lam * scale_loss
+    return total
+
+
+def multi_scale_mse_loss_box(
+    preds: List[torch.Tensor],
+    targets: List[torch.Tensor],
+    kernel_sizes: Sequence[int],
+    lambdas: Sequence[float],
+    strides: Sequence[int],
+) -> torch.Tensor:
+    """
+    Compute a multi-scale MSE loss using box pooling to aggregate local patch errors.
+    """
+    if not (len(preds) == len(targets) == len(kernel_sizes) == len(lambdas) == len(strides)):
+        raise ValueError("preds, targets, kernel_sizes, lambdas, and strides must share length.")
+    if not preds:
+        return torch.tensor(0.0, device="cpu")
+    total = preds[0].new_tensor(0.0)
+    for idx, (p, t) in enumerate(zip(preds, targets)):
+        if p.shape != t.shape:
+            raise ValueError(f"Pred/target shape mismatch at scale {idx}: {p.shape} vs {t.shape}")
+        k = int(kernel_sizes[idx])
+        lam = float(lambdas[idx])
+        stride = int(strides[idx])
+        if stride <= 0:
+            raise ValueError("Box MSE stride must be positive.")
+        _, _, h, w = p.shape
+        k_eff = min(k, h, w)
+        stride_eff = max(1, min(stride, k_eff))
+        per_pixel_mse = (p - t).pow(2).mean(dim=1, keepdim=True)
+        pooled = F.avg_pool2d(per_pixel_mse, kernel_size=k_eff, stride=stride_eff, padding=0)
+        coverage = F.avg_pool2d(torch.ones_like(per_pixel_mse), kernel_size=k_eff, stride=stride_eff, padding=0)
+        if pooled.shape[-2:] != per_pixel_mse.shape[-2:]:
+            pooled = F.interpolate(pooled, size=per_pixel_mse.shape[-2:], mode="bilinear", align_corners=False)
+            coverage = F.interpolate(coverage, size=per_pixel_mse.shape[-2:], mode="bilinear", align_corners=False)
+        coverage = coverage.clamp_min(1e-6)
+        scale_loss = pooled.sum() / coverage.sum()
         total = total + lam * scale_loss
     return total
