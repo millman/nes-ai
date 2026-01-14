@@ -74,8 +74,8 @@ def build_overlay(
 def build_ranking_accuracy_plot(curves: LossCurveData) -> Optional[Dict]:
     if not curves.series:
         return None
-    accuracy = curves.series.get("geometry_rank_accuracy")
-    loss = curves.series.get("loss_geometry_rank")
+    accuracy = curves.series.get("geometry_rank_p_accuracy")
+    loss = curves.series.get("loss_geometry_rank_p")
     if not accuracy and not loss:
         return None
     fig = go.Figure()
@@ -85,7 +85,7 @@ def build_ranking_accuracy_plot(curves: LossCurveData) -> Optional[Dict]:
                 x=curves.steps,
                 y=accuracy,
                 mode="lines",
-                name="geometry_rank_accuracy",
+                name="geometry_rank_p_accuracy",
                 hovertemplate="%{y:.3f}<extra></extra>",
             )
         )
@@ -95,7 +95,7 @@ def build_ranking_accuracy_plot(curves: LossCurveData) -> Optional[Dict]:
                 x=curves.steps,
                 y=loss,
                 mode="lines",
-                name="loss_geometry_rank",
+                name="loss_geometry_rank_p",
                 yaxis="y2",
                 hovertemplate="%{y:.3f}<extra></extra>",
             )

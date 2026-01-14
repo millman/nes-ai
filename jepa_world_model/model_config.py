@@ -82,6 +82,9 @@ class ModelConfig:
     # LayerNorm toggles for debugging.
     layer_norms: LayerNormConfig = field(default_factory=LayerNormConfig)
 
+    # Apply spectral norm to predictor linear layers for h stability.
+    predictor_spectral_norm: bool = False
+
     @property
     def embedding_dim(self) -> int:
         """The embedding dimension is encoder_schedule[-1]."""

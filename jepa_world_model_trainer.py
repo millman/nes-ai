@@ -222,11 +222,16 @@ class PredictorNetwork(nn.Module):
         action_dim: int,
         state_dim: int,
         use_layer_norm: bool = True,
+        use_spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         self.in_proj = nn.Linear(embedding_dim + action_dim + state_dim, hidden_dim)
         self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
         self.h_out = nn.Linear(hidden_dim, state_dim)
+        if use_spectral_norm:
+            self.in_proj = nn.utils.spectral_norm(self.in_proj)
+            self.hidden_proj = nn.utils.spectral_norm(self.hidden_proj)
+            self.h_out = nn.utils.spectral_norm(self.h_out)
         self.h_norm = nn.LayerNorm(state_dim) if use_layer_norm else None
         self.activation = nn.SiLU(inplace=True)
         self.embedding_dim = embedding_dim
@@ -234,6 +239,7 @@ class PredictorNetwork(nn.Module):
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.use_layer_norm = use_layer_norm
+        self.use_spectral_norm = use_spectral_norm
 
     def forward(
         self, embeddings: torch.Tensor, hidden_state: torch.Tensor, actions: torch.Tensor
@@ -538,10 +544,6 @@ class LossWeights:
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
     z2h: float = 1.0
 
-    # Goal-conditioned ranking loss on p = g(stopgrad(h)).
-    # Keeps p useful for planning geometry while avoiding action algebra constraints.
-    geometry_rank: float = 1.0
-
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
     # Keep at 0: forces z to reveal actions, breaking loop-closure invariance.
     inverse_dynamics_z: float = 0.0
@@ -600,8 +602,12 @@ class LossWeights:
     # k-step rollout consistency in p-space.
     rollout_kstep_p: float = 1.0
 
-    # Pose delta magnitude regularizer.
-    mag_p: float = 0.0
+    # Pose scale anchoring (distribution-level).
+    scale_p: float = 0.0
+
+    # Goal-conditioned ranking loss on p = g(stopgrad(h)).
+    # Keeps p useful for planning geometry while avoiding action algebra constraints.
+    geometry_rank_p: float = 1.0
 
 
 @dataclass
@@ -641,6 +647,13 @@ class LossMultiScaleBoxReconConfig:
     max_weight: float = 100.0
     # strides: optional stride for the blur (reduces compute, may downsample before reprojecting).
     strides: Tuple[int, ...] = (4, 8, 8,)
+
+
+@dataclass
+class ScalePConfig:
+    mode: str = "median"
+    target: float = 1.0
+    trim: float = 0.2
 
 @dataclass
 class VisConfig:
@@ -738,6 +751,7 @@ class TrainConfig:
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
     recon_multi_gauss: LossMultiScaleGaussReconConfig = field(default_factory=LossMultiScaleGaussReconConfig)
     recon_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
+    scale_p: ScalePConfig = field(default_factory=ScalePConfig)
 
     # Visualization
     vis: VisConfig = field(default_factory=VisConfig)
@@ -780,6 +794,7 @@ class JEPAWorldModel(nn.Module):
             cfg.action_dim,
             cfg.state_dim,
             use_layer_norm=cfg.layer_norms.h_next,
+            use_spectral_norm=cfg.predictor_spectral_norm,
         )
         self.state_dim = cfg.state_dim
         pose_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_embed_dim
@@ -1158,6 +1173,33 @@ def pixel_delta_loss(recon: torch.Tensor, frames: torch.Tensor) -> torch.Tensor:
     return RECON_LOSS(delta_pred, delta_target)
 
 
+def scale_p_loss(pose: torch.Tensor, start: int, cfg: ScalePConfig) -> torch.Tensor:
+    if pose.shape[1] <= start + 1:
+        return pose.new_tensor(0.0)
+    deltas = pose[:, start + 1 :] - pose[:, start:-1]
+    norms = deltas.norm(dim=-1).reshape(-1)
+    if norms.numel() == 0:
+        return pose.new_tensor(0.0)
+    mode = cfg.mode.lower()
+    if mode == "median":
+        scale = norms.median()
+    elif mode == "trimmed_mean":
+        trim = min(max(cfg.trim, 0.0), 0.49)
+        if trim > 0.0:
+            sorted_norms, _ = norms.sort()
+            n = sorted_norms.numel()
+            k = int(math.floor(trim * n))
+            if k * 2 >= n:
+                scale = sorted_norms.mean()
+            else:
+                scale = sorted_norms[k : n - k].mean()
+        else:
+            scale = norms.mean()
+    else:
+        raise ValueError(f"scale_p.mode must be 'median' or 'trimmed_mean', got {cfg.mode!r}.")
+    return (scale - cfg.target) ** 2
+
+
 
 
 # ------------------------------------------------------------
@@ -1279,9 +1321,9 @@ def _compute_losses_and_metrics(
     loss_z2h = x_frames.new_tensor(0.0)
 
     # p (Geometry) losses
-    loss_geometry_rank = x_frames.new_tensor(0.0)
-    geometry_rank_accuracy = x_frames.new_tensor(0.0)
-    geometry_rank_pairs = x_frames.new_tensor(0.0)
+    loss_geometry_rank_p = x_frames.new_tensor(0.0)
+    geometry_rank_p_accuracy = x_frames.new_tensor(0.0)
+    geometry_rank_p_pairs = x_frames.new_tensor(0.0)
 
     # Inverse dynamics losses
     loss_inverse_dynamics_z = x_frames.new_tensor(0.0)
@@ -1297,7 +1339,7 @@ def _compute_losses_and_metrics(
     loss_additivity_h = x_frames.new_tensor(0.0)
     loss_action_delta_p = x_frames.new_tensor(0.0)
     loss_additivity_p = x_frames.new_tensor(0.0)
-    loss_mag_p = x_frames.new_tensor(0.0)
+    loss_scale_p = x_frames.new_tensor(0.0)
 
     # -------------------------------------------------------------------------
     # Calculate required inputs
@@ -1385,8 +1427,10 @@ def _compute_losses_and_metrics(
 
     # h (Auxiliary)
     # p (Geometry)
-    if weights.geometry_rank > 0:
-        loss_geometry_rank, geometry_rank_accuracy, geometry_rank_pairs = geometry_rank_loss(model, h_states, cfg.geometry)
+    if weights.geometry_rank_p > 0:
+        loss_geometry_rank_p, geometry_rank_p_accuracy, geometry_rank_p_pairs = geometry_rank_loss(
+            model, h_states, cfg.geometry
+        )
 
     dh_pred: Optional[torch.Tensor] = None
     if weights.action_delta_h > 0 or weights.additivity_h > 0:
@@ -1404,7 +1448,7 @@ def _compute_losses_and_metrics(
         weights.action_delta_p > 0
         or weights.additivity_p > 0
         or weights.rollout_kstep_p > 0
-        or weights.mag_p > 0
+        or weights.scale_p > 0
     ):
         if pose_obs.shape[1] >= 2:
             pose_curr = pose_pred[:, start_frame:-1]
@@ -1441,8 +1485,8 @@ def _compute_losses_and_metrics(
                             k_losses.append(F.mse_loss(pose_hat, pose_target_k.detach()))
                     if k_losses:
                         loss_rollout_kstep_p = torch.stack(k_losses).mean()
-            if weights.mag_p > 0 and pose_deltas.numel() > 0:
-                loss_mag_p = pose_deltas.norm(dim=-1).mean()
+        if weights.scale_p > 0:
+            loss_scale_p = scale_p_loss(pose_obs, start_frame, cfg.scale_p)
 
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
@@ -1538,7 +1582,7 @@ def _compute_losses_and_metrics(
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
         + weights.z2h * _scaled("loss_z2h", loss_z2h)
-        + weights.geometry_rank * _scaled("loss_geometry_rank", loss_geometry_rank)
+        + weights.geometry_rank_p * _scaled("loss_geometry_rank_p", loss_geometry_rank_p)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
@@ -1555,7 +1599,7 @@ def _compute_losses_and_metrics(
         + weights.rollout_kstep_h * _scaled("loss_rollout_kstep_h", loss_rollout_kstep_h)
         + weights.rollout_kstep_p * _scaled("loss_rollout_kstep_p", loss_rollout_kstep_p)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
-        + weights.mag_p * _scaled("loss_mag_p", loss_mag_p)
+        + weights.scale_p * _scaled("loss_scale_p", loss_scale_p)
         + weights.action_delta_p * _scaled("loss_action_delta_p", loss_action_delta_p)
         + weights.additivity_p * _scaled("loss_additivity_p", loss_additivity_p)
     )
@@ -1597,9 +1641,9 @@ def _compute_losses_and_metrics(
         "loss_pixel_delta": loss_pixel_delta.item(),
         "loss_h2z": loss_h2z.item(),
         "loss_z2h": loss_z2h.item(),
-        "loss_geometry_rank": loss_geometry_rank.item(),
-        "geometry_rank_accuracy": geometry_rank_accuracy.item(),
-        "geometry_rank_pairs": geometry_rank_pairs.item(),
+        "loss_geometry_rank_p": loss_geometry_rank_p.item(),
+        "geometry_rank_p_accuracy": geometry_rank_p_accuracy.item(),
+        "geometry_rank_p_pairs": geometry_rank_p_pairs.item(),
         "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
         "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
         "loss_inverse_dynamics_p": loss_inverse_dynamics_p.item(),
@@ -1611,7 +1655,7 @@ def _compute_losses_and_metrics(
         "loss_rollout_kstep_h": loss_rollout_kstep_h.item(),
         "loss_rollout_kstep_p": loss_rollout_kstep_p.item(),
         "loss_additivity_h": loss_additivity_h.item(),
-        "loss_mag_p": loss_mag_p.item(),
+        "loss_scale_p": loss_scale_p.item(),
         "loss_action_delta_p": loss_action_delta_p.item(),
         "loss_additivity_p": loss_additivity_p.item(),
         "z_norm_mean": z_norm_mean,
@@ -1995,10 +2039,10 @@ def log_metrics(
         filtered.pop("loss_h2z", None)
     if weights.z2h <= 0:
         filtered.pop("loss_z2h", None)
-    if weights.geometry_rank <= 0:
-        filtered.pop("loss_geometry_rank", None)
-        filtered.pop("geometry_rank_accuracy", None)
-        filtered.pop("geometry_rank_pairs", None)
+    if weights.geometry_rank_p <= 0:
+        filtered.pop("loss_geometry_rank_p", None)
+        filtered.pop("geometry_rank_p_accuracy", None)
+        filtered.pop("geometry_rank_p_pairs", None)
     if weights.inverse_dynamics_z <= 0:
         filtered.pop("loss_inverse_dynamics_z", None)
     if weights.inverse_dynamics_h <= 0:
@@ -2021,8 +2065,8 @@ def log_metrics(
         filtered.pop("loss_rollout_kstep_p", None)
     if weights.additivity_h <= 0:
         filtered.pop("loss_additivity_h", None)
-    if weights.mag_p <= 0:
-        filtered.pop("loss_mag_p", None)
+    if weights.scale_p <= 0:
+        filtered.pop("loss_scale_p", None)
     if weights.action_delta_p <= 0:
         filtered.pop("loss_action_delta_p", None)
     if weights.additivity_p <= 0:
@@ -2060,9 +2104,9 @@ LOSS_COLUMNS = [
     "loss_pixel_delta",
     "loss_h2z",
     "loss_z2h",
-    "loss_geometry_rank",
-    "geometry_rank_accuracy",
-    "geometry_rank_pairs",
+    "loss_geometry_rank_p",
+    "geometry_rank_p_accuracy",
+    "geometry_rank_p_pairs",
     "loss_inverse_dynamics_z",
     "loss_inverse_dynamics_h",
     "loss_inverse_dynamics_p",
@@ -2074,7 +2118,7 @@ LOSS_COLUMNS = [
     "loss_rollout_kstep_h",
     "loss_rollout_kstep_p",
     "loss_additivity_h",
-    "loss_mag_p",
+    "loss_scale_p",
     "loss_action_delta_p",
     "loss_additivity_p",
     "z_norm_mean",
@@ -2111,9 +2155,9 @@ class LossHistory:
     pixel_delta: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
     z2h: List[float] = field(default_factory=list)
-    geometry_rank: List[float] = field(default_factory=list)
-    geometry_rank_accuracy: List[float] = field(default_factory=list)
-    geometry_rank_pairs: List[float] = field(default_factory=list)
+    geometry_rank_p: List[float] = field(default_factory=list)
+    geometry_rank_p_accuracy: List[float] = field(default_factory=list)
+    geometry_rank_p_pairs: List[float] = field(default_factory=list)
     inverse_dynamics_z: List[float] = field(default_factory=list)
     inverse_dynamics_h: List[float] = field(default_factory=list)
     inverse_dynamics_p: List[float] = field(default_factory=list)
@@ -2125,7 +2169,7 @@ class LossHistory:
     rollout_kstep_h: List[float] = field(default_factory=list)
     rollout_kstep_p: List[float] = field(default_factory=list)
     additivity_h: List[float] = field(default_factory=list)
-    mag_p: List[float] = field(default_factory=list)
+    scale_p: List[float] = field(default_factory=list)
     action_delta_p: List[float] = field(default_factory=list)
     additivity_p: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
@@ -2159,9 +2203,9 @@ class LossHistory:
         self.pixel_delta.append(metrics.get("loss_pixel_delta", 0.0))
         self.h2z.append(metrics["loss_h2z"])
         self.z2h.append(metrics["loss_z2h"])
-        self.geometry_rank.append(metrics.get("loss_geometry_rank", 0.0))
-        self.geometry_rank_accuracy.append(metrics.get("geometry_rank_accuracy", 0.0))
-        self.geometry_rank_pairs.append(metrics.get("geometry_rank_pairs", 0.0))
+        self.geometry_rank_p.append(metrics.get("loss_geometry_rank_p", 0.0))
+        self.geometry_rank_p_accuracy.append(metrics.get("geometry_rank_p_accuracy", 0.0))
+        self.geometry_rank_p_pairs.append(metrics.get("geometry_rank_p_pairs", 0.0))
         self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
         self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
         self.inverse_dynamics_p.append(metrics.get("loss_inverse_dynamics_p", 0.0))
@@ -2173,7 +2217,7 @@ class LossHistory:
         self.rollout_kstep_h.append(metrics.get("loss_rollout_kstep_h", 0.0))
         self.rollout_kstep_p.append(metrics.get("loss_rollout_kstep_p", 0.0))
         self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
-        self.mag_p.append(metrics.get("loss_mag_p", 0.0))
+        self.scale_p.append(metrics.get("loss_scale_p", 0.0))
         self.action_delta_p.append(metrics.get("loss_action_delta_p", 0.0))
         self.additivity_p.append(metrics.get("loss_additivity_p", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
@@ -2218,9 +2262,9 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.pixel_delta,
             history.h2z,
             history.z2h,
-            history.geometry_rank,
-            history.geometry_rank_accuracy,
-            history.geometry_rank_pairs,
+            history.geometry_rank_p,
+            history.geometry_rank_p_accuracy,
+            history.geometry_rank_p_pairs,
             history.inverse_dynamics_z,
             history.inverse_dynamics_h,
             history.inverse_dynamics_p,
@@ -2232,7 +2276,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.rollout_kstep_h,
             history.rollout_kstep_p,
             history.additivity_h,
-            history.mag_p,
+            history.scale_p,
             history.action_delta_p,
             history.additivity_p,
             history.z_norm_mean,
@@ -2279,7 +2323,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("pixel_delta", history.pixel_delta),
         ("h2z", history.h2z),
         ("z2h", history.z2h),
-        ("loss_geometry_rank", history.geometry_rank),
+        ("loss_geometry_rank_p", history.geometry_rank_p),
         ("loss_inverse_dynamics_z", history.inverse_dynamics_z),
         ("loss_inverse_dynamics_h", history.inverse_dynamics_h),
         ("loss_inverse_dynamics_p", history.inverse_dynamics_p),
@@ -2293,7 +2337,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_rollout_kstep_p", history.rollout_kstep_p),
         ("loss_additivity_h", history.additivity_h),
         ("loss_additivity_p", history.additivity_p),
-        ("loss_mag_p", history.mag_p),
+        ("loss_scale_p", history.scale_p),
     ]
     for idx, (label, series) in enumerate(loss_series):
         if any(val != 0.0 for val in series):
@@ -2307,22 +2351,22 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
     plt.savefig(out_dir / "loss_curves.png", dpi=DEFAULT_DPI)
     plt.close()
 
-    has_rank_acc = any(val != 0.0 for val in history.geometry_rank_accuracy)
-    has_rank_loss = any(val != 0.0 for val in history.geometry_rank)
+    has_rank_acc = any(val != 0.0 for val in history.geometry_rank_p_accuracy)
+    has_rank_loss = any(val != 0.0 for val in history.geometry_rank_p)
     if has_rank_acc or has_rank_loss:
         fig, ax1 = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
         if has_rank_acc:
-            ax1.plot(history.steps, history.geometry_rank_accuracy, label="geometry_rank_accuracy", color=_color(3))
+            ax1.plot(history.steps, history.geometry_rank_p_accuracy, label="geometry_rank_p_accuracy", color=_color(3))
         ax1.set_xlabel("Step")
         ax1.set_ylabel("Ranking accuracy")
         ax1.set_ylim(0.0, 1.0)
         ax1.grid(True, alpha=0.3)
         if has_rank_loss:
             ax2 = ax1.twinx()
-            ax2.plot(history.steps, history.geometry_rank, label="loss_geometry_rank", color=_color(4))
+            ax2.plot(history.steps, history.geometry_rank_p, label="loss_geometry_rank_p", color=_color(4))
             ax2.set_ylabel("Ranking loss")
             ax2.set_yscale("log")
-        pair_values = [val for val in history.geometry_rank_pairs if val > 0]
+        pair_values = [val for val in history.geometry_rank_p_pairs if val > 0]
         pair_count = int(round(pair_values[-1])) if pair_values else 0
         title = f"Geometry Ranking Accuracy (pairs/batch: {pair_count})" if pair_count else "Geometry Ranking Accuracy"
         fig.suptitle(title, fontsize=11)

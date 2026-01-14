@@ -14,7 +14,7 @@ Suggested default values (balanced auxiliaries):
 - delta_z = 0.05
 - inverse_dynamics_z = 0.05
 - inverse_dynamics_h = 0.05
-- geometry_rank = 0.02
+- geometry_rank_p = 0.02
 
 Rationale by parameter:
 
@@ -30,7 +30,7 @@ Rationale by parameter:
 - delta_z (0.05): light auxiliary for smooth latent transitions; similar scale to other minor terms.
 - inverse_dynamics_z (0.05): action inference from z is secondary; keep in the same small band.
 - inverse_dynamics_h (0.05): symmetric with z inverse dynamics to avoid overemphasis on either latent.
-- geometry_rank (0.02): ranking losses can be brittle; keep small to prevent training collapse early on.
+- geometry_rank_p (0.02): ranking losses can be brittle; keep small to prevent training collapse early on.
 
 Notes:
 
