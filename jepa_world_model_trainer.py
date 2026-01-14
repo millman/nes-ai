@@ -1075,6 +1075,44 @@ def rollout_h_loss(
     return total / steps
 
 
+def rollout_p_loss(
+    pose_obs: torch.Tensor,
+    pose_deltas: torch.Tensor,
+    rollout_horizon: int,
+    start_frame: int,
+) -> torch.Tensor:
+    if rollout_horizon <= 1:
+        raise AssertionError("rollout_horizon must be > 1 for rollout_p_loss.")
+    if pose_obs.shape[1] < 2:
+        raise AssertionError("rollout_p_loss requires at least two timesteps.")
+    if pose_deltas.shape[1] < 1:
+        raise AssertionError("rollout_p_loss requires at least one delta.")
+    max_k = min(rollout_horizon, pose_obs.shape[1] - 1)
+    if max_k < 2:
+        raise AssertionError("rollout_horizon leaves no rollout steps for rollout_p_loss.")
+    total = pose_obs.new_tensor(0.0)
+    steps = 0
+    delta_cumsum = pose_deltas.cumsum(dim=1)
+    for k in range(2, max_k + 1):
+        end = pose_obs.shape[1] - k
+        if end <= start_frame:
+            continue
+        delta_end = delta_cumsum[:, start_frame + k - 1 : end + k - 1]
+        if start_frame > 0:
+            delta_start = delta_cumsum[:, start_frame - 1 : end - 1]
+            delta_sum_k = delta_end - delta_start
+        else:
+            delta_sum_k = delta_end
+        pose_hat = pose_obs[:, start_frame:end] + delta_sum_k
+        pose_target_k = pose_obs[:, start_frame + k : end + k]
+        if pose_hat.numel() > 0:
+            total = total + F.mse_loss(pose_hat, pose_target_k.detach())
+            steps += 1
+    if steps <= 0:
+        raise AssertionError("rollout_p_loss produced no steps; check rollout_horizon or start_frame.")
+    return total / steps
+
+
 def multi_scale_recon_loss_gauss(
     recon: torch.Tensor,
     target: torch.Tensor,
@@ -1434,59 +1472,49 @@ def _compute_losses_and_metrics(
 
     dh_pred: Optional[torch.Tensor] = None
     if weights.action_delta_h > 0 or weights.additivity_h > 0:
-        if h_states.shape[1] >= 2:
-            h_curr = h_states[:, start_frame:-1]
-            h_next = h_states[:, start_frame + 1 :]
-            a_curr = a_seq[:, start_frame:-1]
-            if h_curr.numel() > 0:
-                dh_pred = model.h_action_delta_projector(h_curr, a_curr)
-                dh_target = h_next - h_curr
-                if weights.action_delta_h > 0:
-                    loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
+        assert h_states.shape[1] >= 2, "action_delta_h/additivity_h requires at least two h timesteps."
+        h_curr = h_states[:, start_frame:-1]
+        h_next = h_states[:, start_frame + 1 :]
+        a_curr = a_seq[:, start_frame:-1]
+        assert h_curr.numel() > 0, "action_delta_h/additivity_h requires non-empty h_curr."
+        dh_pred = model.h_action_delta_projector(h_curr, a_curr)
 
-    if (
-        weights.action_delta_p > 0
-        or weights.additivity_p > 0
-        or weights.rollout_kstep_p > 0
-        or weights.scale_p > 0
-    ):
-        if pose_obs.shape[1] >= 2:
-            pose_curr = pose_pred[:, start_frame:-1]
-            pose_next_obs = pose_obs[:, start_frame + 1 :]
-            if pose_curr.numel() > 0:
-                if weights.action_delta_p > 0:
-                    loss_action_delta_p = F.mse_loss(
-                        pose_pred[:, start_frame + 1 :],
-                        pose_next_obs.detach(),
-                    )
-            if weights.additivity_p > 0 and pose_deltas.shape[1] >= start_frame + 2:
-                delta_sum = pose_deltas[:, start_frame:-1] + pose_deltas[:, start_frame + 1 :]
-                pose_target = pose_obs[:, start_frame + 2 :] - pose_obs[:, start_frame:-2]
-                if delta_sum.numel() > 0 and pose_target.numel() > 0:
-                    loss_additivity_p = F.mse_loss(delta_sum, pose_target.detach())
-            if weights.rollout_kstep_p > 0 and pose_deltas.shape[1] >= 2:
-                max_k = min(cfg.rollout_horizon, pose_obs.shape[1] - 1)
-                if max_k >= 2:
-                    delta_cumsum = pose_deltas.cumsum(dim=1)
-                    k_losses: List[torch.Tensor] = []
-                    for k in range(2, max_k + 1):
-                        end = pose_obs.shape[1] - k
-                        if end <= start_frame:
-                            continue
-                        delta_end = delta_cumsum[:, start_frame + k - 1 : end + k - 1]
-                        if start_frame > 0:
-                            delta_start = delta_cumsum[:, start_frame - 1 : end - 1]
-                            delta_sum_k = delta_end - delta_start
-                        else:
-                            delta_sum_k = delta_end
-                        pose_hat = pose_obs[:, start_frame:end] + delta_sum_k
-                        pose_target_k = pose_obs[:, start_frame + k : end + k]
-                        if pose_hat.numel() > 0:
-                            k_losses.append(F.mse_loss(pose_hat, pose_target_k.detach()))
-                    if k_losses:
-                        loss_rollout_kstep_p = torch.stack(k_losses).mean()
-        if weights.scale_p > 0:
-            loss_scale_p = scale_p_loss(pose_obs, start_frame, cfg.scale_p)
+    if weights.action_delta_h > 0:
+        assert dh_pred is not None, "action_delta_h requires dh_pred."
+        dh_target = h_next - h_curr
+        loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
+
+    if weights.action_delta_p > 0:
+        assert pose_obs.shape[1] >= 2, "action_delta_p requires at least two pose timesteps."
+        pose_curr = pose_pred[:, start_frame:-1]
+        pose_next_obs = pose_obs[:, start_frame + 1 :]
+        assert pose_curr.numel() > 0, "action_delta_p requires non-empty pose_curr."
+        loss_action_delta_p = F.mse_loss(
+            pose_pred[:, start_frame + 1 :],
+            pose_next_obs.detach(),
+        )
+
+    if weights.additivity_p > 0:
+        assert pose_obs.shape[1] >= start_frame + 3, "additivity_p requires at least three pose timesteps."
+        assert pose_deltas.shape[1] >= start_frame + 2, "additivity_p requires at least two deltas."
+        delta_sum = pose_deltas[:, start_frame:-1] + pose_deltas[:, start_frame + 1 :]
+        pose_target = pose_obs[:, start_frame + 2 :] - pose_obs[:, start_frame:-2]
+        assert delta_sum.numel() > 0 and pose_target.numel() > 0, "additivity_p requires non-empty tensors."
+        loss_additivity_p = F.mse_loss(delta_sum, pose_target.detach())
+
+    if weights.rollout_kstep_p > 0:
+        assert pose_obs.shape[1] >= 2, "rollout_kstep_p requires at least two pose timesteps."
+        assert pose_deltas.shape[1] >= 2, "rollout_kstep_p requires at least one delta."
+        loss_rollout_kstep_p = rollout_p_loss(
+            pose_obs,
+            pose_deltas,
+            cfg.rollout_horizon,
+            start_frame,
+        )
+
+    if weights.scale_p > 0:
+        assert pose_obs.shape[1] >= start_frame + 2, "scale_p requires at least two pose timesteps after start."
+        loss_scale_p = scale_p_loss(pose_obs, start_frame, cfg.scale_p)
 
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
@@ -1554,12 +1582,13 @@ def _compute_losses_and_metrics(
             warmup_frames,
         )
 
-    if weights.additivity_h > 0 and dh_pred is not None:
-        if dh_pred.shape[1] >= 2:
-            dh_add_pred = dh_pred[:, :-1] + dh_pred[:, 1:]
-            dh_add_target = h_states[:, start_frame + 2 :] - h_states[:, start_frame:-2]
-            if dh_add_pred.numel() > 0:
-                loss_additivity_h = F.mse_loss(dh_add_pred, dh_add_target)
+    if weights.additivity_h > 0:
+        assert dh_pred is not None, "additivity_h requires dh_pred to be computed."
+        assert dh_pred.shape[1] >= 2, "additivity_h requires at least two predicted deltas."
+        dh_add_pred = dh_pred[:, :-1] + dh_pred[:, 1:]
+        dh_add_target = h_states[:, start_frame + 2 :] - h_states[:, start_frame:-2]
+        assert dh_add_pred.numel() > 0, "additivity_h requires non-empty delta tensors."
+        loss_additivity_h = F.mse_loss(dh_add_pred, dh_add_target)
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
