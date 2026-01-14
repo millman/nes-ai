@@ -74,16 +74,20 @@ class ModelConfig:
     state_embed_unit_norm: bool = False
     # Planning pose dimensionality (defaults to state_embed_dim).
     pose_dim: Optional[int] = None
-    # Feature/descriptor dimensionality for place recognition (defaults to state_embed_dim).
-    descriptor_dim: Optional[int] = None
-    # Apply L2 unit normalization to descriptor embeddings.
-    descriptor_unit_norm: bool = True
 
     # LayerNorm toggles for debugging.
     layer_norms: LayerNormConfig = field(default_factory=LayerNormConfig)
 
     # Apply spectral norm to predictor linear layers for h stability.
-    predictor_spectral_norm: bool = False
+    predictor_spectral_norm: bool = True
+
+    # Optional head toggles (resolved from loss weights at runtime when training).
+    enable_inverse_dynamics_z: bool = True
+    enable_inverse_dynamics_h: bool = True
+    enable_inverse_dynamics_p: bool = True
+    enable_action_delta_z: bool = True
+    enable_action_delta_h: bool = True
+    enable_action_delta_p: bool = True
 
     @property
     def embedding_dim(self) -> int:
@@ -113,5 +117,3 @@ class ModelConfig:
             self.state_embed_dim = self.state_dim
         if self.pose_dim is None:
             self.pose_dim = self.state_embed_dim
-        if self.descriptor_dim is None:
-            self.descriptor_dim = self.state_embed_dim

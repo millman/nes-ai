@@ -169,19 +169,27 @@ def save_path_independence_plot(
 def save_drift_by_action_plot(
     out_path: Path,
     labels: Sequence[str],
-    drifts: Sequence[float],
-    counts: Sequence[int],
+    drift_samples: Sequence[Sequence[float]],
     title: str = "H drift by action",
 ) -> None:
     idx = np.arange(len(labels))
     fig, ax = plt.subplots(1, 1, figsize=(6.6, 3.2))
-    ax.bar(idx, drifts, color="#8172b3")
+    for i, samples in enumerate(drift_samples):
+        if not samples:
+            continue
+        samples_np = np.asarray(samples, dtype=np.float32)
+        if samples_np.size > 200:
+            take = np.linspace(0, samples_np.size - 1, num=200, dtype=int)
+            samples_np = samples_np[take]
+        jitter = (np.random.rand(samples_np.size) - 0.5) * 0.2
+        ax.scatter(idx[i] + jitter, samples_np, s=10, alpha=0.35, color="#8172b3", edgecolors="none")
+        mean_val = float(np.mean(samples_np))
+        ax.hlines(mean_val, idx[i] - 0.3, idx[i] + 0.3, color="#c44e52", linewidth=2)
+        ax.text(idx[i], mean_val, f"{len(samples)}", ha="center", va="bottom", fontsize=7)
     ax.set_xticks(idx)
     ax.set_xticklabels(labels, rotation=15, ha="right")
-    ax.set_ylabel("Mean ||h_{t+1}-h_t||")
+    ax.set_ylabel("||h_{t+1}-h_t||")
     ax.set_title(title)
-    for i, count in enumerate(counts):
-        ax.text(i, drifts[i], f"{count}", ha="center", va="bottom", fontsize=7)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=DEFAULT_DPI)

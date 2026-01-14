@@ -603,7 +603,7 @@ class LossWeights:
     rollout_kstep_p: float = 1.0
 
     # Pose scale anchoring (distribution-level).
-    scale_p: float = 0.0
+    scale_p: float = 1.0
 
     # Goal-conditioned ranking loss on p = g(stopgrad(h)).
     # Keeps p useful for planning geometry while avoiding action algebra constraints.
@@ -798,19 +798,11 @@ class JEPAWorldModel(nn.Module):
         )
         self.state_dim = cfg.state_dim
         pose_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_embed_dim
-        desc_dim = cfg.descriptor_dim if cfg.descriptor_dim is not None else pose_dim
         self.h2p = HiddenToStateProjector(
             cfg.state_dim,
             pose_dim if pose_dim is not None else cfg.state_dim,
             cfg.hidden_dim,
             cfg.state_embed_unit_norm,
-            use_layer_norm=cfg.layer_norms.h2p_projector,
-        )
-        self.h2f = HiddenToStateProjector(
-            cfg.state_dim,
-            desc_dim if desc_dim is not None else cfg.state_dim,
-            cfg.hidden_dim,
-            cfg.descriptor_unit_norm,
             use_layer_norm=cfg.layer_norms.h2p_projector,
         )
         # Backwards-compatible aliases for legacy names.
@@ -826,40 +818,64 @@ class JEPAWorldModel(nn.Module):
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.z2h_projector,
         )
-        self.inverse_dynamics_z = InverseDynamicsHead(
-            self.embedding_dim,
-            cfg.hidden_dim,
-            cfg.action_dim,
-            use_layer_norm=cfg.layer_norms.inverse_dynamics_z,
+        self.inverse_dynamics_z = (
+            InverseDynamicsHead(
+                self.embedding_dim,
+                cfg.hidden_dim,
+                cfg.action_dim,
+                use_layer_norm=cfg.layer_norms.inverse_dynamics_z,
+            )
+            if cfg.enable_inverse_dynamics_z
+            else None
         )
-        self.inverse_dynamics_h = InverseDynamicsHead(
-            cfg.state_dim,
-            cfg.hidden_dim,
-            cfg.action_dim,
-            use_layer_norm=cfg.layer_norms.inverse_dynamics_h,
+        self.inverse_dynamics_h = (
+            InverseDynamicsHead(
+                cfg.state_dim,
+                cfg.hidden_dim,
+                cfg.action_dim,
+                use_layer_norm=cfg.layer_norms.inverse_dynamics_h,
+            )
+            if cfg.enable_inverse_dynamics_h
+            else None
         )
-        self.inverse_dynamics_p = InverseDynamicsHead(
-            pose_dim if pose_dim is not None else cfg.state_dim,
-            cfg.hidden_dim,
-            cfg.action_dim,
-            use_layer_norm=cfg.layer_norms.inverse_dynamics_p,
+        self.inverse_dynamics_p = (
+            InverseDynamicsHead(
+                pose_dim if pose_dim is not None else cfg.state_dim,
+                cfg.hidden_dim,
+                cfg.action_dim,
+                use_layer_norm=cfg.layer_norms.inverse_dynamics_p,
+            )
+            if cfg.enable_inverse_dynamics_p
+            else None
         )
-        self.z_action_delta_projector = ActionDeltaProjector(
-            cfg.action_dim,
-            self.embedding_dim,
-            use_layer_norm=cfg.layer_norms.action_delta_projector_z,
+        self.z_action_delta_projector = (
+            ActionDeltaProjector(
+                cfg.action_dim,
+                self.embedding_dim,
+                use_layer_norm=cfg.layer_norms.action_delta_projector_z,
+            )
+            if cfg.enable_action_delta_z
+            else None
         )
-        self.h_action_delta_projector = HiddenActionDeltaProjector(
-            cfg.state_dim,
-            cfg.action_dim,
-            cfg.hidden_dim,
-            use_layer_norm=cfg.layer_norms.action_delta_projector_h,
+        self.h_action_delta_projector = (
+            HiddenActionDeltaProjector(
+                cfg.state_dim,
+                cfg.action_dim,
+                cfg.hidden_dim,
+                use_layer_norm=cfg.layer_norms.action_delta_projector_h,
+            )
+            if cfg.enable_action_delta_h
+            else None
         )
-        self.p_action_delta_projector = HiddenActionDeltaProjector(
-            pose_dim if pose_dim is not None else cfg.state_dim,
-            cfg.action_dim,
-            cfg.hidden_dim,
-            use_layer_norm=cfg.layer_norms.action_delta_projector_p,
+        self.p_action_delta_projector = (
+            HiddenActionDeltaProjector(
+                pose_dim if pose_dim is not None else cfg.state_dim,
+                cfg.action_dim,
+                cfg.hidden_dim,
+                use_layer_norm=cfg.layer_norms.action_delta_projector_p,
+            )
+            if cfg.enable_action_delta_p
+            else None
         )
 
     def encode_sequence(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -906,6 +922,18 @@ def _rollout_pose(
     actions: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build pose observations from h and integrate pose deltas over actions."""
+    if h_states.ndim != 3:
+        raise AssertionError("h_states must have shape [B, T, D].")
+    if actions.ndim != 3:
+        raise AssertionError("actions must have shape [B, T, A].")
+    if h_states.shape[0] != actions.shape[0]:
+        raise AssertionError("h_states and actions must share the batch dimension.")
+    if h_states.shape[1] < 1:
+        raise AssertionError("h_states must include at least one timestep.")
+    if actions.shape[1] < 1:
+        raise AssertionError("actions must include at least one timestep.")
+    if model.p_action_delta_projector is None:
+        raise AssertionError("p_action_delta_projector is required to roll out pose deltas.")
     pose_obs = model.h2p(h_states.detach())
     bsz, steps, dim = pose_obs.shape
     if steps <= 1 or actions.shape[1] < 1:
@@ -1405,7 +1433,22 @@ def _compute_losses_and_metrics(
     # Warmup before applying hidden-state losses to avoid cold-start transients.
     start_frame = max(min(warmup_frames, seq_len - 1), 0)
 
-    pose_obs, pose_pred, pose_deltas = _rollout_pose(model, h_states, a_seq)
+    use_action_delta_p = (
+        weights.action_delta_p > 0
+        or weights.additivity_p > 0
+        or weights.rollout_kstep_p > 0
+    )
+    pose_obs: Optional[torch.Tensor] = None
+    pose_pred: Optional[torch.Tensor] = None
+    pose_deltas: Optional[torch.Tensor] = None
+    if use_action_delta_p:
+        pose_obs, pose_pred, pose_deltas = _rollout_pose(
+            model,
+            h_states,
+            a_seq,
+        )
+    elif weights.inverse_dynamics_p > 0 or weights.scale_p > 0:
+        pose_obs = model.h2p(h_states.detach())
 
     def _norm_stats(tensor: torch.Tensor) -> Tuple[float, float, float]:
         if tensor.numel() == 0:
@@ -1420,8 +1463,12 @@ def _compute_losses_and_metrics(
     with torch.no_grad():
         z_norm_mean, z_norm_std, z_norm_max = _norm_stats(z_embeddings)
         h_norm_mean, h_norm_std, h_norm_max = _norm_stats(h_states)
-        p_embeddings = pose_obs.detach()
-        p_norm_mean, p_norm_std, p_norm_max = _norm_stats(p_embeddings)
+        p_norm_mean = x_frames.new_tensor(0.0)
+        p_norm_std = x_frames.new_tensor(0.0)
+        p_norm_max = x_frames.new_tensor(0.0)
+        if pose_obs is not None:
+            p_embeddings = pose_obs.detach()
+            p_norm_mean, p_norm_std, p_norm_max = _norm_stats(p_embeddings)
 
     # -------------------------------------------------------------------------
     # Losses
@@ -1472,6 +1519,8 @@ def _compute_losses_and_metrics(
 
     dh_pred: Optional[torch.Tensor] = None
     if weights.action_delta_h > 0 or weights.additivity_h > 0:
+        if model.h_action_delta_projector is None:
+            raise AssertionError("h_action_delta_projector is disabled but action_delta_h/additivity_h is enabled.")
         assert h_states.shape[1] >= 2, "action_delta_h/additivity_h requires at least two h timesteps."
         h_curr = h_states[:, start_frame:-1]
         h_next = h_states[:, start_frame + 1 :]
@@ -1485,6 +1534,8 @@ def _compute_losses_and_metrics(
         loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
 
     if weights.action_delta_p > 0:
+        if pose_obs is None or pose_pred is None:
+            raise AssertionError("action_delta_p requires pose rollouts to be computed.")
         assert pose_obs.shape[1] >= 2, "action_delta_p requires at least two pose timesteps."
         pose_curr = pose_pred[:, start_frame:-1]
         pose_next_obs = pose_obs[:, start_frame + 1 :]
@@ -1495,6 +1546,8 @@ def _compute_losses_and_metrics(
         )
 
     if weights.additivity_p > 0:
+        if pose_obs is None or pose_deltas is None:
+            raise AssertionError("additivity_p requires pose rollouts to be computed.")
         assert pose_obs.shape[1] >= start_frame + 3, "additivity_p requires at least three pose timesteps."
         assert pose_deltas.shape[1] >= start_frame + 2, "additivity_p requires at least two deltas."
         delta_sum = pose_deltas[:, start_frame:-1] + pose_deltas[:, start_frame + 1 :]
@@ -1503,6 +1556,8 @@ def _compute_losses_and_metrics(
         loss_additivity_p = F.mse_loss(delta_sum, pose_target.detach())
 
     if weights.rollout_kstep_p > 0:
+        if pose_obs is None or pose_deltas is None:
+            raise AssertionError("rollout_kstep_p requires pose rollouts to be computed.")
         assert pose_obs.shape[1] >= 2, "rollout_kstep_p requires at least two pose timesteps."
         assert pose_deltas.shape[1] >= 2, "rollout_kstep_p requires at least one delta."
         loss_rollout_kstep_p = rollout_p_loss(
@@ -1513,21 +1568,31 @@ def _compute_losses_and_metrics(
         )
 
     if weights.scale_p > 0:
+        if pose_obs is None:
+            raise AssertionError("scale_p requires pose observations to be computed.")
         assert pose_obs.shape[1] >= start_frame + 2, "scale_p requires at least two pose timesteps after start."
         loss_scale_p = scale_p_loss(pose_obs, start_frame, cfg.scale_p)
 
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
+        if model.inverse_dynamics_z is None:
+            raise AssertionError("inverse_dynamics_z head is disabled but inverse_dynamics_z loss is enabled.")
         assert z_embeddings.shape[1] >= 2
         action_logits_z = model.inverse_dynamics_z(z_embeddings[:, :-1], z_embeddings[:, 1:])
         loss_inverse_dynamics_z = INVERSE_DYNAMICS_LOSS(action_logits_z, a_seq[:, :-1])
 
     if weights.inverse_dynamics_h > 0:
+        if model.inverse_dynamics_h is None:
+            raise AssertionError("inverse_dynamics_h head is disabled but inverse_dynamics_h loss is enabled.")
         assert h_states.shape[1] >= 2
         action_logits_h = model.inverse_dynamics_h(h_states[:, :-1], h_states[:, 1:])
         loss_inverse_dynamics_h = INVERSE_DYNAMICS_LOSS(action_logits_h, a_seq[:, :-1])
 
     if weights.inverse_dynamics_p > 0:
+        if model.inverse_dynamics_p is None:
+            raise AssertionError("inverse_dynamics_p head is disabled but inverse_dynamics_p loss is enabled.")
+        if pose_obs is None:
+            pose_obs = model.h2p(h_states.detach())
         assert pose_obs.shape[1] >= 2
         # NOTE: inverse dynamics on p trains h2p but does not backprop into h/dynamics.
         p_for_inverse = pose_obs
@@ -1535,6 +1600,8 @@ def _compute_losses_and_metrics(
         loss_inverse_dynamics_p = INVERSE_DYNAMICS_LOSS(action_logits_p, a_seq[:, :-1])
 
     if weights.action_delta_z > 0:
+        if model.z_action_delta_projector is None:
+            raise AssertionError("z_action_delta_projector is disabled but action_delta_z loss is enabled.")
         assert z_embeddings.shape[1] >= 2
         delta_target = z_embeddings[:, 1:] - z_embeddings[:, :-1]
         delta_proto = model.z_action_delta_projector(a_seq[:, :-1])
@@ -3143,6 +3210,19 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     val_dataloader_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     embedding_generator = torch.Generator()
     embedding_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
+    model_cfg.enable_inverse_dynamics_z = weights.inverse_dynamics_z > 0
+    model_cfg.enable_inverse_dynamics_h = weights.inverse_dynamics_h > 0
+    model_cfg.enable_inverse_dynamics_p = weights.inverse_dynamics_p > 0
+    model_cfg.enable_action_delta_z = weights.action_delta_z > 0
+    model_cfg.enable_action_delta_h = (
+        weights.action_delta_h > 0
+        or weights.additivity_h > 0
+    )
+    model_cfg.enable_action_delta_p = (
+        weights.action_delta_p > 0
+        or weights.additivity_p > 0
+        or weights.rollout_kstep_p > 0
+    )
     diagnostics_generator = torch.Generator()
     diagnostics_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     vis_ctrl_generator = torch.Generator()
@@ -3798,16 +3878,19 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         use_z2h_init=weights.z2h > 0,
                     )
                     diag_p_embeddings = model.h2p(diag_h_states)
-                diag_composability = compute_composability_series(
-                    model,
-                    diag_embeddings,
-                    diag_h_states,
-                    diag_actions_device,
-                    warmup_frames,
-                    cfg.diagnostics.min_action_count,
-                )
+                diag_composability = None
+                diag_p_series = None
+                if model.z_action_delta_projector is not None and model.h_action_delta_projector is not None:
+                    diag_composability = compute_composability_series(
+                        model,
+                        diag_embeddings,
+                        diag_h_states,
+                        diag_actions_device,
+                        warmup_frames,
+                        cfg.diagnostics.min_action_count,
+                    )
+                    diag_p_series = diag_composability.get("p") or diag_composability.get("s")
                 assert torch.is_grad_enabled()
-                diag_p_series = diag_composability.get("p") or diag_composability.get("s")
 
                 def _write_motion_bundle(
                     name: str,
@@ -4020,21 +4103,22 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.diagnostics.top_k_components,
                     diag_paths,
                 )
-                save_composability_plot(
-                    vis_composability_z_dir / f"composability_z_{global_step:07d}.png",
-                    diag_composability["z"],
-                    "z",
-                )
-                save_composability_plot(
-                    vis_composability_h_dir / f"composability_h_{global_step:07d}.png",
-                    diag_composability["h"],
-                    "h",
-                )
-                save_composability_plot(
-                    vis_composability_p_dir / f"composability_p_{global_step:07d}.png",
-                    diag_p_series,
-                    "p",
-                )
+                if diag_composability is not None and diag_p_series is not None:
+                    save_composability_plot(
+                        vis_composability_z_dir / f"composability_z_{global_step:07d}.png",
+                        diag_composability["z"],
+                        "z",
+                    )
+                    save_composability_plot(
+                        vis_composability_h_dir / f"composability_h_{global_step:07d}.png",
+                        diag_composability["h"],
+                        "h",
+                    )
+                    save_composability_plot(
+                        vis_composability_p_dir / f"composability_p_{global_step:07d}.png",
+                        diag_p_series,
+                        "p",
+                    )
                 alignment_stats_z, alignment_debug_z, (cycle_errors_z, cycle_per_action_z) = _write_motion_bundle(
                     "z",
                     motion_z,
@@ -4090,7 +4174,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     h_drift_mean = 0.0
                     p_drift_mean = 0.0
                 id_acc_p = 0.0
-                if diag_p_embeddings.shape[1] >= 2:
+                if weights.inverse_dynamics_p > 0 and diag_p_embeddings.shape[1] >= 2:
                     action_logits_p = model.inverse_dynamics_p(
                         diag_p_embeddings[:, :-1],
                         diag_p_embeddings[:, 1:],
@@ -4561,19 +4645,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         count = int(mask.sum())
                         if count == 0:
                             continue
-                        mean_drift = float(h_drift_flat[mask].mean())
-                        drift_stats.append((int(aid), count, mean_drift))
+                        samples = h_drift_flat[mask]
+                        mean_drift = float(samples.mean())
+                        drift_stats.append((int(aid), count, mean_drift, samples.tolist()))
                     drift_stats.sort(key=lambda row: row[1], reverse=True)
                     drift_stats = drift_stats[: cfg.diagnostics.h_drift_max_actions]
                     if drift_stats:
-                        labels = [action_labels.get(aid, f"action {aid}") for aid, _, _ in drift_stats]
-                        counts = [count for _, count, _ in drift_stats]
-                        drifts = [drift for _, _, drift in drift_stats]
+                        labels = [action_labels.get(aid, f"action {aid}") for aid, _, _, _ in drift_stats]
+                        drift_samples = [samples for _, _, _, samples in drift_stats]
                         save_drift_by_action_plot(
                             diagnostics_h_drift_dir / f"h_drift_by_action_{global_step:07d}.png",
                             labels,
-                            drifts,
-                            counts,
+                            drift_samples,
                         )
                         _write_step_csv(
                             diagnostics_h_drift_dir,
@@ -4581,7 +4664,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                             ["action_id", "label", "count", "mean_drift"],
                             [
                                 (aid, action_labels.get(aid, f"action {aid}"), count, drift)
-                                for aid, count, drift in drift_stats
+                                for aid, count, drift, _ in drift_stats
                             ],
                         )
 
