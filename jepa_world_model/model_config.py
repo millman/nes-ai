@@ -12,7 +12,6 @@ class LayerNormConfig:
 
     h2z_projector: bool = False
     z2h_projector: bool = False
-    h2p_projector: bool = False
 
     # Action deltas are learned residual updates applied repeatedly over rollout time,
     # so their scale directly compounds. Poorly scaled deltas can explode gradients
@@ -33,6 +32,7 @@ class LayerNormConfig:
     inverse_dynamics_p: bool = False
 
     h_next: bool = False
+    pose_correction_projector: bool = False
 
 @dataclass
 class ModelConfig:
@@ -45,7 +45,7 @@ class ModelConfig:
                         ├─ Predictor([z_t, h_t, action_t]) → ẑ_{t+1}, ĥ_{t+1}
         h_t (state_dim) ─────────────────────┘
             │
-            ├→ StateHead(h_t) → p_t (planning embedding)
+            ├→ PoseDelta(p_t, h_t, a_t) → Δp_t (pose increment)
             └→ Decoder(decoder_schedule → image reconstruction from z)
 
     Notes:
@@ -66,14 +66,14 @@ class ModelConfig:
     # Number of initial seq_len frames excluded from h/pose losses only.
     warmup_frames_h: int = 0
 
-    # Planning/state embedding (p) configuration.
-    # Optional separate dimension for the projected planning embedding p (h2p).
-    # If None, defaults to state_dim so h and p share dimensionality.
-    state_embed_dim: Optional[int] = None
-    # Apply L2 unit normalization to p embeddings.
-    state_embed_unit_norm: bool = False
-    # Planning pose dimensionality (defaults to state_embed_dim).
+    # Planning pose dimensionality (defaults to state_dim).
     pose_dim: Optional[int] = None
+    # Stop-grad h when conditioning pose deltas to keep p losses from shaping dynamics.
+    pose_delta_detach_h: bool = True
+    # Apply observation-conditioned pose correction using z_{t+1}.
+    pose_correction_use_z: bool = False
+    # Stop-grad z when applying pose correction.
+    pose_correction_detach_z: bool = True
 
     # LayerNorm toggles for debugging.
     layer_norms: LayerNormConfig = field(default_factory=LayerNormConfig)
@@ -113,7 +113,5 @@ class ModelConfig:
                 raise ValueError(
                     f"image_size={self.image_size} must be divisible by 2**len(decoder_schedule)={decoder_stride}."
                 )
-        if self.state_embed_dim is None:
-            self.state_embed_dim = self.state_dim
         if self.pose_dim is None:
-            self.pose_dim = self.state_embed_dim
+            self.pose_dim = self.state_dim

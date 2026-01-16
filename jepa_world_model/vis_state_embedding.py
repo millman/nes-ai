@@ -20,6 +20,7 @@ from jepa_world_model.vis_odometry import (
     _plot_latent_prediction_comparison,
     _plot_odometry_embeddings,
 )
+from jepa_world_model.pose_rollout import rollout_pose_sequence
 
 
 def write_state_embedding_histogram(
@@ -81,7 +82,7 @@ def write_state_embedding_outputs(
             actions,
             use_z2h_init=use_z2h_init,
         )
-        p = model.h2p(h_states)[0]
+        p = rollout_pose_sequence(model, h_states, actions, z_embeddings=embeddings)[0]
 
     warmup_frames = max(model.cfg.warmup_frames_h, 0)
     warmup = max(min(warmup_frames, p.shape[0] - 1), 0)
@@ -160,7 +161,7 @@ def write_state_embedding_outputs(
             use_z2h_init=use_z2h_init,
         )
         if h_hat_open.shape[1] > 0:
-            p_hat = model.h2p(h_hat_open)[0].detach().cpu().numpy()
+            p_hat = rollout_pose_sequence(model, h_hat_open, actions, z_embeddings=embeddings)[0].detach().cpu().numpy()
             p_next = p_np[1:]
             p_hat_trim = p_hat[warmup:]
             p_next_trim = p_next[warmup:] if warmup < p_next.shape[0] else p_next[:0]
@@ -199,7 +200,7 @@ def write_state_embedding_outputs(
             hist_actions,
             use_z2h_init=use_z2h_init,
         )
-        hist_p = model.h2p(hist_h_states)
+        hist_p = rollout_pose_sequence(model, hist_h_states, hist_actions, z_embeddings=hist_embeddings)
     hist_warmup = max(min(warmup_frames, hist_p.shape[1] - 1), 0)
     hist_p = hist_p[:, hist_warmup:]
     if hist_p.shape[1] < 1:

@@ -87,7 +87,7 @@ def calculate_flops_per_step(cfg: ModelConfig, batch_size: int, seq_len: int) ->
     delta_head_total = delta_head_flops * num_predictions
 
     # --- Action-from-p-pair head (per transition) ---
-    p_dim = cfg.state_embed_dim if cfg.state_embed_dim is not None else cfg.state_dim
+    p_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_dim
     p_delta_head_flops = 0
     p_delta_head_flops += _linear_flops(p_dim * 2, hidden_dim)
     p_delta_head_flops += _linear_flops(hidden_dim, hidden_dim)

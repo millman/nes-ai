@@ -66,6 +66,7 @@ from jepa_world_model.vis_rollout_batch import save_rollout_sequence_batch
 from jepa_world_model.vis_temporal_pairs import save_temporal_pair_visualization
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
 from jepa_world_model.config_diagnostics import DiagnosticsConfig, SpikeDiagnosticsConfig
+from jepa_world_model.pose_rollout import rollout_pose_sequence
 from jepa_world_model.plots.write_action_alignment_crosscheck import (
     write_action_alignment_crosscheck,
 )
@@ -174,44 +175,6 @@ Encoder = ConvEncoder
 VisualizationDecoder = ConvVisualizationDecoder
 LegacyEncoder = ConvEncoder
 LegacyVisualizationDecoder = ConvVisualizationDecoder
-
-
-class HiddenToStateProjector(nn.Module):
-    """Project hidden state to a planning (p) or feature (f) embedding."""
-
-    def __init__(
-        self,
-        h_dim: int,
-        s_dim: int,
-        hidden_dim: int,
-        unit_norm: bool,
-        use_layer_norm: bool = True,
-    ) -> None:
-        super().__init__()
-        layers = []
-        if use_layer_norm:
-            layers.append(nn.LayerNorm(h_dim))
-        layers.extend(
-            [
-                nn.Linear(h_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, s_dim),
-            ]
-        )
-        self.net = nn.Sequential(*layers)
-        self.h_dim = h_dim
-        self.s_dim = s_dim
-        self.hidden_dim = hidden_dim
-        self.unit_norm = unit_norm
-        self.use_layer_norm = use_layer_norm
-
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
-        original_shape = h.shape[:-1]
-        h_flat = h.reshape(-1, h.shape[-1])
-        state = self.net(h_flat)
-        if self.unit_norm:
-            state = F.normalize(state, dim=-1)
-        return state.view(*original_shape, state.shape[-1])
 
 
 class PredictorNetwork(nn.Module):
@@ -360,7 +323,7 @@ class HiddenToDeltaProjector(nn.Module):
 
 
 class HiddenActionDeltaProjector(nn.Module):
-    """Predict state delta from hidden state and action."""
+    """Predict state delta from hidden state and action (no pose input)."""
 
     def __init__(
         self,
@@ -398,8 +361,96 @@ class HiddenActionDeltaProjector(nn.Module):
         return delta.view(*original_shape, delta.shape[-1])
 
 
+class PoseActionDeltaProjector(nn.Module):
+    """Predict pose delta from pose, hidden state, and action (adds pose context vs HiddenActionDeltaProjector)."""
+
+    def __init__(
+        self,
+        pose_dim: int,
+        h_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        use_layer_norm: bool = True,
+    ) -> None:
+        super().__init__()
+        input_dim = pose_dim + h_dim + action_dim
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(input_dim))
+        layers.extend(
+            [
+                nn.Linear(input_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, pose_dim),
+            ]
+        )
+        self.net = nn.Sequential(*layers)
+        self.pose_dim = pose_dim
+        self.h_dim = h_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.use_layer_norm = use_layer_norm
+
+    def forward(
+        self,
+        pose: torch.Tensor,
+        h: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        if not (pose.shape[:-1] == h.shape[:-1] == actions.shape[:-1]):
+            raise ValueError("Pose, hidden state, and actions must share leading dimensions.")
+        original_shape = pose.shape[:-1]
+        pose_flat = pose.reshape(-1, pose.shape[-1])
+        h_flat = h.reshape(-1, h.shape[-1])
+        act_flat = actions.reshape(-1, actions.shape[-1])
+        delta = self.net(torch.cat([pose_flat, h_flat, act_flat], dim=-1))
+        return delta.view(*original_shape, delta.shape[-1])
+
+
+class PoseCorrectionProjector(nn.Module):
+    """Predict observation-conditioned pose correction from pose and z."""
+
+    def __init__(
+        self,
+        pose_dim: int,
+        z_dim: int,
+        hidden_dim: int,
+        use_layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        input_dim = pose_dim + z_dim
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(input_dim))
+        layers.extend(
+            [
+                nn.Linear(input_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, pose_dim),
+            ]
+        )
+        self.net = nn.Sequential(*layers)
+        self.pose_dim = pose_dim
+        self.z_dim = z_dim
+        self.hidden_dim = hidden_dim
+        self.use_layer_norm = use_layer_norm
+
+    def forward(self, pose: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        if pose.shape[:-1] != z.shape[:-1]:
+            raise ValueError("Pose and z must share leading dimensions.")
+        original_shape = pose.shape[:-1]
+        pose_flat = pose.reshape(-1, pose.shape[-1])
+        z_flat = z.reshape(-1, z.shape[-1])
+        correction = self.net(torch.cat([pose_flat, z_flat], dim=-1))
+        return correction.view(*original_shape, correction.shape[-1])
+
+
 class ActionDeltaProjector(nn.Module):
-    """Project action vectors into latent delta prototypes."""
+    """Project action vectors into latent delta prototypes (no state inputs)."""
 
     def __init__(self, action_dim: int, target_dim: int, use_layer_norm: bool = True) -> None:
         super().__init__()
@@ -560,6 +611,7 @@ class LossWeights:
     # z: Level 1 fixed translation; weakly anchor action directions without overfitting perception.
     # h: Level 2 + light Level 3; state-conditioned deltas with short-horizon composition.
     # p: Level 3; a smoother planning space with consistent multi-step structure.
+    # p_odometry note: in the odometry writeup, "p" refers to Δp (increment), while here p is pose.
 
     # --- Z ---
     # Action delta alignment: z_{t+1} - z_t vs learned action prototype.
@@ -594,19 +646,24 @@ class LossWeights:
 
     # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
+    # p_odometry: 1-step odometry consistency (pose_t + Δp_t ≈ pose_{t+1}).
     action_delta_p: float = 1.0
 
     # Explicit additivity of p deltas across steps.
+    # p_odometry: short-horizon composition/additivity of increments.
     additivity_p: float = 1.0
 
     # k-step rollout consistency in p-space.
+    # p_odometry: k-step odometry consistency (multi-step integration).
     rollout_kstep_p: float = 1.0
 
     # Pose scale anchoring (distribution-level).
+    # p_odometry: scale/magnitude anchor to limit drift.
     scale_p: float = 1.0
 
-    # Goal-conditioned ranking loss on p = g(stopgrad(h)).
-    # Keeps p useful for planning geometry while avoiding action algebra constraints.
+    # Goal-conditioned ranking loss on the pose rollout.
+    # Keeps pose useful for planning geometry while avoiding action algebra constraints.
+    # p_odometry: planning geometry / ranking head over the pose space.
     geometry_rank_p: float = 1.0
 
 
@@ -797,14 +854,7 @@ class JEPAWorldModel(nn.Module):
             use_spectral_norm=cfg.predictor_spectral_norm,
         )
         self.state_dim = cfg.state_dim
-        pose_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_embed_dim
-        self.h2p = HiddenToStateProjector(
-            cfg.state_dim,
-            pose_dim if pose_dim is not None else cfg.state_dim,
-            cfg.hidden_dim,
-            cfg.state_embed_unit_norm,
-            use_layer_norm=cfg.layer_norms.h2p_projector,
-        )
+        pose_dim = cfg.pose_dim if cfg.pose_dim is not None else cfg.state_dim
         # Backwards-compatible aliases for legacy names.
         self.h_to_z = HiddenToZProjector(
             cfg.state_dim,
@@ -849,6 +899,7 @@ class JEPAWorldModel(nn.Module):
             else None
         )
         self.z_action_delta_projector = (
+            # Action-only prototypes for z; no state/pose conditioning.
             ActionDeltaProjector(
                 cfg.action_dim,
                 self.embedding_dim,
@@ -858,6 +909,7 @@ class JEPAWorldModel(nn.Module):
             else None
         )
         self.h_action_delta_projector = (
+            # h-only delta predictor (no pose input).
             HiddenActionDeltaProjector(
                 cfg.state_dim,
                 cfg.action_dim,
@@ -868,13 +920,25 @@ class JEPAWorldModel(nn.Module):
             else None
         )
         self.p_action_delta_projector = (
-            HiddenActionDeltaProjector(
+            # Pose delta predictor that conditions on pose + h + action.
+            PoseActionDeltaProjector(
                 pose_dim if pose_dim is not None else cfg.state_dim,
+                cfg.state_dim,
                 cfg.action_dim,
                 cfg.hidden_dim,
                 use_layer_norm=cfg.layer_norms.action_delta_projector_p,
             )
             if cfg.enable_action_delta_p
+            else None
+        )
+        self.p_correction_projector = (
+            PoseCorrectionProjector(
+                pose_dim if pose_dim is not None else cfg.state_dim,
+                self.embedding_dim,
+                cfg.hidden_dim,
+                use_layer_norm=cfg.layer_norms.pose_correction_projector,
+            )
+            if cfg.pose_correction_use_z
             else None
         )
 
@@ -920,38 +984,11 @@ def _rollout_pose(
     model: JEPAWorldModel,
     h_states: torch.Tensor,
     actions: torch.Tensor,
+    z_embeddings: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build pose observations from h and integrate pose deltas over actions."""
-    if h_states.ndim != 3:
-        raise AssertionError("h_states must have shape [B, T, D].")
-    if actions.ndim != 3:
-        raise AssertionError("actions must have shape [B, T, A].")
-    if h_states.shape[0] != actions.shape[0]:
-        raise AssertionError("h_states and actions must share the batch dimension.")
-    if h_states.shape[1] < 1:
-        raise AssertionError("h_states must include at least one timestep.")
-    if actions.shape[1] < 1:
-        raise AssertionError("actions must include at least one timestep.")
-    if model.p_action_delta_projector is None:
-        raise AssertionError("p_action_delta_projector is required to roll out pose deltas.")
-    pose_obs = model.h2p(h_states.detach())
-    bsz, steps, dim = pose_obs.shape
-    if steps <= 1 or actions.shape[1] < 1:
-        zero_delta = pose_obs.new_zeros((bsz, 0, dim))
-        return pose_obs, pose_obs, zero_delta
-    max_steps = min(actions.shape[1], steps - 1)
-    pose_pred: List[torch.Tensor] = [pose_obs[:, 0]]
-    pose_deltas: List[torch.Tensor] = []
-    for idx in range(max_steps):
-        delta = model.p_action_delta_projector(pose_pred[-1], actions[:, idx])
-        pose_next = pose_pred[-1] + delta
-        pose_deltas.append(delta)
-        pose_pred.append(pose_next)
-    pose_pred_tensor = torch.stack(pose_pred, dim=1)
-    if pose_pred_tensor.shape[1] < steps:
-        pad = pose_pred_tensor[:, -1:].repeat(1, steps - pose_pred_tensor.shape[1], 1)
-        pose_pred_tensor = torch.cat([pose_pred_tensor, pad], dim=1)
-    return pose_obs, pose_pred_tensor, torch.stack(pose_deltas, dim=1)
+    """Integrate Δp via the pose delta model to produce a pose rollout."""
+    pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions, z_embeddings=z_embeddings)
+    return pose_pred, pose_pred, pose_deltas
 
 
 def rollout_z_loss(
@@ -1221,14 +1258,12 @@ def z2h_loss(
 
 
 def geometry_rank_loss(
-    model: JEPAWorldModel,
-    h_states: torch.Tensor,
+    pose: torch.Tensor,
     cfg: LossGeometryConfig,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if h_states.numel() == 0:
-        raise AssertionError("geometry_rank_loss requires non-empty h_states.")
-    p_geom = model.h2p(h_states.detach())
-    return geometry_ranking_loss(p_geom, cfg)
+    if pose.numel() == 0:
+        raise AssertionError("geometry_rank_loss requires non-empty pose.")
+    return geometry_ranking_loss(pose.detach(), cfg)
 
 
 def pixel_delta_loss(recon: torch.Tensor, frames: torch.Tensor) -> torch.Tensor:
@@ -1438,17 +1473,32 @@ def _compute_losses_and_metrics(
         or weights.additivity_p > 0
         or weights.rollout_kstep_p > 0
     )
+    use_pose_rollout = (
+        use_action_delta_p
+        or weights.geometry_rank_p > 0
+        or weights.inverse_dynamics_p > 0
+        or weights.scale_p > 0
+    )
     pose_obs: Optional[torch.Tensor] = None
     pose_pred: Optional[torch.Tensor] = None
     pose_deltas: Optional[torch.Tensor] = None
-    if use_action_delta_p:
-        pose_obs, pose_pred, pose_deltas = _rollout_pose(
+    if use_pose_rollout:
+        pose_obs, _, _ = _rollout_pose(
             model,
             h_states,
             a_seq,
+            z_embeddings=z_embeddings,
         )
-    elif weights.inverse_dynamics_p > 0 or weights.scale_p > 0:
-        pose_obs = model.h2p(h_states.detach())
+    if use_action_delta_p:
+        h_pred_states = h_preds
+        if h_pred_states.shape[1] + 1 == h_states.shape[1]:
+            h_pred_states = torch.cat([h_states[:, :1], h_pred_states], dim=1)
+        pose_pred, _, pose_deltas = _rollout_pose(
+            model,
+            h_pred_states,
+            a_seq,
+            z_embeddings=z_embeddings,
+        )
 
     def _norm_stats(tensor: torch.Tensor) -> Tuple[float, float, float]:
         if tensor.numel() == 0:
@@ -1513,8 +1563,12 @@ def _compute_losses_and_metrics(
     # h (Auxiliary)
     # p (Geometry)
     if weights.geometry_rank_p > 0:
+        # p_odometry: planning geometry/ranking head (goal-conditioned ordering in pose space).
+        if pose_obs is None:
+            raise AssertionError("geometry_rank_p requires pose rollouts to be computed.")
         loss_geometry_rank_p, geometry_rank_p_accuracy, geometry_rank_p_pairs = geometry_rank_loss(
-            model, h_states, cfg.geometry
+            pose_obs,
+            cfg.geometry,
         )
 
     dh_pred: Optional[torch.Tensor] = None
@@ -1534,6 +1588,7 @@ def _compute_losses_and_metrics(
         loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
 
     if weights.action_delta_p > 0:
+        # p_odometry: 1-step odometry consistency (pose_pred[t+1] vs pose_obs[t+1]).
         if pose_obs is None or pose_pred is None:
             raise AssertionError("action_delta_p requires pose rollouts to be computed.")
         assert pose_obs.shape[1] >= 2, "action_delta_p requires at least two pose timesteps."
@@ -1546,6 +1601,7 @@ def _compute_losses_and_metrics(
         )
 
     if weights.additivity_p > 0:
+        # p_odometry: additivity of increments (Δp_t + Δp_{t+1} ≈ pose_{t+2} - pose_t).
         if pose_obs is None or pose_deltas is None:
             raise AssertionError("additivity_p requires pose rollouts to be computed.")
         assert pose_obs.shape[1] >= start_frame + 3, "additivity_p requires at least three pose timesteps."
@@ -1556,6 +1612,7 @@ def _compute_losses_and_metrics(
         loss_additivity_p = F.mse_loss(delta_sum, pose_target.detach())
 
     if weights.rollout_kstep_p > 0:
+        # p_odometry: k-step integration consistency.
         if pose_obs is None or pose_deltas is None:
             raise AssertionError("rollout_kstep_p requires pose rollouts to be computed.")
         assert pose_obs.shape[1] >= 2, "rollout_kstep_p requires at least two pose timesteps."
@@ -1568,6 +1625,7 @@ def _compute_losses_and_metrics(
         )
 
     if weights.scale_p > 0:
+        # p_odometry: scale anchor for pose drift control.
         if pose_obs is None:
             raise AssertionError("scale_p requires pose observations to be computed.")
         assert pose_obs.shape[1] >= start_frame + 2, "scale_p requires at least two pose timesteps after start."
@@ -1592,9 +1650,8 @@ def _compute_losses_and_metrics(
         if model.inverse_dynamics_p is None:
             raise AssertionError("inverse_dynamics_p head is disabled but inverse_dynamics_p loss is enabled.")
         if pose_obs is None:
-            pose_obs = model.h2p(h_states.detach())
+            pose_obs, _, _ = _rollout_pose(model, h_states, a_seq, z_embeddings=z_embeddings)
         assert pose_obs.shape[1] >= 2
-        # NOTE: inverse dynamics on p trains h2p but does not backprop into h/dynamics.
         p_for_inverse = pose_obs
         action_logits_p = model.inverse_dynamics_p(p_for_inverse[:, :-1], p_for_inverse[:, 1:])
         loss_inverse_dynamics_p = INVERSE_DYNAMICS_LOSS(action_logits_p, a_seq[:, :-1])
@@ -2622,6 +2679,7 @@ class GraphDiagnosticsBatch:
     graph_h_states: torch.Tensor
     ema_embeddings: Optional[torch.Tensor]
     ema_h_states: Optional[torch.Tensor]
+    graph_actions: torch.Tensor
     next_index: torch.Tensor
     next2_index: torch.Tensor
     chunk_ids: torch.Tensor
@@ -2669,6 +2727,7 @@ def _prepare_graph_diagnostics(
         graph_h_states=graph_h_states,
         ema_embeddings=ema_embeddings,
         ema_h_states=ema_h_states,
+        graph_actions=graph_actions_device,
         next_index=next_index,
         next2_index=next2_index,
         chunk_ids=chunk_ids,
@@ -2685,17 +2744,34 @@ def _run_graph_diag(
     graph_preds: torch.Tensor,
     graph_h_preds: torch.Tensor,
     graph_h_states: torch.Tensor,
+    graph_actions: torch.Tensor,
     ema_embeddings: Optional[torch.Tensor],
     ema_h_states: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if embedding_kind == "p":
-        p_targets = model.h2p(graph_h_states)
-        p_hat_full = torch.cat(
-            [model.h2p(graph_h_preds), model.h2p(graph_h_states[:, -1:, :])],
-            dim=1,
+        _, p_targets, _ = _rollout_pose(
+            model,
+            graph_h_states,
+            graph_actions,
+            z_embeddings=graph_embeddings,
         )
-        if graph_cfg.use_ema_targets and ema_model is not None and ema_h_states is not None:
-            targets = ema_model.h2p(ema_h_states)
+        h_pred_states = graph_h_preds
+        if h_pred_states.shape[1] + 1 == graph_h_states.shape[1]:
+            h_pred_states = torch.cat([graph_h_states[:, :1], h_pred_states], dim=1)
+        _, p_hat, _ = _rollout_pose(
+            model,
+            h_pred_states,
+            graph_actions,
+            z_embeddings=graph_preds,
+        )
+        p_hat_full = torch.cat([p_hat, p_targets[:, -1:, :]], dim=1)
+        if graph_cfg.use_ema_targets and ema_model is not None and ema_h_states is not None and ema_embeddings is not None:
+            _, targets, _ = _rollout_pose(
+                ema_model,
+                ema_h_states,
+                graph_actions,
+                z_embeddings=ema_embeddings,
+            )
         else:
             targets = p_targets
         z_flat = p_targets.reshape(-1, p_targets.shape[-1])
@@ -3760,7 +3836,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     embed_actions,
                     use_z2h_init=weights.z2h > 0,
                 )
-                p_embeddings = model.h2p(h_states)
+                _, p_embeddings, _ = _rollout_pose(
+                    model,
+                    h_states,
+                    embed_actions,
+                    z_embeddings=embed_outputs["embeddings"],
+                )
             assert torch.is_grad_enabled()
             save_embedding_projection(
                 embed_outputs["embeddings"],
@@ -3808,7 +3889,13 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     use_z2h_init=weights.z2h > 0,
                 )
                 self_dist_h_states = self_dist_h_states_batch[0]
-                self_dist_p = model.h2p(self_dist_h_states.unsqueeze(0))[0]
+                _, self_dist_p_batch, _ = _rollout_pose(
+                    model,
+                    self_dist_h_states_batch,
+                    self_dist_actions,
+                    z_embeddings=self_dist_embeddings_full,
+                )
+                self_dist_p = self_dist_p_batch[0]
             assert torch.is_grad_enabled()
             write_self_distance_outputs(
                 self_dist_embeddings,
@@ -3877,7 +3964,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         diag_actions_device,
                         use_z2h_init=weights.z2h > 0,
                     )
-                    diag_p_embeddings = model.h2p(diag_h_states)
+                    _, diag_p_embeddings, diag_p_deltas = _rollout_pose(
+                        model,
+                        diag_h_states,
+                        diag_actions_device,
+                        z_embeddings=diag_embeddings,
+                    )
                 diag_composability = None
                 diag_p_series = None
                 if model.z_action_delta_projector is not None and model.h_action_delta_projector is not None:
@@ -4167,9 +4259,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 p_norm_mean, p_norm_p95 = _compute_norm_stats(diag_p_embeddings)
                 if diag_h_states.shape[1] >= 2:
                     h_drift = diag_h_states[:, 1:] - diag_h_states[:, :-1]
-                    p_drift = diag_p_embeddings[:, 1:] - diag_p_embeddings[:, :-1]
                     h_drift_mean = float(h_drift.norm(dim=-1).mean().item())
-                    p_drift_mean = float(p_drift.norm(dim=-1).mean().item())
+                    if diag_p_deltas.numel() > 0:
+                        p_drift_mean = float(diag_p_deltas.norm(dim=-1).mean().item())
+                    else:
+                        p_drift_mean = 0.0
                 else:
                     h_drift_mean = 0.0
                     p_drift_mean = 0.0
@@ -4305,8 +4399,16 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                     b = int(b_idx.item())
                                     z_t = diag_embeddings[b, start_frame]
                                     h_t = diag_h_states[b, start_frame]
-                                    p_points = [diag_p_embeddings[b, start_frame].detach().cpu().numpy()]
+                                    p_t = diag_p_embeddings[b, start_frame]
+                                    p_points = [p_t.detach().cpu().numpy()]
                                     for _ in range(cfg.diagnostics.straightline_steps):
+                                        h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
+                                        delta = model.p_action_delta_projector(
+                                            p_t.unsqueeze(0),
+                                            h_in.unsqueeze(0),
+                                            action_vec.unsqueeze(0),
+                                        ).squeeze(0)
+                                        p_t = p_t + delta
                                         h_next = model.predictor(
                                             z_t.unsqueeze(0),
                                             h_t.unsqueeze(0),
@@ -4314,7 +4416,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                         )
                                         z_t = model.h_to_z(h_next).squeeze(0)
                                         h_t = h_next.squeeze(0)
-                                        p_points.append(model.h2p(h_t.unsqueeze(0)).squeeze(0).detach().cpu().numpy())
+                                        p_points.append(p_t.detach().cpu().numpy())
                                     p_points_np = np.stack(p_points, axis=0)
                                     proj = (p_points_np - p_center) @ projection
                                     traj_label = f"{label} (start {row_offset + 1})"
@@ -4342,10 +4444,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                             t0 = (flat_idx % start_span) + warmup_frames
                             z_t = diag_embeddings[b, t0]
                             h_t = diag_h_states[b, t0]
+                            p_t = diag_p_embeddings[b, t0]
                             for k in range(rollout_horizon):
                                 if t0 + k >= diag_frames.shape[1] - 1:
                                     break
                                 act = diag_actions_device[b, t0 + k]
+                                h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
+                                delta = model.p_action_delta_projector(
+                                    p_t.unsqueeze(0),
+                                    h_in.unsqueeze(0),
+                                    act.unsqueeze(0),
+                                ).squeeze(0)
+                                p_t = p_t + delta
                                 h_next = model.predictor(
                                     z_t.unsqueeze(0),
                                     h_t.unsqueeze(0),
@@ -4359,9 +4469,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 h_gt = diag_h_states[b, t0 + k + 1]
                                 z_errors[k] += (z_t - z_gt).norm()
                                 h_errors[k] += (h_t - h_gt).norm()
-                                p_pred = model.h2p(h_t.unsqueeze(0)).squeeze(0)
                                 p_gt = diag_p_embeddings[b, t0 + k + 1]
-                                p_errors[k] += (p_pred - p_gt).norm()
+                                p_errors[k] += (p_t - p_gt).norm()
                                 counts[k] += 1
                         counts = torch.clamp(counts, min=1.0)
                         pixel_mean = (pixel_errors / counts).detach().cpu().numpy().tolist()
@@ -4513,7 +4622,23 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 h_a = h_start
                                 z_b = z_start
                                 h_b = h_start
+                                p_a = diag_p_embeddings[b_idx, start_frame]
+                                p_b = diag_p_embeddings[b_idx, start_frame]
                                 for _ in range(cfg.diagnostics.path_independence_steps):
+                                    h_a_in = h_a.detach() if model.cfg.pose_delta_detach_h else h_a
+                                    h_b_in = h_b.detach() if model.cfg.pose_delta_detach_h else h_b
+                                    delta_a = model.p_action_delta_projector(
+                                        p_a.unsqueeze(0),
+                                        h_a_in.unsqueeze(0),
+                                        action_a.unsqueeze(0),
+                                    ).squeeze(0)
+                                    delta_b = model.p_action_delta_projector(
+                                        p_b.unsqueeze(0),
+                                        h_b_in.unsqueeze(0),
+                                        action_b_first.unsqueeze(0),
+                                    ).squeeze(0)
+                                    p_a = p_a + delta_a
+                                    p_b = p_b + delta_b
                                     h_a_next = model.predictor(
                                         z_a.unsqueeze(0),
                                         h_a.unsqueeze(0),
@@ -4529,6 +4654,20 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                     z_b = model.h_to_z(h_b_next).squeeze(0)
                                     h_b = h_b_next.squeeze(0)
                                 for _ in range(cfg.diagnostics.path_independence_steps):
+                                    h_a_in = h_a.detach() if model.cfg.pose_delta_detach_h else h_a
+                                    h_b_in = h_b.detach() if model.cfg.pose_delta_detach_h else h_b
+                                    delta_a = model.p_action_delta_projector(
+                                        p_a.unsqueeze(0),
+                                        h_a_in.unsqueeze(0),
+                                        action_b.unsqueeze(0),
+                                    ).squeeze(0)
+                                    delta_b = model.p_action_delta_projector(
+                                        p_b.unsqueeze(0),
+                                        h_b_in.unsqueeze(0),
+                                        action_b_second.unsqueeze(0),
+                                    ).squeeze(0)
+                                    p_a = p_a + delta_a
+                                    p_b = p_b + delta_b
                                     h_a_next = model.predictor(
                                         z_a.unsqueeze(0),
                                         h_a.unsqueeze(0),
@@ -4544,8 +4683,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                     z_b = model.h_to_z(h_b_next).squeeze(0)
                                     h_b = h_b_next.squeeze(0)
                                 z_diffs.append(float((z_a - z_b).norm().item()))
-                                p_a = model.h2p(h_a.unsqueeze(0)).squeeze(0)
-                                p_b = model.h2p(h_b.unsqueeze(0)).squeeze(0)
                                 p_diffs.append(float((p_a - p_b).norm().item()))
                             if z_diffs and p_diffs:
                                 label_a = action_labels.get(a_id, f"action {a_id}")
@@ -4585,10 +4722,27 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                             z_norm = diag_embeddings[b, t0]
                             h_norm = diag_h_states[b, t0]
                             z_zero = z_norm.clone()
+                            p_norm = diag_p_embeddings[b, t0]
+                            p_zero = diag_p_embeddings[b, t0]
                             for k in range(rollout_horizon):
                                 if t0 + k >= diag_embeddings.shape[1] - 1:
                                     break
                                 act = diag_actions_device[b, t0 + k]
+                                h_norm_in = h_norm.detach() if model.cfg.pose_delta_detach_h else h_norm
+                                delta_norm = model.p_action_delta_projector(
+                                    p_norm.unsqueeze(0),
+                                    h_norm_in.unsqueeze(0),
+                                    act.unsqueeze(0),
+                                ).squeeze(0)
+                                p_norm = p_norm + delta_norm
+                                h_zero = torch.zeros_like(h_norm)
+                                h_zero_in = h_zero.detach() if model.cfg.pose_delta_detach_h else h_zero
+                                delta_zero = model.p_action_delta_projector(
+                                    p_zero.unsqueeze(0),
+                                    h_zero_in.unsqueeze(0),
+                                    act.unsqueeze(0),
+                                ).squeeze(0)
+                                p_zero = p_zero + delta_zero
                                 h_next_norm = model.predictor(
                                     z_norm.unsqueeze(0),
                                     h_norm.unsqueeze(0),
@@ -4596,7 +4750,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 )
                                 h_next_zero = model.predictor(
                                     z_zero.unsqueeze(0),
-                                    torch.zeros_like(h_norm).unsqueeze(0),
+                                    h_zero.unsqueeze(0),
                                     act.unsqueeze(0),
                                 )
                                 z_norm = model.h_to_z(h_next_norm).squeeze(0)
@@ -4607,8 +4761,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                                 target = diag_frames_device[b, t0 + k + 1].unsqueeze(0)
                                 pixel_errors[k] += RECON_LOSS(decoded_norm, target)
                                 pixel_errors_zero[k] += RECON_LOSS(decoded_zero, target)
-                                p_norm = model.h2p(h_norm.unsqueeze(0)).squeeze(0)
-                                p_zero = model.h2p(h_next_zero).squeeze(0)
                                 p_gt = diag_p_embeddings[b, t0 + k + 1]
                                 latent_errors[k] += (p_norm - p_gt).norm()
                                 latent_errors_zero[k] += (p_zero - p_gt).norm()
@@ -4678,7 +4830,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     vis_actions,
                     use_z2h_init=weights.z2h > 0,
                 )
-                vis_p_embeddings = model.h2p(vis_h_states)
+                _, vis_p_embeddings, _ = _rollout_pose(
+                    model,
+                    vis_h_states,
+                    vis_actions,
+                    z_embeddings=vis_embeddings,
+                )
                 warmup_frames = max(model.cfg.warmup_frames_h, 0)
                 metrics_z = compute_vis_ctrl_metrics(
                     vis_embeddings,
@@ -4781,6 +4938,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     graph_preds=graph_diag.graph_preds,
                     graph_h_preds=graph_diag.graph_h_preds,
                     graph_h_states=graph_diag.graph_h_states,
+                    graph_actions=graph_diag.graph_actions,
                     ema_embeddings=graph_diag.ema_embeddings,
                     ema_h_states=graph_diag.ema_h_states,
                 )
@@ -4835,6 +4993,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     graph_preds=graph_diag.graph_preds,
                     graph_h_preds=graph_diag.graph_h_preds,
                     graph_h_states=graph_diag.graph_h_states,
+                    graph_actions=graph_diag.graph_actions,
                     ema_embeddings=graph_diag.ema_embeddings,
                     ema_h_states=graph_diag.ema_h_states,
                 )
@@ -4889,6 +5048,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     graph_preds=graph_diag.graph_preds,
                     graph_h_preds=graph_diag.graph_h_preds,
                     graph_h_states=graph_diag.graph_h_states,
+                    graph_actions=graph_diag.graph_actions,
                     ema_embeddings=graph_diag.ema_embeddings,
                     ema_h_states=graph_diag.ema_h_states,
                 )

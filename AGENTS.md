@@ -60,3 +60,6 @@ When the user requests that a commit be prepared:
 - Include prompts that clarified requirements or triggered follow-up adjustments if those instructions influenced the final code.
 - When a changes file covers work that was planned across earlier prompts, include those prior prompts as well—provided they are relevant to the current edits and have not already been logged elsewhere.
 - When the user asks for a "commit," prepare the commit message and output the `git commit` command instead of staging files or invoking `git commit` yourself.
+- Prefer explicit assertions for invalid preconditions in diagnostics/utilities instead of returning empty placeholders; fail fast to surface misconfigured calls.
+- If a function depends on a feature toggle or required module, assert with a clear error message rather than silently skipping.
+- Use early assertions for minimum sequence length/shape requirements to avoid silently degraded metrics.

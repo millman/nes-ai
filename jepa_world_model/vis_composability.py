@@ -10,6 +10,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
+from jepa_world_model.pose_rollout import rollout_pose_sequence
 from jepa_world_model.plots.plot_layout import DEFAULT_DPI, figsize_for_grid
 
 
@@ -159,8 +160,9 @@ def compute_composability_series(
         )
 
     if z_embeddings.shape[1] < warmup + 3:
-        empty = _empty_series()
-        return {"z": empty, "h": empty, "p": empty, "s": empty}
+        raise AssertionError("compute_composability_series requires at least warmup+3 frames.")
+    if model.p_action_delta_projector is None:
+        raise AssertionError("compute_composability_series requires p_action_delta_projector.")
     z = z_embeddings[:, warmup:]
     h = h_states[:, warmup:]
     a = actions[:, warmup:]
@@ -175,8 +177,8 @@ def compute_composability_series(
     z_tp2 = z[:, 2 : steps + 2]
     h_t = h[:, :steps]
     h_tp2 = h[:, 2 : steps + 2]
-    p = model.h2p(h)
-    p_tp2 = p[:, 2 : steps + 2]
+    pose, _ = rollout_pose_sequence(model, h, a, z_embeddings=z)
+    p_tp2 = pose[:, 2 : steps + 2]
     a_t = a[:, :steps]
     a_tp1 = a[:, 1 : steps + 1]
 
@@ -194,11 +196,20 @@ def compute_composability_series(
     pred2 = model.h_to_z(h2).view(b, steps, -1)
     h2 = h2.view(b, steps, -1)
     h2_to_z = model.h_to_z(h2)
-    p2_pred = model.h2p(h2)
-
     actual_z = torch.norm(pred2 - z_tp2, dim=-1)
     actual_h = torch.norm(h2_to_z - z_tp2, dim=-1)
-    actual_p = torch.norm(p2_pred - p_tp2, dim=-1)
+    pose_t = pose[:, :steps]
+    flat_pose_t = pose_t.reshape(-1, pose_t.shape[-1])
+    flat_h1 = h1.reshape(-1, h1.shape[-1])
+    delta_p1 = model.p_action_delta_projector(flat_pose_t, flat_h_t, flat_a_t).view(b, steps, -1)
+    pose1 = pose_t + delta_p1
+    delta_p2 = model.p_action_delta_projector(
+        pose1.reshape(-1, pose1.shape[-1]),
+        flat_h1,
+        flat_a_tp1,
+    ).view(b, steps, -1)
+    pose2_pred = pose1 + delta_p2
+    actual_p = torch.norm(pose2_pred - p_tp2, dim=-1)
 
     delta_z1 = model.z_action_delta_projector(flat_a_t).view(b, steps, -1)
     delta_z2 = model.z_action_delta_projector(flat_a_tp1).view(b, steps, -1)
@@ -210,8 +221,14 @@ def compute_composability_series(
     dh2 = model.h_action_delta_projector(flat_h_t2, flat_a_tp1).view(b, steps, -1)
     h_add = h_t + dh1 + dh2
     add_h = torch.norm(h_add - h_tp2, dim=-1)
-    p_add = model.h2p(h_add)
-    add_p = torch.norm(p_add - p_tp2, dim=-1)
+    pose1_add = pose_t + delta_p1
+    delta_p2_add = model.p_action_delta_projector(
+        pose1_add.reshape(-1, pose1_add.shape[-1]),
+        (h_t + dh1).reshape(-1, h_t.shape[-1]),
+        flat_a_tp1,
+    ).view(b, steps, -1)
+    pose_add = pose1_add + delta_p2_add
+    add_p = torch.norm(pose_add - p_tp2, dim=-1)
 
     action_ids = compress_actions_to_ids(a_t.reshape(-1, a_t.shape[-1])).view(b, steps).cpu().numpy()
     action_ids_next = compress_actions_to_ids(a_tp1.reshape(-1, a_tp1.shape[-1])).view(b, steps).cpu().numpy()
