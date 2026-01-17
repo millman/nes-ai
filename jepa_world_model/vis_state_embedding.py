@@ -200,7 +200,7 @@ def write_state_embedding_outputs(
             hist_actions,
             use_z2h_init=use_z2h_init,
         )
-        hist_p = rollout_pose_sequence(model, hist_h_states, hist_actions, z_embeddings=hist_embeddings)
+        hist_p = rollout_pose_sequence(model, hist_h_states, hist_actions, z_embeddings=hist_embeddings)[0]
     hist_warmup = max(min(warmup_frames, hist_p.shape[1] - 1), 0)
     hist_p = hist_p[:, hist_warmup:]
     if hist_p.shape[1] < 1:

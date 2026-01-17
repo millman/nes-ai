@@ -66,6 +66,7 @@ from jepa_world_model.vis_rollout_batch import save_rollout_sequence_batch
 from jepa_world_model.vis_temporal_pairs import save_temporal_pair_visualization
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
 from jepa_world_model.config_diagnostics import DiagnosticsConfig, SpikeDiagnosticsConfig
+from jepa_world_model.config_planning import PlanningDiagnosticsConfig
 from jepa_world_model.pose_rollout import rollout_pose_sequence
 from jepa_world_model.plots.write_action_alignment_crosscheck import (
     write_action_alignment_crosscheck,
@@ -115,6 +116,9 @@ from jepa_world_model.plots.plot_variance_report import write_variance_report
 from jepa_world_model.plots.plot_variance_spectrum import (
     save_variance_spectrum_plot,
 )
+from jepa_world_model.plots.plot_reachable_fraction_hist import (
+    save_reachable_fraction_hist_plot,
+)
 from jepa_world_model.plots.plot_diagnostics_extra import (
     StraightLineTrajectory,
     save_ablation_divergence_plot,
@@ -155,6 +159,23 @@ from jepa_world_model.vis_vis_ctrl_metrics import (
     compute_vis_ctrl_metrics,
     write_vis_ctrl_metrics_csv,
 )
+from jepa_world_model.planning.planning_eval import (
+    DIRECTION_ORDER,
+    ActionDeltaStats,
+    DatasetGraph,
+    action_labels_from_vectors,
+    bfs_plan,
+    build_dataset_graph,
+    cluster_latents,
+    compute_action_delta_stats,
+    delta_lattice_astar,
+    PlanningTestResult,
+    plot_action_stats,
+    plot_grid_trace,
+    plot_pca_path,
+    reachable_fractions,
+    run_plan_in_env,
+)
 from jepa_world_model.encoder_schedule import _derive_encoder_schedule, _suggest_encoder_schedule
 from jepa_world_model.step_schedule import _parse_schedule, _should_run_schedule
 from jepa_world_model.data import TrajectorySequenceDataset, collate_batch, load_actions_for_trajectory
@@ -164,6 +185,7 @@ from jepa_world_model.vis_rollout import (
     VisualizationSequence,
     render_rollout_batch,
 )
+from gridworldkey_env import GridworldKeyEnv
 
 
 
@@ -774,6 +796,15 @@ class TrainConfig:
             )
         ),
     ] = "10:100 50:1000 100:10000 200:None"
+    plan_schedule: Annotated[
+        Union[str, Tuple[Tuple[int, Optional[int]], ...]],
+        tyro.conf.arg(
+            help=(
+                "Planning schedule entries use every_steps:max_step (or None for no cap). "
+                "Example: '10:100 50:1000 100:10000 200:None'. Commas or spaces separate entries."
+            )
+        ),
+    ] = "10:100 50:1000 100:10000 200:None"
     checkpoint_every_steps: int = 100
     steps: int = 100_000
     show_timing_breakdown: bool = True
@@ -815,6 +846,7 @@ class TrainConfig:
     hard_example: HardExampleConfig = field(default_factory=HardExampleConfig)
     debug_visualization: DebugVisualization = field(default_factory=DebugVisualization)
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
+    planning_diagnostics: PlanningDiagnosticsConfig = field(default_factory=PlanningDiagnosticsConfig)
     spike_diagnostics: SpikeDiagnosticsConfig = field(default_factory=SpikeDiagnosticsConfig)
     graph_diagnostics: GraphDiagnosticsConfig = field(default_factory=GraphDiagnosticsConfig)
     vis_ctrl: VisCtrlConfig = field(default_factory=VisCtrlConfig)
@@ -3098,6 +3130,240 @@ def _compute_norm_stats(tensor: torch.Tensor, quantile: float = 0.95) -> Tuple[f
     return mean, p95
 
 
+def _frame_to_tensor(frame: np.ndarray, image_size: int) -> torch.Tensor:
+    pil = Image.fromarray(frame)
+    pil = pil.resize((image_size, image_size), Image.BILINEAR)
+    arr = np.array(pil, dtype=np.float32) / 255.0
+    return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+
+
+def _pose_from_frames(
+    frames: Sequence[np.ndarray],
+    model: JEPAWorldModel,
+    model_cfg: ModelConfig,
+    device: torch.device,
+    *,
+    use_z2h_init: bool,
+    action_dim: int,
+) -> np.ndarray:
+    if len(frames) < 2:
+        raise AssertionError("Pose extraction requires at least two frames.")
+    frames_tensor = torch.stack(
+        [_frame_to_tensor(f, model_cfg.image_size) for f in frames],
+        dim=0,
+    ).unsqueeze(0)
+    frames_tensor = frames_tensor.to(device)
+    actions_zero = torch.zeros((1, frames_tensor.shape[1] - 1, action_dim), device=device)
+    with torch.no_grad():
+        embeds = model.encode_sequence(frames_tensor)["embeddings"]
+        _, _, h_states = rollout_teacher_forced(
+            model,
+            embeds,
+            actions_zero,
+            use_z2h_init=use_z2h_init,
+        )
+        pose_obs, _, _ = _rollout_pose(
+            model,
+            h_states,
+            actions_zero,
+            z_embeddings=embeds,
+        )
+    return pose_obs[0].detach().cpu().numpy()
+
+
+def _extract_planning_latents(
+    model: JEPAWorldModel,
+    plan_frames: torch.Tensor,
+    plan_actions: torch.Tensor,
+    device: torch.device,
+    *,
+    use_z2h_init: bool,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Optional[str]], np.ndarray, torch.Tensor]:
+    assert torch.is_grad_enabled()
+    with torch.no_grad():
+        plan_frames_device = plan_frames.to(device)
+        plan_actions_device = plan_actions.to(device)
+        plan_embeddings = model.encode_sequence(plan_frames_device)["embeddings"]
+        _, _, plan_h_states = rollout_teacher_forced(
+            model,
+            plan_embeddings,
+            plan_actions_device,
+            use_z2h_init=use_z2h_init,
+        )
+        _, plan_p_embeddings, _ = _rollout_pose(
+            model,
+            plan_h_states,
+            plan_actions_device,
+            z_embeddings=plan_embeddings,
+        )
+    p_t = plan_p_embeddings[:, :-1].detach().cpu().reshape(-1, plan_p_embeddings.shape[-1]).numpy()
+    p_tp1 = plan_p_embeddings[:, 1:].detach().cpu().reshape(-1, plan_p_embeddings.shape[-1]).numpy()
+    h_t = plan_h_states[:, :-1].detach().cpu().reshape(-1, plan_h_states.shape[-1]).numpy()
+    h_tp1 = plan_h_states[:, 1:].detach().cpu().reshape(-1, plan_h_states.shape[-1]).numpy()
+    actions_np = plan_actions[:, :-1].detach().cpu().reshape(-1, plan_actions.shape[-1]).numpy()
+    action_labels = action_labels_from_vectors(actions_np)
+    deltas = p_tp1 - p_t
+    return p_t, p_tp1, h_t, h_tp1, actions_np, action_labels, deltas, plan_h_states
+
+
+def _compute_planning_graphs(
+    p_t: np.ndarray,
+    p_tp1: np.ndarray,
+    h_t: np.ndarray,
+    h_tp1: np.ndarray,
+    actions_np: np.ndarray,
+    action_labels: Sequence[Optional[str]],
+    *,
+    min_action_count: int,
+) -> Tuple[ActionDeltaStats, DatasetGraph, DatasetGraph, float]:
+    stats = compute_action_delta_stats(
+        p_t,
+        p_tp1,
+        actions_np,
+        min_action_count=min_action_count,
+    )
+    non_noop = np.array([lbl in DIRECTION_ORDER for lbl in action_labels], dtype=bool)
+    if not np.any(non_noop):
+        raise AssertionError("Planning diagnostics require non-noop actions for h graph thresholds.")
+    h_dot = (h_t * h_tp1).sum(axis=1)
+    h_norms = np.maximum(np.linalg.norm(h_t, axis=1) * np.linalg.norm(h_tp1, axis=1), 1e-8)
+    h_cos = h_dot / h_norms
+    d_nn = float(np.median(1.0 - h_cos[non_noop]))
+    tau_h_merge = min(max(3.0 * d_nn, 0.02), 0.08)
+    graph_h = build_dataset_graph(
+        h_t,
+        h_tp1,
+        actions_np,
+        radius=tau_h_merge,
+        metric="cosine",
+    )
+    graph_p = build_dataset_graph(
+        p_t,
+        p_tp1,
+        actions_np,
+        radius=stats.r_cluster_p,
+        metric="l2",
+    )
+    return stats, graph_h, graph_p, tau_h_merge
+
+
+def _run_h_local_sanity(
+    graph_h: DatasetGraph,
+    plan_h_states: torch.Tensor,
+    tau_h_merge: float,
+    cfg: PlanningDiagnosticsConfig,
+    rng: random.Random,
+) -> bool:
+    seq_len = plan_h_states.shape[1]
+    if seq_len <= cfg.local_k_min:
+        raise AssertionError("Planning diagnostics require seq_len > local_k_min.")
+    h_all = plan_h_states.detach().cpu().numpy().reshape(-1, plan_h_states.shape[-1])
+    _, h_nodes = cluster_latents(h_all, radius=tau_h_merge, metric="cosine")
+    h_nodes = h_nodes.reshape(plan_h_states.shape[0], seq_len)
+    b_idx = rng.randrange(plan_h_states.shape[0])
+    max_start = seq_len - cfg.local_k_min - 1
+    if max_start <= 0:
+        raise AssertionError("Planning diagnostics require room for local k-step test.")
+    t0 = rng.randrange(max_start)
+    k_max = min(cfg.local_k_max, seq_len - 1 - t0)
+    k = rng.randint(cfg.local_k_min, k_max)
+    h_local_actions = bfs_plan(graph_h, int(h_nodes[b_idx, t0]), int(h_nodes[b_idx, t0 + k]))
+    return h_local_actions is not None
+
+
+def _build_planning_tests(
+    env: GridworldKeyEnv,
+    cfg: PlanningDiagnosticsConfig,
+) -> List[Tuple[str, Tuple[int, int], Tuple[int, int]]]:
+    start_loop = (env.grid_rows - 2, 1)
+    goal_center = (env.grid_rows // 2, env.grid_cols // 2)
+    goal_mid = (
+        env.grid_rows // 2,
+        min(env.grid_cols - 2, env.grid_cols // 2 + cfg.interior_goal_col_offset),
+    )
+    return [
+        ("test1", start_loop, goal_center),
+        ("test2", goal_center, goal_mid),
+    ]
+
+
+def _write_planning_metrics_row(
+    metrics_dir: Path,
+    stats: ActionDeltaStats,
+    graph_h: DatasetGraph,
+    graph_p: DatasetGraph,
+    h_reach: np.ndarray,
+    p_reach: np.ndarray,
+    h_local_success: bool,
+    test_results: Dict[str, PlanningTestResult],
+    *,
+    global_step: int,
+) -> None:
+    def _pct(values: np.ndarray, q: float) -> float:
+        if values.size == 0:
+            return float("nan")
+        return float(np.quantile(values, q))
+
+    planning_metrics_path = metrics_dir / "planning_metrics.csv"
+    header = [
+        "step",
+        "L",
+        "inv_lr",
+        "inv_ud",
+        "noop_ratio",
+        "q_L",
+        "q_R",
+        "q_U",
+        "q_D",
+        "num_nodes_h",
+        "num_nodes_p",
+        "reach_h_median",
+        "reach_h_p10",
+        "reach_h_p90",
+        "reach_p_median",
+        "reach_p_p10",
+        "reach_p_p90",
+        "h_local_success",
+        "test1_success",
+        "test1_steps",
+        "test1_final_p_dist",
+        "test1_goal_dist",
+        "test2_success",
+        "test2_steps",
+        "test2_final_p_dist",
+        "test2_goal_dist",
+    ]
+    row = [
+        global_step,
+        stats.L_scale,
+        stats.inv_lr,
+        stats.inv_ud,
+        stats.noop_ratio,
+        stats.q.get("L", float("nan")),
+        stats.q.get("R", float("nan")),
+        stats.q.get("U", float("nan")),
+        stats.q.get("D", float("nan")),
+        graph_h.centers.shape[0],
+        graph_p.centers.shape[0],
+        float(np.median(h_reach)) if h_reach.size else float("nan"),
+        _pct(h_reach, 0.10),
+        _pct(h_reach, 0.90),
+        float(np.median(p_reach)) if p_reach.size else float("nan"),
+        _pct(p_reach, 0.10),
+        _pct(p_reach, 0.90),
+        float(h_local_success),
+        float(test_results["test1"].success),
+        test_results["test1"].steps,
+        test_results["test1"].final_p_distance,
+        test_results["test1"].goal_distance,
+        float(test_results["test2"].success),
+        test_results["test2"].steps,
+        test_results["test2"].final_p_distance,
+        test_results["test2"].goal_distance,
+    ]
+    _append_csv_row(planning_metrics_path, header, row)
+
+
 def _shift_frame(frame: torch.Tensor, dx: int, dy: int) -> torch.Tensor:
     _, h, w = frame.shape
     shifted = torch.zeros_like(frame)
@@ -3123,6 +3389,7 @@ def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
         ("train", "train"),
         ("log", "log"),
         ("vis", "vis"),
+        ("plan", "plan"),
     ):
         value = totals.get(key, 0.0)
         fraction = (value / total_time) if total_time > 0 else 0.0
@@ -3347,6 +3614,10 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_h_ablation_dir = run_dir / "vis_h_ablation"
     diagnostics_h_drift_dir = run_dir / "vis_h_drift_by_action"
     diagnostics_norm_timeseries_dir = run_dir / "vis_norm_timeseries"
+    planning_action_stats_dir = run_dir / "vis_planning_action_stats"
+    planning_pca_dir = run_dir / "vis_planning_pca"
+    planning_exec_dir = run_dir / "vis_planning_exec"
+    planning_reachable_dir = run_dir / "vis_planning_reachable"
     spike_diagnostics_dir = run_dir / "spike_diagnostics"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_p_dir = run_dir / "graph_diagnostics_p"
@@ -3406,6 +3677,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_h_ablation_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_h_drift_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_norm_timeseries_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.planning_diagnostics.enabled:
+        planning_action_stats_dir.mkdir(parents=True, exist_ok=True)
+        planning_pca_dir.mkdir(parents=True, exist_ok=True)
+        planning_exec_dir.mkdir(parents=True, exist_ok=True)
+        planning_reachable_dir.mkdir(parents=True, exist_ok=True)
     if cfg.spike_diagnostics.enabled:
         spike_diagnostics_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
@@ -3592,6 +3868,20 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             generator=diagnostics_generator,
         )
 
+    planning_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
+    planning_env: Optional[GridworldKeyEnv] = None
+    if cfg.planning_diagnostics.enabled:
+        if cfg.planning_diagnostics.sample_sequences <= 0:
+            raise AssertionError(
+                "Planning diagnostics requested but planning_diagnostics.sample_sequences is not positive."
+            )
+        planning_batch_cpu = _build_embedding_batch(
+            dataset,
+            cfg.planning_diagnostics.sample_sequences,
+            generator=diagnostics_generator,
+        )
+        planning_env = GridworldKeyEnv(render_mode="rgb_array", keyboard_override=False, start_manual_control=False)
+
     if cfg.vis_ctrl.enabled:
         if cfg.vis_ctrl.sample_sequences <= 0:
             raise AssertionError(
@@ -3603,7 +3893,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             generator=vis_ctrl_generator,
         )
 
-    timing_totals: Dict[str, float] = {"train": 0.0, "log": 0.0, "vis": 0.0}
+    timing_totals: Dict[str, float] = {"train": 0.0, "log": 0.0, "vis": 0.0, "plan": 0.0}
     total_samples_processed = 0
     run_start_time = perf_counter()
     loss_norm_ema: Dict[str, float] = {}
@@ -5100,6 +5390,177 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             timing_totals["vis"] += perf_counter() - vis_start
 
         if (
+            cfg.planning_diagnostics.enabled
+            and planning_batch_cpu is not None
+            and _should_run_schedule(global_step, cfg.plan_schedule)
+        ):
+            plan_start = perf_counter()
+            model.eval()
+            if planning_env is None:
+                raise AssertionError("Planning diagnostics enabled but planning_env is missing.")
+            plan_frames = planning_batch_cpu[0]
+            plan_actions = planning_batch_cpu[1]
+            if plan_frames.shape[1] < 2:
+                raise AssertionError("Planning diagnostics require sequences with at least two frames.")
+            (
+                p_t,
+                p_tp1,
+                h_t,
+                h_tp1,
+                actions_np,
+                action_labels,
+                deltas,
+                plan_h_states,
+            ) = _extract_planning_latents(
+                model,
+                plan_frames,
+                plan_actions,
+                device,
+                use_z2h_init=weights.z2h > 0,
+            )
+            stats, graph_h, graph_p, tau_h_merge = _compute_planning_graphs(
+                p_t,
+                p_tp1,
+                h_t,
+                h_tp1,
+                actions_np,
+                action_labels,
+                min_action_count=cfg.planning_diagnostics.min_action_count,
+            )
+
+            plot_action_stats(
+                planning_action_stats_dir / f"action_stats_{global_step:07d}.png",
+                deltas,
+                action_labels,
+                stats.mu,
+            )
+
+            rng = random.Random(global_step)
+            h_reach = reachable_fractions(
+                graph_h,
+                sample_limit=cfg.planning_diagnostics.reachable_fraction_samples,
+                rng=rng,
+            )
+            p_reach = reachable_fractions(
+                graph_p,
+                sample_limit=cfg.planning_diagnostics.reachable_fraction_samples,
+                rng=rng,
+            )
+
+            h_local_success = _run_h_local_sanity(
+                graph_h,
+                plan_h_states,
+                tau_h_merge,
+                cfg.planning_diagnostics,
+                rng,
+            )
+            test_cases = _build_planning_tests(planning_env, cfg.planning_diagnostics)
+
+            test_results: Dict[str, PlanningTestResult] = {}
+            plan_nodes_for_plot: Dict[str, Optional[np.ndarray]] = {}
+            action_dim = plan_actions.shape[-1]
+            for label, start_tile, goal_tile in test_cases:
+                obs_start, _ = planning_env.reset(options={"start_tile": start_tile})
+                obs_goal, _ = planning_env.reset(options={"start_tile": goal_tile})
+                pose_seq = _pose_from_frames(
+                    [obs_start, obs_goal],
+                    model,
+                    model_cfg,
+                    device,
+                    use_z2h_init=weights.z2h > 0,
+                    action_dim=action_dim,
+                )
+                p_start = pose_seq[0]
+                p_goal = pose_seq[1]
+                plan = delta_lattice_astar(
+                    p_start,
+                    p_goal,
+                    stats.mu,
+                    r_goal=stats.r_goal,
+                    r_merge=stats.r_merge,
+                    step_scale=stats.L_scale,
+                    max_nodes=cfg.planning_diagnostics.astar_max_nodes,
+                )
+                if plan is None:
+                    test_results[label] = PlanningTestResult(
+                        success=False,
+                        steps=0,
+                        final_p_distance=float("inf"),
+                        goal_distance=float(np.linalg.norm(p_goal - p_start)),
+                        visited_cells=[],
+                    )
+                    plan_nodes_for_plot[label] = None
+                    continue
+                visited, final_frame = run_plan_in_env(
+                    planning_env,
+                    plan.actions,
+                    start_tile=start_tile,
+                )
+                final_cell = visited[-1] if visited else start_tile
+                success = final_cell == goal_tile
+                final_p_distance = float("inf")
+                if final_frame is not None:
+                    final_pose = _pose_from_frames(
+                        [obs_start, final_frame],
+                        model,
+                        model_cfg,
+                        device,
+                        use_z2h_init=weights.z2h > 0,
+                        action_dim=action_dim,
+                    )
+                    final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))
+                test_results[label] = PlanningTestResult(
+                    success=success,
+                    steps=len(plan.actions),
+                    final_p_distance=final_p_distance,
+                    goal_distance=float(np.linalg.norm(p_goal - p_start)),
+                    visited_cells=visited,
+                )
+                plan_nodes_for_plot[label] = np.stack(plan.nodes, axis=0) if plan.nodes else None
+                plot_grid_trace(
+                    planning_exec_dir / f"exec_{label}_{global_step:07d}.png",
+                    planning_env.grid_rows,
+                    planning_env.grid_cols,
+                    visited,
+                    start_tile,
+                    goal_tile,
+                )
+                plot_pca_path(
+                    planning_pca_dir / f"pca_{label}_{global_step:07d}.png",
+                    p_t,
+                    plan_nodes_for_plot[label],
+                    p_start,
+                    p_goal,
+                    max_samples=cfg.planning_diagnostics.pca_samples,
+                )
+
+            save_reachable_fraction_hist_plot(
+                planning_reachable_dir / f"reachable_h_{global_step:07d}.png",
+                h_reach,
+                "Reachable fraction (h)",
+            )
+            save_reachable_fraction_hist_plot(
+                planning_reachable_dir / f"reachable_p_{global_step:07d}.png",
+                p_reach,
+                "Reachable fraction (p)",
+            )
+
+            _write_planning_metrics_row(
+                metrics_dir,
+                stats,
+                graph_h,
+                graph_p,
+                h_reach,
+                p_reach,
+                h_local_success,
+                test_results,
+                global_step=global_step,
+            )
+
+            model.train()
+            timing_totals["plan"] += perf_counter() - plan_start
+
+        if (
             cfg.checkpoint_every_steps > 0
             and global_step % cfg.checkpoint_every_steps == 0
         ):
@@ -5112,6 +5573,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 tag="last",
             )
         last_step = global_step
+
+    if planning_env is not None:
+        planning_env.close()
 
     # --- Final metrics export ---
     last_step = global_step if cfg.steps > 0 else last_step
@@ -5140,6 +5604,7 @@ def main() -> None:
         cfg,
         log_schedule=_parse_schedule(cfg.log_schedule),
         vis_schedule=_parse_schedule(cfg.vis_schedule),
+        plan_schedule=_parse_schedule(cfg.plan_schedule),
     )
     model_cfg = ModelConfig()
     run_training(cfg, model_cfg, cfg.loss_weights, title=cfg.title)

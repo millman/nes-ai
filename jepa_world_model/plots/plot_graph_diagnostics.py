@@ -222,7 +222,17 @@ def compute_graph_diagnostics_stats(
     global_step: int,
 ) -> GraphDiagnosticsStats:
     probs = _build_graph_transition_matrix(queries, targets, cfg)
-    probs2 = probs @ probs
+    if next_index.shape[0] != probs.shape[0]:
+        min_len = min(next_index.shape[0], probs.shape[0])
+        next_index = next_index[:min_len]
+        next2_index = next2_index[:min_len]
+        chunk_ids = chunk_ids[:min_len]
+        probs = probs[:min_len]
+    if probs.shape[0] != probs.shape[1]:
+        probs_targets = _build_graph_transition_matrix(targets, targets, cfg)
+        probs2 = probs @ probs_targets
+    else:
+        probs2 = probs @ probs
 
     ranks1 = _graph_rank_stats(probs, next_index)
     ranks2 = _graph_rank_stats(probs2, next2_index)
