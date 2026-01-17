@@ -35,6 +35,18 @@ const FOLDER_GROUP_PRESETS = {
   composability_z: ["vis_composability_z"],
   composability_h: ["vis_composability_h"],
   composability_s: ["vis_composability_p"],
+  planning: [
+    "vis_planning_pca_test1",
+    "vis_planning_pca_test2",
+    "vis_planning_exec_test1",
+    "vis_planning_exec_test2",
+    "vis_planning_action_stats",
+    "vis_planning_action_stats_strip",
+    "vis_planning_reachable_h",
+    "vis_planning_reachable_p",
+    "vis_planning_graph_h",
+    "vis_planning_graph_p",
+  ],
 };
 
 /**

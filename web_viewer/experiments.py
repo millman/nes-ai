@@ -829,6 +829,46 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
         candidates=[('vis_vis_ctrl', 'stability_s_*.png', 'stability_s_')],
     ),
     'vis_ctrl_stability_h': VIS_CTRL_STABILITY_H_SPEC,
+    'vis_planning_action_stats': VisSpec(
+        label='Planning:Action stats (P)',
+        candidates=[('vis_planning_action_stats', 'action_stats_*.png', 'action_stats_')],
+    ),
+    'vis_planning_action_stats_strip': VisSpec(
+        label='Planning:Action stats strip (P)',
+        candidates=[('vis_planning_action_stats', 'action_stats_strip_*.png', 'action_stats_strip_')],
+    ),
+    'vis_planning_pca_test1': VisSpec(
+        label='Planning:PCA path (test1)',
+        candidates=[('vis_planning_pca', 'pca_test1_*.png', 'pca_test1_')],
+    ),
+    'vis_planning_pca_test2': VisSpec(
+        label='Planning:PCA path (test2)',
+        candidates=[('vis_planning_pca', 'pca_test2_*.png', 'pca_test2_')],
+    ),
+    'vis_planning_exec_test1': VisSpec(
+        label='Planning:Exec trace (test1)',
+        candidates=[('vis_planning_exec', 'exec_test1_*.png', 'exec_test1_')],
+    ),
+    'vis_planning_exec_test2': VisSpec(
+        label='Planning:Exec trace (test2)',
+        candidates=[('vis_planning_exec', 'exec_test2_*.png', 'exec_test2_')],
+    ),
+    'vis_planning_reachable_h': VisSpec(
+        label='Planning:Reachable fraction (H)',
+        candidates=[('vis_planning_reachable', 'reachable_h_*.png', 'reachable_h_')],
+    ),
+    'vis_planning_reachable_p': VisSpec(
+        label='Planning:Reachable fraction (P)',
+        candidates=[('vis_planning_reachable', 'reachable_p_*.png', 'reachable_p_')],
+    ),
+    'vis_planning_graph_h': VisSpec(
+        label='Planning:Graph (H)',
+        candidates=[('vis_planning_graph', 'graph_h_*.png', 'graph_h_')],
+    ),
+    'vis_planning_graph_p': VisSpec(
+        label='Planning:Graph (P)',
+        candidates=[('vis_planning_graph', 'graph_p_*.png', 'graph_p_')],
+    ),
 }
 
 

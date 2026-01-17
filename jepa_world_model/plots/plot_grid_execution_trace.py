@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence, Tuple
 
+import numpy as np
 import matplotlib.pyplot as plt
 
 
@@ -22,6 +23,18 @@ def save_grid_execution_trace_plot(
     ax.set_yticks(range(grid_rows))
     ax.grid(True, color="0.85", linestyle="-", linewidth=0.5)
     if visited:
+        heat = np.zeros((grid_rows, grid_cols), dtype=np.float32)
+        for row, col in visited:
+            if 0 <= row < grid_rows and 0 <= col < grid_cols:
+                heat[row, col] += 1.0
+        ax.imshow(
+            heat,
+            cmap="Blues",
+            interpolation="nearest",
+            alpha=0.55,
+            vmin=0.0,
+            vmax=max(float(heat.max()), 1.0),
+        )
         rows, cols = zip(*visited)
         ax.plot(cols, rows, marker="o", markersize=3, linewidth=1)
     ax.scatter([start[1]], [start[0]], s=60, marker="o", color="green", label="start")

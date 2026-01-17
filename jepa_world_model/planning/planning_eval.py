@@ -10,7 +10,10 @@ import math
 
 import numpy as np
 import torch
-from jepa_world_model.plots.plot_action_delta_stats import save_action_delta_stats_plot
+from jepa_world_model.plots.plot_action_delta_stats import (
+    save_action_delta_stats_plot,
+    save_action_delta_strip_plot,
+)
 from jepa_world_model.plots.plot_grid_execution_trace import save_grid_execution_trace_plot
 from jepa_world_model.plots.plot_planning_pca_path import save_planning_pca_path_plot
 from gridworldkey_env import (
@@ -367,6 +370,10 @@ def delta_lattice_astar(
 
 def plot_action_stats(out_path: Path, deltas: np.ndarray, labels: Sequence[Optional[str]], mu: Dict[str, np.ndarray]) -> None:
     save_action_delta_stats_plot(out_path, deltas, labels, mu)
+
+
+def plot_action_strip(out_path: Path, deltas: np.ndarray, labels: Sequence[Optional[str]], mu: Dict[str, np.ndarray]) -> None:
+    save_action_delta_strip_plot(out_path, deltas, labels, mu)
 
 
 def plot_pca_path(

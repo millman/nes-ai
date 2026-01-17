@@ -75,7 +75,7 @@ def write_run_metadata(
     if exclude_fields:
         for field_name in exclude_fields:
             train_config.pop(field_name, None)
-    for schedule_key in ("log_schedule", "vis_schedule"):
+    for schedule_key in ("log_schedule", "vis_schedule", "plan_schedule"):
         if schedule_key in train_config:
             train_config[schedule_key] = _format_schedule_for_metadata(train_config[schedule_key])
     train_config = _serialize_for_json(train_config)

@@ -119,6 +119,7 @@ from jepa_world_model.plots.plot_variance_spectrum import (
 from jepa_world_model.plots.plot_reachable_fraction_hist import (
     save_reachable_fraction_hist_plot,
 )
+from jepa_world_model.plots.plot_planning_graph import save_planning_graph_plot
 from jepa_world_model.plots.plot_diagnostics_extra import (
     StraightLineTrajectory,
     save_ablation_divergence_plot,
@@ -171,6 +172,7 @@ from jepa_world_model.planning.planning_eval import (
     delta_lattice_astar,
     PlanningTestResult,
     plot_action_stats,
+    plot_action_strip,
     plot_grid_trace,
     plot_pca_path,
     reachable_fractions,
@@ -3618,6 +3620,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     planning_pca_dir = run_dir / "vis_planning_pca"
     planning_exec_dir = run_dir / "vis_planning_exec"
     planning_reachable_dir = run_dir / "vis_planning_reachable"
+    planning_graph_dir = run_dir / "vis_planning_graph"
     spike_diagnostics_dir = run_dir / "spike_diagnostics"
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_p_dir = run_dir / "graph_diagnostics_p"
@@ -3682,6 +3685,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         planning_pca_dir.mkdir(parents=True, exist_ok=True)
         planning_exec_dir.mkdir(parents=True, exist_ok=True)
         planning_reachable_dir.mkdir(parents=True, exist_ok=True)
+        planning_graph_dir.mkdir(parents=True, exist_ok=True)
     if cfg.spike_diagnostics.enabled:
         spike_diagnostics_dir.mkdir(parents=True, exist_ok=True)
     if cfg.graph_diagnostics.enabled:
@@ -5434,6 +5438,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 action_labels,
                 stats.mu,
             )
+            plot_action_strip(
+                planning_action_stats_dir / f"action_stats_strip_{global_step:07d}.png",
+                deltas,
+                action_labels,
+                stats.mu,
+            )
 
             rng = random.Random(global_step)
             h_reach = reachable_fractions(
@@ -5445,6 +5455,24 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 graph_p,
                 sample_limit=cfg.planning_diagnostics.reachable_fraction_samples,
                 rng=rng,
+            )
+            save_planning_graph_plot(
+                planning_graph_dir / f"graph_h_{global_step:07d}.png",
+                h_t,
+                graph_h.centers,
+                graph_h.edges,
+                title="Planning graph (h)",
+                max_samples=cfg.planning_diagnostics.pca_samples,
+                max_edges=4000,
+            )
+            save_planning_graph_plot(
+                planning_graph_dir / f"graph_p_{global_step:07d}.png",
+                p_t,
+                graph_p.centers,
+                graph_p.edges,
+                title="Planning graph (p)",
+                max_samples=cfg.planning_diagnostics.pca_samples,
+                max_edges=4000,
             )
 
             h_local_success = _run_h_local_sanity(
@@ -5481,42 +5509,44 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     step_scale=stats.L_scale,
                     max_nodes=cfg.planning_diagnostics.astar_max_nodes,
                 )
+                visited: List[Tuple[int, int]] = [start_tile]
+                final_frame = None
                 if plan is None:
                     test_results[label] = PlanningTestResult(
                         success=False,
                         steps=0,
                         final_p_distance=float("inf"),
                         goal_distance=float(np.linalg.norm(p_goal - p_start)),
-                        visited_cells=[],
+                        visited_cells=visited,
                     )
                     plan_nodes_for_plot[label] = None
-                    continue
-                visited, final_frame = run_plan_in_env(
-                    planning_env,
-                    plan.actions,
-                    start_tile=start_tile,
-                )
-                final_cell = visited[-1] if visited else start_tile
-                success = final_cell == goal_tile
-                final_p_distance = float("inf")
-                if final_frame is not None:
-                    final_pose = _pose_from_frames(
-                        [obs_start, final_frame],
-                        model,
-                        model_cfg,
-                        device,
-                        use_z2h_init=weights.z2h > 0,
-                        action_dim=action_dim,
+                else:
+                    visited, final_frame = run_plan_in_env(
+                        planning_env,
+                        plan.actions,
+                        start_tile=start_tile,
                     )
-                    final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))
-                test_results[label] = PlanningTestResult(
-                    success=success,
-                    steps=len(plan.actions),
-                    final_p_distance=final_p_distance,
-                    goal_distance=float(np.linalg.norm(p_goal - p_start)),
-                    visited_cells=visited,
-                )
-                plan_nodes_for_plot[label] = np.stack(plan.nodes, axis=0) if plan.nodes else None
+                    final_cell = visited[-1] if visited else start_tile
+                    success = final_cell == goal_tile
+                    final_p_distance = float("inf")
+                    if final_frame is not None:
+                        final_pose = _pose_from_frames(
+                            [obs_start, final_frame],
+                            model,
+                            model_cfg,
+                            device,
+                            use_z2h_init=weights.z2h > 0,
+                            action_dim=action_dim,
+                        )
+                        final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))
+                    test_results[label] = PlanningTestResult(
+                        success=success,
+                        steps=len(plan.actions),
+                        final_p_distance=final_p_distance,
+                        goal_distance=float(np.linalg.norm(p_goal - p_start)),
+                        visited_cells=visited,
+                    )
+                    plan_nodes_for_plot[label] = np.stack(plan.nodes, axis=0) if plan.nodes else None
                 plot_grid_trace(
                     planning_exec_dir / f"exec_{label}_{global_step:07d}.png",
                     planning_env.grid_rows,

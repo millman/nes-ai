@@ -327,7 +327,7 @@ def _normalize_schedule(raw: Any) -> Any:
 
 
 def _normalize_train_config(train_cfg: Dict[str, Any]) -> None:
-    for field in ("log_schedule", "vis_schedule"):
+    for field in ("log_schedule", "vis_schedule", "plan_schedule"):
         if field in train_cfg:
             train_cfg[field] = _normalize_schedule(train_cfg[field])
 
