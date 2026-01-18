@@ -822,7 +822,7 @@ class TrainConfig:
                 "Example: '10:100 50:1000 100:10000 200:None'. Commas or spaces separate entries."
             )
         ),
-    ] = "10:100 50:1000 100:10000 200:None"
+    ] = "10:10 50:1000 100:10000 200:None"
     plan_schedule: Annotated[
         Union[str, Tuple[Tuple[int, Optional[int]], ...]],
         tyro.conf.arg(
@@ -831,7 +831,7 @@ class TrainConfig:
                 "Example: '10:100 50:1000 100:10000 200:None'. Commas or spaces separate entries."
             )
         ),
-    ] = "10:100 50:1000 100:10000 200:None"
+    ] = "10:10 50:1000 100:10000 200:None"
     checkpoint_every_steps: int = 100
     steps: int = 100_000
     show_timing_breakdown: bool = True
