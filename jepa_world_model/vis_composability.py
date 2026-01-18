@@ -10,7 +10,10 @@ import torch
 import matplotlib.pyplot as plt
 
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
-from jepa_world_model.pose_rollout import rollout_pose_sequence
+from jepa_world_model.pose_rollout import (
+    rollout_pose_sequence,
+    rollout_pose_sequence_with_correction,
+)
 from jepa_world_model.plots.plot_layout import DEFAULT_DPI, figsize_for_grid
 
 
@@ -177,7 +180,10 @@ def compute_composability_series(
     z_tp2 = z[:, 2 : steps + 2]
     h_t = h[:, :steps]
     h_tp2 = h[:, 2 : steps + 2]
-    pose, _ = rollout_pose_sequence(model, h, a, z_embeddings=z)
+    if model.p_correction_projector is not None and z is not None:
+        pose, _ = rollout_pose_sequence_with_correction(model, h, a, z)
+    else:
+        pose, _ = rollout_pose_sequence(model, h, a)
     p_tp2 = pose[:, 2 : steps + 2]
     a_t = a[:, :steps]
     a_tp1 = a[:, 1 : steps + 1]

@@ -7,18 +7,31 @@ from typing import Tuple
 import torch
 
 
-def rollout_pose_sequence(
+def _finalize_pose_rollout(
+    pose_pred: list[torch.Tensor],
+    pose_deltas: list[torch.Tensor],
+    steps: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    pose_pred_tensor = torch.stack(pose_pred, dim=1)
+    if pose_pred_tensor.shape[1] < steps:
+        pad = pose_pred_tensor[:, -1:].repeat(1, steps - pose_pred_tensor.shape[1], 1)
+        pose_pred_tensor = torch.cat([pose_pred_tensor, pad], dim=1)
+    if pose_deltas:
+        pose_deltas_tensor = torch.stack(pose_deltas, dim=1)
+    else:
+        pose_start = pose_pred_tensor[:, 0]
+        pose_deltas_tensor = pose_start.new_zeros((pose_start.shape[0], 0, pose_start.shape[1]))
+    return pose_pred_tensor, pose_deltas_tensor
+
+
+def _validate_rollout_inputs(
     model,
     h_states: torch.Tensor,
     actions: torch.Tensor,
-    z_embeddings: torch.Tensor | None = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Roll out pose by integrating Δp from the pose delta projector.
-
-    Returns:
-        pose_seq: [B, T, pose_dim] pose trajectory
-        pose_deltas: [B, T-1, pose_dim] per-step increments
-    """
+    z_embeddings: torch.Tensor | None,
+    *,
+    require_correction: bool,
+) -> int:
     if h_states.ndim != 3:
         raise AssertionError("h_states must have shape [B, T, D].")
     if actions.ndim != 3:
@@ -35,32 +48,69 @@ def rollout_pose_sequence(
         raise AssertionError("z_embeddings must have shape [B, T, D].")
     if z_embeddings is not None and z_embeddings.shape[0] != h_states.shape[0]:
         raise AssertionError("z_embeddings and h_states must share the batch dimension.")
-    bsz, steps, _ = h_states.shape
+    if require_correction and model.p_correction_projector is None:
+        raise AssertionError("p_correction_projector is required for corrected pose rollouts.")
+    if require_correction and z_embeddings is None:
+        raise AssertionError("z_embeddings are required for corrected pose rollouts.")
+    _, steps, _ = h_states.shape
+    if steps <= 1:
+        raise AssertionError("Pose rollout requires at least two timesteps.")
+    return steps
+
+
+def rollout_pose_sequence(
+    model,
+    h_states: torch.Tensor,
+    actions: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Roll out pose by integrating Δp from the pose delta projector.
+
+    Returns:
+        pose_seq: [B, T, pose_dim] pose trajectory
+        pose_deltas: [B, T-1, pose_dim] per-step increments
+    """
+    steps = _validate_rollout_inputs(model, h_states, actions, None, require_correction=False)
+    bsz = h_states.shape[0]
     pose_dim = model.p_action_delta_projector.pose_dim
     pose_start = h_states.new_zeros((bsz, pose_dim))
-    if steps <= 1 or actions.shape[1] < 1:
-        pose_single = pose_start.unsqueeze(1).repeat(1, steps, 1)
-        zero_delta = pose_start.new_zeros((bsz, 0, pose_dim))
-        return pose_single, zero_delta
     max_steps = min(actions.shape[1], steps - 1)
     pose_pred = [pose_start]
-    pose_deltas = []
+    pose_deltas: list[torch.Tensor] = []
+    for idx in range(max_steps):
+        h_in = h_states[:, idx]
+        if model.cfg.pose_delta_detach_h:
+            h_in = h_in.detach()
+        delta = model.p_action_delta_projector(pose_pred[-1], h_in, actions[:, idx])
+        pose_deltas.append(delta)
+        pose_pred.append(pose_pred[-1] + delta)
+    return _finalize_pose_rollout(pose_pred, pose_deltas, steps)
+
+
+def rollout_pose_sequence_with_correction(
+    model,
+    h_states: torch.Tensor,
+    actions: torch.Tensor,
+    z_embeddings: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Roll out pose by integrating Δp and applying z-based corrections."""
+    steps = _validate_rollout_inputs(model, h_states, actions, z_embeddings, require_correction=True)
+    bsz = h_states.shape[0]
+    pose_dim = model.p_action_delta_projector.pose_dim
+    pose_start = h_states.new_zeros((bsz, pose_dim))
+    max_steps = min(actions.shape[1], steps - 1)
+    pose_pred = [pose_start]
+    pose_deltas: list[torch.Tensor] = []
     for idx in range(max_steps):
         h_in = h_states[:, idx]
         if model.cfg.pose_delta_detach_h:
             h_in = h_in.detach()
         delta = model.p_action_delta_projector(pose_pred[-1], h_in, actions[:, idx])
         pose_next = pose_pred[-1] + delta
-        if model.p_correction_projector is not None and z_embeddings is not None:
-            if idx + 1 < z_embeddings.shape[1]:
-                z_in = z_embeddings[:, idx + 1]
-                if model.cfg.pose_correction_detach_z:
-                    z_in = z_in.detach()
-                pose_next = pose_next + model.p_correction_projector(pose_next, z_in)
+        if idx + 1 < z_embeddings.shape[1]:
+            z_in = z_embeddings[:, idx + 1]
+            if model.cfg.pose_correction_detach_z:
+                z_in = z_in.detach()
+            pose_next = pose_next + model.p_correction_projector(pose_next, z_in)
         pose_deltas.append(delta)
         pose_pred.append(pose_next)
-    pose_pred_tensor = torch.stack(pose_pred, dim=1)
-    if pose_pred_tensor.shape[1] < steps:
-        pad = pose_pred_tensor[:, -1:].repeat(1, steps - pose_pred_tensor.shape[1], 1)
-        pose_pred_tensor = torch.cat([pose_pred_tensor, pad], dim=1)
-    return pose_pred_tensor, torch.stack(pose_deltas, dim=1)
+    return _finalize_pose_rollout(pose_pred, pose_deltas, steps)

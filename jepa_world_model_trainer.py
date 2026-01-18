@@ -67,7 +67,10 @@ from jepa_world_model.vis_temporal_pairs import save_temporal_pair_visualization
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
 from jepa_world_model.config_diagnostics import DiagnosticsConfig, SpikeDiagnosticsConfig
 from jepa_world_model.config_planning import PlanningDiagnosticsConfig
-from jepa_world_model.pose_rollout import rollout_pose_sequence
+from jepa_world_model.pose_rollout import (
+    rollout_pose_sequence,
+    rollout_pose_sequence_with_correction,
+)
 from jepa_world_model.plots.write_action_alignment_crosscheck import (
     write_action_alignment_crosscheck,
 )
@@ -120,6 +123,10 @@ from jepa_world_model.plots.plot_reachable_fraction_hist import (
     save_reachable_fraction_hist_plot,
 )
 from jepa_world_model.plots.plot_planning_graph import save_planning_graph_plot
+from jepa_world_model.plots.plot_action_vector_field import (
+    save_action_time_slice_plot,
+    save_action_vector_field_plot,
+)
 from jepa_world_model.plots.plot_diagnostics_extra import (
     StraightLineTrajectory,
     save_ablation_divergence_plot,
@@ -649,7 +656,7 @@ class LossWeights:
 
     # Pixel reconstruction on predicted z rollouts (decode z_roll vs x_{t+k}).
     # Keep at 0: ties z rollouts to action effects, which should live in h/p instead.
-    rollout_recon_z: float = 0.0
+    rollout_recon_z: float = 1.0
 
     # Projection consistency on predicted z rollouts (enc(dec(z_roll)) vs z_roll).
     # Keep at 0: reinforces action-conditioned z trajectories, hurting loop closure.
@@ -833,7 +840,7 @@ class TrainConfig:
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
     detach_decoder: bool = False
-    detach_z_from_h_and_p: bool = False
+    detach_z_from_h_and_p: bool = True
 
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
@@ -1018,10 +1025,26 @@ def _rollout_pose(
     model: JEPAWorldModel,
     h_states: torch.Tensor,
     actions: torch.Tensor,
-    z_embeddings: Optional[torch.Tensor] = None,
+    z_embeddings: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Integrate Δp via the pose delta model to produce a pose rollout."""
-    pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions, z_embeddings=z_embeddings)
+    if z_embeddings.ndim != 3:
+        raise AssertionError("z_embeddings must have shape [B, T, D].")
+    if z_embeddings.shape[0] != h_states.shape[0]:
+        raise AssertionError("z_embeddings and h_states must share the batch dimension.")
+    if z_embeddings.shape[1] != h_states.shape[1]:
+        raise AssertionError("z_embeddings and h_states must share the time dimension.")
+    if model.cfg.pose_correction_use_z:
+        if model.p_correction_projector is None:
+            raise AssertionError("pose_correction_use_z requires p_correction_projector to be enabled.")
+        pose_pred, pose_deltas = rollout_pose_sequence_with_correction(
+            model,
+            h_states,
+            actions,
+            z_embeddings,
+        )
+    else:
+        pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
     return pose_pred, pose_pred, pose_deltas
 
 
@@ -1297,7 +1320,7 @@ def geometry_rank_loss(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if pose.numel() == 0:
         raise AssertionError("geometry_rank_loss requires non-empty pose.")
-    return geometry_ranking_loss(pose.detach(), cfg)
+    return geometry_ranking_loss(pose, cfg)
 
 
 def pixel_delta_loss(recon: torch.Tensor, frames: torch.Tensor) -> torch.Tensor:
@@ -2792,11 +2815,19 @@ def _run_graph_diag(
         h_pred_states = graph_h_preds
         if h_pred_states.shape[1] + 1 == graph_h_states.shape[1]:
             h_pred_states = torch.cat([graph_h_states[:, :1], h_pred_states], dim=1)
+        if graph_preds.shape[1] + 1 == graph_h_states.shape[1]:
+            z_pred_embeddings = torch.cat([graph_embeddings[:, :1], graph_preds], dim=1)
+        elif graph_preds.shape[1] == graph_h_states.shape[1]:
+            z_pred_embeddings = graph_preds
+        else:
+            raise AssertionError(
+                "graph_preds must match graph_h_states in time (T or T-1) to build pose rollouts."
+            )
         _, p_hat, _ = _rollout_pose(
             model,
             h_pred_states,
             graph_actions,
-            z_embeddings=graph_preds,
+            z_embeddings=z_pred_embeddings,
         )
         p_hat_full = torch.cat([p_hat, p_targets[:, -1:, :]], dim=1)
         if graph_cfg.use_ema_targets and ema_model is not None and ema_h_states is not None and ema_embeddings is not None:
@@ -3610,6 +3641,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     diagnostics_rollout_divergence_h_dir = run_dir / "vis_rollout_divergence_h"
     diagnostics_rollout_divergence_p_dir = run_dir / "vis_rollout_divergence_p"
     diagnostics_straightline_p_dir = run_dir / "vis_straightline_p"
+    diagnostics_action_field_z_dir = run_dir / "vis_action_field_z"
+    diagnostics_action_field_h_dir = run_dir / "vis_action_field_h"
+    diagnostics_action_field_p_dir = run_dir / "vis_action_field_p"
+    diagnostics_action_time_z_dir = run_dir / "vis_action_time_z"
+    diagnostics_action_time_h_dir = run_dir / "vis_action_time_h"
+    diagnostics_action_time_p_dir = run_dir / "vis_action_time_p"
     diagnostics_z_consistency_dir = run_dir / "vis_z_consistency"
     diagnostics_z_monotonicity_dir = run_dir / "vis_z_monotonicity"
     diagnostics_path_independence_dir = run_dir / "vis_path_independence"
@@ -3673,6 +3710,12 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         diagnostics_rollout_divergence_z_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_rollout_divergence_h_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_rollout_divergence_p_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_action_field_z_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_action_field_h_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_action_field_p_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_action_time_z_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_action_time_h_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_action_time_p_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_straightline_p_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_z_consistency_dir.mkdir(parents=True, exist_ok=True)
         diagnostics_z_monotonicity_dir.mkdir(parents=True, exist_ok=True)
@@ -4489,6 +4532,71 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     cfg.diagnostics.top_k_components,
                     diag_paths,
                 )
+                action_ids_seq = compress_actions_to_ids(diag_actions.detach().cpu().numpy())
+                action_ids_flat = action_ids_seq[:, :-1].reshape(-1)
+                z_embed_np = diag_embeddings.detach().cpu().numpy()
+                h_embed_np = diag_h_states.detach().cpu().numpy()
+                p_embed_np = diag_p_embeddings.detach().cpu().numpy()
+                z_deltas = z_embed_np[:, 1:] - z_embed_np[:, :-1]
+                h_deltas = h_embed_np[:, 1:] - h_embed_np[:, :-1]
+                p_deltas = p_embed_np[:, 1:] - p_embed_np[:, :-1]
+                save_action_vector_field_plot(
+                    diagnostics_action_field_z_dir / f"action_field_z_{global_step:07d}.png",
+                    z_embed_np.reshape(-1, z_embed_np.shape[-1]),
+                    z_deltas.reshape(-1, z_deltas.shape[-1]),
+                    action_ids_flat,
+                    motion_z.action_dim,
+                    max_actions=cfg.diagnostics.max_actions_to_plot,
+                    min_count=cfg.diagnostics.min_action_count,
+                    title="Action-conditioned vector field (Z)",
+                )
+                save_action_vector_field_plot(
+                    diagnostics_action_field_h_dir / f"action_field_h_{global_step:07d}.png",
+                    h_embed_np.reshape(-1, h_embed_np.shape[-1]),
+                    h_deltas.reshape(-1, h_deltas.shape[-1]),
+                    action_ids_flat,
+                    motion_h.action_dim,
+                    max_actions=cfg.diagnostics.max_actions_to_plot,
+                    min_count=cfg.diagnostics.min_action_count,
+                    title="Action-conditioned vector field (H)",
+                )
+                save_action_vector_field_plot(
+                    diagnostics_action_field_p_dir / f"action_field_p_{global_step:07d}.png",
+                    p_embed_np.reshape(-1, p_embed_np.shape[-1]),
+                    p_deltas.reshape(-1, p_deltas.shape[-1]),
+                    action_ids_flat,
+                    motion_p.action_dim,
+                    max_actions=cfg.diagnostics.max_actions_to_plot,
+                    min_count=cfg.diagnostics.min_action_count,
+                    title="Action-conditioned vector field (P)",
+                )
+                save_action_time_slice_plot(
+                    diagnostics_action_time_z_dir / f"action_time_z_{global_step:07d}.png",
+                    z_deltas,
+                    action_ids_seq[:, :-1],
+                    motion_z.action_dim,
+                    max_actions=cfg.diagnostics.max_actions_to_plot,
+                    min_count=cfg.diagnostics.min_action_count,
+                    title="Action delta time slices (Z)",
+                )
+                save_action_time_slice_plot(
+                    diagnostics_action_time_h_dir / f"action_time_h_{global_step:07d}.png",
+                    h_deltas,
+                    action_ids_seq[:, :-1],
+                    motion_h.action_dim,
+                    max_actions=cfg.diagnostics.max_actions_to_plot,
+                    min_count=cfg.diagnostics.min_action_count,
+                    title="Action delta time slices (H)",
+                )
+                save_action_time_slice_plot(
+                    diagnostics_action_time_p_dir / f"action_time_p_{global_step:07d}.png",
+                    p_deltas,
+                    action_ids_seq[:, :-1],
+                    motion_p.action_dim,
+                    max_actions=cfg.diagnostics.max_actions_to_plot,
+                    min_count=cfg.diagnostics.min_action_count,
+                    title="Action delta time slices (P)",
+                )
                 if diag_composability is not None and diag_p_series is not None:
                     save_composability_plot(
                         vis_composability_z_dir / f"composability_z_{global_step:07d}.png",
@@ -4561,7 +4669,23 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 else:
                     h_drift_mean = 0.0
                     p_drift_mean = 0.0
+                id_acc_z = 0.0
+                id_acc_h = 0.0
                 id_acc_p = 0.0
+                if weights.inverse_dynamics_z > 0 and diag_embeddings.shape[1] >= 2:
+                    action_logits_z = model.inverse_dynamics_z(
+                        diag_embeddings[:, :-1],
+                        diag_embeddings[:, 1:],
+                    )
+                    action_preds_z = (torch.sigmoid(action_logits_z) > 0.5).to(diag_actions_device.dtype)
+                    id_acc_z = float((action_preds_z == diag_actions_device[:, :-1]).float().mean().item())
+                if weights.inverse_dynamics_h > 0 and diag_h_states.shape[1] >= 2:
+                    action_logits_h = model.inverse_dynamics_h(
+                        diag_h_states[:, :-1],
+                        diag_h_states[:, 1:],
+                    )
+                    action_preds_h = (torch.sigmoid(action_logits_h) > 0.5).to(diag_actions_device.dtype)
+                    id_acc_h = float((action_preds_h == diag_actions_device[:, :-1]).float().mean().item())
                 if weights.inverse_dynamics_p > 0 and diag_p_embeddings.shape[1] >= 2:
                     action_logits_p = model.inverse_dynamics_p(
                         diag_p_embeddings[:, :-1],
@@ -4581,6 +4705,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         "p_norm_p95",
                         "h_drift_mean",
                         "p_drift_mean",
+                        "id_acc_z",
+                        "id_acc_h",
                         "id_acc_p",
                     ],
                     [
@@ -4593,6 +4719,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                         p_norm_p95,
                         h_drift_mean,
                         p_drift_mean,
+                        id_acc_z,
+                        id_acc_h,
                         id_acc_p,
                     ],
                 )
