@@ -619,9 +619,9 @@ class LossWeights:
     recon_multi_box: float = 1.0
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
-    pixel_delta: float = 1.0
+    pixel_delta: float = 0.0
     # Pixel delta reconstruction loss using multi-scale box weighting.
-    pixel_delta_multi_box: float = 0.0
+    pixel_delta_multi_box: float = 1.0
 
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 1.0
@@ -658,7 +658,7 @@ class LossWeights:
 
     # Pixel reconstruction on predicted z rollouts (decode z_roll vs x_{t+k}).
     # Keep at 0: ties z rollouts to action effects, which should live in h/p instead.
-    rollout_recon_z: float = 1.0
+    rollout_recon_z: float = 0.0
 
     # Multi-scale box reconstruction on predicted z rollouts (decode z_roll vs x_{t+k}).
     # Keep at 0: ties z rollouts to action effects, which should live in h/p instead.
@@ -691,7 +691,7 @@ class LossWeights:
 
     # k-step rollout delta consistency in h-space.
     # Encourages predicted h changes to match teacher deltas over short horizons.
-    rollout_kstep_delta_h: float = 0.0
+    rollout_kstep_delta_h: float = 1.0
 
     # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
@@ -4828,6 +4828,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     diag_paths,
                 )
                 action_ids_seq = compress_actions_to_ids(diag_actions.detach().cpu().numpy())
+                if action_ids_seq.ndim == 1:
+                    action_ids_seq = action_ids_seq.reshape(diag_actions.shape[0], diag_actions.shape[1])
                 action_ids_flat = action_ids_seq[:, :-1].reshape(-1)
                 z_embed_np = diag_embeddings.detach().cpu().numpy()
                 h_embed_np = diag_h_states.detach().cpu().numpy()
@@ -4837,7 +4839,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 p_deltas = p_embed_np[:, 1:] - p_embed_np[:, :-1]
                 save_action_vector_field_plot(
                     diagnostics_action_field_z_dir / f"action_field_z_{global_step:07d}.png",
-                    z_embed_np.reshape(-1, z_embed_np.shape[-1]),
+                    z_embed_np[:, :-1].reshape(-1, z_embed_np.shape[-1]),
                     z_deltas.reshape(-1, z_deltas.shape[-1]),
                     action_ids_flat,
                     motion_z.action_dim,
@@ -4847,7 +4849,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 )
                 save_action_vector_field_plot(
                     diagnostics_action_field_h_dir / f"action_field_h_{global_step:07d}.png",
-                    h_embed_np.reshape(-1, h_embed_np.shape[-1]),
+                    h_embed_np[:, :-1].reshape(-1, h_embed_np.shape[-1]),
                     h_deltas.reshape(-1, h_deltas.shape[-1]),
                     action_ids_flat,
                     motion_h.action_dim,
@@ -4857,7 +4859,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 )
                 save_action_vector_field_plot(
                     diagnostics_action_field_p_dir / f"action_field_p_{global_step:07d}.png",
-                    p_embed_np.reshape(-1, p_embed_np.shape[-1]),
+                    p_embed_np[:, :-1].reshape(-1, p_embed_np.shape[-1]),
                     p_deltas.reshape(-1, p_deltas.shape[-1]),
                     action_ids_flat,
                     motion_p.action_dim,
