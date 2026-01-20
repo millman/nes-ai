@@ -82,12 +82,12 @@ class ModelConfig:
     predictor_spectral_norm: bool = True
 
     # Optional head toggles (resolved from loss weights at runtime when training).
-    enable_inverse_dynamics_z: bool = True
-    enable_inverse_dynamics_h: bool = True
-    enable_inverse_dynamics_p: bool = True
-    enable_action_delta_z: bool = True
-    enable_action_delta_h: bool = True
-    enable_action_delta_p: bool = True
+    enable_inverse_dynamics_z: Optional[bool] = None
+    enable_inverse_dynamics_h: Optional[bool] = None
+    enable_inverse_dynamics_p: Optional[bool] = None
+    enable_action_delta_z: Optional[bool] = None
+    enable_action_delta_h: Optional[bool] = None
+    enable_action_delta_p: Optional[bool] = None
 
     @property
     def embedding_dim(self) -> int:

@@ -897,6 +897,16 @@ class JEPAWorldModel(nn.Module):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
+        for name in (
+            "enable_inverse_dynamics_z",
+            "enable_inverse_dynamics_h",
+            "enable_inverse_dynamics_p",
+            "enable_action_delta_z",
+            "enable_action_delta_h",
+            "enable_action_delta_p",
+        ):
+            if getattr(cfg, name) is None:
+                raise AssertionError(f"{name} must be resolved before JEPAWorldModel initialization.")
         self.encoder = Encoder(
             cfg.in_channels,
             cfg.encoder_schedule,
@@ -3881,18 +3891,31 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     val_dataloader_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
     embedding_generator = torch.Generator()
     embedding_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
-    model_cfg.enable_inverse_dynamics_z = weights.inverse_dynamics_z > 0
-    model_cfg.enable_inverse_dynamics_h = weights.inverse_dynamics_h > 0
-    model_cfg.enable_inverse_dynamics_p = weights.inverse_dynamics_p > 0
-    model_cfg.enable_action_delta_z = weights.action_delta_z > 0
-    model_cfg.enable_action_delta_h = (
-        weights.action_delta_h > 0
-        or weights.additivity_h > 0
-    )
-    model_cfg.enable_action_delta_p = (
-        weights.action_delta_p > 0
-        or weights.additivity_p > 0
-        or weights.rollout_kstep_p > 0
+    for name in (
+        "enable_inverse_dynamics_z",
+        "enable_inverse_dynamics_h",
+        "enable_inverse_dynamics_p",
+        "enable_action_delta_z",
+        "enable_action_delta_h",
+        "enable_action_delta_p",
+    ):
+        if getattr(model_cfg, name) is not None:
+            raise AssertionError(f"{name} must be None and derived from loss weights during training.")
+    model_cfg_runtime = replace(
+        model_cfg,
+        enable_inverse_dynamics_z=weights.inverse_dynamics_z > 0,
+        enable_inverse_dynamics_h=weights.inverse_dynamics_h > 0,
+        enable_inverse_dynamics_p=weights.inverse_dynamics_p > 0,
+        enable_action_delta_z=weights.action_delta_z > 0,
+        enable_action_delta_h=(
+            weights.action_delta_h > 0
+            or weights.additivity_h > 0
+        ),
+        enable_action_delta_p=(
+            weights.action_delta_p > 0
+            or weights.additivity_p > 0
+            or weights.rollout_kstep_p > 0
+        ),
     )
     diagnostics_generator = torch.Generator()
     diagnostics_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
@@ -4141,22 +4164,26 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     )
 
     # --- Model initialization ---
-    model = JEPAWorldModel(model_cfg).to(device)
+    model = JEPAWorldModel(model_cfg_runtime).to(device)
 
     ema_model: Optional[JEPAWorldModel] = None
 
-    decoder_schedule = model_cfg.decoder_schedule if model_cfg.decoder_schedule is not None else model_cfg.encoder_schedule
+    decoder_schedule = (
+        model_cfg_runtime.decoder_schedule
+        if model_cfg_runtime.decoder_schedule is not None
+        else model_cfg_runtime.encoder_schedule
+    )
     decoder = VisualizationDecoder(
         model.embedding_dim,
-        model_cfg.in_channels,
-        model_cfg.image_size,
+        model_cfg_runtime.in_channels,
+        model_cfg_runtime.image_size,
         decoder_schedule,
     ).to(device)
 
-    flops_per_step = calculate_flops_per_step(model_cfg, cfg.batch_size, cfg.seq_len)
+    flops_per_step = calculate_flops_per_step(model_cfg_runtime, cfg.batch_size, cfg.seq_len)
 
     # Write model_shape.txt
-    _write_model_shape_summary(run_dir, dataset, model, decoder, model_cfg, flops_per_step)
+    _write_model_shape_summary(run_dir, dataset, model, decoder, model_cfg_runtime, flops_per_step)
 
     # Write metadata_model.txt (TOML format)
     _write_model_metadata(run_dir, model, decoder, flops_per_step)
@@ -4419,7 +4446,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 sequences,
                 grad_label,
                 global_step,
-                include_pixel_delta=weights.pixel_delta > 0,
+                include_pixel_delta=(weights.pixel_delta > 0 or weights.pixel_delta_multi_box > 0),
             )
 
             sequences, grad_label = _build_visualization_sequences(
@@ -4437,7 +4464,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 sequences,
                 grad_label,
                 global_step,
-                include_pixel_delta=weights.pixel_delta > 0,
+                include_pixel_delta=(weights.pixel_delta > 0 or weights.pixel_delta_multi_box > 0),
             )
             if off_manifold_batch_cpu is not None:
                 assert torch.is_grad_enabled()

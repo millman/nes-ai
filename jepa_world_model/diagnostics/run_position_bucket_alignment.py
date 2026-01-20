@@ -40,12 +40,32 @@ def _read_metadata(run_dir: Path) -> RunMetadata:
     payload = tomllib.loads(metadata_path.read_text())
     train_cfg = payload.get("train_config") or {}
     diagnostics_cfg = train_cfg.get("diagnostics") or {}
+    loss_weights = train_cfg.get("loss_weights") or {}
     model_cfg = payload.get("model_config") or {}
     layer_norms_raw = model_cfg.get("layer_norms") or {}
     layer_norms = LayerNormConfig(**layer_norms_raw)
     encoder_schedule = tuple(model_cfg.get("encoder_schedule") or ())
     decoder_schedule_raw = model_cfg.get("decoder_schedule")
     decoder_schedule = None if decoder_schedule_raw is None else tuple(decoder_schedule_raw)
+    def _resolve_toggle(key: str, derived: bool) -> bool:
+        raw = model_cfg.get(key)
+        if raw is None:
+            return derived
+        return bool(raw)
+
+    enable_inverse_dynamics_z = loss_weights.get("inverse_dynamics_z", 0) > 0
+    enable_inverse_dynamics_h = loss_weights.get("inverse_dynamics_h", 0) > 0
+    enable_inverse_dynamics_p = loss_weights.get("inverse_dynamics_p", 0) > 0
+    enable_action_delta_z = loss_weights.get("action_delta_z", 0) > 0
+    enable_action_delta_h = (
+        loss_weights.get("action_delta_h", 0) > 0
+        or loss_weights.get("additivity_h", 0) > 0
+    )
+    enable_action_delta_p = (
+        loss_weights.get("action_delta_p", 0) > 0
+        or loss_weights.get("additivity_p", 0) > 0
+        or loss_weights.get("rollout_kstep_p", 0) > 0
+    )
     model = ModelConfig(
         in_channels=int(model_cfg.get("in_channels", 3)),
         image_size=int(model_cfg.get("image_size", 64)),
@@ -61,12 +81,12 @@ def _read_metadata(run_dir: Path) -> RunMetadata:
         pose_correction_detach_z=bool(model_cfg.get("pose_correction_detach_z", True)),
         layer_norms=layer_norms,
         predictor_spectral_norm=bool(model_cfg.get("predictor_spectral_norm", True)),
-        enable_inverse_dynamics_z=bool(model_cfg.get("enable_inverse_dynamics_z", True)),
-        enable_inverse_dynamics_h=bool(model_cfg.get("enable_inverse_dynamics_h", True)),
-        enable_inverse_dynamics_p=bool(model_cfg.get("enable_inverse_dynamics_p", True)),
-        enable_action_delta_z=bool(model_cfg.get("enable_action_delta_z", True)),
-        enable_action_delta_h=bool(model_cfg.get("enable_action_delta_h", True)),
-        enable_action_delta_p=bool(model_cfg.get("enable_action_delta_p", True)),
+        enable_inverse_dynamics_z=_resolve_toggle("enable_inverse_dynamics_z", enable_inverse_dynamics_z),
+        enable_inverse_dynamics_h=_resolve_toggle("enable_inverse_dynamics_h", enable_inverse_dynamics_h),
+        enable_inverse_dynamics_p=_resolve_toggle("enable_inverse_dynamics_p", enable_inverse_dynamics_p),
+        enable_action_delta_z=_resolve_toggle("enable_action_delta_z", enable_action_delta_z),
+        enable_action_delta_h=_resolve_toggle("enable_action_delta_h", enable_action_delta_h),
+        enable_action_delta_p=_resolve_toggle("enable_action_delta_p", enable_action_delta_p),
     )
     data_root = Path(train_cfg.get("data_root") or "")
     if not data_root.exists():
