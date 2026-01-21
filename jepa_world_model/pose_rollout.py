@@ -114,3 +114,30 @@ def rollout_pose_sequence_with_correction(
         pose_deltas.append(delta)
         pose_pred.append(pose_next)
     return _finalize_pose_rollout(pose_pred, pose_deltas, steps)
+
+
+def rollout_pose(
+    model,
+    h_states: torch.Tensor,
+    actions: torch.Tensor,
+    z_embeddings: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Integrate Δp via the pose delta model to produce a pose rollout."""
+    if z_embeddings.ndim != 3:
+        raise AssertionError("z_embeddings must have shape [B, T, D].")
+    if z_embeddings.shape[0] != h_states.shape[0]:
+        raise AssertionError("z_embeddings and h_states must share the batch dimension.")
+    if z_embeddings.shape[1] != h_states.shape[1]:
+        raise AssertionError("z_embeddings and h_states must share the time dimension.")
+    if model.cfg.pose_correction_use_z:
+        if model.p_correction_projector is None:
+            raise AssertionError("pose_correction_use_z requires p_correction_projector to be enabled.")
+        pose_pred, pose_deltas = rollout_pose_sequence_with_correction(
+            model,
+            h_states,
+            actions,
+            z_embeddings,
+        )
+    else:
+        pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
+    return pose_pred, pose_pred, pose_deltas
