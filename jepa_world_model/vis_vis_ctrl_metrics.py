@@ -235,22 +235,26 @@ def write_vis_ctrl_metrics_csv(
     csv_path: Path,
     global_step: int,
     metrics_z: VisCtrlMetrics,
-    metrics_p: VisCtrlMetrics,
+    metrics_p: VisCtrlMetrics | None,
     metrics_h: VisCtrlMetrics | None = None,
 ) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_p_keys = metrics_p.knn_mean_distances.keys() if metrics_p is not None else []
+    metrics_p_jaccard = metrics_p.jaccard_means.keys() if metrics_p is not None else []
     knn_ks = sorted(
         {int(k) for k in metrics_z.knn_mean_distances.keys()}
-        | {int(k) for k in metrics_p.knn_mean_distances.keys()}
+        | {int(k) for k in metrics_p_keys}
         | ({int(k) for k in metrics_h.knn_mean_distances.keys()} if metrics_h else set())
     )
     jac_ks = sorted(
         {int(k) for k in metrics_z.jaccard_means.keys()}
-        | {int(k) for k in metrics_p.jaccard_means.keys()}
+        | {int(k) for k in metrics_p_jaccard}
         | ({int(k) for k in metrics_h.jaccard_means.keys()} if metrics_h else set())
     )
     fieldnames = ["step"]
-    prefixes = [("z", metrics_z), ("p", metrics_p)]
+    prefixes = [("z", metrics_z)]
+    if metrics_p is not None:
+        prefixes.append(("p", metrics_p))
     if metrics_h is not None:
         prefixes.append(("h", metrics_h))
     for prefix, _ in prefixes:

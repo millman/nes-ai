@@ -84,7 +84,7 @@ Legend:
 | recon_multi_box | target `x_t` | encoder + decoder | `detach_decoder=True` would isolate decoder only. |
 | pixel_delta_multi_box | target `x_{t+1}-x_t` | encoder + decoder | Same detach rules as recon. |
 | h2z | target `z_t` detached | h_to_z + predictor (via h states) | No encoder grads. |
-| z2h | z0 detached, h0 detached | z_to_h only | Pure projector training. |
+| z2h | z_t detached (t >= start_frame) | z_to_h only (h_to_z frozen for aux) | z_t -> z_to_h -> h_to_z -> compare to z_t. |
 | inverse_dynamics_h | uses `h_t, h_{t+1}` | inverse_dynamics_h head + predictor | No encoder grads (z detached). |
 | action_delta_h | uses `h_{t+1}-h_t` | h_action_delta_projector + predictor | No encoder grads (z detached). |
 | rollout_kstep_h | compares predicted h rollouts | predictor + h_to_z | z inputs detached by default. |
