@@ -33,7 +33,6 @@ class GraphDiagnosticsConfig:
     block_size: int = 256
     normalize_latents: bool = True
     use_predictor_scores: bool = True
-    use_ema_targets: bool = False
     mask_self_edges: bool = True
     include_edge_consistency: bool = True
     edge_consistency_samples: int = 1024

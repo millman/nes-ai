@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -23,8 +23,6 @@ class GraphDiagnosticsBatch:
     graph_preds: torch.Tensor
     graph_h_preds: torch.Tensor
     graph_h_states: torch.Tensor
-    ema_embeddings: Optional[torch.Tensor]
-    ema_h_states: Optional[torch.Tensor]
     graph_actions: torch.Tensor
     next_index: torch.Tensor
     next2_index: torch.Tensor
@@ -36,7 +34,6 @@ def prepare_graph_diagnostics(
     graph_frames: torch.Tensor,
     graph_actions: torch.Tensor,
     model,
-    ema_model,
     graph_cfg: GraphDiagnosticsConfig,
     device: torch.device,
     use_z2h_init: bool,
@@ -54,16 +51,6 @@ def prepare_graph_diagnostics(
             graph_actions_device,
             use_z2h_init=use_z2h_init,
         )
-        ema_embeddings: Optional[torch.Tensor] = None
-        ema_h_states: Optional[torch.Tensor] = None
-        if graph_cfg.use_ema_targets and ema_model is not None:
-            ema_embeddings = ema_model.encode_sequence(graph_frames_device)["embeddings"]
-            _, _, ema_h_states = rollout_teacher_forced(
-                ema_model,
-                ema_embeddings,
-                graph_actions_device,
-                use_z2h_init=use_z2h_init,
-            )
     assert torch.is_grad_enabled()
     next_index, next2_index, chunk_ids = build_graph_diag_indices(graph_frames_device)
     return GraphDiagnosticsBatch(
@@ -71,8 +58,6 @@ def prepare_graph_diagnostics(
         graph_preds=graph_preds,
         graph_h_preds=graph_h_preds,
         graph_h_states=graph_h_states,
-        ema_embeddings=ema_embeddings,
-        ema_h_states=ema_h_states,
         graph_actions=graph_actions_device,
         next_index=next_index,
         next2_index=next2_index,
@@ -85,14 +70,11 @@ def run_graph_diag(
     embedding_kind: str,
     graph_cfg: GraphDiagnosticsConfig,
     model,
-    ema_model,
     graph_embeddings: torch.Tensor,
     graph_preds: torch.Tensor,
     graph_h_preds: torch.Tensor,
     graph_h_states: torch.Tensor,
     graph_actions: torch.Tensor,
-    ema_embeddings: Optional[torch.Tensor],
-    ema_h_states: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if embedding_kind == "p":
         if model.p_action_delta_projector is None:
@@ -121,22 +103,12 @@ def run_graph_diag(
             z_embeddings=z_pred_embeddings,
         )
         p_hat_full = torch.cat([p_hat, p_targets[:, -1:, :]], dim=1)
-        if graph_cfg.use_ema_targets and ema_model is not None and ema_h_states is not None and ema_embeddings is not None:
-            if ema_model.p_action_delta_projector is None:
-                raise AssertionError("Graph diagnostics for p require ema p_action_delta_projector.")
-            _, targets, _ = rollout_pose(
-                ema_model,
-                ema_h_states,
-                graph_actions,
-                z_embeddings=ema_embeddings,
-            )
-        else:
-            targets = p_targets
+        targets = p_targets
         z_flat = p_targets.reshape(-1, p_targets.shape[-1])
         target_flat = targets.reshape(-1, targets.shape[-1])
         zhat_full = p_hat_full.reshape(-1, p_hat_full.shape[-1])
     elif embedding_kind == "h":
-        targets = ema_h_states if graph_cfg.use_ema_targets and ema_h_states is not None else graph_h_states
+        targets = graph_h_states
         z_flat = graph_h_states.reshape(-1, graph_h_states.shape[-1])
         target_flat = targets.reshape(-1, targets.shape[-1])
         zhat_full = torch.cat(
@@ -144,7 +116,7 @@ def run_graph_diag(
             dim=1,
         ).reshape(-1, graph_h_states.shape[-1])
     else:
-        targets = ema_embeddings if graph_cfg.use_ema_targets and ema_embeddings is not None else graph_embeddings
+        targets = graph_embeddings
         z_flat = graph_embeddings.reshape(-1, graph_embeddings.shape[-1])
         target_flat = targets.reshape(-1, targets.shape[-1])
         zhat_full = torch.cat(
@@ -166,7 +138,6 @@ def run_graph_diagnostics_for_kind(
     kind: str,
     graph_cfg,
     model,
-    ema_model,
     global_step: int,
     graph_diag: GraphDiagnosticsBatch,
     metrics_dir: Path,
@@ -176,14 +147,11 @@ def run_graph_diagnostics_for_kind(
         embedding_kind=kind,
         graph_cfg=graph_cfg,
         model=model,
-        ema_model=ema_model,
         graph_embeddings=graph_diag.graph_embeddings,
         graph_preds=graph_diag.graph_preds,
         graph_h_preds=graph_diag.graph_h_preds,
         graph_h_states=graph_diag.graph_h_states,
         graph_actions=graph_diag.graph_actions,
-        ema_embeddings=graph_diag.ema_embeddings,
-        ema_h_states=graph_diag.ema_h_states,
     )
     stats = compute_graph_diagnostics_stats(
         queries,

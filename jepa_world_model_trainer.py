@@ -795,7 +795,6 @@ class NormalizeLossesConfig:
 
 @dataclass
 class VisCtrlConfig:
-    enabled: bool = True
     sample_sequences: int = 128
     knn_k_values: Tuple[int, ...] = (1, 2, 5, 10)
     knn_chunk_size: int = 512
@@ -3699,16 +3698,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     )
 
     diagnostics_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
-    if cfg.diagnostics.enabled:
-        if cfg.diagnostics.sample_sequences <= 0:
-            raise AssertionError(
-                "Diagnostics requested but diagnostics.sample_sequences is not positive."
-            )
-        diagnostics_batch_cpu = _build_embedding_batch(
-            dataset,
-            cfg.diagnostics.sample_sequences,
-            generator=diagnostics_generator,
+    if cfg.diagnostics.sample_sequences <= 0:
+        raise AssertionError(
+            "Diagnostics requested but diagnostics.sample_sequences is not positive."
         )
+    diagnostics_batch_cpu = _build_embedding_batch(
+        dataset,
+        cfg.diagnostics.sample_sequences,
+        generator=diagnostics_generator,
+    )
 
     planning_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
     planning_env: Optional[GridworldKeyEnv] = None
@@ -3725,16 +3723,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         planning_env = GridworldKeyEnv(render_mode="rgb_array", keyboard_override=False, start_manual_control=False)
 
     vis_ctrl_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
-    if cfg.vis_ctrl.enabled:
-        if cfg.vis_ctrl.sample_sequences <= 0:
-            raise AssertionError(
-                "Vis-ctrl requested but vis_ctrl.sample_sequences is not positive."
-            )
-        vis_ctrl_batch_cpu = _build_embedding_batch(
-            dataset,
-            cfg.vis_ctrl.sample_sequences,
-            generator=vis_ctrl_generator,
+    if cfg.vis_ctrl.sample_sequences <= 0:
+        raise AssertionError(
+            "Vis-ctrl requested but vis_ctrl.sample_sequences is not positive."
         )
+    vis_ctrl_batch_cpu = _build_embedding_batch(
+        dataset,
+        cfg.vis_ctrl.sample_sequences,
+        generator=vis_ctrl_generator,
+    )
 
     timing_totals: Dict[str, float] = {"train": 0.0, "log": 0.0, "vis": 0.0, "plan": 0.0}
     total_samples_processed = 0
@@ -3910,7 +3907,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 vis_ctrl_cfg=cfg.vis_ctrl,
                 graph_cfg=cfg.graph_diagnostics,
                 model=model,
-                ema_model=ema_model,
                 decoder=decoder,
                 device=device,
                 weights=weights,

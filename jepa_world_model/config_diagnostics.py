@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 @dataclass
 class DiagnosticsConfig:
-    enabled: bool = True
     sample_sequences: int = 128
     top_k_components: int = 8
     min_action_count: int = 5
