@@ -20,7 +20,7 @@ from jepa_world_model.model_config import LayerNormConfig, ModelConfig
 from jepa_world_model.plots.build_motion_subspace import build_motion_subspace
 from jepa_world_model.plots.plot_action_alignment_stats import compute_action_alignment_stats
 from jepa_world_model.rollout import rollout_teacher_forced
-from jepa_world_model_trainer import JEPAWorldModel
+from jepa_world_model.model import JEPAWorldModel
 
 
 @dataclass

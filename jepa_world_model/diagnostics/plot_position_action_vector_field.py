@@ -23,7 +23,7 @@ from jepa_world_model.diagnostics.run_position_bucket_alignment import (
 from jepa_world_model.plots.build_motion_subspace import build_motion_subspace
 from jepa_world_model.pose_rollout import rollout_pose_sequence, rollout_pose_sequence_with_correction
 from jepa_world_model.rollout import rollout_teacher_forced
-from jepa_world_model_trainer import JEPAWorldModel
+from jepa_world_model.model import JEPAWorldModel
 
 
 def _load_checkpoint(path: Path, device: torch.device) -> Dict[str, torch.Tensor]:

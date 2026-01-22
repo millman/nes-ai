@@ -91,7 +91,7 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "self_distance_z": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for z."),
     "self_distance_h": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for h."),
     "self_distance_p": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for p."),
-    "state_embedding": DiagnosticsOutputSpec(True, "State embedding projections + odometry visuals."),
+    "state_embedding": DiagnosticsOutputSpec(False, "State embedding projections + odometry visuals."),
     "diagnostics_action_field_z": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for z."),
     "diagnostics_action_field_h": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for h."),
     "diagnostics_action_field_p": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for p."),
@@ -107,10 +107,10 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "diagnostics_alignment_z": DiagnosticsOutputSpec(True, "Action-alignment artifacts for z."),
     "diagnostics_alignment_h": DiagnosticsOutputSpec(True, "Action-alignment artifacts for h."),
     "diagnostics_alignment_p": DiagnosticsOutputSpec(True, "Action-alignment artifacts for p."),
-    "diagnostics_cycle_z": DiagnosticsOutputSpec(True, "Cycle-error artifacts for z."),
-    "diagnostics_cycle_h": DiagnosticsOutputSpec(True, "Cycle-error artifacts for h."),
-    "diagnostics_cycle_p": DiagnosticsOutputSpec(True, "Cycle-error artifacts for p."),
-    "diagnostics_frames": DiagnosticsOutputSpec(True, "Diagnostics frame dumps + CSV."),
+    "diagnostics_cycle_z": DiagnosticsOutputSpec(False, "Cycle-error artifacts for z."),
+    "diagnostics_cycle_h": DiagnosticsOutputSpec(False, "Cycle-error artifacts for h."),
+    "diagnostics_cycle_p": DiagnosticsOutputSpec(False, "Cycle-error artifacts for p."),
+    "diagnostics_frames": DiagnosticsOutputSpec(False, "Diagnostics frame dumps + CSV."),
     "diagnostics_scalars": DiagnosticsOutputSpec(True, "Diagnostics scalar CSV summary."),
     "diagnostics_norm_timeseries": DiagnosticsOutputSpec(True, "Norm timeseries plot."),
     "diagnostics_straightline_p": DiagnosticsOutputSpec(True, "Straight-line rollout plot in p."),
@@ -122,31 +122,31 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "diagnostics_z_monotonicity": DiagnosticsOutputSpec(True, "Z monotonicity plots/CSVs."),
     "diagnostics_path_independence": DiagnosticsOutputSpec(True, "Path-independence plots/CSVs."),
     "diagnostics_h_drift": DiagnosticsOutputSpec(True, "H drift-by-action plot/CSV."),
-    "vis_ctrl_smoothness_z": DiagnosticsOutputSpec(True, "Vis-ctrl smoothness spectrum for z."),
-    "vis_ctrl_smoothness_h": DiagnosticsOutputSpec(True, "Vis-ctrl smoothness spectrum for h."),
-    "vis_ctrl_smoothness_p": DiagnosticsOutputSpec(True, "Vis-ctrl smoothness spectrum for p."),
-    "vis_ctrl_composition_error_z": DiagnosticsOutputSpec(True, "Vis-ctrl two-step composition error for z."),
-    "vis_ctrl_composition_error_h": DiagnosticsOutputSpec(True, "Vis-ctrl two-step composition error for h."),
-    "vis_ctrl_composition_error_p": DiagnosticsOutputSpec(True, "Vis-ctrl two-step composition error for p."),
-    "vis_ctrl_stability_z": DiagnosticsOutputSpec(True, "Vis-ctrl neighborhood stability plot for z."),
-    "vis_ctrl_stability_h": DiagnosticsOutputSpec(True, "Vis-ctrl neighborhood stability plot for h."),
-    "vis_ctrl_stability_p": DiagnosticsOutputSpec(True, "Vis-ctrl neighborhood stability plot for p."),
-    "vis_ctrl_summary": DiagnosticsOutputSpec(True, "Vis-ctrl metrics CSV summary."),
-    "graph_rank_cdf_z": DiagnosticsOutputSpec(True, "Graph diagnostics rank CDF plots for z."),
-    "graph_rank_cdf_h": DiagnosticsOutputSpec(True, "Graph diagnostics rank CDF plots for h."),
-    "graph_rank_cdf_p": DiagnosticsOutputSpec(True, "Graph diagnostics rank CDF plots for p."),
-    "graph_neff_violin_z": DiagnosticsOutputSpec(True, "Graph diagnostics Neff violin plot for z."),
-    "graph_neff_violin_h": DiagnosticsOutputSpec(True, "Graph diagnostics Neff violin plot for h."),
-    "graph_neff_violin_p": DiagnosticsOutputSpec(True, "Graph diagnostics Neff violin plot for p."),
-    "graph_in_degree_z": DiagnosticsOutputSpec(True, "Graph diagnostics in-degree histogram for z."),
-    "graph_in_degree_h": DiagnosticsOutputSpec(True, "Graph diagnostics in-degree histogram for h."),
-    "graph_in_degree_p": DiagnosticsOutputSpec(True, "Graph diagnostics in-degree histogram for p."),
-    "graph_edge_consistency_z": DiagnosticsOutputSpec(True, "Graph diagnostics edge consistency histogram for z."),
-    "graph_edge_consistency_h": DiagnosticsOutputSpec(True, "Graph diagnostics edge consistency histogram for h."),
-    "graph_edge_consistency_p": DiagnosticsOutputSpec(True, "Graph diagnostics edge consistency histogram for p."),
-    "graph_history_z": DiagnosticsOutputSpec(True, "Graph diagnostics history CSV for z."),
-    "graph_history_h": DiagnosticsOutputSpec(True, "Graph diagnostics history CSV for h."),
-    "graph_history_p": DiagnosticsOutputSpec(True, "Graph diagnostics history CSV for p."),
+    "vis_ctrl_smoothness_z": DiagnosticsOutputSpec(False, "Vis-ctrl smoothness spectrum for z."),
+    "vis_ctrl_smoothness_h": DiagnosticsOutputSpec(False, "Vis-ctrl smoothness spectrum for h."),
+    "vis_ctrl_smoothness_p": DiagnosticsOutputSpec(False, "Vis-ctrl smoothness spectrum for p."),
+    "vis_ctrl_composition_error_z": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for z."),
+    "vis_ctrl_composition_error_h": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for h."),
+    "vis_ctrl_composition_error_p": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for p."),
+    "vis_ctrl_stability_z": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for z."),
+    "vis_ctrl_stability_h": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for h."),
+    "vis_ctrl_stability_p": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for p."),
+    "vis_ctrl_summary": DiagnosticsOutputSpec(False, "Vis-ctrl metrics CSV summary."),
+    "graph_rank_cdf_z": DiagnosticsOutputSpec(False, "Graph diagnostics rank CDF plots for z."),
+    "graph_rank_cdf_h": DiagnosticsOutputSpec(False, "Graph diagnostics rank CDF plots for h."),
+    "graph_rank_cdf_p": DiagnosticsOutputSpec(False, "Graph diagnostics rank CDF plots for p."),
+    "graph_neff_violin_z": DiagnosticsOutputSpec(False, "Graph diagnostics Neff violin plot for z."),
+    "graph_neff_violin_h": DiagnosticsOutputSpec(False, "Graph diagnostics Neff violin plot for h."),
+    "graph_neff_violin_p": DiagnosticsOutputSpec(False, "Graph diagnostics Neff violin plot for p."),
+    "graph_in_degree_z": DiagnosticsOutputSpec(False, "Graph diagnostics in-degree histogram for z."),
+    "graph_in_degree_h": DiagnosticsOutputSpec(False, "Graph diagnostics in-degree histogram for h."),
+    "graph_in_degree_p": DiagnosticsOutputSpec(False, "Graph diagnostics in-degree histogram for p."),
+    "graph_edge_consistency_z": DiagnosticsOutputSpec(False, "Graph diagnostics edge consistency histogram for z."),
+    "graph_edge_consistency_h": DiagnosticsOutputSpec(False, "Graph diagnostics edge consistency histogram for h."),
+    "graph_edge_consistency_p": DiagnosticsOutputSpec(False, "Graph diagnostics edge consistency histogram for p."),
+    "graph_history_z": DiagnosticsOutputSpec(False, "Graph diagnostics history CSV for z."),
+    "graph_history_h": DiagnosticsOutputSpec(False, "Graph diagnostics history CSV for h."),
+    "graph_history_p": DiagnosticsOutputSpec(False, "Graph diagnostics history CSV for p."),
 }
 
 DIAGNOSTICS_OUTPUT_GROUPS = {
@@ -188,11 +188,7 @@ def _resolve_outputs(
 ) -> dict[str, DiagnosticsOutputSpec]:
     enabled_kinds = _enabled_kinds(weights, model)
     group_enabled = {
-        "rollouts": True,
-        "pca": True,
         "hard_examples": getattr(hard_example_cfg, "reservoir", 0) > 0,
-        "self_distance": True,
-        "diagnostics": True,
         "vis_ctrl": True,
         "graph": bool(getattr(graph_cfg, "enabled", True)),
     }
@@ -631,19 +627,19 @@ def run_diagnostics_step(
     self_distance_z_dir = run_dir / "self_distance_z"
     self_distance_p_dir = run_dir / "self_distance_p"
     self_distance_h_dir = run_dir / "self_distance_h"
-    diagnostics_delta_dir = run_dir / "vis_delta_z_pca"
+    diagnostics_delta_z_dir = run_dir / "vis_delta_z_pca"
     diagnostics_delta_p_dir = run_dir / "vis_delta_p_pca"
     diagnostics_delta_h_dir = run_dir / "vis_delta_h_pca"
-    diagnostics_alignment_dir = run_dir / "vis_action_alignment_z"
-    diagnostics_alignment_raw_dir = run_dir / "vis_action_alignment_z_raw"
-    diagnostics_alignment_centered_dir = run_dir / "vis_action_alignment_z_centered"
+    diagnostics_alignment_z_dir = run_dir / "vis_action_alignment_z"
+    diagnostics_alignment_z_raw_dir = run_dir / "vis_action_alignment_z_raw"
+    diagnostics_alignment_z_centered_dir = run_dir / "vis_action_alignment_z_centered"
     diagnostics_alignment_p_dir = run_dir / "vis_action_alignment_p"
     diagnostics_alignment_p_raw_dir = run_dir / "vis_action_alignment_p_raw"
     diagnostics_alignment_p_centered_dir = run_dir / "vis_action_alignment_p_centered"
     diagnostics_alignment_h_dir = run_dir / "vis_action_alignment_h"
     diagnostics_alignment_h_raw_dir = run_dir / "vis_action_alignment_h_raw"
     diagnostics_alignment_h_centered_dir = run_dir / "vis_action_alignment_h_centered"
-    diagnostics_cycle_dir = run_dir / "vis_cycle_error_z"
+    diagnostics_cycle_z_dir = run_dir / "vis_cycle_error_z"
     diagnostics_cycle_p_dir = run_dir / "vis_cycle_error_p"
     diagnostics_cycle_h_dir = run_dir / "vis_cycle_error_h"
     diagnostics_frames_dir = run_dir / "vis_diagnostics_frames"
@@ -703,15 +699,15 @@ def run_diagnostics_step(
         vis_odometry_dir.mkdir(parents=True, exist_ok=True)
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["diagnostics"]):
         if resolved_outputs["diagnostics_motion_pca_z"].enabled:
-            diagnostics_delta_dir.mkdir(parents=True, exist_ok=True)
+            diagnostics_delta_z_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_motion_pca_p"].enabled:
             diagnostics_delta_p_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_motion_pca_h"].enabled:
             diagnostics_delta_h_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_alignment_z"].enabled:
-            diagnostics_alignment_dir.mkdir(parents=True, exist_ok=True)
-            diagnostics_alignment_raw_dir.mkdir(parents=True, exist_ok=True)
-            diagnostics_alignment_centered_dir.mkdir(parents=True, exist_ok=True)
+            diagnostics_alignment_z_dir.mkdir(parents=True, exist_ok=True)
+            diagnostics_alignment_z_raw_dir.mkdir(parents=True, exist_ok=True)
+            diagnostics_alignment_z_centered_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_alignment_p"].enabled:
             diagnostics_alignment_p_dir.mkdir(parents=True, exist_ok=True)
             diagnostics_alignment_p_raw_dir.mkdir(parents=True, exist_ok=True)
@@ -721,7 +717,7 @@ def run_diagnostics_step(
             diagnostics_alignment_h_raw_dir.mkdir(parents=True, exist_ok=True)
             diagnostics_alignment_h_centered_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_cycle_z"].enabled:
-            diagnostics_cycle_dir.mkdir(parents=True, exist_ok=True)
+            diagnostics_cycle_z_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_cycle_p"].enabled:
             diagnostics_cycle_p_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_cycle_h"].enabled:
@@ -1092,11 +1088,11 @@ def run_diagnostics_step(
 
             if kind == "z":
                 motion = diag_state.motion_z
-                delta_dir = diagnostics_delta_dir
-                align_dir = diagnostics_alignment_dir
-                align_raw_dir = diagnostics_alignment_raw_dir
-                align_center_dir = diagnostics_alignment_centered_dir
-                cycle_dir = diagnostics_cycle_dir
+                delta_dir = diagnostics_delta_z_dir
+                align_dir = diagnostics_alignment_z_dir
+                align_raw_dir = diagnostics_alignment_z_raw_dir
+                align_center_dir = diagnostics_alignment_z_centered_dir
+                cycle_dir = diagnostics_cycle_z_dir
             elif kind == "h":
                 motion = diag_state.motion_h
                 delta_dir = diagnostics_delta_h_dir
