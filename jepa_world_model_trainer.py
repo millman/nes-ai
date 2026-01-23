@@ -7,7 +7,7 @@ from collections import defaultdict
 import json
 import os
 from pathlib import Path
-from typing import Annotated, Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
 
 import math
 import random
@@ -206,6 +206,7 @@ from gridworldkey_env import GridworldKeyEnv
 # ------------------------------------------------------------
 
 VisualizationDecoder = ConvVisualizationDecoder
+RenderMode = Literal["anchor_delta", "direct"]
 
 # ------------------------------------------------------------
 # Configs and containers
@@ -220,20 +221,30 @@ class LossWeights:
         * What: predictor takes [z_t, h_t, action_t] -> z_hat_{t+1}; MSE vs detached z_{t+1}.
         * Grads: into predictor; into encoder via z_t (and h_t path if attached); target path is stop-grad.
         * Purpose: advance the observable latent consistent with the next encoded frame.
+    - loss_jepa_rep (representation alignment):
+        * What: encoder z_{t+1} vs detached predictor z_hat_{t+1}.
+        * Grads: into encoder only; predictor path is stop-grad.
+        * Purpose: gently align perception with belief without collapsing dynamics into perception.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
     - loss_z2h: z->hidden init projection; h_hat_from_z0 vs h0 (detached); z inputs are also detached so this only trains the z->h projector.
+    - loss_h2z_delta: h->(z_{t+1}-z_t) prediction against detached z deltas; trains a delta head for anchored rollout rendering.
     - loss_pixel_delta: pixel delta reconstruction on decoded frames.
     Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
     """
     # Latent transition supervision: ẑ_{t+1} (from predictor) vs detached z_{t+1}; shapes encoder+predictor via z_t.
     jepa: float = 1.0
+    # Representation alignment: z_{t+1} (encoder) vs detached ẑ_{t+1} (predictor).
+    jepa_rep: float = 1.0
+    # Multi-step open-loop JEPA rollout loss (self-fed z predictions).
+    jepa_open_loop: float = 0.0
+
     sigreg: float = 0.0
 
     # Image/pixel reconstruction
-    recon: float = 0.0
+    recon: float = 1.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 1.0
+    recon_multi_box: float = 0.0
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
     pixel_delta: float = 0.0
@@ -243,13 +254,15 @@ class LossWeights:
     # Project hidden→z: ẑ_from_h vs z (detached); shapes hidden path without pushing encoder targets.
     h2z: float = 0.0
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
-    z2h: float = 1.0
+    z2h: float = 0.0
+    # Predict z deltas from h (for z-anchor rollout rendering); trains h->Δz head.
+    h2z_delta: float = 0.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
     # Keep at 0: forces z to reveal actions, breaking loop-closure invariance.
     inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 1.0
+    inverse_dynamics_h: float = 0.0
     # Inverse dynamics from consecutive p pairs (p_t, p_{t+1}).
     # Keep at 0: pushes p to encode action identity/scale, which conflicts with geometric invariance
     # (p should encode place/pose, allow no-motion steps, and stay bounded for planning).
@@ -296,7 +309,7 @@ class LossWeights:
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 1.0
+    action_delta_h: float = 0.0
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
@@ -304,11 +317,17 @@ class LossWeights:
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
-    rollout_kstep_h: float = 1.0
+    rollout_kstep_h: float = 0.0
 
     # k-step rollout delta consistency in h-space.
     # Encourages predicted h changes to match teacher deltas over short horizons.
-    rollout_kstep_delta_h: float = 1.0
+    rollout_kstep_delta_h: float = 0.0
+
+    # Pixel reconstruction on predicted h rollouts (decode h->z_roll vs x_{t+k}) with detached z inputs.
+    rollout_recon_h: float = 0.0
+
+    # Multi-scale box reconstruction on predicted h rollouts with detached z inputs.
+    rollout_recon_multi_box_h: float = 0.0
 
     # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
@@ -475,6 +494,14 @@ class TrainConfig:
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
     detach_decoder: bool = False
     detach_z_from_h_and_p: bool = True
+    render_mode: Annotated[
+        RenderMode,
+        tyro.conf.arg(help="Rendering mode for rollout decode losses: anchor_delta or direct."),
+    ] = "direct"
+    rollout_init_z2h: Annotated[
+        bool,
+        tyro.conf.arg(help="Initialize rollout h from z_to_h(z_start) instead of teacher h_states."),
+    ] = False
 
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
@@ -518,6 +545,22 @@ JEPA_LOSS = nn.MSELoss()
 INVERSE_DYNAMICS_LOSS = nn.BCEWithLogitsLoss()
 
 
+def _rollout_render_latent(
+    model: JEPAWorldModel,
+    z_anchor: torch.Tensor,
+    h_next: torch.Tensor,
+    render_mode: RenderMode,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if render_mode == "direct":
+        return model.h_to_z(h_next), None
+    if render_mode == "anchor_delta":
+        if model.h2z_delta is None:
+            raise AssertionError("render_mode anchor_delta requires model.h2z_delta.")
+        delta = model.h2z_delta(h_next)
+        return z_anchor + delta, delta
+    raise AssertionError(f"Unknown render_mode: {render_mode}")
+
+
 def jepa_loss(
     model: JEPAWorldModel,
     outputs: Dict[str, torch.Tensor],
@@ -530,14 +573,59 @@ def jepa_loss(
     if embeddings.shape[1] < 2:
         raise AssertionError("JEPA loss requires at least two timesteps.")
     embeddings_for_rollout = embeddings.detach() if detach_z_inputs else embeddings
-    preds, h_preds, h_states = rollout_teacher_forced(
+    z_preds, h_preds, h_states = rollout_teacher_forced(
         model,
         embeddings_for_rollout,
         actions,
         use_z2h_init=use_z2h_init,
     )
     target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(preds, target), preds, h_preds, h_states
+    return JEPA_LOSS(z_preds, target), z_preds, h_preds, h_states
+
+
+def jepa_open_loop_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+    use_z2h_init: bool = False,
+    detach_z_inputs: bool = False,
+) -> torch.Tensor:
+    """Open-loop multi-step JEPA loss using self-fed predictions."""
+    if rollout_horizon <= 0:
+        raise AssertionError("rollout_horizon must be > 0 for jepa_open_loop_loss.")
+    b, t, _ = embeddings.shape
+    if t < 2:
+        raise AssertionError("jepa_open_loop_loss requires at least two timesteps.")
+    warmup = max(min(warmup_frames, t - 1), 0)
+    if warmup >= t - 1:
+        raise AssertionError("warmup_frames leaves no rollout steps for jepa_open_loop_loss.")
+    start = warmup
+    embeddings_for_rollout = embeddings.detach() if detach_z_inputs else embeddings
+    z_current = embeddings_for_rollout[:, start]
+    h_current = (
+        model.z_to_h(embeddings[:, start].detach())
+        if use_z2h_init
+        else embeddings.new_zeros((b, model.state_dim))
+    )
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("jepa_open_loop_loss produced no steps; check rollout_horizon or warmup_frames.")
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(z_current, h_current, act)
+        z_next = model.h_to_z(h_next)
+        target = embeddings[:, start + offset + 1].detach()
+        total = total + JEPA_LOSS(z_next, target)
+        steps += 1
+        z_current = z_next
+        h_current = h_next
+    if steps <= 0:
+        raise AssertionError("jepa_open_loop_loss produced no steps; check rollout_horizon or warmup_frames.")
+    return total / steps
 
 
 def _rollout_pose(
@@ -574,6 +662,7 @@ def rollout_z_loss(
     h_states: torch.Tensor,
     rollout_horizon: int,
     warmup_frames: int,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
         raise AssertionError("rollout_horizon must be > 1 for rollout_z_loss.")
@@ -585,19 +674,21 @@ def rollout_z_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_z_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        h_current = h_states[:, start]
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            target_step = embeddings[:, start + offset + 1].detach()
-            total = total + JEPA_LOSS(pred, target_step)
-            steps += 1
-            current = pred
-            h_current = h_next
+    start = warmup
+    current = embeddings[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("rollout_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    h_current = model.z_to_h(embeddings[:, start].detach()) if use_z2h_init else h_states[:, start]
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        target_step = embeddings[:, start + offset + 1].detach()
+        total = total + JEPA_LOSS(pred, target_step)
+        steps += 1
+        current = pred
+        h_current = h_next
     if steps <= 0:
         raise AssertionError("rollout_z_loss produced no steps; check rollout_horizon or warmup_frames.")
     return total / steps
@@ -612,6 +703,8 @@ def rollout_recon_z_loss(
     h_states: torch.Tensor,
     rollout_horizon: int,
     warmup_frames: int,
+    render_mode: RenderMode,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be > 0 for rollout_recon_z_loss.")
@@ -623,22 +716,75 @@ def rollout_recon_z_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_recon_z_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        h_current = h_states[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            decoded = decoder(pred)
-            target_frame = frames[:, start + offset + 1]
-            total = total + RECON_LOSS(decoded, target_frame)
-            steps += 1
-            current = pred
-            h_current = h_next
+    start = warmup
+    z_anchor = embeddings[:, start].detach()
+    current = z_anchor if render_mode == "anchor_delta" else embeddings[:, start]
+    h_current = model.z_to_h(embeddings[:, start].detach()) if use_z2h_init else h_states[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("rollout_recon_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        z_render, _ = _rollout_render_latent(model, z_anchor, h_next, render_mode)
+        decoded = decoder(z_render)
+        target_frame = frames[:, start + offset + 1]
+        total = total + RECON_LOSS(decoded, target_frame)
+        steps += 1
+        current = pred
+        h_current = h_next
     if steps <= 0:
         raise AssertionError("rollout_recon_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    return total / steps
+
+
+def rollout_recon_h_loss(
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    frames: torch.Tensor,
+    h_states: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+    render_mode: RenderMode,
+    use_z2h_init: bool,
+) -> torch.Tensor:
+    if rollout_horizon <= 0:
+        raise AssertionError("rollout_horizon must be > 0 for rollout_recon_h_loss.")
+    b, t, _ = embeddings.shape
+    if t < 2:
+        raise AssertionError("rollout_recon_h_loss requires at least two timesteps.")
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
+    if warmup >= t - 1:
+        raise AssertionError("warmup_frames leaves no rollout steps for rollout_recon_h_loss.")
+    start = warmup
+    z_anchor = embeddings[:, start].detach()
+    current = z_anchor
+    h_current = model.z_to_h(embeddings[:, start].detach()) if use_z2h_init else h_states[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("rollout_recon_h_loss produced no steps; check rollout_horizon or warmup_frames.")
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        z_render, delta = _rollout_render_latent(model, z_anchor, h_next, render_mode)
+        decoded = decoder(z_render)
+        target_frame = frames[:, start + offset + 1]
+        total = total + RECON_LOSS(decoded, target_frame)
+        if render_mode == "anchor_delta":
+            assert delta is not None, "anchor_delta render_mode requires delta output."
+            delta_target = embeddings[:, start + offset + 1] - z_anchor
+            total = total + F.mse_loss(delta, delta_target.detach())
+        steps += 1
+        current = pred
+        h_current = h_next
+    if steps <= 0:
+        raise AssertionError("rollout_recon_h_loss produced no steps; check rollout_horizon or warmup_frames.")
     return total / steps
 
 
@@ -652,6 +798,8 @@ def rollout_recon_multi_box_z_loss(
     rollout_horizon: int,
     warmup_frames: int,
     cfg: LossMultiScaleBoxReconConfig,
+    render_mode: RenderMode,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be > 0 for rollout_recon_multi_box_z_loss.")
@@ -663,24 +811,80 @@ def rollout_recon_multi_box_z_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_recon_multi_box_z_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        h_current = h_states[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            decoded = decoder(pred)
-            target_frame = frames[:, start + offset + 1]
-            total = total + multi_scale_recon_loss_box(decoded, target_frame, cfg)
-            steps += 1
-            current = pred
-            h_current = h_next
+    start = warmup
+    z_anchor = embeddings[:, start].detach()
+    current = z_anchor
+    h_current = model.z_to_h(z_anchor) if use_z2h_init else h_states[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError(
+            "rollout_recon_multi_box_z_loss produced no steps; check rollout_horizon or warmup_frames."
+        )
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        z_render, _ = _rollout_render_latent(model, z_anchor, h_next, render_mode)
+        decoded = decoder(z_render)
+        target_frame = frames[:, start + offset + 1]
+        total = total + multi_scale_recon_loss_box(decoded, target_frame, cfg)
+        steps += 1
+        current = pred
+        h_current = h_next
     if steps <= 0:
         raise AssertionError(
             "rollout_recon_multi_box_z_loss produced no steps; check rollout_horizon or warmup_frames."
         )
+    return total / steps
+
+
+def rollout_recon_multi_box_h_loss(
+    model: JEPAWorldModel,
+    decoder: VisualizationDecoder,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    frames: torch.Tensor,
+    h_states: torch.Tensor,
+    rollout_horizon: int,
+    warmup_frames: int,
+    cfg: LossMultiScaleBoxReconConfig,
+    render_mode: RenderMode,
+    use_z2h_init: bool,
+) -> torch.Tensor:
+    if rollout_horizon <= 0:
+        raise AssertionError("rollout_horizon must be > 0 for rollout_recon_multi_box_h_loss.")
+    b, t, _ = embeddings.shape
+    if t < 2:
+        raise AssertionError("rollout_recon_multi_box_h_loss requires at least two timesteps.")
+    total = embeddings.new_tensor(0.0)
+    steps = 0
+    warmup = max(min(warmup_frames, t - 1), 0)
+    if warmup >= t - 1:
+        raise AssertionError("warmup_frames leaves no rollout steps for rollout_recon_multi_box_h_loss.")
+    start = warmup
+    z_anchor = embeddings[:, start].detach()
+    current = z_anchor
+    h_current = model.z_to_h(z_anchor) if use_z2h_init else h_states[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError(
+            "rollout_recon_multi_box_h_loss produced no steps; check rollout_horizon or warmup_frames."
+        )
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        z_render, delta = _rollout_render_latent(model, z_anchor, h_next, render_mode)
+        decoded = decoder(z_render)
+        target_frame = frames[:, start + offset + 1]
+        total = total + multi_scale_recon_loss_box(decoded, target_frame, cfg)
+        if render_mode == "anchor_delta":
+            assert delta is not None, "anchor_delta render_mode requires delta output."
+            delta_target = embeddings[:, start + offset + 1] - z_anchor
+            total = total + F.mse_loss(delta, delta_target.detach())
+        steps += 1
+        current = pred
+        h_current = h_next
     return total / steps
 
 
@@ -693,6 +897,8 @@ def rollout_recon_delta_z_loss(
     h_states: torch.Tensor,
     rollout_horizon: int,
     warmup_frames: int,
+    render_mode: RenderMode,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be > 0 for rollout_recon_delta_z_loss.")
@@ -704,23 +910,27 @@ def rollout_recon_delta_z_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_recon_delta_z_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        h_current = h_states[:, start]
-        prev_decoded = decoder(current)
-        max_h = min(rollout_horizon, t - start - 1)
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            decoded = decoder(pred)
-            target_delta = frames[:, start + offset + 1] - frames[:, start + offset]
-            pred_delta = decoded - prev_decoded
-            total = total + RECON_LOSS(pred_delta, target_delta)
-            steps += 1
-            current = pred
-            h_current = h_next
-            prev_decoded = decoded
+    start = warmup
+    z_anchor = embeddings[:, start].detach()
+    current = z_anchor if render_mode == "anchor_delta" else embeddings[:, start]
+    h_current = model.z_to_h(z_anchor) if use_z2h_init else h_states[:, start]
+    prev_decoded = decoder(z_anchor if render_mode == "anchor_delta" else embeddings[:, start])
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("rollout_recon_delta_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        z_render, _ = _rollout_render_latent(model, z_anchor, h_next, render_mode)
+        decoded = decoder(z_render)
+        target_delta = frames[:, start + offset + 1] - frames[:, start + offset]
+        pred_delta = decoded - prev_decoded
+        total = total + RECON_LOSS(pred_delta, target_delta)
+        steps += 1
+        current = pred
+        h_current = h_next
+        prev_decoded = decoded
     if steps <= 0:
         raise AssertionError("rollout_recon_delta_z_loss produced no steps; check rollout_horizon or warmup_frames.")
     return total / steps
@@ -736,6 +946,8 @@ def rollout_recon_multi_box_delta_z_loss(
     rollout_horizon: int,
     warmup_frames: int,
     cfg: LossMultiScaleBoxReconConfig,
+    render_mode: RenderMode,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be > 0 for rollout_recon_multi_box_delta_z_loss.")
@@ -747,23 +959,29 @@ def rollout_recon_multi_box_delta_z_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_recon_multi_box_delta_z_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        h_current = h_states[:, start]
-        prev_decoded = decoder(current)
-        max_h = min(rollout_horizon, t - start - 1)
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            decoded = decoder(pred)
-            target_delta = frames[:, start + offset + 1] - frames[:, start + offset]
-            pred_delta = decoded - prev_decoded
-            total = total + multi_scale_recon_loss_box(pred_delta, target_delta, cfg)
-            steps += 1
-            current = pred
-            h_current = h_next
-            prev_decoded = decoded
+    start = warmup
+    z_anchor = embeddings[:, start].detach()
+    current = z_anchor if render_mode == "anchor_delta" else embeddings[:, start]
+    h_current = model.z_to_h(z_anchor) if use_z2h_init else h_states[:, start]
+    prev_decoded = decoder(z_anchor if render_mode == "anchor_delta" else embeddings[:, start])
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError(
+            "rollout_recon_multi_box_delta_z_loss produced no steps; check rollout_horizon or warmup_frames."
+        )
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        z_render, _ = _rollout_render_latent(model, z_anchor, h_next, render_mode)
+        decoded = decoder(z_render)
+        target_delta = frames[:, start + offset + 1] - frames[:, start + offset]
+        pred_delta = decoded - prev_decoded
+        total = total + multi_scale_recon_loss_box(pred_delta, target_delta, cfg)
+        steps += 1
+        current = pred
+        h_current = h_next
+        prev_decoded = decoded
     if steps <= 0:
         raise AssertionError(
             "rollout_recon_multi_box_delta_z_loss produced no steps; check rollout_horizon or warmup_frames."
@@ -779,6 +997,8 @@ def rollout_project_z_loss(
     h_states: torch.Tensor,
     rollout_horizon: int,
     warmup_frames: int,
+    render_mode: RenderMode,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be > 0 for rollout_project_z_loss.")
@@ -790,20 +1010,24 @@ def rollout_project_z_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_project_z_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        h_current = h_states[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            decoded = decoder(pred)
-            z_back = model.encoder(decoded)
-            total = total + F.mse_loss(z_back, pred)
-            steps += 1
-            current = pred
-            h_current = h_next
+    start = warmup
+    z_anchor = embeddings[:, start].detach()
+    current = z_anchor if render_mode == "anchor_delta" else embeddings[:, start]
+    h_current = model.z_to_h(z_anchor) if use_z2h_init else h_states[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("rollout_project_z_loss produced no steps; check rollout_horizon or warmup_frames.")
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        z_render, _ = _rollout_render_latent(model, z_anchor, h_next, render_mode)
+        decoded = decoder(z_render)
+        z_back = model.encoder(decoded)
+        total = total + F.mse_loss(z_back, z_render)
+        steps += 1
+        current = pred
+        h_current = h_next
     if steps <= 0:
         raise AssertionError("rollout_project_z_loss produced no steps; check rollout_horizon or warmup_frames.")
     return total / steps
@@ -816,6 +1040,7 @@ def rollout_h_loss(
     h_states: torch.Tensor,
     rollout_horizon: int,
     warmup_frames: int,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
         raise AssertionError("rollout_horizon must be > 1 for rollout_h_loss.")
@@ -827,19 +1052,22 @@ def rollout_h_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_h_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        h_current = h_states[:, start]
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            target_h = h_states[:, start + offset + 1].detach()
-            total = total + F.mse_loss(h_next, target_h)
-            steps += 1
-            current = pred
-            h_current = h_next
+    start = warmup
+    current = embeddings[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("rollout_h_loss produced no steps; check rollout_horizon or warmup_frames.")
+    z_anchor = current
+    h_current = model.z_to_h(z_anchor) if use_z2h_init else h_states[:, start]
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        target_h = h_states[:, start + offset + 1].detach()
+        total = total + F.mse_loss(h_next, target_h)
+        steps += 1
+        current = pred
+        h_current = h_next
     if steps <= 0:
         raise AssertionError("rollout_h_loss produced no steps; check rollout_horizon or warmup_frames.")
     return total / steps
@@ -852,6 +1080,7 @@ def rollout_h_delta_loss(
     h_states: torch.Tensor,
     rollout_horizon: int,
     warmup_frames: int,
+    use_z2h_init: bool,
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
         raise AssertionError("rollout_horizon must be > 1 for rollout_h_delta_loss.")
@@ -863,19 +1092,21 @@ def rollout_h_delta_loss(
     warmup = max(min(warmup_frames, t - 1), 0)
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for rollout_h_delta_loss.")
-    for start in range(warmup, t - 1):
-        current = embeddings[:, start]
-        max_h = min(rollout_horizon, t - start - 1)
-        h_current = h_states[:, start]
-        for offset in range(max_h):
-            act = actions[:, start + offset]
-            h_next = model.predictor(current, h_current, act)
-            pred = model.h_to_z(h_next)
-            target_delta = h_states[:, start + offset + 1].detach() - h_states[:, start + offset].detach()
-            total = total + F.mse_loss(h_next - h_current, target_delta)
-            steps += 1
-            current = pred
-            h_current = h_next
+    start = warmup
+    current = embeddings[:, start]
+    max_h = min(rollout_horizon, t - start - 1)
+    if max_h <= 0:
+        raise AssertionError("rollout_h_delta_loss produced no steps; check rollout_horizon or warmup_frames.")
+    h_current = model.z_to_h(embeddings[:, start].detach()) if use_z2h_init else h_states[:, start]
+    for offset in range(max_h):
+        act = actions[:, start + offset]
+        h_next = model.predictor(current, h_current, act)
+        pred = model.h_to_z(h_next)
+        target_delta = h_states[:, start + offset + 1].detach() - h_states[:, start + offset].detach()
+        total = total + F.mse_loss(h_next - h_current, target_delta)
+        steps += 1
+        current = pred
+        h_current = h_next
     if steps <= 0:
         raise AssertionError("rollout_h_delta_loss produced no steps; check rollout_horizon or warmup_frames.")
     return total / steps
@@ -925,6 +1156,10 @@ def multi_scale_recon_loss_gauss(
     cfg: LossMultiScaleGaussReconConfig,
 ) -> torch.Tensor:
     """Multi-scale hardness-weighted reconstruction over an image pyramid."""
+    if recon.ndim == 4:
+        recon = recon.unsqueeze(1)
+    if target.ndim == 4:
+        target = target.unsqueeze(1)
     # Flatten batch/time to apply pyramid on spatial dims only.
     recon_bt = recon.reshape(-1, *recon.shape[2:])
     target_bt = target.reshape(-1, *target.shape[2:])
@@ -949,6 +1184,10 @@ def multi_scale_recon_loss_box(
     cfg: LossMultiScaleBoxReconConfig,
 ) -> torch.Tensor:
     """Multi-scale hardness-weighted reconstruction over an image pyramid using box filters."""
+    if recon.ndim == 4:
+        recon = recon.unsqueeze(1)
+    if target.ndim == 4:
+        target = target.unsqueeze(1)
     recon_bt = recon.reshape(-1, *recon.shape[2:])
     target_bt = target.reshape(-1, *target.shape[2:])
     num_scales = len(cfg.kernel_sizes)
@@ -978,6 +1217,24 @@ def h2z_loss(
     h_stack = h_states[:, start:]
     z_hat_from_h = model.h_to_z(h_stack)
     return F.mse_loss(z_hat_from_h, embeddings[:, start:].detach())
+
+
+def h2z_delta_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    h_states: torch.Tensor,
+    start: int,
+) -> torch.Tensor:
+    if model.h2z_delta is None:
+        raise AssertionError("h2z_delta_loss requires model.h2z_delta.")
+    if embeddings.shape[1] < start + 2:
+        raise AssertionError("h2z_delta_loss requires at least two timesteps after start.")
+    h_stack = h_states[:, start + 1 :].detach()
+    if h_stack.numel() == 0:
+        raise AssertionError("h2z_delta_loss requires non-empty h states after start.")
+    delta_target = embeddings[:, start + 1 :] - embeddings[:, start:-1]
+    delta_pred = model.h2z_delta(h_stack)
+    return F.mse_loss(delta_pred, delta_target.detach())
 
 
 def z2h_loss(
@@ -1171,6 +1428,8 @@ def _compute_losses_and_metrics(
 
     # Core JEPA losses
     loss_jepa = x_frames.new_tensor(0.0)
+    loss_jepa_rep = x_frames.new_tensor(0.0)
+    loss_jepa_open_loop = x_frames.new_tensor(0.0)
     loss_sigreg = x_frames.new_tensor(0.0)
 
     # z (Recon) losses
@@ -1186,6 +1445,7 @@ def _compute_losses_and_metrics(
     # h (Hidden) losses
     loss_h2z = x_frames.new_tensor(0.0)
     loss_z2h = x_frames.new_tensor(0.0)
+    loss_h2z_delta = x_frames.new_tensor(0.0)
 
     # p (Geometry) losses
     loss_geometry_rank_p = x_frames.new_tensor(0.0)
@@ -1206,6 +1466,8 @@ def _compute_losses_and_metrics(
     loss_rollout_recon_delta_z = x_frames.new_tensor(0.0)
     loss_rollout_recon_multi_box_delta_z = x_frames.new_tensor(0.0)
     loss_rollout_project_z = x_frames.new_tensor(0.0)
+    loss_rollout_recon_h = x_frames.new_tensor(0.0)
+    loss_rollout_recon_multi_box_h = x_frames.new_tensor(0.0)
     loss_rollout_kstep_delta_h = x_frames.new_tensor(0.0)
     loss_additivity_h = x_frames.new_tensor(0.0)
     loss_action_delta_p = x_frames.new_tensor(0.0)
@@ -1221,7 +1483,7 @@ def _compute_losses_and_metrics(
 
     encode_outputs = model.encode_sequence(x_frames)
     z_embeddings = encode_outputs["embeddings"]
-    loss_jepa_raw, preds, h_preds, h_states = jepa_loss(
+    loss_jepa_raw, z_preds, h_preds, h_states = jepa_loss(
         model,
         encode_outputs,
         a_seq,
@@ -1297,6 +1559,18 @@ def _compute_losses_and_metrics(
     # Core JEPA losses
     if weights.jepa > 0:
         loss_jepa = loss_jepa_raw
+    if weights.jepa_rep > 0:
+        loss_jepa_rep = JEPA_LOSS(z_embeddings[:, 1:], z_preds.detach())
+    if weights.jepa_open_loop > 0:
+        loss_jepa_open_loop = jepa_open_loop_loss(
+            model,
+            z_embeddings,
+            a_seq,
+            cfg.rollout_horizon,
+            warmup_frames,
+            use_z2h_init=cfg.rollout_init_z2h,
+            detach_z_inputs=cfg.detach_z_from_h_and_p,
+        )
 
     if weights.sigreg > 0:
         loss_sigreg = sigreg_loss(z_embeddings, cfg.sigreg.projections)
@@ -1331,6 +1605,8 @@ def _compute_losses_and_metrics(
         loss_h2z = h2z_loss(model, z_embeddings, h_states, start_frame)
     if weights.z2h > 0:
         loss_z2h = z2h_loss(model, z_embeddings, start_frame)
+    if weights.h2z_delta > 0:
+        loss_h2z_delta = h2z_delta_loss(model, z_embeddings, h_states, start_frame)
 
     # h (Auxiliary)
     # p (Geometry)
@@ -1444,6 +1720,7 @@ def _compute_losses_and_metrics(
             h_states,
             cfg.rollout_horizon,
             warmup_frames,
+            cfg.rollout_init_z2h,
         )
     if weights.rollout_recon_z > 0:
         loss_rollout_recon_z = rollout_recon_z_loss(
@@ -1455,6 +1732,8 @@ def _compute_losses_and_metrics(
             h_states,
             cfg.rollout_horizon,
             warmup_frames,
+            cfg.render_mode,
+            cfg.rollout_init_z2h,
         )
     if weights.rollout_recon_multi_box_z > 0:
         loss_rollout_recon_multi_box_z = rollout_recon_multi_box_z_loss(
@@ -1467,6 +1746,8 @@ def _compute_losses_and_metrics(
             cfg.rollout_horizon,
             warmup_frames,
             cfg.recon_multi_box,
+            cfg.render_mode,
+            cfg.rollout_init_z2h,
         )
     if weights.rollout_recon_delta_z > 0:
         loss_rollout_recon_delta_z = rollout_recon_delta_z_loss(
@@ -1478,6 +1759,8 @@ def _compute_losses_and_metrics(
             h_states,
             cfg.rollout_horizon,
             warmup_frames,
+            cfg.render_mode,
+            cfg.rollout_init_z2h,
         )
     if weights.rollout_recon_multi_box_delta_z > 0:
         loss_rollout_recon_multi_box_delta_z = rollout_recon_multi_box_delta_z_loss(
@@ -1490,6 +1773,8 @@ def _compute_losses_and_metrics(
             cfg.rollout_horizon,
             warmup_frames,
             cfg.recon_multi_box,
+            cfg.render_mode,
+            cfg.rollout_init_z2h,
         )
     if weights.rollout_project_z > 0:
         loss_rollout_project_z = rollout_project_z_loss(
@@ -1500,6 +1785,35 @@ def _compute_losses_and_metrics(
             h_states,
             cfg.rollout_horizon,
             warmup_frames,
+            cfg.render_mode,
+            cfg.rollout_init_z2h,
+        )
+    if weights.rollout_recon_h > 0:
+        loss_rollout_recon_h = rollout_recon_h_loss(
+            model,
+            decoder,
+            z_embeddings,
+            a_seq,
+            x_frames,
+            h_states,
+            cfg.rollout_horizon,
+            warmup_frames,
+            cfg.render_mode,
+            cfg.rollout_init_z2h,
+        )
+    if weights.rollout_recon_multi_box_h > 0:
+        loss_rollout_recon_multi_box_h = rollout_recon_multi_box_h_loss(
+            model,
+            decoder,
+            z_embeddings,
+            a_seq,
+            x_frames,
+            h_states,
+            cfg.rollout_horizon,
+            warmup_frames,
+            cfg.recon_multi_box,
+            cfg.render_mode,
+            cfg.rollout_init_z2h,
         )
 
     z_for_rollout_h: Optional[torch.Tensor] = None
@@ -1513,6 +1827,7 @@ def _compute_losses_and_metrics(
             h_states,
             cfg.rollout_horizon,
             warmup_frames,
+            cfg.rollout_init_z2h,
         )
     if weights.rollout_kstep_delta_h > 0:
         loss_rollout_kstep_delta_h = rollout_h_delta_loss(
@@ -1522,6 +1837,7 @@ def _compute_losses_and_metrics(
             h_states,
             cfg.rollout_horizon,
             warmup_frames,
+            cfg.rollout_init_z2h,
         )
 
     if weights.additivity_h > 0:
@@ -1550,9 +1866,12 @@ def _compute_losses_and_metrics(
 
     world_loss = (
         weights.jepa * _scaled("loss_jepa", loss_jepa)
+        + weights.jepa_rep * _scaled("loss_jepa_rep", loss_jepa_rep)
+        + weights.jepa_open_loop * _scaled("loss_jepa_open_loop", loss_jepa_open_loop)
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
         + weights.z2h * _scaled("loss_z2h", loss_z2h)
+        + weights.h2z_delta * _scaled("loss_h2z_delta", loss_h2z_delta)
         + weights.geometry_rank_p * _scaled("loss_geometry_rank_p", loss_geometry_rank_p)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
@@ -1573,6 +1892,9 @@ def _compute_losses_and_metrics(
         + weights.rollout_recon_multi_box_delta_z
         * _scaled("loss_rollout_recon_multi_box_delta_z", loss_rollout_recon_multi_box_delta_z)
         + weights.rollout_project_z * _scaled("loss_rollout_project_z", loss_rollout_project_z)
+        + weights.rollout_recon_h * _scaled("loss_rollout_recon_h", loss_rollout_recon_h)
+        + weights.rollout_recon_multi_box_h
+        * _scaled("loss_rollout_recon_multi_box_h", loss_rollout_recon_multi_box_h)
         + weights.rollout_kstep_h * _scaled("loss_rollout_kstep_h", loss_rollout_kstep_h)
         + weights.rollout_kstep_delta_h * _scaled("loss_rollout_kstep_delta_h", loss_rollout_kstep_delta_h)
         + weights.rollout_kstep_p * _scaled("loss_rollout_kstep_p", loss_rollout_kstep_p)
@@ -1611,6 +1933,8 @@ def _compute_losses_and_metrics(
 
     metrics = {
         "loss_jepa": loss_jepa.item(),
+        "loss_jepa_rep": loss_jepa_rep.item(),
+        "loss_jepa_open_loop": loss_jepa_open_loop.item(),
         "loss_sigreg": loss_sigreg.item(),
         "loss_recon": loss_recon.item(),
         "loss_recon_multi_gauss": loss_recon_multi_gauss.item(),
@@ -1620,6 +1944,7 @@ def _compute_losses_and_metrics(
         "loss_pixel_delta_multi_box": loss_pixel_delta_multi_box.item(),
         "loss_h2z": loss_h2z.item(),
         "loss_z2h": loss_z2h.item(),
+        "loss_h2z_delta": loss_h2z_delta.item(),
         "loss_geometry_rank_p": loss_geometry_rank_p.item(),
         "geometry_rank_p_accuracy": geometry_rank_p_accuracy.item(),
         "geometry_rank_p_pairs": geometry_rank_p_pairs.item(),
@@ -1634,6 +1959,8 @@ def _compute_losses_and_metrics(
         "loss_rollout_recon_delta_z": loss_rollout_recon_delta_z.item(),
         "loss_rollout_recon_multi_box_delta_z": loss_rollout_recon_multi_box_delta_z.item(),
         "loss_rollout_project_z": loss_rollout_project_z.item(),
+        "loss_rollout_recon_h": loss_rollout_recon_h.item(),
+        "loss_rollout_recon_multi_box_h": loss_rollout_recon_multi_box_h.item(),
         "loss_rollout_kstep_h": loss_rollout_kstep_h.item(),
         "loss_rollout_kstep_delta_h": loss_rollout_kstep_delta_h.item(),
         "loss_rollout_kstep_p": loss_rollout_kstep_p.item(),
@@ -2009,6 +2336,10 @@ def log_metrics(
     filtered = dict(metrics)
     if weights.jepa <= 0:
         filtered.pop("loss_jepa", None)
+    if weights.jepa_rep <= 0:
+        filtered.pop("loss_jepa_rep", None)
+    if weights.jepa_open_loop <= 0:
+        filtered.pop("loss_jepa_open_loop", None)
     if weights.sigreg <= 0:
         filtered.pop("loss_sigreg", None)
     if weights.recon <= 0:
@@ -2038,6 +2369,8 @@ def log_metrics(
         filtered.pop("loss_h2z", None)
     if weights.z2h <= 0:
         filtered.pop("loss_z2h", None)
+    if weights.h2z_delta <= 0:
+        filtered.pop("loss_h2z_delta", None)
     if weights.geometry_rank_p <= 0:
         filtered.pop("loss_geometry_rank_p", None)
         filtered.pop("geometry_rank_p_accuracy", None)
@@ -2064,6 +2397,10 @@ def log_metrics(
         filtered.pop("loss_rollout_recon_multi_box_delta_z", None)
     if weights.rollout_project_z <= 0:
         filtered.pop("loss_rollout_project_z", None)
+    if weights.rollout_recon_h <= 0:
+        filtered.pop("loss_rollout_recon_h", None)
+    if weights.rollout_recon_multi_box_h <= 0:
+        filtered.pop("loss_rollout_recon_multi_box_h", None)
     if weights.rollout_kstep_h <= 0:
         filtered.pop("loss_rollout_kstep_h", None)
     if weights.rollout_kstep_delta_h <= 0:
@@ -2103,6 +2440,8 @@ LOSS_COLUMNS = [
     "loss_val_recon_multi_box",
     "loss_val_recon_patch",
     "loss_jepa",
+    "loss_jepa_rep",
+    "loss_jepa_open_loop",
     "loss_sigreg",
     "loss_recon",
     "loss_recon_multi_gauss",
@@ -2112,6 +2451,7 @@ LOSS_COLUMNS = [
     "loss_pixel_delta_multi_box",
     "loss_h2z",
     "loss_z2h",
+    "loss_h2z_delta",
     "loss_geometry_rank_p",
     "geometry_rank_p_accuracy",
     "geometry_rank_p_pairs",
@@ -2126,6 +2466,8 @@ LOSS_COLUMNS = [
     "loss_rollout_recon_delta_z",
     "loss_rollout_recon_multi_box_delta_z",
     "loss_rollout_project_z",
+    "loss_rollout_recon_h",
+    "loss_rollout_recon_multi_box_h",
     "loss_rollout_kstep_h",
     "loss_rollout_kstep_delta_h",
     "loss_rollout_kstep_p",
@@ -2159,6 +2501,8 @@ class LossHistory:
     val_recon_multi_box: List[float] = field(default_factory=list)
     val_recon_patch: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
+    jepa_rep: List[float] = field(default_factory=list)
+    jepa_open_loop: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     recon_multi_gauss: List[float] = field(default_factory=list)
@@ -2168,6 +2512,7 @@ class LossHistory:
     pixel_delta_multi_box: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
     z2h: List[float] = field(default_factory=list)
+    h2z_delta: List[float] = field(default_factory=list)
     geometry_rank_p: List[float] = field(default_factory=list)
     geometry_rank_p_accuracy: List[float] = field(default_factory=list)
     geometry_rank_p_pairs: List[float] = field(default_factory=list)
@@ -2182,6 +2527,8 @@ class LossHistory:
     rollout_recon_delta_z: List[float] = field(default_factory=list)
     rollout_recon_multi_box_delta_z: List[float] = field(default_factory=list)
     rollout_project_z: List[float] = field(default_factory=list)
+    rollout_recon_h: List[float] = field(default_factory=list)
+    rollout_recon_multi_box_h: List[float] = field(default_factory=list)
     rollout_kstep_h: List[float] = field(default_factory=list)
     rollout_kstep_delta_h: List[float] = field(default_factory=list)
     rollout_kstep_p: List[float] = field(default_factory=list)
@@ -2212,6 +2559,8 @@ class LossHistory:
         self.val_recon_multi_box.append(metrics.get("loss_val_recon_multi_box", 0.0))
         self.val_recon_patch.append(metrics.get("loss_val_recon_patch", 0.0))
         self.jepa.append(metrics["loss_jepa"])
+        self.jepa_rep.append(metrics.get("loss_jepa_rep", 0.0))
+        self.jepa_open_loop.append(metrics.get("loss_jepa_open_loop", 0.0))
         self.sigreg.append(metrics["loss_sigreg"])
         self.recon.append(metrics["loss_recon"])
         self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
@@ -2221,6 +2570,7 @@ class LossHistory:
         self.pixel_delta_multi_box.append(metrics.get("loss_pixel_delta_multi_box", 0.0))
         self.h2z.append(metrics["loss_h2z"])
         self.z2h.append(metrics["loss_z2h"])
+        self.h2z_delta.append(metrics.get("loss_h2z_delta", 0.0))
         self.geometry_rank_p.append(metrics.get("loss_geometry_rank_p", 0.0))
         self.geometry_rank_p_accuracy.append(metrics.get("geometry_rank_p_accuracy", 0.0))
         self.geometry_rank_p_pairs.append(metrics.get("geometry_rank_p_pairs", 0.0))
@@ -2235,6 +2585,8 @@ class LossHistory:
         self.rollout_recon_delta_z.append(metrics.get("loss_rollout_recon_delta_z", 0.0))
         self.rollout_recon_multi_box_delta_z.append(metrics.get("loss_rollout_recon_multi_box_delta_z", 0.0))
         self.rollout_project_z.append(metrics.get("loss_rollout_project_z", 0.0))
+        self.rollout_recon_h.append(metrics.get("loss_rollout_recon_h", 0.0))
+        self.rollout_recon_multi_box_h.append(metrics.get("loss_rollout_recon_multi_box_h", 0.0))
         self.rollout_kstep_h.append(metrics.get("loss_rollout_kstep_h", 0.0))
         self.rollout_kstep_delta_h.append(metrics.get("loss_rollout_kstep_delta_h", 0.0))
         self.rollout_kstep_p.append(metrics.get("loss_rollout_kstep_p", 0.0))
@@ -2276,6 +2628,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.val_recon_multi_box,
             history.val_recon_patch,
             history.jepa,
+            history.jepa_rep,
+            history.jepa_open_loop,
             history.sigreg,
             history.recon,
             history.recon_multi_gauss,
@@ -2285,6 +2639,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.pixel_delta_multi_box,
             history.h2z,
             history.z2h,
+            history.h2z_delta,
             history.geometry_rank_p,
             history.geometry_rank_p_accuracy,
             history.geometry_rank_p_pairs,
@@ -2299,6 +2654,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.rollout_recon_delta_z,
             history.rollout_recon_multi_box_delta_z,
             history.rollout_project_z,
+            history.rollout_recon_h,
+            history.rollout_recon_multi_box_h,
             history.rollout_kstep_h,
             history.rollout_kstep_delta_h,
             history.rollout_kstep_p,
@@ -2342,6 +2699,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("val_recon_multi_box", history.val_recon_multi_box),
         ("val_recon_patch", history.val_recon_patch),
         ("jepa", history.jepa),
+        ("jepa_rep", history.jepa_rep),
+        ("jepa_open_loop", history.jepa_open_loop),
         ("sigreg", history.sigreg),
         ("recon", history.recon),
         ("recon_multi_gauss", history.recon_multi_gauss),
@@ -2351,6 +2710,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("pixel_delta_multi_box", history.pixel_delta_multi_box),
         ("h2z", history.h2z),
         ("z2h", history.z2h),
+        ("h2z_delta", history.h2z_delta),
         ("loss_geometry_rank_p", history.geometry_rank_p),
         ("loss_inverse_dynamics_z", history.inverse_dynamics_z),
         ("loss_inverse_dynamics_h", history.inverse_dynamics_h),
@@ -2364,6 +2724,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_rollout_recon_delta_z", history.rollout_recon_delta_z),
         ("loss_rollout_recon_multi_box_delta_z", history.rollout_recon_multi_box_delta_z),
         ("loss_rollout_project_z", history.rollout_project_z),
+        ("loss_rollout_recon_h", history.rollout_recon_h),
+        ("loss_rollout_recon_multi_box_h", history.rollout_recon_multi_box_h),
         ("loss_rollout_kstep_h", history.rollout_kstep_h),
         ("loss_rollout_kstep_delta_h", history.rollout_kstep_delta_h),
         ("loss_rollout_kstep_p", history.rollout_kstep_p),
@@ -2969,6 +3331,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         "enable_action_delta_z",
         "enable_action_delta_h",
         "enable_action_delta_p",
+        "enable_h2z_delta",
     ):
         if getattr(model_cfg, name) is not None:
             raise AssertionError(f"{name} must be None and derived from loss weights during training.")
@@ -2987,6 +3350,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             or weights.additivity_p > 0
             or weights.rollout_kstep_p > 0
         ),
+        enable_h2z_delta=weights.h2z_delta > 0,
     )
     diagnostics_generator = torch.Generator()
     diagnostics_generator.manual_seed(python_rng.randint(0, 2**32 - 1))
@@ -3417,6 +3781,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 diagnostics_generator=diagnostics_generator,
                 vis_selection_generator=vis_selection_generator,
                 run_dir=run_dir,
+                render_mode=cfg.render_mode,
             )
             timing_totals["vis"] += perf_counter() - vis_start
 

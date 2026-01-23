@@ -365,22 +365,22 @@ VIS_CTRL_ALIGNMENT_H_SPEC = VisSpec(
 SELF_DISTANCE_Z_IMAGES_SPEC = VisSpec(
     label="Self-distance:Distance (Z)",
     candidates=[
-        ("vis_self_distance_z", "self_distance_z_*.png"),
-        ("vis_self_distance", "self_distance_*.png"),
+        ("vis_self_distance_z", "self_distance_z_*.png", "self_distance_z_"),
+        ("vis_self_distance", "self_distance_*.png", "self_distance_"),
     ],
 )
 SELF_DISTANCE_P_IMAGES_SPEC = VisSpec(
     label="Self-distance:Distance (P)",
     candidates=[
-        ("vis_self_distance_p", "self_distance_p_*.png"),
-        ("vis_self_distance_s", "self_distance_s_*.png"),
-        ("vis_state_embedding", "state_embedding_[0-9]*.png"),
+        ("vis_self_distance_p", "self_distance_p_*.png", "self_distance_p_"),
+        ("vis_self_distance_s", "self_distance_s_*.png", "self_distance_s_"),
+        ("vis_state_embedding", "state_embedding_[0-9]*.png", "state_embedding_"),
     ],
 )
 SELF_DISTANCE_H_IMAGES_SPEC = VisSpec(
     label="Self-distance:Distance (H)",
     candidates=[
-        ("vis_self_distance_h", "self_distance_h_*.png"),
+        ("vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"),
     ],
 )
 STATE_EMBEDDING_CSVS_SPEC = VisSpec(

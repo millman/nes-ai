@@ -400,6 +400,7 @@ class JEPAWorldModel(nn.Module):
             "enable_action_delta_z",
             "enable_action_delta_h",
             "enable_action_delta_p",
+            "enable_h2z_delta",
         ):
             if getattr(cfg, name) is None:
                 raise AssertionError(f"{name} must be resolved before JEPAWorldModel initialization.")
@@ -432,6 +433,16 @@ class JEPAWorldModel(nn.Module):
             cfg.state_dim,
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.z2h_projector,
+        )
+        self.h2z_delta = (
+            HiddenToDeltaProjector(
+                cfg.state_dim,
+                self.embedding_dim,
+                cfg.hidden_dim,
+                use_layer_norm=cfg.layer_norms.h2z_delta_projector,
+            )
+            if cfg.enable_h2z_delta
+            else None
         )
         self.inverse_dynamics_z = (
             InverseDynamicsHead(

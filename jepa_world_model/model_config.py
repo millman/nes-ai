@@ -12,6 +12,7 @@ class LayerNormConfig:
 
     h2z_projector: bool = False
     z2h_projector: bool = False
+    h2z_delta_projector: bool = False
 
     # Action deltas are learned residual updates applied repeatedly over rollout time,
     # so their scale directly compounds. Poorly scaled deltas can explode gradients
@@ -88,6 +89,7 @@ class ModelConfig:
     enable_action_delta_z: Optional[bool] = None
     enable_action_delta_h: Optional[bool] = None
     enable_action_delta_p: Optional[bool] = None
+    enable_h2z_delta: Optional[bool] = None
 
     @property
     def embedding_dim(self) -> int:

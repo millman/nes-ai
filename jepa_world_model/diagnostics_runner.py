@@ -520,6 +520,10 @@ def _enabled_kinds(weights, model) -> dict[str, bool]:
         for name in (
             "jepa",
             "inverse_dynamics_z",
+            "recon",
+            "recon_patch",
+            "recon_multi_gauss",
+            "recon_multi_box",
             "action_delta_z",
             "rollout_kstep_z",
             "rollout_recon_z",
@@ -532,13 +536,18 @@ def _enabled_kinds(weights, model) -> dict[str, bool]:
     h_enabled = any(
         getattr(weights, name, 0.0) > 0
         for name in (
+            "jepa",
+            "jepa_open_loop",
             "h2z",
             "z2h",
+            "h2z_delta",
             "inverse_dynamics_h",
             "action_delta_h",
             "additivity_h",
             "rollout_kstep_h",
             "rollout_kstep_delta_h",
+            "rollout_recon_h",
+            "rollout_recon_multi_box_h",
         )
     )
     p_enabled = (
@@ -586,6 +595,7 @@ def run_diagnostics_step(
     diagnostics_generator: torch.Generator,
     vis_selection_generator: torch.Generator,
     run_dir: Path,
+    render_mode: str,
 ) -> None:
     resolved_outputs = _resolve_outputs(
         weights=weights,
@@ -784,6 +794,7 @@ def run_diagnostics_step(
             vis_cfg=vis_cfg,
             vis_selection_generator=vis_selection_generator,
             use_z2h_init=weights.z2h > 0,
+            render_mode=render_mode,
         )
         save_rollout_sequence_batch(
             fixed_vis_dir,
@@ -803,6 +814,7 @@ def run_diagnostics_step(
             vis_cfg=vis_cfg,
             vis_selection_generator=vis_selection_generator,
             use_z2h_init=weights.z2h > 0,
+            render_mode=render_mode,
         )
         save_rollout_sequence_batch(
             rolling_vis_dir,

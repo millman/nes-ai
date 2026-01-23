@@ -44,6 +44,7 @@ def build_visualization_sequences(
     vis_cfg,
     vis_selection_generator: torch.Generator,
     use_z2h_init: bool,
+    render_mode: str,
 ) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
@@ -92,6 +93,7 @@ def build_visualization_sequences(
         gt_slice = vis_frames[idx, start_idx : start_idx + max_window]
         if gt_slice.shape[0] < max_window:
             continue
+        z_anchor = vis_embeddings[idx, start_idx].unsqueeze(0).detach()
         row_actions: List[str] = []
         for offset in range(max_window):
             action_idx = min(start_idx + offset, vis_actions.shape[1] - 1)
@@ -112,7 +114,16 @@ def build_visualization_sequences(
                 prev_embed = current_embed
                 h_next = model.predictor(current_embed, current_hidden, action)
                 next_embed = model.h_to_z(h_next)
-                decoded_next = decoder(next_embed)[0]
+                if render_mode == "anchor_delta":
+                    if model.h2z_delta is None:
+                        raise AssertionError("anchor_delta render_mode requires model.h2z_delta for rollout visuals.")
+                    delta_hat = model.h2z_delta(h_next)
+                    z_render = z_anchor + delta_hat
+                    decoded_next = decoder(z_render)[0]
+                elif render_mode == "direct":
+                    decoded_next = decoder(next_embed)[0]
+                else:
+                    raise AssertionError(f"Unknown render_mode for rollout visuals: {render_mode}")
                 current_frame = decoded_next.clamp(0, 1)
                 row_rollout[step] = current_frame.detach().cpu()
                 reenc_embed = model.encoder(current_frame.unsqueeze(0))
@@ -236,6 +247,7 @@ def run_rollout_visualizations(
     fixed_vis_dir: Path,
     rolling_vis_dir: Path,
     vis_off_manifold_dir: Path,
+    render_mode: str,
 ) -> None:
     sequences, grad_label = build_visualization_sequences(
         batch_cpu=fixed_batch_cpu,
@@ -246,6 +258,7 @@ def run_rollout_visualizations(
         vis_cfg=vis_cfg,
         vis_selection_generator=vis_selection_generator,
         use_z2h_init=weights.z2h > 0,
+        render_mode=render_mode,
     )
     save_rollout_sequence_batch(
         fixed_vis_dir,
@@ -264,6 +277,7 @@ def run_rollout_visualizations(
         vis_cfg=vis_cfg,
         vis_selection_generator=vis_selection_generator,
         use_z2h_init=weights.z2h > 0,
+        render_mode=render_mode,
     )
     save_rollout_sequence_batch(
         rolling_vis_dir,
