@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
+from jepa_world_model.diagnostics_utils import should_use_z2h_init
 from jepa_world_model.plots.build_motion_subspace import MotionSubspace, build_motion_subspace
 from jepa_world_model.plots.plot_action_inverse_map import build_action_inverse_map
 from jepa_world_model.pose_rollout import rollout_pose
@@ -71,7 +72,7 @@ def prepare_diagnostics_batch_state(
             model,
             diag_embeddings,
             diag_actions_device,
-            use_z2h_init=weights.z2h > 0,
+            use_z2h_init=should_use_z2h_init(weights),
         )
         diag_p_embeddings = None
         diag_p_deltas = None

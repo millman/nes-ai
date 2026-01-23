@@ -29,7 +29,12 @@ from jepa_world_model.diagnostics_rollout_visuals import (
     build_visualization_sequences,
     compute_off_manifold_errors,
 )
-from jepa_world_model.diagnostics_utils import append_csv_row, compute_norm_stats, write_step_csv
+from jepa_world_model.diagnostics_utils import (
+    append_csv_row,
+    compute_norm_stats,
+    should_use_z2h_init,
+    write_step_csv,
+)
 from jepa_world_model.diagnostics_vis_ctrl import compute_vis_ctrl_state, write_vis_ctrl_summary
 from jepa_world_model.plots.plot_action_vector_field import (
     save_action_time_slice_plot,
@@ -540,6 +545,7 @@ def _enabled_kinds(weights, model) -> dict[str, bool]:
             "jepa_open_loop",
             "h2z",
             "z2h",
+            "z2h_init_zero",
             "h2z_delta",
             "inverse_dynamics_h",
             "action_delta_h",
@@ -793,7 +799,7 @@ def run_diagnostics_step(
             device=device,
             vis_cfg=vis_cfg,
             vis_selection_generator=vis_selection_generator,
-            use_z2h_init=weights.z2h > 0,
+            use_z2h_init=should_use_z2h_init(weights),
             render_mode=render_mode,
         )
         save_rollout_sequence_batch(
@@ -813,7 +819,7 @@ def run_diagnostics_step(
             device=device,
             vis_cfg=vis_cfg,
             vis_selection_generator=vis_selection_generator,
-            use_z2h_init=weights.z2h > 0,
+            use_z2h_init=should_use_z2h_init(weights),
             render_mode=render_mode,
         )
         save_rollout_sequence_batch(
@@ -849,7 +855,7 @@ def run_diagnostics_step(
                 model,
                 embed_outputs["embeddings"],
                 embed_actions,
-                use_z2h_init=weights.z2h > 0,
+                use_z2h_init=should_use_z2h_init(weights),
             )
 
         if resolved_outputs["pca_z"].enabled:
@@ -906,7 +912,7 @@ def run_diagnostics_step(
                 model,
                 self_dist_embeddings_full,
                 self_dist_actions,
-                use_z2h_init=weights.z2h > 0,
+                use_z2h_init=should_use_z2h_init(weights),
             )
             self_dist_h_states = self_dist_h_states_batch[0]
 
@@ -966,7 +972,7 @@ def run_diagnostics_step(
                 vis_state_embedding_dir,
                 vis_odometry_dir,
                 global_step,
-                use_z2h_init=weights.z2h > 0,
+                use_z2h_init=should_use_z2h_init(weights),
                 hist_frames_cpu=rolling_batch_cpu[0],
                 hist_actions_cpu=rolling_batch_cpu[1],
             )
@@ -1572,7 +1578,7 @@ def run_diagnostics_step(
             model=model,
             graph_cfg=graph_cfg,
             device=device,
-            use_z2h_init=weights.z2h > 0,
+            use_z2h_init=should_use_z2h_init(weights),
         )
 
         graph_kinds = ["z", "h"]

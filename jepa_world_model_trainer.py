@@ -44,6 +44,7 @@ from jepa_world_model.loss_recon import (
     build_feature_pyramid,
     multi_scale_hardness_loss_box,
     multi_scale_hardness_loss_gaussian,
+    multi_scale_recon_loss_box_mse,
     patch_recon_loss,
 )
 from jepa_world_model.loss_sigreg import sigreg_loss
@@ -169,7 +170,7 @@ from jepa_world_model.vis_vis_ctrl_metrics import (
     write_vis_ctrl_metrics_csv,
 )
 from jepa_world_model.diagnostics_runner import run_diagnostics_step
-from jepa_world_model.diagnostics_utils import append_csv_row
+from jepa_world_model.diagnostics_utils import append_csv_row, should_use_z2h_init
 from jepa_world_model.planning.planning_eval import (
     DIRECTION_ORDER,
     ActionDeltaStats,
@@ -227,6 +228,8 @@ class LossWeights:
         * Purpose: gently align perception with belief without collapsing dynamics into perception.
     - loss_h2z: hidden->z projection; z_hat_from_h vs z (detached); shapes hidden path without moving encoder targets.
     - loss_z2h: z->hidden init projection; h_hat_from_z0 vs h0 (detached); z inputs are also detached so this only trains the z->h projector.
+    - loss_z2h_init_zero: z->hidden init projection; h_hat_from_z0 vs h1 from h0=0; trains z->h to match the
+      dynamics "cold start" state.
     - loss_h2z_delta: h->(z_{t+1}-z_t) prediction against detached z deltas; trains a delta head for anchored rollout rendering.
     - loss_pixel_delta: pixel delta reconstruction on decoded frames.
     Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
@@ -241,10 +244,11 @@ class LossWeights:
     sigreg: float = 0.0
 
     # Image/pixel reconstruction
-    recon: float = 1.0
+    recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
     recon_multi_box: float = 0.0
+    recon_multi_box_mse: float = 1.0
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
     pixel_delta: float = 0.0
@@ -255,6 +259,8 @@ class LossWeights:
     h2z: float = 0.0
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
     z2h: float = 0.0
+    # Project z→hidden to match the 1-step dynamics target from h0=0.
+    z2h_init_zero: float = 0.0
     # Predict z deltas from h (for z-anchor rollout rendering); trains h->Δz head.
     h2z_delta: float = 0.0
 
@@ -509,6 +515,7 @@ class TrainConfig:
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
     recon_multi_gauss: LossMultiScaleGaussReconConfig = field(default_factory=LossMultiScaleGaussReconConfig)
     recon_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
+    recon_multi_box_mse: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
     scale_p: ScalePConfig = field(default_factory=ScalePConfig)
 
     # Visualization
@@ -1267,6 +1274,25 @@ def z2h_loss(
     return F.mse_loss(z_hat, z_stack)
 
 
+def z2h_init_zero_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    actions: torch.Tensor,
+    start: int,
+) -> torch.Tensor:
+    """Train z->h to match the 1-step h state from a zero-initialized rollout."""
+    if embeddings.shape[1] <= start:
+        raise AssertionError("z2h_init_zero_loss requires a valid start index.")
+    if actions.shape[1] <= start:
+        raise AssertionError("z2h_init_zero_loss requires actions for the start index.")
+    z0 = embeddings[:, start].detach()
+    a0 = actions[:, start]
+    h0 = embeddings.new_zeros((embeddings.shape[0], model.state_dim))
+    h1_target = model.predictor(z0, h0, a0).detach()
+    h0_hat = model.z_to_h(z0)
+    return F.mse_loss(h0_hat, h1_target)
+
+
 def geometry_rank_loss(
     pose: torch.Tensor,
     cfg: LossGeometryConfig,
@@ -1436,6 +1462,7 @@ def _compute_losses_and_metrics(
     loss_recon = x_frames.new_tensor(0.0)
     loss_recon_multi_gauss = x_frames.new_tensor(0.0)
     loss_recon_multi_box = x_frames.new_tensor(0.0)
+    loss_recon_multi_box_mse = x_frames.new_tensor(0.0)
     loss_recon_patch = x_frames.new_tensor(0.0)
 
     # z (Auxiliary) losses
@@ -1445,6 +1472,7 @@ def _compute_losses_and_metrics(
     # h (Hidden) losses
     loss_h2z = x_frames.new_tensor(0.0)
     loss_z2h = x_frames.new_tensor(0.0)
+    loss_z2h_init_zero = x_frames.new_tensor(0.0)
     loss_h2z_delta = x_frames.new_tensor(0.0)
 
     # p (Geometry) losses
@@ -1487,7 +1515,7 @@ def _compute_losses_and_metrics(
         model,
         encode_outputs,
         a_seq,
-        use_z2h_init=weights.z2h > 0,
+        use_z2h_init=should_use_z2h_init(weights),
         detach_z_inputs=cfg.detach_z_from_h_and_p,
     )
 
@@ -1585,6 +1613,15 @@ def _compute_losses_and_metrics(
     if weights.recon_multi_box > 0:
         loss_recon_multi_box = multi_scale_recon_loss_box(x_recon, x_frames, cfg.recon_multi_box)
 
+    if weights.recon_multi_box_mse > 0:
+        loss_recon_multi_box_mse = multi_scale_recon_loss_box_mse(
+            x_recon,
+            x_frames,
+            cfg.recon_multi_box_mse.kernel_sizes,
+            cfg.recon_multi_box_mse.lambdas,
+            cfg.recon_multi_box_mse.strides,
+        )
+
     if weights.recon_patch > 0:
         loss_recon_patch = patch_recon_loss(
             x_recon,
@@ -1605,6 +1642,8 @@ def _compute_losses_and_metrics(
         loss_h2z = h2z_loss(model, z_embeddings, h_states, start_frame)
     if weights.z2h > 0:
         loss_z2h = z2h_loss(model, z_embeddings, start_frame)
+    if weights.z2h_init_zero > 0:
+        loss_z2h_init_zero = z2h_init_zero_loss(model, z_embeddings, a_seq, start_frame)
     if weights.h2z_delta > 0:
         loss_h2z_delta = h2z_delta_loss(model, z_embeddings, h_states, start_frame)
 
@@ -1871,11 +1910,13 @@ def _compute_losses_and_metrics(
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
         + weights.z2h * _scaled("loss_z2h", loss_z2h)
+        + weights.z2h_init_zero * _scaled("loss_z2h_init_zero", loss_z2h_init_zero)
         + weights.h2z_delta * _scaled("loss_h2z_delta", loss_h2z_delta)
         + weights.geometry_rank_p * _scaled("loss_geometry_rank_p", loss_geometry_rank_p)
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
+        + weights.recon_multi_box_mse * _scaled("loss_recon_multi_box_mse", loss_recon_multi_box_mse)
         + weights.recon_patch * _scaled("loss_recon_patch", loss_recon_patch)
         + weights.pixel_delta * _scaled("loss_pixel_delta", loss_pixel_delta)
         + weights.pixel_delta_multi_box * _scaled("loss_pixel_delta_multi_box", loss_pixel_delta_multi_box)
@@ -1939,11 +1980,13 @@ def _compute_losses_and_metrics(
         "loss_recon": loss_recon.item(),
         "loss_recon_multi_gauss": loss_recon_multi_gauss.item(),
         "loss_recon_multi_box": loss_recon_multi_box.item(),
+        "loss_recon_multi_box_mse": loss_recon_multi_box_mse.item(),
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_pixel_delta": loss_pixel_delta.item(),
         "loss_pixel_delta_multi_box": loss_pixel_delta_multi_box.item(),
         "loss_h2z": loss_h2z.item(),
         "loss_z2h": loss_z2h.item(),
+        "loss_z2h_init_zero": loss_z2h_init_zero.item(),
         "loss_h2z_delta": loss_h2z_delta.item(),
         "loss_geometry_rank_p": loss_geometry_rank_p.item(),
         "geometry_rank_p_accuracy": geometry_rank_p_accuracy.item(),
@@ -2348,6 +2391,8 @@ def log_metrics(
         filtered.pop("loss_recon_multi_gauss", None)
     if weights.recon_multi_box <= 0:
         filtered.pop("loss_recon_multi_box", None)
+    if weights.recon_multi_box_mse <= 0:
+        filtered.pop("loss_recon_multi_box_mse", None)
     if weights.recon_patch <= 0:
         filtered.pop("loss_recon_patch", None)
     if weights.pixel_delta <= 0:
@@ -2363,12 +2408,16 @@ def log_metrics(
         filtered["loss_val_recon_multi_gauss"] = metrics["loss_val_recon_multi_gauss"]
     if "loss_val_recon_multi_box" in metrics:
         filtered["loss_val_recon_multi_box"] = metrics["loss_val_recon_multi_box"]
+    if "loss_val_recon_multi_box_mse" in metrics:
+        filtered["loss_val_recon_multi_box_mse"] = metrics["loss_val_recon_multi_box_mse"]
     if "loss_val_recon_patch" in metrics:
         filtered["loss_val_recon_patch"] = metrics["loss_val_recon_patch"]
     if weights.h2z <= 0:
         filtered.pop("loss_h2z", None)
     if weights.z2h <= 0:
         filtered.pop("loss_z2h", None)
+    if weights.z2h_init_zero <= 0:
+        filtered.pop("loss_z2h_init_zero", None)
     if weights.h2z_delta <= 0:
         filtered.pop("loss_h2z_delta", None)
     if weights.geometry_rank_p <= 0:
@@ -2438,6 +2487,7 @@ LOSS_COLUMNS = [
     "loss_val_recon",
     "loss_val_recon_multi_gauss",
     "loss_val_recon_multi_box",
+    "loss_val_recon_multi_box_mse",
     "loss_val_recon_patch",
     "loss_jepa",
     "loss_jepa_rep",
@@ -2446,11 +2496,13 @@ LOSS_COLUMNS = [
     "loss_recon",
     "loss_recon_multi_gauss",
     "loss_recon_multi_box",
+    "loss_recon_multi_box_mse",
     "loss_recon_patch",
     "loss_pixel_delta",
     "loss_pixel_delta_multi_box",
     "loss_h2z",
     "loss_z2h",
+    "loss_z2h_init_zero",
     "loss_h2z_delta",
     "loss_geometry_rank_p",
     "geometry_rank_p_accuracy",
@@ -2499,6 +2551,7 @@ class LossHistory:
     val_recon: List[float] = field(default_factory=list)
     val_recon_multi_gauss: List[float] = field(default_factory=list)
     val_recon_multi_box: List[float] = field(default_factory=list)
+    val_recon_multi_box_mse: List[float] = field(default_factory=list)
     val_recon_patch: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
     jepa_rep: List[float] = field(default_factory=list)
@@ -2507,11 +2560,13 @@ class LossHistory:
     recon: List[float] = field(default_factory=list)
     recon_multi_gauss: List[float] = field(default_factory=list)
     recon_multi_box: List[float] = field(default_factory=list)
+    recon_multi_box_mse: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
     pixel_delta: List[float] = field(default_factory=list)
     pixel_delta_multi_box: List[float] = field(default_factory=list)
     h2z: List[float] = field(default_factory=list)
     z2h: List[float] = field(default_factory=list)
+    z2h_init_zero: List[float] = field(default_factory=list)
     h2z_delta: List[float] = field(default_factory=list)
     geometry_rank_p: List[float] = field(default_factory=list)
     geometry_rank_p_accuracy: List[float] = field(default_factory=list)
@@ -2557,6 +2612,7 @@ class LossHistory:
         self.val_recon.append(metrics.get("loss_val_recon", 0.0))
         self.val_recon_multi_gauss.append(metrics.get("loss_val_recon_multi_gauss", 0.0))
         self.val_recon_multi_box.append(metrics.get("loss_val_recon_multi_box", 0.0))
+        self.val_recon_multi_box_mse.append(metrics.get("loss_val_recon_multi_box_mse", 0.0))
         self.val_recon_patch.append(metrics.get("loss_val_recon_patch", 0.0))
         self.jepa.append(metrics["loss_jepa"])
         self.jepa_rep.append(metrics.get("loss_jepa_rep", 0.0))
@@ -2565,11 +2621,13 @@ class LossHistory:
         self.recon.append(metrics["loss_recon"])
         self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
+        self.recon_multi_box_mse.append(metrics.get("loss_recon_multi_box_mse", 0.0))
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.pixel_delta.append(metrics.get("loss_pixel_delta", 0.0))
         self.pixel_delta_multi_box.append(metrics.get("loss_pixel_delta_multi_box", 0.0))
         self.h2z.append(metrics["loss_h2z"])
         self.z2h.append(metrics["loss_z2h"])
+        self.z2h_init_zero.append(metrics.get("loss_z2h_init_zero", 0.0))
         self.h2z_delta.append(metrics.get("loss_h2z_delta", 0.0))
         self.geometry_rank_p.append(metrics.get("loss_geometry_rank_p", 0.0))
         self.geometry_rank_p_accuracy.append(metrics.get("geometry_rank_p_accuracy", 0.0))
@@ -2626,6 +2684,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.val_recon,
             history.val_recon_multi_gauss,
             history.val_recon_multi_box,
+            history.val_recon_multi_box_mse,
             history.val_recon_patch,
             history.jepa,
             history.jepa_rep,
@@ -2634,11 +2693,13 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.recon,
             history.recon_multi_gauss,
             history.recon_multi_box,
+            history.recon_multi_box_mse,
             history.recon_patch,
             history.pixel_delta,
             history.pixel_delta_multi_box,
             history.h2z,
             history.z2h,
+            history.z2h_init_zero,
             history.h2z_delta,
             history.geometry_rank_p,
             history.geometry_rank_p_accuracy,
@@ -2697,6 +2758,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("val_recon", history.val_recon),
         ("val_recon_multi_gauss", history.val_recon_multi_gauss),
         ("val_recon_multi_box", history.val_recon_multi_box),
+        ("val_recon_multi_box_mse", history.val_recon_multi_box_mse),
         ("val_recon_patch", history.val_recon_patch),
         ("jepa", history.jepa),
         ("jepa_rep", history.jepa_rep),
@@ -2705,11 +2767,13 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("recon", history.recon),
         ("recon_multi_gauss", history.recon_multi_gauss),
         ("recon_multi_box", history.recon_multi_box),
+        ("recon_multi_box_mse", history.recon_multi_box_mse),
         ("recon_patch", history.recon_patch),
         ("pixel_delta", history.pixel_delta),
         ("pixel_delta_multi_box", history.pixel_delta_multi_box),
         ("h2z", history.h2z),
         ("z2h", history.z2h),
+        ("z2h_init_zero", history.z2h_init_zero),
         ("h2z_delta", history.h2z_delta),
         ("loss_geometry_rank_p", history.geometry_rank_p),
         ("loss_inverse_dynamics_z", history.inverse_dynamics_z),
@@ -3684,6 +3748,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 metrics_for_log["loss_val_recon"] = val_metrics["loss_recon"]
                 metrics_for_log["loss_val_recon_multi_gauss"] = val_metrics["loss_recon_multi_gauss"]
                 metrics_for_log["loss_val_recon_multi_box"] = val_metrics["loss_recon_multi_box"]
+                metrics_for_log["loss_val_recon_multi_box_mse"] = val_metrics["loss_recon_multi_box_mse"]
                 metrics_for_log["loss_val_recon_patch"] = val_metrics["loss_recon_patch"]
             log_metrics(
                 global_step,
@@ -3812,7 +3877,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 plan_frames,
                 plan_actions,
                 device,
-                use_z2h_init=weights.z2h > 0,
+                use_z2h_init=should_use_z2h_init(weights),
             )
             stats, graph_h, graph_p, tau_h_merge = _compute_planning_graphs(
                 p_t,
@@ -3887,7 +3952,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                     model,
                     model_cfg,
                     device,
-                    use_z2h_init=weights.z2h > 0,
+                    use_z2h_init=should_use_z2h_init(weights),
                     action_dim=action_dim,
                 )
                 p_start = pose_seq[0]
@@ -3927,7 +3992,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                             model,
                             model_cfg,
                             device,
-                            use_z2h_init=weights.z2h > 0,
+                            use_z2h_init=should_use_z2h_init(weights),
                             action_dim=action_dim,
                         )
                         final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))

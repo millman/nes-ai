@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 
+from jepa_world_model.diagnostics_utils import should_use_z2h_init
 from jepa_world_model.pose_rollout import rollout_pose
 from jepa_world_model.rollout import rollout_teacher_forced
 from jepa_world_model.plots.plot_neighborhood_stability import save_neighborhood_stability_plot
@@ -28,7 +29,7 @@ def compute_vis_ctrl_state(
         model,
         vis_embeddings,
         vis_actions,
-        use_z2h_init=weights.z2h > 0,
+        use_z2h_init=should_use_z2h_init(weights),
     )
     vis_p_embeddings = None
     if model.p_action_delta_projector is not None:

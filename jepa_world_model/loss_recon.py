@@ -21,6 +21,7 @@ __all__ = [
     "multi_scale_hardness_loss_gaussian",
     "multi_scale_hardness_loss_box",
     "multi_scale_mse_loss_box",
+    "multi_scale_recon_loss_box_mse",
 ]
 
 
@@ -357,3 +358,28 @@ def multi_scale_mse_loss_box(
         scale_loss = pooled.sum() / coverage.sum()
         total = total + lam * scale_loss
     return total
+
+
+def multi_scale_recon_loss_box_mse(
+    recon: torch.Tensor,
+    target: torch.Tensor,
+    kernel_sizes: Sequence[int],
+    lambdas: Sequence[float],
+    strides: Sequence[int],
+) -> torch.Tensor:
+    """Multi-scale reconstruction over an image pyramid using box-pooled MSE."""
+    if recon.ndim == 4:
+        recon = recon.unsqueeze(1)
+    if target.ndim == 4:
+        target = target.unsqueeze(1)
+    recon_bt = recon.reshape(-1, *recon.shape[2:])
+    target_bt = target.reshape(-1, *target.shape[2:])
+    num_scales = len(kernel_sizes)
+    preds_scales, targets_scales = build_feature_pyramid(recon_bt, target_bt, num_scales)
+    return multi_scale_mse_loss_box(
+        preds_scales,
+        targets_scales,
+        kernel_sizes,
+        lambdas,
+        strides,
+    )

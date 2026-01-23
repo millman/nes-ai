@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from jepa_world_model.diagnostics_utils import should_use_z2h_init
 from jepa_world_model.vis import describe_action_tensor
 from jepa_world_model.vis_rollout import VisualizationSelection, VisualizationSequence, render_rollout_batch
 from jepa_world_model.vis_rollout_batch import save_rollout_sequence_batch
@@ -257,7 +258,7 @@ def run_rollout_visualizations(
         device=device,
         vis_cfg=vis_cfg,
         vis_selection_generator=vis_selection_generator,
-        use_z2h_init=weights.z2h > 0,
+        use_z2h_init=should_use_z2h_init(weights),
         render_mode=render_mode,
     )
     save_rollout_sequence_batch(
@@ -276,7 +277,7 @@ def run_rollout_visualizations(
         device=device,
         vis_cfg=vis_cfg,
         vis_selection_generator=vis_selection_generator,
-        use_z2h_init=weights.z2h > 0,
+        use_z2h_init=should_use_z2h_init(weights),
         render_mode=render_mode,
     )
     save_rollout_sequence_batch(

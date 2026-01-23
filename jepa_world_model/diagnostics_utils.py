@@ -35,3 +35,9 @@ def compute_norm_stats(tensor: torch.Tensor, quantile: float = 0.95) -> Tuple[fl
     mean_val = float(norms.mean().item())
     quantile_val = float(torch.quantile(norms, quantile).item())
     return mean_val, quantile_val
+
+
+def should_use_z2h_init(weights) -> bool:
+    if not hasattr(weights, "z2h") or not hasattr(weights, "z2h_init_zero"):
+        raise AssertionError("should_use_z2h_init requires weights.z2h and weights.z2h_init_zero.")
+    return (weights.z2h > 0) or (weights.z2h_init_zero > 0)
