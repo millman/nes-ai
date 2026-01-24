@@ -707,6 +707,30 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
         label='Diagnostics:Action alignment of centered delta (H)',
         candidates=[('vis_action_alignment_h_centered', 'action_alignment_detail_*.png', 'action_alignment_detail_')],
     ),
+    'vis_action_field_z': VisSpec(
+        label='Diagnostics:Action vector field (Z)',
+        candidates=[('vis_action_field_z', 'action_field_z_*.png', 'action_field_z_')],
+    ),
+    'vis_action_field_h': VisSpec(
+        label='Diagnostics:Action vector field (H)',
+        candidates=[('vis_action_field_h', 'action_field_h_*.png', 'action_field_h_')],
+    ),
+    'vis_action_field_p': VisSpec(
+        label='Diagnostics:Action vector field (P)',
+        candidates=[('vis_action_field_p', 'action_field_p_*.png', 'action_field_p_')],
+    ),
+    'vis_action_time_z': VisSpec(
+        label='Diagnostics:Action time slices (Z)',
+        candidates=[('vis_action_time_z', 'action_time_z_*.png', 'action_time_z_')],
+    ),
+    'vis_action_time_h': VisSpec(
+        label='Diagnostics:Action time slices (H)',
+        candidates=[('vis_action_time_h', 'action_time_h_*.png', 'action_time_h_')],
+    ),
+    'vis_action_time_p': VisSpec(
+        label='Diagnostics:Action time slices (P)',
+        candidates=[('vis_action_time_p', 'action_time_p_*.png', 'action_time_p_')],
+    ),
     'vis_cycle_error': DIAGNOSTICS_CYCLE_ERROR_IMAGE_SPEC,
     'vis_cycle_error_p': DIAGNOSTICS_P_CYCLE_ERROR_IMAGE_SPEC,
     'vis_cycle_error_s': VisSpec(

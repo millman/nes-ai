@@ -991,69 +991,59 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
                     SELF_DISTANCE_H_CSV_CANDIDATES,
                     conflict_label="self-distance (H) CSV",
                 )
-                if z_dir is None or p_dir is None or h_dir is None:
-                    continue
-                if not (
-                    _has_matching_file(
-                        z_dir,
-                        exact_name="self_distance_z_0000000.csv",
-                        pattern="self_distance_z_*.csv",
+                z_has = (
+                    z_dir is not None
+                    and (
+                        _has_matching_file(
+                            z_dir,
+                            exact_name="self_distance_z_0000000.csv",
+                            pattern="self_distance_z_*.csv",
+                        )
+                        or _has_matching_file(
+                            z_dir,
+                            exact_name="self_distance_0000000.csv",
+                            pattern="self_distance_*.csv",
+                        )
                     )
-                    or _has_matching_file(
-                        z_dir,
-                        exact_name="self_distance_0000000.csv",
-                        pattern="self_distance_*.csv",
+                )
+                h_has = (
+                    h_dir is not None
+                    and _has_matching_file(
+                        h_dir,
+                        exact_name="self_distance_h_0000000.csv",
+                        pattern="self_distance_h_*.csv",
                     )
-                ):
-                    continue
-                if not _has_matching_file(
-                    h_dir,
-                    exact_name="self_distance_h_0000000.csv",
-                    pattern="self_distance_h_*.csv",
-                ):
-                    continue
-                if not (
-                    _has_matching_file(
-                        p_dir,
-                        exact_name="self_distance_p_0000000.csv",
-                        pattern="self_distance_p_*.csv",
+                )
+                p_has = (
+                    p_dir is not None
+                    and (
+                        _has_matching_file(
+                            p_dir,
+                            exact_name="self_distance_p_0000000.csv",
+                            pattern="self_distance_p_*.csv",
+                        )
+                        or _has_matching_file(
+                            p_dir,
+                            exact_name="self_distance_s_0000000.csv",
+                            pattern="self_distance_s_*.csv",
+                        )
+                        or _has_matching_file(
+                            p_dir,
+                            exact_name="state_embedding_0000000.csv",
+                            pattern="state_embedding_*.csv",
+                        )
                     )
-                    or _has_matching_file(
-                        p_dir,
-                        exact_name="self_distance_s_0000000.csv",
-                        pattern="self_distance_s_*.csv",
-                    )
-                    or _has_matching_file(
-                        p_dir,
-                        exact_name="state_embedding_0000000.csv",
-                        pattern="state_embedding_*.csv",
-                    )
-                ):
-                    continue
-                return row.id
+                )
+                if z_has or h_has or p_has:
+                    return row.id
             return None
 
         selected_id: Optional[str] = None
         if requested:
             requested_path = cfg.output_dir / requested
-            if requested_path.is_dir():
-                z_dir = _find_candidate_dir(
-                    requested_path,
-                    SELF_DISTANCE_Z_CSV_CANDIDATES,
-                    conflict_label="self-distance CSV",
-                )
-                p_dir = _find_candidate_dir(
-                    requested_path,
-                    SELF_DISTANCE_P_CSV_CANDIDATES,
-                    conflict_label="self-distance (P) CSV",
-                )
-                h_dir = _find_candidate_dir(
-                    requested_path,
-                    SELF_DISTANCE_H_CSV_CANDIDATES,
-                    conflict_label="self-distance (H) CSV",
-                )
-                if z_dir is not None and p_dir is not None and h_dir is not None:
-                    selected_id = requested
+            if not requested_path.is_dir():
+                abort(404, f"Requested experiment not found: {requested}")
+            selected_id = requested
         if selected_id is None:
             selected_id = _latest_self_distance_zhp_id()
 
@@ -1086,19 +1076,21 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         h_csvs = sorted(h_dir.glob("self_distance_h_*.csv")) if h_dir is not None else []
         latest_h_csv = h_csvs[-1] if h_csvs else None
-        if (
-            selected is None
-            or selected.self_distance_z_csv is None
-            or selected.self_distance_p_csv is None
-            or latest_h_csv is None
-        ):
-            abort(404, "Experiment not found for self-distance (Z/H/P).")
         _find_candidate_dir(selected.path, SELF_DISTANCE_Z_IMAGE_CANDIDATES, conflict_label="self-distance image")
         _find_candidate_dir(selected.path, SELF_DISTANCE_S_IMAGE_CANDIDATES, conflict_label="self-distance (S) image")
         _find_candidate_dir(selected.path, SELF_DISTANCE_P_IMAGE_CANDIDATES, conflict_label="self-distance (P) image")
         self_distance_h_images = sorted((selected.path / "vis_self_distance_h").glob("self_distance_h_*.png"))
 
         figure = _build_single_experiment_figure(selected)
+        p_csv = selected.self_distance_p_csv or selected.state_embedding_csv
+        p_images = selected.self_distance_p_images or selected.state_embedding_images
+        missing_parts = []
+        if selected.self_distance_z_csv is None:
+            missing_parts.append("Z")
+        if latest_h_csv is None:
+            missing_parts.append("H")
+        if p_csv is None:
+            missing_parts.append("P")
 
         return render_template(
             "self_distance_zhp.html",
@@ -1108,12 +1100,13 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             page_title="Self-distance (Z/H/P)",
             self_distance_h_csv=latest_h_csv,
             self_distance_h_images=self_distance_h_images,
-            self_distance_p_csv=selected.self_distance_p_csv,
-            self_distance_p_images=selected.self_distance_p_images,
+            self_distance_p_csv=p_csv,
+            self_distance_p_images=p_images,
             cfg=cfg,
             active_nav="self_distance_zhp",
             active_experiment_id=selected.id,
             first_experiment_id=selected.id,
+            missing_parts=missing_parts,
         )
 
     @app.route("/odometry", defaults={"exp_id": None})

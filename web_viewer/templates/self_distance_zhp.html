@@ -34,8 +34,28 @@
 {% if not experiment %}
 <div class="text-muted fst-italic">No matching self-distance outputs found.</div>
 {% else %}
+{% if missing_parts %}
+<div class="alert alert-warning py-2 small mb-2">
+    Missing self-distance outputs: {{ missing_parts | join(", ") }}.
+</div>
+{% endif %}
 <div class="small text-muted mb-2">
-    Loaded from {{ experiment.self_distance_z_csv.name }}, {{ self_distance_h_csv.name }}, {{ self_distance_p_csv.name }}.
+    Loaded from
+    {% if experiment.self_distance_z_csv %}
+        {{ experiment.self_distance_z_csv.name }}
+    {% else %}
+        <span class="text-warning">missing self_distance_z.csv</span>
+    {% endif %},
+    {% if self_distance_h_csv %}
+        {{ self_distance_h_csv.name }}
+    {% else %}
+        <span class="text-warning">missing self_distance_h.csv</span>
+    {% endif %},
+    {% if self_distance_p_csv %}
+        {{ self_distance_p_csv.name }}
+    {% else %}
+        <span class="text-warning">missing self_distance_p.csv</span>
+    {% endif %}.
 </div>
 <ul class="nav nav-tabs" id="self-distance-plot-tabs" role="tablist">
     <li class="nav-item" role="presentation">
@@ -203,9 +223,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         return;
     }
-    const zCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.self_distance_z_csv.relative_to(experiment.path)) }}";
-    const hCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_h_csv.relative_to(experiment.path)) }}";
-    const pCsvUrl = "{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_p_csv.relative_to(experiment.path)) }}";
+    const zCsvUrl = {% if experiment.self_distance_z_csv %}"{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ experiment.self_distance_z_csv.relative_to(experiment.path)) }}"{% else %}null{% endif %};
+    const hCsvUrl = {% if self_distance_h_csv %}"{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_h_csv.relative_to(experiment.path)) }}"{% else %}null{% endif %};
+    const pCsvUrl = {% if self_distance_p_csv %}"{{ url_for('serve_asset', relative_path=experiment.id ~ '/' ~ self_distance_p_csv.relative_to(experiment.path)) }}"{% else %}null{% endif %};
     const plotConfig = buildPlotlyConfig({});
     const zFirstPlotCos = document.getElementById("self-distance-z-first-cos");
     const zPriorPlotCos = document.getElementById("self-distance-z-prior-cos");
@@ -663,7 +683,11 @@ document.addEventListener("DOMContentLoaded", () => {
         buildL2Plots(zRows, zFirstPlotL2, zPriorPlotL2, "self_distance_z.csv", "z", "Z ·");
         buildL2Plots(hRows, hFirstPlotL2, hPriorPlotL2, "self_distance_h.csv", "h", "H ·");
         buildL2Plots(pRows, pFirstPlotL2, pPriorPlotL2, "self_distance_p.csv", "p", "P ·");
-        const initialStep = zRows.length ? Number(zRows[zRows.length - 1].timestep) : 0;
+        const initialStep = zRows.length
+            ? Number(zRows[zRows.length - 1].timestep)
+            : (hRows.length
+                ? Number(hRows[hRows.length - 1].timestep)
+                : (pRows.length ? Number(pRows[pRows.length - 1].timestep) : 0));
         updateSelfDistanceImage(initialStep, selfDistanceMapZ, selfDistanceStepsZ, stepImgZ, stepLabelZ, "Z");
         updateSelfDistanceImage(initialStep, selfDistanceMapH, selfDistanceStepsH, stepImgH, stepLabelH, "H");
         updateSelfDistanceImage(initialStep, selfDistanceMapP, selfDistanceStepsP, stepImgP, stepLabelP, "P");

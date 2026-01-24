@@ -241,14 +241,17 @@ class LossWeights:
     # Multi-step open-loop JEPA rollout loss (self-fed z predictions).
     jepa_open_loop: float = 0.0
 
-    sigreg: float = 0.0
+    sigreg: float = 0.01
 
     # Image/pixel reconstruction
     recon: float = 0.0
     recon_patch: float = 0.0
     recon_multi_gauss: float = 0.0
-    recon_multi_box: float = 0.0
-    recon_multi_box_mse: float = 1.0
+    recon_multi_box: float = 0.1
+    recon_multi_box_mse: float = 0.0
+
+    # Image/pixel reconstruction for ẑ: recon(ẑ_{t+1}) vs x_{t+1} (detached from encoder)
+    recon_zhat_multi_box: float = 0.1
 
     # Pixel delta reconstruction loss: recon(z_{t+1}) - recon(z_t) vs x_{t+1} - x_t.
     pixel_delta: float = 0.0
@@ -515,6 +518,7 @@ class TrainConfig:
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
     recon_multi_gauss: LossMultiScaleGaussReconConfig = field(default_factory=LossMultiScaleGaussReconConfig)
     recon_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
+    recon_zhat_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
     recon_multi_box_mse: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
     scale_p: ScalePConfig = field(default_factory=ScalePConfig)
 
@@ -1462,6 +1466,7 @@ def _compute_losses_and_metrics(
     loss_recon = x_frames.new_tensor(0.0)
     loss_recon_multi_gauss = x_frames.new_tensor(0.0)
     loss_recon_multi_box = x_frames.new_tensor(0.0)
+    loss_recon_zhat_multi_box = x_frames.new_tensor(0.0)
     loss_recon_multi_box_mse = x_frames.new_tensor(0.0)
     loss_recon_patch = x_frames.new_tensor(0.0)
 
@@ -1612,6 +1617,20 @@ def _compute_losses_and_metrics(
 
     if weights.recon_multi_box > 0:
         loss_recon_multi_box = multi_scale_recon_loss_box(x_recon, x_frames, cfg.recon_multi_box)
+
+    if weights.recon_zhat_multi_box > 0:
+        z_preds_hat, _, _ = rollout_teacher_forced(
+            model,
+            z_embeddings.detach(),
+            a_seq,
+            use_z2h_init=should_use_z2h_init(weights),
+        )
+        x_recon_hat = decoder(z_preds_hat)
+        loss_recon_zhat_multi_box = multi_scale_recon_loss_box(
+            x_recon_hat,
+            x_frames[:, 1:],
+            cfg.recon_zhat_multi_box,
+        )
 
     if weights.recon_multi_box_mse > 0:
         loss_recon_multi_box_mse = multi_scale_recon_loss_box_mse(
@@ -1916,6 +1935,7 @@ def _compute_losses_and_metrics(
         + weights.recon * _scaled("loss_recon", loss_recon)
         + weights.recon_multi_gauss * _scaled("loss_recon_multi_gauss", loss_recon_multi_gauss)
         + weights.recon_multi_box * _scaled("loss_recon_multi_box", loss_recon_multi_box)
+        + weights.recon_zhat_multi_box * _scaled("loss_recon_zhat_multi_box", loss_recon_zhat_multi_box)
         + weights.recon_multi_box_mse * _scaled("loss_recon_multi_box_mse", loss_recon_multi_box_mse)
         + weights.recon_patch * _scaled("loss_recon_patch", loss_recon_patch)
         + weights.pixel_delta * _scaled("loss_pixel_delta", loss_pixel_delta)
@@ -1980,6 +2000,7 @@ def _compute_losses_and_metrics(
         "loss_recon": loss_recon.item(),
         "loss_recon_multi_gauss": loss_recon_multi_gauss.item(),
         "loss_recon_multi_box": loss_recon_multi_box.item(),
+        "loss_recon_zhat_multi_box": loss_recon_zhat_multi_box.item(),
         "loss_recon_multi_box_mse": loss_recon_multi_box_mse.item(),
         "loss_recon_patch": loss_recon_patch.item(),
         "loss_pixel_delta": loss_pixel_delta.item(),
@@ -2391,6 +2412,8 @@ def log_metrics(
         filtered.pop("loss_recon_multi_gauss", None)
     if weights.recon_multi_box <= 0:
         filtered.pop("loss_recon_multi_box", None)
+    if weights.recon_zhat_multi_box <= 0:
+        filtered.pop("loss_recon_zhat_multi_box", None)
     if weights.recon_multi_box_mse <= 0:
         filtered.pop("loss_recon_multi_box_mse", None)
     if weights.recon_patch <= 0:
@@ -2408,6 +2431,8 @@ def log_metrics(
         filtered["loss_val_recon_multi_gauss"] = metrics["loss_val_recon_multi_gauss"]
     if "loss_val_recon_multi_box" in metrics:
         filtered["loss_val_recon_multi_box"] = metrics["loss_val_recon_multi_box"]
+    if "loss_val_recon_zhat_multi_box" in metrics:
+        filtered["loss_val_recon_zhat_multi_box"] = metrics["loss_val_recon_zhat_multi_box"]
     if "loss_val_recon_multi_box_mse" in metrics:
         filtered["loss_val_recon_multi_box_mse"] = metrics["loss_val_recon_multi_box_mse"]
     if "loss_val_recon_patch" in metrics:
@@ -2487,6 +2512,7 @@ LOSS_COLUMNS = [
     "loss_val_recon",
     "loss_val_recon_multi_gauss",
     "loss_val_recon_multi_box",
+    "loss_val_recon_zhat_multi_box",
     "loss_val_recon_multi_box_mse",
     "loss_val_recon_patch",
     "loss_jepa",
@@ -2496,6 +2522,7 @@ LOSS_COLUMNS = [
     "loss_recon",
     "loss_recon_multi_gauss",
     "loss_recon_multi_box",
+    "loss_recon_zhat_multi_box",
     "loss_recon_multi_box_mse",
     "loss_recon_patch",
     "loss_pixel_delta",
@@ -2551,6 +2578,7 @@ class LossHistory:
     val_recon: List[float] = field(default_factory=list)
     val_recon_multi_gauss: List[float] = field(default_factory=list)
     val_recon_multi_box: List[float] = field(default_factory=list)
+    val_recon_zhat_multi_box: List[float] = field(default_factory=list)
     val_recon_multi_box_mse: List[float] = field(default_factory=list)
     val_recon_patch: List[float] = field(default_factory=list)
     jepa: List[float] = field(default_factory=list)
@@ -2560,6 +2588,7 @@ class LossHistory:
     recon: List[float] = field(default_factory=list)
     recon_multi_gauss: List[float] = field(default_factory=list)
     recon_multi_box: List[float] = field(default_factory=list)
+    recon_zhat_multi_box: List[float] = field(default_factory=list)
     recon_multi_box_mse: List[float] = field(default_factory=list)
     recon_patch: List[float] = field(default_factory=list)
     pixel_delta: List[float] = field(default_factory=list)
@@ -2612,6 +2641,7 @@ class LossHistory:
         self.val_recon.append(metrics.get("loss_val_recon", 0.0))
         self.val_recon_multi_gauss.append(metrics.get("loss_val_recon_multi_gauss", 0.0))
         self.val_recon_multi_box.append(metrics.get("loss_val_recon_multi_box", 0.0))
+        self.val_recon_zhat_multi_box.append(metrics.get("loss_val_recon_zhat_multi_box", 0.0))
         self.val_recon_multi_box_mse.append(metrics.get("loss_val_recon_multi_box_mse", 0.0))
         self.val_recon_patch.append(metrics.get("loss_val_recon_patch", 0.0))
         self.jepa.append(metrics["loss_jepa"])
@@ -2621,6 +2651,7 @@ class LossHistory:
         self.recon.append(metrics["loss_recon"])
         self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
+        self.recon_zhat_multi_box.append(metrics.get("loss_recon_zhat_multi_box", 0.0))
         self.recon_multi_box_mse.append(metrics.get("loss_recon_multi_box_mse", 0.0))
         self.recon_patch.append(metrics["loss_recon_patch"])
         self.pixel_delta.append(metrics.get("loss_pixel_delta", 0.0))
@@ -2684,6 +2715,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.val_recon,
             history.val_recon_multi_gauss,
             history.val_recon_multi_box,
+            history.val_recon_zhat_multi_box,
             history.val_recon_multi_box_mse,
             history.val_recon_patch,
             history.jepa,
@@ -2693,6 +2725,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.recon,
             history.recon_multi_gauss,
             history.recon_multi_box,
+            history.recon_zhat_multi_box,
             history.recon_multi_box_mse,
             history.recon_patch,
             history.pixel_delta,
@@ -2758,6 +2791,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("val_recon", history.val_recon),
         ("val_recon_multi_gauss", history.val_recon_multi_gauss),
         ("val_recon_multi_box", history.val_recon_multi_box),
+        ("val_recon_zhat_multi_box", history.val_recon_zhat_multi_box),
         ("val_recon_multi_box_mse", history.val_recon_multi_box_mse),
         ("val_recon_patch", history.val_recon_patch),
         ("jepa", history.jepa),
@@ -2767,6 +2801,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("recon", history.recon),
         ("recon_multi_gauss", history.recon_multi_gauss),
         ("recon_multi_box", history.recon_multi_box),
+        ("recon_zhat_multi_box", history.recon_zhat_multi_box),
         ("recon_multi_box_mse", history.recon_multi_box_mse),
         ("recon_patch", history.recon_patch),
         ("pixel_delta", history.pixel_delta),
@@ -3748,6 +3783,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 metrics_for_log["loss_val_recon"] = val_metrics["loss_recon"]
                 metrics_for_log["loss_val_recon_multi_gauss"] = val_metrics["loss_recon_multi_gauss"]
                 metrics_for_log["loss_val_recon_multi_box"] = val_metrics["loss_recon_multi_box"]
+                metrics_for_log["loss_val_recon_zhat_multi_box"] = val_metrics["loss_recon_zhat_multi_box"]
                 metrics_for_log["loss_val_recon_multi_box_mse"] = val_metrics["loss_recon_multi_box_mse"]
                 metrics_for_log["loss_val_recon_patch"] = val_metrics["loss_recon_patch"]
             log_metrics(

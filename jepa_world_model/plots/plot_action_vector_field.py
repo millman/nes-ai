@@ -16,13 +16,36 @@ def _compute_pca_components(data: np.ndarray, *, k: int = 2) -> Tuple[np.ndarray
         raise ValueError("PCA expects a 2D array.")
     if data.shape[0] < 2:
         raise ValueError("Need at least two samples for PCA.")
+    finite_mask = np.isfinite(data).all(axis=1)
+    if not np.any(finite_mask):
+        raise ValueError("PCA expects finite samples.")
+    if finite_mask.sum() < 2:
+        raise ValueError("Need at least two finite samples for PCA.")
+    data = data[finite_mask]
     centered = data - data.mean(axis=0, keepdims=True)
-    _, s, vt = np.linalg.svd(centered, full_matrices=False)
-    k = max(1, min(k, vt.shape[0]))
-    eigvals = (s ** 2) / max(1, centered.shape[0] - 1)
-    total = float(eigvals.sum()) if eigvals.size else 0.0
-    var_ratio = eigvals[:k] / total if total > 0 else np.zeros((k,), dtype=np.float32)
-    return vt[:k], var_ratio
+    dim = centered.shape[1]
+    k = max(1, min(k, dim))
+    try:
+        _, s, vt = np.linalg.svd(centered, full_matrices=False)
+        k = max(1, min(k, vt.shape[0]))
+        eigvals = (s ** 2) / max(1, centered.shape[0] - 1)
+        total = float(eigvals.sum()) if eigvals.size else 0.0
+        var_ratio = eigvals[:k] / total if total > 0 else np.zeros((k,), dtype=np.float32)
+        return vt[:k], var_ratio
+    except np.linalg.LinAlgError:
+        cov = (centered.T @ centered) / max(1, centered.shape[0] - 1)
+        try:
+            eigvals, eigvecs = np.linalg.eigh(cov)
+        except np.linalg.LinAlgError:
+            components = np.eye(dim, dtype=centered.dtype)[:k]
+            var_ratio = np.zeros((k,), dtype=np.float32)
+            return components, var_ratio
+        order = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[order]
+        eigvecs = eigvecs[:, order]
+        total = float(eigvals.sum()) if eigvals.size else 0.0
+        var_ratio = eigvals[:k] / total if total > 0 else np.zeros((k,), dtype=np.float32)
+        return eigvecs[:, :k].T, var_ratio
 
 
 def _select_top_actions(action_ids: np.ndarray, max_actions: int) -> List[int]:

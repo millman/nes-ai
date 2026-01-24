@@ -23,13 +23,13 @@ DEFAULT_DISPLAY_HEIGHT = 224
 DEFAULT_INVENTORY_HEIGHT = DEFAULT_DISPLAY_HEIGHT - GRID_PLAY_ROWS * TILE_SIZE
 BASE_WORLD_SIZE = 32
 AGENT_SPEED = 2
-AGENT_SIZE = 3
+AGENT_SIZE = 4
 AGENT_RENDER_INSET = 2
 AGENT_COLLISION_INSET = 2
 KEY_RENDER_INSET = 3
 KEY_COLLISION_INSET = 3
 ALLOWED_WORLD_SIZES = {224, 128, 64, 32}
-MOVEMENT_PATTERN_CHOICES = ("right_only", "loop", "loop_imperfect", "random", "right_left")
+MOVEMENT_PATTERN_CHOICES = ("right_only", "loop", "loop_imperfect", "random", "right_left", "random_corner_loops")
 THEME_CHOICES = ("basic", "zelda")
 
 COLOR_FLOOR = np.array([233, 220, 188], dtype=np.uint8)
@@ -230,12 +230,24 @@ class GridworldKeyEnv(gym.Env):
     def _reset_agent(self):
         self._place_agent_at_tile(self.grid_rows - 2, 1)
 
+    def _clamp_agent_position(self, x: int, y: int) -> tuple[int, int]:
+        max_x = max(0, self.display_width - self.agent_size)
+        max_y = max(self.inventory_height, self.display_height - self.agent_size)
+        x = max(0, min(x, max_x))
+        y = max(self.inventory_height, min(y, max_y))
+        return x, y
+
     def _place_agent_at_tile(self, row: int, col: int):
         row = max(0, min(self.grid_rows - 1, row))
         col = max(0, min(self.grid_cols - 1, col))
+        max_row = int((self.display_height - self.agent_size - self.inventory_height) // self.tile_size)
+        max_col = int((self.display_width - self.agent_size) // self.tile_size)
+        max_row = max(0, min(self.grid_rows - 1, max_row))
+        max_col = max(0, min(self.grid_cols - 1, max_col))
+        row = min(row, max_row)
+        col = min(col, max_col)
         x, y = self._tile_top_left(row, col)
-        self.agent_x = x
-        self.agent_y = y
+        self.agent_x, self.agent_y = self._clamp_agent_position(x, y)
 
     def _draw_key(self, frame: np.ndarray):
         if not self.include_key or not self.key_present:
@@ -522,7 +534,7 @@ class GridworldConfig:
     hide_key_and_inventory: Optional[bool] = None
     black_background: Optional[bool] = None
     movement_pattern: Optional[
-        Literal["right_only", "loop", "loop_imperfect", "random", "right_left"]
+        Literal["right_only", "loop", "loop_imperfect", "random", "right_left", "random_corner_loops"]
     ] = None
 
 
@@ -679,6 +691,40 @@ def _build_pattern_actions(
                 + [ACTION_DOWN] * up_steps
             )
             actions.extend(_imperfect(_with_noops(segment_actions, rng, chance=0.2, max_noops=2), rng, chance=0.06))
+        return actions, start_tile
+
+    elif pattern == "random_corner_loops":
+        start_tile = start_middle
+        actions: list[int] = []
+        random_steps = min(max_steps, max(12, int(max_steps * 0.25)))
+        actions.extend(
+            [int(rng.choice([ACTION_NOOP, ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT])) for _ in range(random_steps)]
+        )
+        left_steps = _steps_for_tiles(env.grid_cols, env.tile_size, env.agent_speed)
+        down_steps = _steps_for_tiles(env.grid_rows, env.tile_size, env.agent_speed)
+        actions.extend([ACTION_LEFT] * left_steps + [ACTION_DOWN] * down_steps)
+
+        nudge_right = _steps_for_tiles(1, env.tile_size, env.agent_speed)
+        nudge_up = _steps_for_tiles(1, env.tile_size, env.agent_speed)
+        actions.extend([ACTION_RIGHT] * nudge_right + [ACTION_UP] * nudge_up)
+
+        loop_sizes = [
+            (env.grid_cols - 3, env.grid_rows - 3),
+            (env.grid_cols - 5, env.grid_rows - 5),
+            (env.grid_cols - 4, env.grid_rows - 6),
+        ]
+        for width_tiles, height_tiles in loop_sizes:
+            width_tiles = max(2, width_tiles)
+            height_tiles = max(2, height_tiles)
+            right_steps = _steps_for_tiles(width_tiles, env.tile_size, env.agent_speed)
+            up_steps = _steps_for_tiles(height_tiles, env.tile_size, env.agent_speed)
+            segment_actions = (
+                [ACTION_RIGHT] * right_steps
+                + [ACTION_UP] * up_steps
+                + [ACTION_LEFT] * right_steps
+                + [ACTION_DOWN] * up_steps
+            )
+            actions.extend(_with_noops(segment_actions, rng, chance=0.15, max_noops=2))
         return actions, start_tile
 
     else:
