@@ -27,7 +27,7 @@ def save_rollout_divergence_plot(
     title: str = "Rollout divergence",
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(6, 3.2))
-    ax.plot(horizons, pixel_errors, marker="o", label="Pixel error")
+    ax.plot(horizons, pixel_errors, marker="o", label="Pixel error (MSE)")
     ax.plot(horizons, latent_errors, marker="o", label=latent_label)
     ax.set_xlabel("Rollout step k")
     ax.set_ylabel("Error")

@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from jepa_world_model.conv_encoder_decoder import Encoder as ConvEncoder
 from jepa_world_model.model_config import ModelConfig
@@ -92,7 +93,8 @@ class HiddenToZProjector(nn.Module):
         original_shape = h.shape[:-1]
         h_flat = h.reshape(-1, h.shape[-1])
         z_hat = self.net(h_flat)
-        return z_hat.view(*original_shape, z_hat.shape[-1])
+        z_hat = z_hat.view(*original_shape, z_hat.shape[-1])
+        return F.normalize(z_hat, dim=-1)
 
 
 class ZToHProjector(nn.Module):
@@ -524,5 +526,5 @@ class JEPAWorldModel(nn.Module):
             pooled = self.encoder(current)
             embeddings.append(pooled)
         return {
-            "embeddings": torch.stack(embeddings, dim=1),
+            "embeddings": F.normalize(torch.stack(embeddings, dim=1), dim=-1),
         }

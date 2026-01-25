@@ -501,6 +501,10 @@ class TrainConfig:
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_normalization_enabled: bool = False
     normalize_losses: NormalizeLossesConfig = field(default_factory=NormalizeLossesConfig)
+    normalize_jepa_z: Annotated[
+        bool,
+        tyro.conf.arg(help="Normalize z embeddings for JEPA-family losses (JEPA, JEPA rep, JEPA open-loop)."),
+    ] = True
     detach_decoder: bool = False
     detach_z_from_h_and_p: bool = True
     render_mode: Annotated[
@@ -578,9 +582,12 @@ def jepa_loss(
     actions: torch.Tensor,
     use_z2h_init: bool = False,
     detach_z_inputs: bool = False,
+    normalize_z: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """JEPA loss using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
+    if normalize_z:
+        embeddings = F.normalize(embeddings, dim=-1)
     if embeddings.shape[1] < 2:
         raise AssertionError("JEPA loss requires at least two timesteps.")
     embeddings_for_rollout = embeddings.detach() if detach_z_inputs else embeddings
@@ -591,6 +598,9 @@ def jepa_loss(
         use_z2h_init=use_z2h_init,
     )
     target = embeddings[:, 1:].detach()
+    if normalize_z:
+        z_preds = F.normalize(z_preds, dim=-1)
+        target = F.normalize(target, dim=-1)
     return JEPA_LOSS(z_preds, target), z_preds, h_preds, h_states
 
 
@@ -602,6 +612,7 @@ def jepa_open_loop_loss(
     warmup_frames: int,
     use_z2h_init: bool = False,
     detach_z_inputs: bool = False,
+    normalize_z: bool = False,
 ) -> torch.Tensor:
     """Open-loop multi-step JEPA loss using self-fed predictions."""
     if rollout_horizon <= 0:
@@ -613,6 +624,8 @@ def jepa_open_loop_loss(
     if warmup >= t - 1:
         raise AssertionError("warmup_frames leaves no rollout steps for jepa_open_loop_loss.")
     start = warmup
+    if normalize_z:
+        embeddings = F.normalize(embeddings, dim=-1)
     embeddings_for_rollout = embeddings.detach() if detach_z_inputs else embeddings
     z_current = embeddings_for_rollout[:, start]
     h_current = (
@@ -630,6 +643,9 @@ def jepa_open_loop_loss(
         h_next = model.predictor(z_current, h_current, act)
         z_next = model.h_to_z(h_next)
         target = embeddings[:, start + offset + 1].detach()
+        if normalize_z:
+            z_next = F.normalize(z_next, dim=-1)
+            target = F.normalize(target, dim=-1)
         total = total + JEPA_LOSS(z_next, target)
         steps += 1
         z_current = z_next
@@ -1522,6 +1538,7 @@ def _compute_losses_and_metrics(
         a_seq,
         use_z2h_init=should_use_z2h_init(weights),
         detach_z_inputs=cfg.detach_z_from_h_and_p,
+        normalize_z=cfg.normalize_jepa_z,
     )
 
     z_for_decoder = z_embeddings.detach() if cfg.detach_decoder else z_embeddings
@@ -1593,7 +1610,12 @@ def _compute_losses_and_metrics(
     if weights.jepa > 0:
         loss_jepa = loss_jepa_raw
     if weights.jepa_rep > 0:
-        loss_jepa_rep = JEPA_LOSS(z_embeddings[:, 1:], z_preds.detach())
+        z_rep_target = z_embeddings[:, 1:]
+        z_rep_pred = z_preds.detach()
+        if cfg.normalize_jepa_z:
+            z_rep_target = F.normalize(z_rep_target, dim=-1)
+            z_rep_pred = F.normalize(z_rep_pred, dim=-1)
+        loss_jepa_rep = JEPA_LOSS(z_rep_target, z_rep_pred)
     if weights.jepa_open_loop > 0:
         loss_jepa_open_loop = jepa_open_loop_loss(
             model,
@@ -1603,6 +1625,7 @@ def _compute_losses_and_metrics(
             warmup_frames,
             use_z2h_init=cfg.rollout_init_z2h,
             detach_z_inputs=cfg.detach_z_from_h_and_p,
+            normalize_z=cfg.normalize_jepa_z,
         )
 
     if weights.sigreg > 0:
