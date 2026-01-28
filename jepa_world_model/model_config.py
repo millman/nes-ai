@@ -82,6 +82,9 @@ class ModelConfig:
     # Apply spectral norm to predictor linear layers for h stability.
     predictor_spectral_norm: bool = True
 
+    # Normalize encoder/predicted z to unit norm.
+    z_norm: bool = False
+
     # Optional head toggles (resolved from loss weights at runtime when training).
     enable_inverse_dynamics_z: Optional[bool] = None
     enable_inverse_dynamics_h: Optional[bool] = None

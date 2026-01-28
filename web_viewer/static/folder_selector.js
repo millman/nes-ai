@@ -20,10 +20,10 @@ const FOLDER_GROUP_PRESETS = {
     "vis_z_consistency",
     "vis_z_monotonicity",
   ],
-  // Diags: Action alignment of PCA, Distance, Cumulative sum
-  diags_z: ["vis_action_alignment_detail_z", "vis_self_distance_z", "vis_odometry_current_z"],
-  diags_h: ["vis_action_alignment_detail_h", "vis_self_distance_h", "vis_odometry_current_h"],
-  diags_s: ["vis_action_alignment_detail_p", "vis_self_distance_p", "vis_odometry_current_p"],
+  // Diags: Action alignment, Self-distance, Delta PCA
+  diags_z: ["vis_action_alignment_detail_z", "vis_self_distance_z", "vis_delta_z_pca"],
+  diags_h: ["vis_action_alignment_detail_h", "vis_self_distance_h", "vis_delta_h_pca"],
+  diags_s: ["vis_action_alignment_detail_p", "vis_self_distance_p", "vis_delta_p_pca"],
   // Action: centered delta, PCA, raw delta
   action_z: ["vis_action_alignment_detail_centered_z", "vis_action_alignment_detail_z", "vis_action_alignment_detail_raw_z"],
   action_h: ["vis_action_alignment_detail_centered_h", "vis_action_alignment_detail_h", "vis_action_alignment_detail_raw_h"],
@@ -32,9 +32,6 @@ const FOLDER_GROUP_PRESETS = {
   self_distance_z: ["vis_self_distance_z"],
   self_distance_h: ["vis_self_distance_h"],
   self_distance_s: ["vis_self_distance_p"],
-  composability_z: ["vis_composability_z"],
-  composability_h: ["vis_composability_h"],
-  composability_s: ["vis_composability_p"],
   planning: [
     "vis_planning_pca_test1",
     "vis_planning_pca_test2",
@@ -64,6 +61,18 @@ function createFolderSelector(config) {
   const { menuId, initialFolders, onSelectionChange, updateUrl = true } = config;
 
   let selectedFolders = ["vis_fixed_0"];
+  let availableFolders = null;
+
+  function isFolderAvailable(value) {
+    if (!availableFolders) return true;
+    return availableFolders.has(value);
+  }
+
+  function filterAvailableFolders(values) {
+    const list = Array.isArray(values) ? values : [];
+    if (!availableFolders) return list;
+    return list.filter((value) => availableFolders.has(value));
+  }
 
   function normalizeSelectedFolders(values) {
     const normalized = [];
@@ -75,7 +84,7 @@ function createFolderSelector(config) {
       seen.add(trimmed);
       normalized.push(trimmed);
     });
-    return normalized;
+    return filterAvailableFolders(normalized);
   }
 
   // Find matching folder group for a given folder array
@@ -122,10 +131,41 @@ function createFolderSelector(config) {
     });
   }
 
+  function updateAvailabilityUI() {
+    const menu = document.getElementById(menuId);
+    if (menu) {
+      const items = menu.querySelectorAll("[data-value]");
+      items.forEach((item) => {
+        const value = item.dataset.value;
+        const checkbox = item.querySelector('input[type="checkbox"]');
+        const available = isFolderAvailable(value);
+        if (checkbox) {
+          checkbox.disabled = !available;
+        }
+        item.classList.toggle("disabled", !available);
+        item.classList.toggle("text-muted", !available);
+      });
+    }
+
+    const buttons = document.querySelectorAll("[data-folder-preset]");
+    buttons.forEach((button) => {
+      const preset = FOLDER_GROUP_PRESETS[button.dataset.folderPreset];
+      if (!preset) return;
+      const available = filterAvailableFolders(preset);
+      const isDisabled = available.length === 0;
+      button.disabled = isDisabled;
+      button.classList.toggle("disabled", isDisabled);
+      button.setAttribute("aria-disabled", isDisabled ? "true" : "false");
+    });
+  }
+
   function setSelectedFolders(nextSelected, options = {}) {
     const { triggerCallback = true, doUpdateUrl = true } = options;
     const normalized = normalizeSelectedFolders(nextSelected);
-    selectedFolders = normalized.length ? normalized : ["vis_fixed_0"];
+    selectedFolders = normalized.length ? normalized : (filterAvailableFolders(["vis_fixed_0"])[0] ? ["vis_fixed_0"] : []);
+    if (!selectedFolders.length && availableFolders && availableFolders.size) {
+      selectedFolders = [Array.from(availableFolders)[0]];
+    }
     if (doUpdateUrl) {
       updateFolderUrl(selectedFolders);
     }
@@ -188,9 +228,12 @@ function createFolderSelector(config) {
       button.addEventListener("click", () => {
         const preset = FOLDER_GROUP_PRESETS[button.dataset.folderPreset];
         if (!preset) return;
-        setSelectedFolders(preset);
+        const filtered = filterAvailableFolders(preset);
+        if (!filtered.length) return;
+        setSelectedFolders(filtered);
       });
     });
+    updateAvailabilityUI();
   }
 
   function restoreFromUrl() {
@@ -237,6 +280,26 @@ function createFolderSelector(config) {
     syncDropdownSelection();
   }
 
+  function setAvailableFolderValues(values, options = {}) {
+    const { pruneSelection = true } = options;
+    if (values === null || values === undefined) {
+      availableFolders = null;
+    } else if (values instanceof Set) {
+      availableFolders = new Set(values);
+    } else {
+      availableFolders = new Set(values);
+    }
+    updateAvailabilityUI();
+    if (pruneSelection) {
+      const filtered = filterAvailableFolders(selectedFolders);
+      if (filtered.length !== selectedFolders.length) {
+        setSelectedFolders(filtered);
+      } else {
+        syncDropdownSelection();
+      }
+    }
+  }
+
   // Initialize on creation
   initialize();
 
@@ -244,5 +307,6 @@ function createFolderSelector(config) {
     getSelectedFolders,
     setSelectedFolders,
     syncDropdownSelection,
+    setAvailableFolderValues,
   };
 }

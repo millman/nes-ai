@@ -48,6 +48,22 @@
                     return folderSelector ? folderSelector.getSelectedFolders() : ["vis_fixed_0"];
                 }
 
+                function computeAvailableFolderValues(vizSteps, rolloutSteps) {
+                    const available = new Set();
+                    if (vizSteps && typeof vizSteps === "object") {
+                        Object.entries(vizSteps).forEach(([key, steps]) => {
+                            if (key === "__fallback") return;
+                            if (Array.isArray(steps) && steps.length) {
+                                available.add(key);
+                            }
+                        });
+                    }
+                    if (Array.isArray(rolloutSteps) && rolloutSteps.length) {
+                        available.add("vis_fixed_0");
+                    }
+                    return available;
+                }
+
                 function initializeDetailStickyPlot() {
                     if (detailStickyInitialized) return;
                     const wrapper = document.querySelector(".compare-plot-wrapper");
@@ -120,6 +136,7 @@
                         menuId: "folder-menu",
                         onSelectionChange: rebuildAndUpdate,
                     });
+                    folderSelector.setAvailableFolderValues(computeAvailableFolderValues(visualizationSteps, rolloutSteps));
 
                     // Parse view state from URL
                     const urlParams = new URLSearchParams(window.location.search);

@@ -21,6 +21,7 @@ def compute_vis_ctrl_state(
     weights,
     device: torch.device,
     vis_ctrl_batch_cpu,
+    force_h_zero: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     vis_frames = vis_ctrl_batch_cpu[0].to(device)
     vis_actions = vis_ctrl_batch_cpu[1].to(device)
@@ -30,6 +31,7 @@ def compute_vis_ctrl_state(
         vis_embeddings,
         vis_actions,
         use_z2h_init=should_use_z2h_init(weights),
+        force_h_zero=force_h_zero,
     )
     vis_p_embeddings = None
     if model.p_action_delta_projector is not None:

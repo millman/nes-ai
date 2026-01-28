@@ -602,6 +602,7 @@ def run_diagnostics_step(
     vis_selection_generator: torch.Generator,
     run_dir: Path,
     render_mode: str,
+    force_h_zero: bool = False,
 ) -> None:
     resolved_outputs = _resolve_outputs(
         weights=weights,
@@ -801,6 +802,7 @@ def run_diagnostics_step(
             vis_selection_generator=vis_selection_generator,
             use_z2h_init=should_use_z2h_init(weights),
             render_mode=render_mode,
+            force_h_zero=force_h_zero,
         )
         save_rollout_sequence_batch(
             fixed_vis_dir,
@@ -821,6 +823,7 @@ def run_diagnostics_step(
             vis_selection_generator=vis_selection_generator,
             use_z2h_init=should_use_z2h_init(weights),
             render_mode=render_mode,
+            force_h_zero=force_h_zero,
         )
         save_rollout_sequence_batch(
             rolling_vis_dir,
@@ -973,6 +976,7 @@ def run_diagnostics_step(
                 vis_odometry_dir,
                 global_step,
                 use_z2h_init=should_use_z2h_init(weights),
+                force_h_zero=force_h_zero,
                 hist_frames_cpu=rolling_batch_cpu[0],
                 hist_actions_cpu=rolling_batch_cpu[1],
             )
@@ -984,6 +988,7 @@ def run_diagnostics_step(
             weights=weights,
             diagnostics_batch_cpu=diagnostics_batch_cpu,
             device=device,
+            force_h_zero=force_h_zero,
         )
 
         action_ids_flat = diag_state.action_metadata.action_ids_flat
@@ -1311,7 +1316,7 @@ def run_diagnostics_step(
             resolved_outputs[f"diagnostics_rollout_divergence_{kind}"].enabled for kind in ["z", "h", "p"]
         )
         if can_rollout and rollout_outputs_enabled:
-            horizons, pixel_mean, z_mean, h_mean, p_mean = compute_rollout_divergence_metrics(
+            horizons, pixel_mean, pixel_teacher_mean, z_mean, h_mean, p_mean = compute_rollout_divergence_metrics(
                 model=model,
                 decoder=decoder,
                 diag_embeddings=diag_state.embeddings,
@@ -1324,7 +1329,9 @@ def run_diagnostics_step(
                 start_span=start_span,
                 rollout_divergence_samples=diagnostics_cfg.rollout_divergence_samples,
                 diagnostics_generator=diagnostics_generator,
+                force_h_zero=force_h_zero,
             )
+            pixel_excess = (np.maximum(np.asarray(pixel_mean) - np.asarray(pixel_teacher_mean), 0.0)).tolist()
 
             for kind in ["z", "h", "p"]:
                 if not resolved_outputs[f"diagnostics_rollout_divergence_{kind}"].enabled:
@@ -1357,11 +1364,26 @@ def run_diagnostics_step(
                     latent_label=latent_label,
                     title=title,
                 )
+                save_rollout_divergence_plot(
+                    out_dir / f"rollout_divergence_excess_{kind}_{global_step:07d}.png",
+                    horizons,
+                    pixel_excess,
+                    metric,
+                    pixel_label="Excess pixel error (MSE - recon)",
+                    latent_label=latent_label,
+                    title=f"{title} (excess)",
+                )
                 write_step_csv(
                     out_dir,
                     f"rollout_divergence_{kind}_{global_step:07d}.csv",
                     csv_cols,
                     zip(horizons, pixel_mean, metric),
+                )
+                write_step_csv(
+                    out_dir,
+                    f"rollout_divergence_excess_{kind}_{global_step:07d}.csv",
+                    csv_cols,
+                    zip(horizons, pixel_excess, metric),
                 )
         if (
             can_rollout
@@ -1383,6 +1405,7 @@ def run_diagnostics_step(
                 start_span=start_span,
                 rollout_divergence_samples=diagnostics_cfg.rollout_divergence_samples,
                 diagnostics_generator=diagnostics_generator,
+                force_h_zero=force_h_zero,
             )
             save_ablation_divergence_plot(
                 diagnostics_h_ablation_dir / f"h_ablation_{global_step:07d}.png",
@@ -1503,6 +1526,7 @@ def run_diagnostics_step(
             weights=weights,
             device=device,
             vis_ctrl_batch_cpu=vis_ctrl_batch_cpu,
+            force_h_zero=force_h_zero,
         )
 
         warmup_frames = max(model.cfg.warmup_frames_h, 0)
@@ -1579,6 +1603,7 @@ def run_diagnostics_step(
             graph_cfg=graph_cfg,
             device=device,
             use_z2h_init=should_use_z2h_init(weights),
+            force_h_zero=force_h_zero,
         )
 
         graph_kinds = ["z", "h"]

@@ -620,6 +620,10 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
         label=None,
         candidates=[('vis_delta_s_pca', 'delta_s_pca_*.png', 'delta_s_pca_')],
     ),
+    'vis_off_manifold': VisSpec(
+        label='Diagnostics:Off-manifold',
+        candidates=[('vis_off_manifold', 'off_manifold_*.png', 'off_manifold_')],
+    ),
     'vis_delta_h_pca': VisSpec(
         label='Diagnostics:Delta-h PCA',
         candidates=[('vis_delta_h_pca', 'delta_h_pca_*.png', 'delta_h_pca_')],
@@ -746,11 +750,23 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
         label='Diagnostics:Rollout divergence (Z)',
         candidates=[('vis_rollout_divergence_z', 'rollout_divergence_z_*.png', 'rollout_divergence_z_')],
     ),
+    'vis_rollout_divergence_excess_z': VisSpec(
+        label='Diagnostics:Rollout divergence excess (Z)',
+        candidates=[('vis_rollout_divergence_z', 'rollout_divergence_excess_z_*.png', 'rollout_divergence_excess_z_')],
+    ),
     'vis_rollout_divergence_h': VisSpec(
         label='Diagnostics:Rollout divergence (H)',
         candidates=[('vis_rollout_divergence_h', 'rollout_divergence_h_*.png', 'rollout_divergence_h_')],
     ),
+    'vis_rollout_divergence_excess_h': VisSpec(
+        label='Diagnostics:Rollout divergence excess (H)',
+        candidates=[('vis_rollout_divergence_h', 'rollout_divergence_excess_h_*.png', 'rollout_divergence_excess_h_')],
+    ),
     'vis_rollout_divergence_p': DIAGNOSTICS_P_ROLLOUT_DIVERGENCE_IMAGE_SPEC,
+    'vis_rollout_divergence_excess_p': VisSpec(
+        label='Diagnostics:Rollout divergence excess (P)',
+        candidates=[('vis_rollout_divergence_p', 'rollout_divergence_excess_p_*.png', 'rollout_divergence_excess_p_')],
+    ),
     'vis_z_consistency': DIAGNOSTICS_Z_CONSISTENCY_IMAGE_SPEC,
     'vis_z_monotonicity': DIAGNOSTICS_Z_MONOTONICITY_IMAGE_SPEC,
     'vis_path_independence': DIAGNOSTICS_PATH_INDEPENDENCE_IMAGE_SPEC,

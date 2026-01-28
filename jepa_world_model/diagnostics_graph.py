@@ -37,6 +37,7 @@ def prepare_graph_diagnostics(
     graph_cfg: GraphDiagnosticsConfig,
     device: torch.device,
     use_z2h_init: bool,
+    force_h_zero: bool = False,
 ) -> GraphDiagnosticsBatch:
     if graph_frames.shape[1] < 3:
         raise AssertionError("Graph diagnostics require sequences with at least three frames.")
@@ -50,6 +51,7 @@ def prepare_graph_diagnostics(
             graph_embeddings,
             graph_actions_device,
             use_z2h_init=use_z2h_init,
+            force_h_zero=force_h_zero,
         )
     assert torch.is_grad_enabled()
     next_index, next2_index, chunk_ids = build_graph_diag_indices(graph_frames_device)

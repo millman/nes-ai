@@ -71,7 +71,14 @@ class PredictorNetwork(nn.Module):
 class HiddenToZProjector(nn.Module):
     """Project hidden state to an image-anchored embedding prediction."""
 
-    def __init__(self, h_dim: int, z_dim: int, hidden_dim: int, use_layer_norm: bool = True) -> None:
+    def __init__(
+        self,
+        h_dim: int,
+        z_dim: int,
+        hidden_dim: int,
+        use_layer_norm: bool = True,
+        normalize_output: bool = False,
+    ) -> None:
         super().__init__()
         layers = []
         if use_layer_norm:
@@ -88,13 +95,16 @@ class HiddenToZProjector(nn.Module):
         self.z_dim = z_dim
         self.hidden_dim = hidden_dim
         self.use_layer_norm = use_layer_norm
+        self.normalize_output = normalize_output
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         original_shape = h.shape[:-1]
         h_flat = h.reshape(-1, h.shape[-1])
         z_hat = self.net(h_flat)
         z_hat = z_hat.view(*original_shape, z_hat.shape[-1])
-        return F.normalize(z_hat, dim=-1)
+        if self.normalize_output:
+            z_hat = F.normalize(z_hat, dim=-1)
+        return z_hat
 
 
 class ZToHProjector(nn.Module):
@@ -429,6 +439,7 @@ class JEPAWorldModel(nn.Module):
             self.embedding_dim,
             cfg.hidden_dim,
             use_layer_norm=cfg.layer_norms.h2z_projector,
+            normalize_output=cfg.z_norm,
         )
         self.z_to_h = ZToHProjector(
             self.embedding_dim,
@@ -525,6 +536,9 @@ class JEPAWorldModel(nn.Module):
             current = images[:, step]
             pooled = self.encoder(current)
             embeddings.append(pooled)
+        z = torch.stack(embeddings, dim=1)
+        if self.cfg.z_norm:
+            z = F.normalize(z, dim=-1)
         return {
-            "embeddings": F.normalize(torch.stack(embeddings, dim=1), dim=-1),
+            "embeddings": z,
         }

@@ -70,6 +70,7 @@ def write_state_embedding_outputs(
     global_step: int,
     *,
     use_z2h_init: bool = False,
+    force_h_zero: bool = False,
     hist_frames_cpu: Optional[torch.Tensor] = None,
     hist_actions_cpu: Optional[torch.Tensor] = None,
 ) -> None:
@@ -84,6 +85,7 @@ def write_state_embedding_outputs(
             embeddings,
             actions,
             use_z2h_init=use_z2h_init,
+            force_h_zero=force_h_zero,
         )
         if model.p_correction_projector is not None and embeddings is not None:
             p = rollout_pose_sequence_with_correction(model, h_states, actions, embeddings)[0]

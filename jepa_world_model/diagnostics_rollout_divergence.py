@@ -27,7 +27,8 @@ def compute_rollout_divergence_metrics(
     start_span: int,
     rollout_divergence_samples: int,
     diagnostics_generator: torch.Generator,
-) -> Tuple[List[int], List[float], List[float], List[float], List[float]]:
+    force_h_zero: bool = False,
+) -> Tuple[List[int], List[float], List[float], List[float], List[float], List[float]]:
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be positive for rollout divergence.")
     if start_span <= 0:
@@ -41,6 +42,7 @@ def compute_rollout_divergence_metrics(
     perm = torch.randperm(total_positions, generator=diagnostics_generator)[:sample_count]
     has_p = diag_p_embeddings is not None and model.p_action_delta_projector is not None
     pixel_errors = torch.zeros(rollout_horizon, device=diag_embeddings.device)
+    pixel_teacher_errors = torch.zeros(rollout_horizon, device=diag_embeddings.device)
     z_errors = torch.zeros(rollout_horizon, device=diag_embeddings.device)
     h_errors = torch.zeros(rollout_horizon, device=diag_embeddings.device)
     p_errors = torch.zeros(rollout_horizon, device=diag_embeddings.device)
@@ -50,13 +52,18 @@ def compute_rollout_divergence_metrics(
         t0 = (flat_idx % start_span) + warmup_frames
         z_t = diag_embeddings[b, t0]
         h_t = diag_h_states[b, t0]
+        if force_h_zero:
+            h_t = torch.zeros_like(h_t)
         p_t = diag_p_embeddings[b, t0] if has_p else None
         for k in range(rollout_horizon):
             if t0 + k >= diag_frames_device.shape[1] - 1:
                 break
             act = diag_actions_device[b, t0 + k]
             if has_p:
-                h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
+                if force_h_zero:
+                    h_in = torch.zeros_like(h_t)
+                else:
+                    h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
                 delta = model.p_action_delta_projector(
                     p_t.unsqueeze(0),
                     h_in.unsqueeze(0),
@@ -69,11 +76,16 @@ def compute_rollout_divergence_metrics(
                 act.unsqueeze(0),
             )
             z_t = model.h_to_z(h_next).squeeze(0)
-            h_t = h_next.squeeze(0)
+            if force_h_zero:
+                h_t = torch.zeros_like(h_t)
+            else:
+                h_t = h_next.squeeze(0)
             decoded = decoder(z_t.unsqueeze(0))
             pixel_errors[k] += RECON_LOSS(decoded, diag_frames_device[b, t0 + k + 1].unsqueeze(0))
             z_gt = diag_embeddings[b, t0 + k + 1]
             h_gt = diag_h_states[b, t0 + k + 1]
+            decoded_teacher = decoder(z_gt.unsqueeze(0))
+            pixel_teacher_errors[k] += RECON_LOSS(decoded_teacher, diag_frames_device[b, t0 + k + 1].unsqueeze(0))
             z_errors[k] += (z_t - z_gt).norm()
             h_errors[k] += (h_t - h_gt).norm()
             if has_p:
@@ -82,6 +94,7 @@ def compute_rollout_divergence_metrics(
             counts[k] += 1
     counts = torch.clamp(counts, min=1.0)
     pixel_mean = (pixel_errors / counts).detach().cpu().numpy().tolist()
+    pixel_teacher_mean = (pixel_teacher_errors / counts).detach().cpu().numpy().tolist()
     z_mean = (z_errors / counts).detach().cpu().numpy().tolist()
     h_mean = (h_errors / counts).detach().cpu().numpy().tolist()
     if has_p:
@@ -89,7 +102,7 @@ def compute_rollout_divergence_metrics(
     else:
         p_mean = [0.0 for _ in range(rollout_horizon)]
     horizons = list(range(1, rollout_horizon + 1))
-    return horizons, pixel_mean, z_mean, h_mean, p_mean
+    return horizons, pixel_mean, pixel_teacher_mean, z_mean, h_mean, p_mean
 
 
 def compute_h_ablation_divergence(
@@ -106,7 +119,10 @@ def compute_h_ablation_divergence(
     start_span: int,
     rollout_divergence_samples: int,
     diagnostics_generator: torch.Generator,
+    force_h_zero: bool = False,
 ) -> Tuple[List[int], List[float], List[float], List[float], List[float]]:
+    if force_h_zero:
+        raise AssertionError("h-ablation divergence is undefined when force_h_zero is enabled.")
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be positive for h-ablation divergence.")
     if start_span <= 0:
@@ -180,4 +196,3 @@ def compute_h_ablation_divergence(
     latent_zero_mean = (latent_errors_zero / counts).detach().cpu().numpy().tolist()
     horizons = list(range(1, rollout_horizon + 1))
     return horizons, pixel_mean, pixel_zero_mean, latent_mean, latent_zero_mean
-

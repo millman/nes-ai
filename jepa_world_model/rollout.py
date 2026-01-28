@@ -12,13 +12,16 @@ def rollout_teacher_forced_z(
     actions: torch.Tensor,
     *,
     use_z2h_init: bool = False,
+    force_h_zero: bool = False,
 ) -> torch.Tensor:
     """Teacher-forced rollout that returns z_hat (enc(x_t) used at each step)."""
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, embeddings.shape[-1]))
     z_preds = []
-    if use_z2h_init and t > 0:
+    if force_h_zero:
+        h_t = embeddings.new_zeros((b, model.state_dim))
+    elif use_z2h_init and t > 0:
         h_t = model.z_to_h(embeddings[:, 0].detach())
     else:
         h_t = embeddings.new_zeros((b, model.state_dim))
@@ -28,7 +31,10 @@ def rollout_teacher_forced_z(
         h_next = model.predictor(z_t, h_t, act_t)
         z_pred = model.h_to_z(h_next)
         z_preds.append(z_pred)
-        h_t = h_next
+        if force_h_zero:
+            h_t = embeddings.new_zeros((b, model.state_dim))
+        else:
+            h_t = h_next
     return torch.stack(z_preds, dim=1)
 
 
@@ -38,6 +44,7 @@ def rollout_self_fed(
     actions: torch.Tensor,
     *,
     use_z2h_init: bool = False,
+    force_h_zero: bool = False,
 ) -> torch.Tensor:
     """Roll predictor using its own predictions (no teacher forcing) to get hidden states.
 
@@ -47,7 +54,9 @@ def rollout_self_fed(
     b, t, _ = embeddings.shape
     if t < 2:
         return embeddings.new_zeros((b, 0, model.state_dim))
-    if use_z2h_init and t > 0:
+    if force_h_zero:
+        h_t = embeddings.new_zeros((b, model.state_dim))
+    elif use_z2h_init and t > 0:
         h_t = model.z_to_h(embeddings[:, 0].detach())
     else:
         h_t = embeddings.new_zeros((b, model.state_dim))
@@ -57,9 +66,15 @@ def rollout_self_fed(
         act_t = actions[:, step]
         h_next = model.predictor(z_t, h_t, act_t)
         z_next = model.h_to_z(h_next)
-        h_preds.append(h_next)
+        if force_h_zero:
+            h_preds.append(embeddings.new_zeros((b, model.state_dim)))
+        else:
+            h_preds.append(h_next)
         z_t = z_next
-        h_t = h_next
+        if force_h_zero:
+            h_t = embeddings.new_zeros((b, model.state_dim))
+        else:
+            h_t = h_next
     return torch.stack(h_preds, dim=1)
 
 
@@ -69,11 +84,14 @@ def rollout_teacher_forced(
     actions: torch.Tensor,
     *,
     use_z2h_init: bool = False,
+    force_h_zero: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Teacher-forced rollout that returns z_hat plus hidden state sequences."""
     b, t, _ = embeddings.shape
     h0 = None
-    if use_z2h_init and t > 0:
+    if force_h_zero:
+        h0 = embeddings.new_zeros((b, model.state_dim))
+    elif use_z2h_init and t > 0:
         h0 = model.z_to_h(embeddings[:, 0].detach())
     if t < 2:
         z_preds = embeddings.new_zeros((b, 0, embeddings.shape[-1]))
@@ -96,8 +114,13 @@ def rollout_teacher_forced(
         act_t = actions[:, step]
         h_next = model.predictor(z_t, h_t, act_t)
         z_preds.append(model.h_to_z(h_next))
-        h_preds.append(h_next)
-        h_states.append(h_next)
+        if force_h_zero:
+            h_zero = embeddings.new_zeros((b, model.state_dim))
+            h_preds.append(h_zero)
+            h_states.append(h_zero)
+        else:
+            h_preds.append(h_next)
+            h_states.append(h_next)
     return (
         torch.stack(z_preds, dim=1),
         torch.stack(h_preds, dim=1),

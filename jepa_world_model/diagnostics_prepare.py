@@ -55,6 +55,7 @@ def prepare_diagnostics_batch_state(
     weights,
     diagnostics_batch_cpu: Tuple[torch.Tensor, torch.Tensor, List[List[str]]],
     device: torch.device,
+    force_h_zero: bool = False,
 ) -> DiagnosticsBatchState:
     diag_frames = diagnostics_batch_cpu[0]
     diag_actions = diagnostics_batch_cpu[1]
@@ -73,6 +74,7 @@ def prepare_diagnostics_batch_state(
             diag_embeddings,
             diag_actions_device,
             use_z2h_init=should_use_z2h_init(weights),
+            force_h_zero=force_h_zero,
         )
         diag_p_embeddings = None
         diag_p_deltas = None

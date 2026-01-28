@@ -21,7 +21,14 @@ def save_off_manifold_visualization(
     rng = np.random.default_rng(0)
     jitter = rng.normal(scale=0.06, size=step_indices.shape)
     axes[0].scatter(step_indices + jitter, errors, s=10, alpha=0.6, color="tab:blue")
-    axes[0].set_title("Off-manifold error by rollout index")
+    unique_steps = np.unique(step_indices)
+    for step in unique_steps:
+        mask = step_indices == step
+        if not np.any(mask):
+            continue
+        mean_val = float(np.mean(errors[mask]))
+        axes[0].plot([step - 0.2, step + 0.2], [mean_val, mean_val], color="red", linewidth=2)
+    axes[0].set_title("Off-manifold error by rollout index (Z)")
     axes[0].set_xlabel("rollout index")
     axes[0].set_ylabel("||enc(dec(z_roll)) - z_roll||")
     axes[1].hist(errors, bins=30, color="tab:orange", alpha=0.8)

@@ -46,6 +46,7 @@ def build_visualization_sequences(
     vis_selection_generator: torch.Generator,
     use_z2h_init: bool,
     render_mode: str,
+    force_h_zero: bool = False,
 ) -> Tuple[List[VisualizationSequence], str]:
     vis_frames = batch_cpu[0].to(device)
     vis_actions = batch_cpu[1].to(device)
@@ -104,7 +105,9 @@ def build_visualization_sequences(
         assert torch.is_grad_enabled()
         with torch.no_grad():
             current_embed = vis_embeddings[idx, start_idx].unsqueeze(0)
-            if use_z2h_init:
+            if force_h_zero:
+                current_hidden = current_embed.new_zeros(1, model.state_dim)
+            elif use_z2h_init:
                 current_hidden = model.z_to_h(current_embed.detach())
             else:
                 current_hidden = current_embed.new_zeros(1, model.state_dim)
@@ -142,7 +145,10 @@ def build_visualization_sequences(
                     )
                 prev_pred_frame = current_frame.detach()
                 current_embed = next_embed
-                current_hidden = h_next
+                if force_h_zero:
+                    current_hidden = current_embed.new_zeros(1, model.state_dim)
+                else:
+                    current_hidden = h_next
         assert torch.is_grad_enabled()
         action_texts.append(row_actions)
         rollout_frames.append(row_rollout)
@@ -249,6 +255,7 @@ def run_rollout_visualizations(
     rolling_vis_dir: Path,
     vis_off_manifold_dir: Path,
     render_mode: str,
+    force_h_zero: bool = False,
 ) -> None:
     sequences, grad_label = build_visualization_sequences(
         batch_cpu=fixed_batch_cpu,
@@ -260,6 +267,7 @@ def run_rollout_visualizations(
         vis_selection_generator=vis_selection_generator,
         use_z2h_init=should_use_z2h_init(weights),
         render_mode=render_mode,
+        force_h_zero=force_h_zero,
     )
     save_rollout_sequence_batch(
         fixed_vis_dir,
@@ -279,6 +287,7 @@ def run_rollout_visualizations(
         vis_selection_generator=vis_selection_generator,
         use_z2h_init=should_use_z2h_init(weights),
         render_mode=render_mode,
+        force_h_zero=force_h_zero,
     )
     save_rollout_sequence_batch(
         rolling_vis_dir,

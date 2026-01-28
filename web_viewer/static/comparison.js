@@ -8,6 +8,7 @@ let currentExperiments = [];
 let currentSpecsByExp = {};
 let compareStickyInitialized = false;
 let folderSelector = null;
+let availableFolderValues = new Set();
 
 // Store original data for x-axis toggling
 let originalSteps = [];
@@ -29,6 +30,21 @@ function resolveImageSpec(folderValue, expId) {
   const options = currentSpecsByExp?.[expId];
   const resolved = getResolvedImageSpec(folderValue, options);
   return { stepsKey: folderValue, folderPath: resolved.folder, prefix: resolved.prefix };
+}
+
+function computeAvailableFolderValues(stepsByExp, experiments) {
+  const available = new Set();
+  (experiments || []).forEach((exp) => {
+    const map = stepsByExp?.[exp.id];
+    if (!map) return;
+    Object.entries(map).forEach(([key, steps]) => {
+      if (key === "__fallback") return;
+      if (Array.isArray(steps) && steps.length) {
+        available.add(key);
+      }
+    });
+  });
+  return available;
 }
 
 function getStepsForFolder(stepsMap, expId, folderValue) {
@@ -212,6 +228,10 @@ function renderComparison(payload) {
   currentStepsByExp = availableStepsByExp;
   currentSpecsByExp = specsByExp;
   currentExperiments = experiments;
+  availableFolderValues = computeAvailableFolderValues(availableStepsByExp, experiments);
+  if (folderSelector) {
+    folderSelector.setAvailableFolderValues(availableFolderValues);
+  }
   grid.innerHTML = "";
   grid.appendChild(buildExperimentGrid(experiments));
   refreshPreviewImages(grid, availableStepsByExp);
