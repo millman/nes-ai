@@ -25,6 +25,7 @@ Format for each prompt entry:
 ## Preparing a Commit Message
 When the user requests that a commit be prepared:
 1. Read every Markdown file inside `.agent/changes/` and order them by filename to preserve chronology.
+   - If the user explicitly requests a commit message for a subset of changes, only use the specified `.agent/changes/` files and ignore the rest.
 2. Combine their contents into a single message using the template:
    ```
    <one line summary>
