@@ -22,7 +22,7 @@ DEFAULT_DISPLAY_WIDTH = GRID_COLS * TILE_SIZE
 DEFAULT_DISPLAY_HEIGHT = 224
 DEFAULT_INVENTORY_HEIGHT = DEFAULT_DISPLAY_HEIGHT - GRID_PLAY_ROWS * TILE_SIZE
 BASE_WORLD_SIZE = 32
-AGENT_SPEED = 2
+AGENT_SPEED = 3
 AGENT_SIZE = 4
 AGENT_RENDER_INSET = 2
 AGENT_COLLISION_INSET = 2
@@ -624,6 +624,27 @@ def _steps_for_tiles(tiles: int, tile_size: int, speed: int) -> int:
     return max(1, int(round(pixels / max(1, speed))))
 
 
+def _action_within_bounds(
+    x: int,
+    y: int,
+    action: int,
+    min_x: int,
+    max_x: int,
+    min_y: int,
+    max_y: int,
+    speed: int,
+) -> bool:
+    if action == ACTION_LEFT:
+        return x - speed >= min_x
+    if action == ACTION_RIGHT:
+        return x + speed <= max_x
+    if action == ACTION_UP:
+        return y - speed >= min_y
+    if action == ACTION_DOWN:
+        return y + speed <= max_y
+    return True
+
+
 def _build_pattern_actions(
     name: str, env: GridworldKeyEnv, rng: np.random.Generator, max_steps: int
 ) -> tuple[list[int], tuple[int, int]]:
@@ -696,17 +717,120 @@ def _build_pattern_actions(
     elif pattern == "random_corner_loops":
         start_tile = start_middle
         actions: list[int] = []
+        start_x, start_y = env._tile_top_left(*start_tile)
+        pos_x = int(start_x)
+        pos_y = int(start_y)
+        min_x = 0
+        max_x = max(0, env.display_width - env.agent_size)
+        min_y = env.inventory_height
+        max_y = max(env.inventory_height, env.display_height - env.agent_size)
+        center_x, center_y = start_x, start_y
+        edge_margin = max(1, env.tile_size)
+
+        def _apply_action(x: int, y: int, action: int) -> tuple[int, int]:
+            if action == ACTION_NOOP:
+                return x, y
+            if action in (ACTION_LEFT, ACTION_RIGHT):
+                delta = env.agent_speed if action == ACTION_RIGHT else -env.agent_speed
+                step = 1 if delta > 0 else -1
+                remaining = abs(delta)
+                while remaining > 0:
+                    next_x = x + step
+                    if env._can_occupy(next_x, y):
+                        x = next_x
+                        remaining -= 1
+                    else:
+                        break
+                return x, y
+            delta = env.agent_speed if action == ACTION_DOWN else -env.agent_speed
+            step = 1 if delta > 0 else -1
+            remaining = abs(delta)
+            while remaining > 0:
+                next_y = y + step
+                if env._can_occupy(x, next_y):
+                    y = next_y
+                    remaining -= 1
+                else:
+                    break
+            return x, y
+
+        def _near_edge(x: int, y: int) -> bool:
+            return (
+                x <= min_x + edge_margin
+                or x >= max_x - edge_margin
+                or y <= min_y + edge_margin
+                or y >= max_y - edge_margin
+            )
+
+        def _choose_center_action(x: int, y: int) -> int:
+            dx = center_x - x
+            dy = center_y - y
+            candidates: list[int] = []
+            if abs(dx) >= abs(dy):
+                if dx > 0:
+                    candidates.append(ACTION_RIGHT)
+                elif dx < 0:
+                    candidates.append(ACTION_LEFT)
+                if dy > 0:
+                    candidates.append(ACTION_DOWN)
+                elif dy < 0:
+                    candidates.append(ACTION_UP)
+            else:
+                if dy > 0:
+                    candidates.append(ACTION_DOWN)
+                elif dy < 0:
+                    candidates.append(ACTION_UP)
+                if dx > 0:
+                    candidates.append(ACTION_RIGHT)
+                elif dx < 0:
+                    candidates.append(ACTION_LEFT)
+            for candidate in candidates:
+                if _action_within_bounds(x, y, candidate, min_x, max_x, min_y, max_y, env.agent_speed):
+                    return candidate
+            return ACTION_NOOP
+
+        def _append_action(action: int, allow_correction: bool = False) -> None:
+            nonlocal pos_x, pos_y
+            if _action_within_bounds(pos_x, pos_y, action, min_x, max_x, min_y, max_y, env.agent_speed):
+                actions.append(action)
+                pos_x, pos_y = _apply_action(pos_x, pos_y, action)
+                return
+            if allow_correction:
+                correction = _choose_center_action(pos_x, pos_y)
+                if _action_within_bounds(pos_x, pos_y, correction, min_x, max_x, min_y, max_y, env.agent_speed):
+                    actions.append(correction)
+                    pos_x, pos_y = _apply_action(pos_x, pos_y, correction)
+                    return
+            actions.append(ACTION_NOOP)
+
         random_steps = min(max_steps, max(12, int(max_steps * 0.25)))
-        actions.extend(
-            [int(rng.choice([ACTION_NOOP, ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT])) for _ in range(random_steps)]
-        )
+        for _ in range(random_steps):
+            if _near_edge(pos_x, pos_y):
+                _append_action(_choose_center_action(pos_x, pos_y), allow_correction=True)
+                continue
+            safe_actions = [
+                action
+                for action in (ACTION_NOOP, ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT)
+                if _action_within_bounds(pos_x, pos_y, action, min_x, max_x, min_y, max_y, env.agent_speed)
+            ]
+            if not safe_actions:
+                _append_action(ACTION_NOOP)
+                continue
+            _append_action(int(rng.choice(safe_actions)))
+
         left_steps = _steps_for_tiles(env.grid_cols, env.tile_size, env.agent_speed)
         down_steps = _steps_for_tiles(env.grid_rows, env.tile_size, env.agent_speed)
-        actions.extend([ACTION_LEFT] * left_steps + [ACTION_DOWN] * down_steps)
+        for _ in range(left_steps):
+            _append_action(ACTION_LEFT)
+        for _ in range(down_steps):
+            _append_action(ACTION_DOWN)
 
         nudge_right = _steps_for_tiles(1, env.tile_size, env.agent_speed)
         nudge_up = _steps_for_tiles(1, env.tile_size, env.agent_speed)
-        actions.extend([ACTION_RIGHT] * nudge_right + [ACTION_UP] * nudge_up)
+        for _ in range(nudge_right):
+            _append_action(ACTION_RIGHT)
+        for _ in range(nudge_up):
+            _append_action(ACTION_UP)
 
         loop_sizes = [
             (env.grid_cols - 3, env.grid_rows - 3),
@@ -724,7 +848,8 @@ def _build_pattern_actions(
                 + [ACTION_LEFT] * right_steps
                 + [ACTION_DOWN] * up_steps
             )
-            actions.extend(_with_noops(segment_actions, rng, chance=0.15, max_noops=2))
+            for action in _with_noops(segment_actions, rng, chance=0.15, max_noops=2):
+                _append_action(action)
         return actions, start_tile
 
     else:
