@@ -25,7 +25,7 @@ from werkzeug.utils import safe_join
 from .config import ViewerConfig
 from .csv_utils import get_max_step
 from .experiments import DIAGNOSTICS_H_PATTERNS
-from .diffing import diff_metadata
+from .diffing import build_metadata_diff_views, diff_metadata
 from .experiments import (
     Experiment,
     ExperimentIndex,
@@ -3072,6 +3072,8 @@ def _build_overlay_data(experiments: List[Experiment]):
 def _build_comparison_rows(experiments: List[Experiment]):
     if not experiments:
         return []
+    metadata_texts = [exp.metadata_text for exp in experiments]
+    metadata_diff_views = build_metadata_diff_views(metadata_texts)
     base_metadata = experiments[0].metadata_text
     rows = []
     for idx, exp in enumerate(experiments):
@@ -3096,6 +3098,7 @@ def _build_comparison_rows(experiments: List[Experiment]):
                 "max_step": max_step,
                 "metadata": exp.metadata_text,
                 "metadata_diff": diff_text,
+                "metadata_differences": metadata_diff_views[idx],
                 "git_metadata": exp.git_metadata_text,
                 "total_params": exp.total_params,
                 "flops_per_step": exp.flops_per_step,

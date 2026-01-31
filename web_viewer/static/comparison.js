@@ -490,7 +490,15 @@ function buildExperimentGrid(experiments) {
   );
   container.appendChild(lossRow);
 
-  // Row 4: Metadata section
+  // Row 4: Metadata differences section
+  const metaDiffRow = buildSectionRow(
+    "Metadata Differences",
+    experiments,
+    (exp) => buildMetadataDifferencesCell(exp)
+  );
+  container.appendChild(metaDiffRow);
+
+  // Row 5: Metadata section
   const metaRow = buildSectionRow(
     "Metadata",
     experiments,
@@ -498,7 +506,7 @@ function buildExperimentGrid(experiments) {
   );
   container.appendChild(metaRow);
 
-  // Row 5: Git metadata section
+  // Row 6: Git metadata section
   const gitMetaRow = buildSectionRow(
     "Git Metadata",
     experiments,
@@ -778,6 +786,16 @@ function buildMetadataCell(exp) {
   pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
   pre.style.maxHeight = "280px";
   pre.textContent = exp.metadata || "(no metadata)";
+  container.appendChild(pre);
+  return container;
+}
+
+function buildMetadataDifferencesCell(exp) {
+  const container = document.createElement("div");
+  const pre = document.createElement("pre");
+  pre.className = "bg-dark text-light p-2 rounded overflow-auto mb-0 small";
+  pre.style.maxHeight = "280px";
+  pre.textContent = exp.metadata_differences || "(no metadata differences)";
   container.appendChild(pre);
   return container;
 }

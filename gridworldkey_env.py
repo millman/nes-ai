@@ -715,7 +715,7 @@ def _build_pattern_actions(
         return actions, start_tile
 
     elif pattern == "random_corner_loops":
-        start_tile = start_middle
+        start_tile = start_lower_left
         actions: list[int] = []
         start_x, start_y = env._tile_top_left(*start_tile)
         pos_x = int(start_x)
@@ -724,7 +724,8 @@ def _build_pattern_actions(
         max_x = max(0, env.display_width - env.agent_size)
         min_y = env.inventory_height
         max_y = max(env.inventory_height, env.display_height - env.agent_size)
-        center_x, center_y = start_x, start_y
+        center_tile = start_middle
+        center_x, center_y = env._tile_top_left(*center_tile)
         edge_margin = max(1, env.tile_size)
 
         def _apply_action(x: int, y: int, action: int) -> tuple[int, int]:
@@ -803,6 +804,12 @@ def _build_pattern_actions(
                     return
             actions.append(ACTION_NOOP)
 
+        center_steps = min(max_steps, max(8, int(max_steps * 0.2)))
+        for _ in range(center_steps):
+            if abs(center_x - pos_x) <= env.agent_speed and abs(center_y - pos_y) <= env.agent_speed:
+                break
+            _append_action(_choose_center_action(pos_x, pos_y), allow_correction=True)
+
         random_steps = min(max_steps, max(12, int(max_steps * 0.25)))
         for _ in range(random_steps):
             if _near_edge(pos_x, pos_y):
@@ -817,20 +824,6 @@ def _build_pattern_actions(
                 _append_action(ACTION_NOOP)
                 continue
             _append_action(int(rng.choice(safe_actions)))
-
-        left_steps = _steps_for_tiles(env.grid_cols, env.tile_size, env.agent_speed)
-        down_steps = _steps_for_tiles(env.grid_rows, env.tile_size, env.agent_speed)
-        for _ in range(left_steps):
-            _append_action(ACTION_LEFT)
-        for _ in range(down_steps):
-            _append_action(ACTION_DOWN)
-
-        nudge_right = _steps_for_tiles(1, env.tile_size, env.agent_speed)
-        nudge_up = _steps_for_tiles(1, env.tile_size, env.agent_speed)
-        for _ in range(nudge_right):
-            _append_action(ACTION_RIGHT)
-        for _ in range(nudge_up):
-            _append_action(ACTION_UP)
 
         loop_sizes = [
             (env.grid_cols - 3, env.grid_rows - 3),
