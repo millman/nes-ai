@@ -38,6 +38,12 @@ def compute_norm_stats(tensor: torch.Tensor, quantile: float = 0.95) -> Tuple[fl
 
 
 def should_use_z2h_init(weights) -> bool:
-    if not hasattr(weights, "z2h") or not hasattr(weights, "z2h_init_zero"):
-        raise AssertionError("should_use_z2h_init requires weights.z2h and weights.z2h_init_zero.")
-    return (weights.z2h > 0) or (weights.z2h_init_zero > 0)
+    if (
+        not hasattr(weights, "z2h")
+        or not hasattr(weights, "z2h_init_zero")
+        or not hasattr(weights, "z2h_match_h")
+    ):
+        raise AssertionError(
+            "should_use_z2h_init requires weights.z2h, weights.z2h_init_zero, and weights.z2h_match_h."
+        )
+    return (weights.z2h > 0) or (weights.z2h_init_zero > 0) or (weights.z2h_match_h > 0)

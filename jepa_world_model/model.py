@@ -536,9 +536,9 @@ class JEPAWorldModel(nn.Module):
             current = images[:, step]
             pooled = self.encoder(current)
             embeddings.append(pooled)
-        z = torch.stack(embeddings, dim=1)
-        if self.cfg.z_norm:
-            z = F.normalize(z, dim=-1)
+        z_raw = torch.stack(embeddings, dim=1)
+        z = F.normalize(z_raw, dim=-1) if self.cfg.z_norm else z_raw
         return {
             "embeddings": z,
+            "embeddings_raw": z_raw,
         }

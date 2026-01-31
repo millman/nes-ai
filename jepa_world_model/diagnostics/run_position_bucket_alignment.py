@@ -49,6 +49,8 @@ def _read_metadata(run_dir: Path) -> RunMetadata:
     decoder_schedule = None if decoder_schedule_raw is None else tuple(decoder_schedule_raw)
     def _resolve_toggle(key: str, derived: bool) -> bool:
         raw = model_cfg.get(key)
+        if isinstance(raw, str) and raw.lower() == "null":
+            raw = None
         if raw is None:
             return derived
         return bool(raw)
@@ -66,6 +68,7 @@ def _read_metadata(run_dir: Path) -> RunMetadata:
         or loss_weights.get("additivity_p", 0) > 0
         or loss_weights.get("rollout_kstep_p", 0) > 0
     )
+    enable_h2z_delta = loss_weights.get("h2z_delta", 0) > 0
     model = ModelConfig(
         in_channels=int(model_cfg.get("in_channels", 3)),
         image_size=int(model_cfg.get("image_size", 64)),
@@ -87,6 +90,7 @@ def _read_metadata(run_dir: Path) -> RunMetadata:
         enable_action_delta_z=_resolve_toggle("enable_action_delta_z", enable_action_delta_z),
         enable_action_delta_h=_resolve_toggle("enable_action_delta_h", enable_action_delta_h),
         enable_action_delta_p=_resolve_toggle("enable_action_delta_p", enable_action_delta_p),
+        enable_h2z_delta=_resolve_toggle("enable_h2z_delta", enable_h2z_delta),
     )
     data_root = Path(train_cfg.get("data_root") or "")
     if not data_root.exists():

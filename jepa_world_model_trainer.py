@@ -230,6 +230,7 @@ class LossWeights:
     - loss_z2h: z->hidden init projection; h_hat_from_z0 vs h0 (detached); z inputs are also detached so this only trains the z->h projector.
     - loss_z2h_init_zero: z->hidden init projection; h_hat_from_z0 vs h1 from h0=0; trains z->h to match the
       dynamics "cold start" state.
+    - loss_z2h_match_h: z->hidden projection; h_hat_from_z_t vs h_t (detached) for t>=1; aligns z->h with predictor h.
     - loss_h2z_delta: h->(z_{t+1}-z_t) prediction against detached z deltas; trains a delta head for anchored rollout rendering.
     - loss_pixel_delta: pixel delta reconstruction on decoded frames.
     Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
@@ -263,19 +264,24 @@ class LossWeights:
     # Project z→hidden: ĥ_from_z vs h (detached); trains z->h projector.
     z2h: float = 0.0
     # Project z→hidden to match the 1-step dynamics target from h0=0.
-    z2h_init_zero: float = 0.0
+    z2h_init_zero: float = 0.1
+    # Project z→hidden to match predictor h_t for t>=1.
+    z2h_match_h: float = 0.1
     # Predict z deltas from h (for z-anchor rollout rendering); trains h->Δz head.
     h2z_delta: float = 0.0
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
     # Keep at 0: forces z to reveal actions, breaking loop-closure invariance.
-    inverse_dynamics_z: float = 0.0
+    inverse_dynamics_z: float = 0.1
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
-    inverse_dynamics_h: float = 0.0
+    inverse_dynamics_h: float = 0.1
     # Inverse dynamics from consecutive p pairs (p_t, p_{t+1}).
     # Keep at 0: pushes p to encode action identity/scale, which conflicts with geometric invariance
     # (p should encode place/pose, allow no-motion steps, and stay bounded for planning).
     inverse_dynamics_p: float = 0.0
+
+    # Robust temporal smoothness on z (Huber on consecutive z distances).
+    z_smooth: float = 0.1
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
@@ -318,15 +324,15 @@ class LossWeights:
     # --- H ---
     # State-conditioned delta alignment: h_{t+1} - h_t vs E(h_t, a_t).
     # Makes action effects locally predictable (supports momentum, contacts, and walls).
-    action_delta_h: float = 1.0
+    action_delta_h: float = 0.1
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 0.0
+    additivity_h: float = 0.1
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
-    rollout_kstep_h: float = 0.0
+    rollout_kstep_h: float = 0.1
 
     # k-step rollout delta consistency in h-space.
     # Encourages predicted h changes to match teacher deltas over short horizons.
@@ -364,6 +370,26 @@ class LossWeights:
 @dataclass
 class LossSigRegConfig:
     projections: int = 64
+
+
+@dataclass
+class LossZTemporalSmoothConfig:
+    delta: Annotated[
+        float,
+        tyro.conf.arg(
+            help=(
+                "Huber threshold for z temporal smoothness; with cosine distance in [0,2], 0.3 treats small motions as smooth."
+            )
+        ),
+    ] = 0.3
+
+
+@dataclass
+class LossJEPAOpenLoopConfig:
+    weighting: Annotated[
+        Literal["hyperbolic", "uniform"],
+        tyro.conf.arg(help="Step weighting for JEPA open-loop loss (hyperbolic = k/K, uniform = 1)."),
+    ] = "uniform"
 
 
 @dataclass
@@ -489,7 +515,7 @@ class TrainConfig:
     max_trajectories: Optional[int] = None
     seq_len: int = 8
     batch_size: int = 8
-    rollout_horizon: int = 4
+    rollout_horizon: int = 8
 
     # Optimization
     lr: float = 1e-4
@@ -518,6 +544,8 @@ class TrainConfig:
 
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
+    z_smooth: LossZTemporalSmoothConfig = field(default_factory=LossZTemporalSmoothConfig)
+    jepa_open_loop: LossJEPAOpenLoopConfig = field(default_factory=LossJEPAOpenLoopConfig)
     geometry: LossGeometryConfig = field(default_factory=LossGeometryConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
     recon_multi_gauss: LossMultiScaleGaussReconConfig = field(default_factory=LossMultiScaleGaussReconConfig)
@@ -560,6 +588,14 @@ JEPA_LOSS = nn.MSELoss()
 INVERSE_DYNAMICS_LOSS = nn.BCEWithLogitsLoss()
 
 
+def z_vector_loss(pred: torch.Tensor, target: torch.Tensor, use_cosine: bool) -> torch.Tensor:
+    if pred.shape != target.shape:
+        raise AssertionError("z_vector_loss requires matching shapes.")
+    if use_cosine:
+        return (1.0 - F.cosine_similarity(pred, target, dim=-1)).mean()
+    return F.mse_loss(pred, target)
+
+
 def _rollout_render_latent(
     model: JEPAWorldModel,
     z_anchor: torch.Tensor,
@@ -583,6 +619,7 @@ def jepa_loss(
     use_z2h_init: bool = False,
     detach_z_inputs: bool = False,
     force_h_zero: bool = False,
+    use_cosine_z: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """JEPA loss using predictor conditioned on z, h, and action."""
     embeddings = outputs["embeddings"]
@@ -597,7 +634,7 @@ def jepa_loss(
         force_h_zero=force_h_zero,
     )
     target = embeddings[:, 1:].detach()
-    return JEPA_LOSS(z_preds, target), z_preds, h_preds, h_states
+    return z_vector_loss(z_preds, target, use_cosine_z), z_preds, h_preds, h_states
 
 
 def jepa_open_loop_loss(
@@ -609,6 +646,8 @@ def jepa_open_loop_loss(
     use_z2h_init: bool = False,
     detach_z_inputs: bool = False,
     force_h_zero: bool = False,
+    use_cosine_z: bool = False,
+    weighting: Literal["hyperbolic", "uniform"] = "hyperbolic",
 ) -> torch.Tensor:
     """Open-loop multi-step JEPA loss using self-fed predictions."""
     if rollout_horizon <= 0:
@@ -634,13 +673,21 @@ def jepa_open_loop_loss(
     if max_h <= 0:
         raise AssertionError("jepa_open_loop_loss produced no steps; check rollout_horizon or warmup_frames.")
     total = embeddings.new_tensor(0.0)
+    weight_total = embeddings.new_tensor(0.0)
     steps = 0
     for offset in range(max_h):
         act = actions[:, start + offset]
         h_next = model.predictor(z_current, h_current, act)
         z_next = model.h_to_z(h_next)
         target = embeddings[:, start + offset + 1].detach()
-        total = total + JEPA_LOSS(z_next, target)
+        if weighting == "uniform":
+            step_weight = embeddings.new_tensor(1.0)
+        elif weighting == "hyperbolic":
+            step_weight = embeddings.new_tensor((offset + 1) / max_h)
+        else:
+            raise AssertionError(f"Unknown JEPA open-loop weighting: {weighting}")
+        total = total + step_weight * z_vector_loss(z_next, target, use_cosine_z)
+        weight_total = weight_total + step_weight
         steps += 1
         z_current = z_next
         if force_h_zero:
@@ -649,7 +696,9 @@ def jepa_open_loop_loss(
             h_current = h_next
     if steps <= 0:
         raise AssertionError("jepa_open_loop_loss produced no steps; check rollout_horizon or warmup_frames.")
-    return total / steps
+    if weight_total.item() <= 0:
+        raise AssertionError("jepa_open_loop_loss produced non-positive weight sum; check rollout_horizon.")
+    return total / weight_total
 
 
 def _rollout_pose(
@@ -688,6 +737,7 @@ def rollout_z_loss(
     warmup_frames: int,
     use_z2h_init: bool,
     force_h_zero: bool = False,
+    use_cosine_z: bool = False,
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
         raise AssertionError("rollout_horizon must be > 1 for rollout_z_loss.")
@@ -713,7 +763,7 @@ def rollout_z_loss(
         h_next = model.predictor(current, h_current, act)
         pred = model.h_to_z(h_next)
         target_step = embeddings[:, start + offset + 1].detach()
-        total = total + JEPA_LOSS(pred, target_step)
+        total = total + z_vector_loss(pred, target_step, use_cosine_z)
         steps += 1
         current = pred
         if force_h_zero:
@@ -1059,6 +1109,7 @@ def rollout_project_z_loss(
     render_mode: RenderMode,
     use_z2h_init: bool,
     force_h_zero: bool = False,
+    use_cosine_z: bool = False,
 ) -> torch.Tensor:
     if rollout_horizon <= 0:
         raise AssertionError("rollout_horizon must be > 0 for rollout_project_z_loss.")
@@ -1087,7 +1138,7 @@ def rollout_project_z_loss(
         z_render, _ = _rollout_render_latent(model, z_anchor, h_next, render_mode)
         decoded = decoder(z_render)
         z_back = model.encoder(decoded)
-        total = total + F.mse_loss(z_back, z_render)
+        total = total + z_vector_loss(z_back, z_render, use_cosine_z)
         steps += 1
         current = pred
         if force_h_zero:
@@ -1275,6 +1326,7 @@ def h2z_loss(
     embeddings: torch.Tensor,
     h_states: torch.Tensor,
     start: int,
+    use_cosine_z: bool,
 ) -> torch.Tensor:
     if h_states.numel() == 0:
         raise AssertionError("h2z_loss requires non-empty h_states.")
@@ -1282,7 +1334,7 @@ def h2z_loss(
         raise AssertionError("h2z_loss requires at least one timestep after start.")
     h_stack = h_states[:, start:]
     z_hat_from_h = model.h_to_z(h_stack)
-    return F.mse_loss(z_hat_from_h, embeddings[:, start:].detach())
+    return z_vector_loss(z_hat_from_h, embeddings[:, start:].detach(), use_cosine_z)
 
 
 def h2z_delta_loss(
@@ -1307,6 +1359,7 @@ def z2h_loss(
     model: JEPAWorldModel,
     embeddings: torch.Tensor,
     start: int,
+    use_cosine_z: bool,
 ) -> torch.Tensor:
     """Aux z->h->z consistency loss that trains z_to_h only.
 
@@ -1330,7 +1383,7 @@ def z2h_loss(
     for param, requires_grad in zip(model.h_to_z.parameters(), h2z_requires_grad):
         param.requires_grad_(requires_grad)
     # Compare predicted z_hat to the detached target z_t.
-    return F.mse_loss(z_hat, z_stack)
+    return z_vector_loss(z_hat, z_stack, use_cosine_z)
 
 
 def z2h_init_zero_loss(
@@ -1350,6 +1403,26 @@ def z2h_init_zero_loss(
     h1_target = model.predictor(z0, h0, a0).detach()
     h0_hat = model.z_to_h(z0)
     return F.mse_loss(h0_hat, h1_target)
+
+
+def z2h_match_h_loss(
+    model: JEPAWorldModel,
+    embeddings: torch.Tensor,
+    h_states: torch.Tensor,
+    start: int,
+) -> torch.Tensor:
+    """Align z->h with predictor h_t for t>=1 using detached targets."""
+    if embeddings.shape[1] < 2:
+        raise AssertionError("z2h_match_h_loss requires at least two timesteps.")
+    if embeddings.shape[1] != h_states.shape[1]:
+        raise AssertionError("z2h_match_h_loss requires matching z/h timesteps.")
+    start_idx = max(1, start)
+    if embeddings.shape[1] <= start_idx:
+        raise AssertionError("z2h_match_h_loss requires a valid start index.")
+    z_stack = embeddings[:, start_idx:].detach()
+    h_target = h_states[:, start_idx:].detach()
+    h_hat = model.z_to_h(z_stack)
+    return F.mse_loss(h_hat, h_target)
 
 
 def geometry_rank_loss(
@@ -1379,6 +1452,28 @@ def pixel_delta_multi_box_loss(
     delta_target = frames[:, 1:] - frames[:, :-1]
     delta_pred = recon[:, 1:] - recon[:, :-1]
     return multi_scale_recon_loss_box(delta_pred, delta_target, cfg)
+
+
+def z_smooth_huber_loss(
+    z_embeddings: torch.Tensor,
+    delta: float,
+    use_cosine: bool,
+) -> torch.Tensor:
+    if z_embeddings.shape[1] < 2:
+        raise AssertionError("z_smooth_huber_loss requires at least two timesteps.")
+    z_t = z_embeddings[:, :-1]
+    z_tp1 = z_embeddings[:, 1:]
+    if use_cosine:
+        distances = 1.0 - F.cosine_similarity(z_t, z_tp1, dim=-1)
+    else:
+        distances = torch.norm(z_tp1 - z_t, dim=-1)
+    delta_tensor = z_embeddings.new_tensor(delta)
+    loss = torch.where(
+        distances <= delta_tensor,
+        0.5 * distances * distances,
+        delta_tensor * (distances - 0.5 * delta_tensor),
+    )
+    return loss.mean()
 
 
 def scale_p_loss(pose: torch.Tensor, start: int, cfg: ScalePConfig) -> torch.Tensor:
@@ -1528,11 +1623,13 @@ def _compute_losses_and_metrics(
     # z (Auxiliary) losses
     loss_pixel_delta = x_frames.new_tensor(0.0)
     loss_pixel_delta_multi_box = x_frames.new_tensor(0.0)
+    loss_z_smooth = x_frames.new_tensor(0.0)
 
     # h (Hidden) losses
     loss_h2z = x_frames.new_tensor(0.0)
     loss_z2h = x_frames.new_tensor(0.0)
     loss_z2h_init_zero = x_frames.new_tensor(0.0)
+    loss_z2h_match_h = x_frames.new_tensor(0.0)
     loss_h2z_delta = x_frames.new_tensor(0.0)
 
     # p (Geometry) losses
@@ -1571,6 +1668,8 @@ def _compute_losses_and_metrics(
 
     encode_outputs = model.encode_sequence(x_frames)
     z_embeddings = encode_outputs["embeddings"]
+    z_embeddings_raw = encode_outputs["embeddings_raw"]
+    use_cosine_z = cfg.z_norm
     loss_jepa_raw, z_preds, h_preds, h_states = jepa_loss(
         model,
         encode_outputs,
@@ -1578,6 +1677,7 @@ def _compute_losses_and_metrics(
         use_z2h_init=should_use_z2h_init(weights),
         detach_z_inputs=cfg.detach_z_from_h_and_p,
         force_h_zero=cfg.force_h_zero,
+        use_cosine_z=use_cosine_z,
     )
 
     z_for_decoder = z_embeddings.detach() if cfg.detach_decoder else z_embeddings
@@ -1649,7 +1749,7 @@ def _compute_losses_and_metrics(
     if weights.jepa > 0:
         loss_jepa = loss_jepa_raw
     if weights.jepa_rep > 0:
-        loss_jepa_rep = JEPA_LOSS(z_embeddings[:, 1:], z_preds.detach())
+        loss_jepa_rep = z_vector_loss(z_embeddings[:, 1:], z_preds.detach(), use_cosine_z)
     if weights.jepa_open_loop > 0:
         loss_jepa_open_loop = jepa_open_loop_loss(
             model,
@@ -1660,10 +1760,18 @@ def _compute_losses_and_metrics(
             use_z2h_init=should_use_z2h_init(weights),
             detach_z_inputs=cfg.detach_z_from_h_and_p,
             force_h_zero=cfg.force_h_zero,
+            use_cosine_z=use_cosine_z,
+            weighting=cfg.jepa_open_loop.weighting,
         )
 
     if weights.sigreg > 0:
-        loss_sigreg = sigreg_loss(z_embeddings, cfg.sigreg.projections)
+        loss_sigreg = sigreg_loss(z_embeddings_raw, cfg.sigreg.projections)
+    if weights.z_smooth > 0:
+        loss_z_smooth = z_smooth_huber_loss(
+            z_embeddings,
+            cfg.z_smooth.delta,
+            cfg.z_norm,
+        )
 
     # z (Recon) Reconstruction and pixel-space losses
     if weights.recon > 0:
@@ -1716,11 +1824,13 @@ def _compute_losses_and_metrics(
 
     # h (Hidden) Hidden-state dynamics and cross-projection losses
     if weights.h2z > 0:
-        loss_h2z = h2z_loss(model, z_embeddings, h_states, start_frame)
+        loss_h2z = h2z_loss(model, z_embeddings, h_states, start_frame, use_cosine_z)
     if weights.z2h > 0:
-        loss_z2h = z2h_loss(model, z_embeddings, start_frame)
+        loss_z2h = z2h_loss(model, z_embeddings, start_frame, use_cosine_z)
     if weights.z2h_init_zero > 0:
         loss_z2h_init_zero = z2h_init_zero_loss(model, z_embeddings, a_seq, start_frame)
+    if weights.z2h_match_h > 0:
+        loss_z2h_match_h = z2h_match_h_loss(model, z_embeddings, h_states, start_frame)
     if weights.h2z_delta > 0:
         loss_h2z_delta = h2z_delta_loss(model, z_embeddings, h_states, start_frame)
 
@@ -1838,6 +1948,7 @@ def _compute_losses_and_metrics(
             warmup_frames,
             should_use_z2h_init(weights),
             force_h_zero=cfg.force_h_zero,
+            use_cosine_z=use_cosine_z,
         )
     if weights.rollout_recon_z > 0:
         loss_rollout_recon_z = rollout_recon_z_loss(
@@ -1909,6 +2020,7 @@ def _compute_losses_and_metrics(
             cfg.render_mode,
             should_use_z2h_init(weights),
             force_h_zero=cfg.force_h_zero,
+            use_cosine_z=use_cosine_z,
         )
     if weights.rollout_recon_h > 0:
         loss_rollout_recon_h = rollout_recon_h_loss(
@@ -1991,9 +2103,11 @@ def _compute_losses_and_metrics(
         + weights.jepa_rep * _scaled("loss_jepa_rep", loss_jepa_rep)
         + weights.jepa_open_loop * _scaled("loss_jepa_open_loop", loss_jepa_open_loop)
         + weights.sigreg * _scaled("loss_sigreg", loss_sigreg)
+        + weights.z_smooth * _scaled("loss_z_smooth", loss_z_smooth)
         + weights.h2z * _scaled("loss_h2z", loss_h2z)
         + weights.z2h * _scaled("loss_z2h", loss_z2h)
         + weights.z2h_init_zero * _scaled("loss_z2h_init_zero", loss_z2h_init_zero)
+        + weights.z2h_match_h * _scaled("loss_z2h_match_h", loss_z2h_match_h)
         + weights.h2z_delta * _scaled("loss_h2z_delta", loss_h2z_delta)
         + weights.geometry_rank_p * _scaled("loss_geometry_rank_p", loss_geometry_rank_p)
         + weights.recon * _scaled("loss_recon", loss_recon)
@@ -2061,6 +2175,7 @@ def _compute_losses_and_metrics(
         "loss_jepa_rep": loss_jepa_rep.item(),
         "loss_jepa_open_loop": loss_jepa_open_loop.item(),
         "loss_sigreg": loss_sigreg.item(),
+        "loss_z_smooth": loss_z_smooth.item(),
         "loss_recon": loss_recon.item(),
         "loss_recon_multi_gauss": loss_recon_multi_gauss.item(),
         "loss_recon_multi_box": loss_recon_multi_box.item(),
@@ -2072,6 +2187,7 @@ def _compute_losses_and_metrics(
         "loss_h2z": loss_h2z.item(),
         "loss_z2h": loss_z2h.item(),
         "loss_z2h_init_zero": loss_z2h_init_zero.item(),
+        "loss_z2h_match_h": loss_z2h_match_h.item(),
         "loss_h2z_delta": loss_h2z_delta.item(),
         "loss_geometry_rank_p": loss_geometry_rank_p.item(),
         "geometry_rank_p_accuracy": geometry_rank_p_accuracy.item(),
@@ -2470,6 +2586,8 @@ def log_metrics(
         filtered.pop("loss_jepa_open_loop", None)
     if weights.sigreg <= 0:
         filtered.pop("loss_sigreg", None)
+    if weights.z_smooth <= 0:
+        filtered.pop("loss_z_smooth", None)
     if weights.recon <= 0:
         filtered.pop("loss_recon", None)
     if weights.recon_multi_gauss <= 0:
@@ -2507,6 +2625,8 @@ def log_metrics(
         filtered.pop("loss_z2h", None)
     if weights.z2h_init_zero <= 0:
         filtered.pop("loss_z2h_init_zero", None)
+    if weights.z2h_match_h <= 0:
+        filtered.pop("loss_z2h_match_h", None)
     if weights.h2z_delta <= 0:
         filtered.pop("loss_h2z_delta", None)
     if weights.geometry_rank_p <= 0:
@@ -2583,6 +2703,7 @@ LOSS_COLUMNS = [
     "loss_jepa_rep",
     "loss_jepa_open_loop",
     "loss_sigreg",
+    "loss_z_smooth",
     "loss_recon",
     "loss_recon_multi_gauss",
     "loss_recon_multi_box",
@@ -2594,6 +2715,7 @@ LOSS_COLUMNS = [
     "loss_h2z",
     "loss_z2h",
     "loss_z2h_init_zero",
+    "loss_z2h_match_h",
     "loss_h2z_delta",
     "loss_geometry_rank_p",
     "geometry_rank_p_accuracy",
@@ -2649,6 +2771,7 @@ class LossHistory:
     jepa_rep: List[float] = field(default_factory=list)
     jepa_open_loop: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
+    z_smooth: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     recon_multi_gauss: List[float] = field(default_factory=list)
     recon_multi_box: List[float] = field(default_factory=list)
@@ -2660,6 +2783,7 @@ class LossHistory:
     h2z: List[float] = field(default_factory=list)
     z2h: List[float] = field(default_factory=list)
     z2h_init_zero: List[float] = field(default_factory=list)
+    z2h_match_h: List[float] = field(default_factory=list)
     h2z_delta: List[float] = field(default_factory=list)
     geometry_rank_p: List[float] = field(default_factory=list)
     geometry_rank_p_accuracy: List[float] = field(default_factory=list)
@@ -2712,6 +2836,7 @@ class LossHistory:
         self.jepa_rep.append(metrics.get("loss_jepa_rep", 0.0))
         self.jepa_open_loop.append(metrics.get("loss_jepa_open_loop", 0.0))
         self.sigreg.append(metrics["loss_sigreg"])
+        self.z_smooth.append(metrics.get("loss_z_smooth", 0.0))
         self.recon.append(metrics["loss_recon"])
         self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
@@ -2723,6 +2848,7 @@ class LossHistory:
         self.h2z.append(metrics["loss_h2z"])
         self.z2h.append(metrics["loss_z2h"])
         self.z2h_init_zero.append(metrics.get("loss_z2h_init_zero", 0.0))
+        self.z2h_match_h.append(metrics.get("loss_z2h_match_h", 0.0))
         self.h2z_delta.append(metrics.get("loss_h2z_delta", 0.0))
         self.geometry_rank_p.append(metrics.get("loss_geometry_rank_p", 0.0))
         self.geometry_rank_p_accuracy.append(metrics.get("geometry_rank_p_accuracy", 0.0))
@@ -2786,6 +2912,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.jepa_rep,
             history.jepa_open_loop,
             history.sigreg,
+            history.z_smooth,
             history.recon,
             history.recon_multi_gauss,
             history.recon_multi_box,
@@ -2862,6 +2989,7 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("jepa_rep", history.jepa_rep),
         ("jepa_open_loop", history.jepa_open_loop),
         ("sigreg", history.sigreg),
+        ("z_smooth", history.z_smooth),
         ("recon", history.recon),
         ("recon_multi_gauss", history.recon_multi_gauss),
         ("recon_multi_box", history.recon_multi_box),
@@ -3510,6 +3638,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 "h2z_delta",
                 "z2h",
                 "z2h_init_zero",
+                "z2h_match_h",
                 "inverse_dynamics_h",
                 "action_delta_h",
                 "additivity_h",

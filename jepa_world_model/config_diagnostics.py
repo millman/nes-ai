@@ -8,7 +8,7 @@ from dataclasses import dataclass
 @dataclass
 class DiagnosticsConfig:
     sample_sequences: int = 128
-    top_k_components: int = 8
+    top_k_components: int = 64
     min_action_count: int = 5
     max_actions_to_plot: int = 12
     cosine_high_threshold: float = 0.7
