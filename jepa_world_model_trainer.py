@@ -236,13 +236,13 @@ class LossWeights:
     Other losses (recon, sigreg, inverse dynamics, etc.) behave as before.
     """
     # Latent transition supervision: ẑ_{t+1} (from predictor) vs detached z_{t+1}; shapes encoder+predictor via z_t.
-    jepa: float = 0.0
+    jepa: float = 0.5
     # Representation alignment: z_{t+1} (encoder) vs detached ẑ_{t+1} (predictor).
     jepa_rep: float = 0.0
     # Multi-step open-loop JEPA rollout loss (self-fed z predictions).
-    jepa_open_loop: float = 1.0
+    jepa_open_loop: float = 0.5
 
-    sigreg: float = 0.01
+    sigreg: float = 0.05
 
     # Image/pixel reconstruction
     recon: float = 0.0
@@ -272,7 +272,7 @@ class LossWeights:
 
     # Inverse dynamics from consecutive z pairs (z_t, z_{t+1}).
     # Keep at 0: forces z to reveal actions, breaking loop-closure invariance.
-    inverse_dynamics_z: float = 0.1
+    inverse_dynamics_z: float = 0.0
     # Inverse dynamics from consecutive h pairs (h_t, h_{t+1}).
     inverse_dynamics_h: float = 0.1
     # Inverse dynamics from consecutive p pairs (p_t, p_{t+1}).
@@ -530,7 +530,7 @@ class TrainConfig:
     z_norm: Annotated[
         bool,
         tyro.conf.arg(help="Normalize encoder/predicted z to unit norm globally."),
-    ] = True
+    ] = False
     detach_decoder: bool = False
     detach_z_from_h_and_p: bool = True
     force_h_zero: Annotated[
