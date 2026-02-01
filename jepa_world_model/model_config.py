@@ -72,7 +72,7 @@ class ModelConfig:
     # Stop-grad h when conditioning pose deltas to keep p losses from shaping dynamics.
     pose_delta_detach_h: bool = True
     # Apply observation-conditioned pose correction using z_{t+1}.
-    pose_correction_use_z: bool = False
+    pose_correction_use_z: bool = True
     # Stop-grad z when applying pose correction.
     pose_correction_detach_z: bool = True
 

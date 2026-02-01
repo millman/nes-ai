@@ -103,124 +103,181 @@ def write_alignment_artifacts(
     alignment_dir: Path,
     alignment_raw_dir: Path,
     alignment_centered_dir: Path,
+    write_pca: bool = True,
+    write_raw: bool = True,
+    write_centered: bool = True,
 ) -> Dict[str, Dict[int, Dict[str, float]]]:
-    stats = compute_action_alignment_stats(
-        motion.delta_proj,
-        motion.action_ids,
-        diagnostics_cfg.min_action_count,
-        diagnostics_cfg.cosine_high_threshold,
-    )
-    debug = build_action_alignment_debug(
-        stats,
-        motion.delta_proj,
-        motion.action_ids,
-    )
-    save_action_alignment_detail_plot(
-        alignment_dir / f"action_alignment_detail_{global_step:07d}.png",
-        debug,
-        diagnostics_cfg.cosine_high_threshold,
-        motion.action_dim,
-        alignment_label="PCA",
-    )
-    write_action_alignment_report(
-        stats,
-        motion.action_dim,
-        inverse_map,
-        alignment_dir,
-        global_step,
-    )
-    write_action_alignment_strength(
-        stats,
-        motion.action_dim,
-        alignment_dir,
-        global_step,
-    )
-    write_action_alignment_crosscheck(
-        stats,
-        motion,
-        alignment_dir,
-        global_step,
-    )
-    motion_raw = replace(motion, delta_proj=motion.delta_embed)
-    stats_raw = compute_action_alignment_stats(
-        motion_raw.delta_proj,
-        motion_raw.action_ids,
-        diagnostics_cfg.min_action_count,
-        diagnostics_cfg.cosine_high_threshold,
-    )
-    debug_raw = build_action_alignment_debug(
-        stats_raw,
-        motion_raw.delta_proj,
-        motion_raw.action_ids,
-    )
-    save_action_alignment_detail_plot(
-        alignment_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
-        debug_raw,
-        diagnostics_cfg.cosine_high_threshold,
-        motion_raw.action_dim,
-        alignment_label="raw delta",
-    )
-    write_action_alignment_crosscheck(
-        stats_raw,
-        motion_raw,
-        alignment_raw_dir,
-        global_step,
-    )
-    motion_centered = replace(motion, delta_proj=motion.delta_centered)
-    stats_centered = compute_action_alignment_stats(
-        motion_centered.delta_proj,
-        motion_centered.action_ids,
-        diagnostics_cfg.min_action_count,
-        diagnostics_cfg.cosine_high_threshold,
-    )
-    debug_centered = build_action_alignment_debug(
-        stats_centered,
-        motion_centered.delta_proj,
-        motion_centered.action_ids,
-    )
-    save_action_alignment_detail_plot(
-        alignment_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
-        debug_centered,
-        diagnostics_cfg.cosine_high_threshold,
-        motion_centered.action_dim,
-        alignment_label="centered delta",
-    )
-    write_action_alignment_crosscheck(
-        stats_centered,
-        motion_centered,
-        alignment_centered_dir,
-        global_step,
-    )
-    for dir_entry, stats_entry, debug_entry in [
-        (alignment_dir, stats, debug),
-        (alignment_raw_dir, stats_raw, debug_raw),
-        (alignment_centered_dir, stats_centered, debug_centered),
-    ]:
+    stats_out: Dict[str, Dict[int, Dict[str, float]]] = {}
+
+    if write_pca:
+        stats = compute_action_alignment_stats(
+            motion.delta_proj,
+            motion.action_ids,
+            diagnostics_cfg.min_action_count,
+            diagnostics_cfg.cosine_high_threshold,
+        )
+        debug = build_action_alignment_debug(
+            stats,
+            motion.delta_proj,
+            motion.action_ids,
+        )
+        save_action_alignment_detail_plot(
+            alignment_dir / f"action_alignment_detail_{global_step:07d}.png",
+            debug,
+            diagnostics_cfg.cosine_high_threshold,
+            motion.action_dim,
+            alignment_label="PCA",
+        )
+        write_action_alignment_report(
+            stats,
+            motion.action_dim,
+            inverse_map,
+            alignment_dir,
+            global_step,
+        )
+        write_action_alignment_strength(
+            stats,
+            motion.action_dim,
+            alignment_dir,
+            global_step,
+        )
+        write_action_alignment_crosscheck(
+            stats,
+            motion,
+            alignment_dir,
+            global_step,
+        )
         write_action_alignment_csv(
-            dir_entry,
+            alignment_dir,
             global_step,
             motion.action_dim,
-            stats_entry,
+            stats,
         )
         write_action_alignment_full_csv(
-            dir_entry,
+            alignment_dir,
             global_step,
             motion.action_dim,
-            stats_entry,
+            stats,
         )
         write_action_alignment_pairwise_csv(
-            dir_entry,
+            alignment_dir,
             global_step,
             motion.action_dim,
-            debug_entry,
+            debug,
         )
         write_action_alignment_overview_txt(
-            dir_entry,
+            alignment_dir,
             global_step,
             diagnostics_cfg.cosine_high_threshold,
-            debug_entry,
+            debug,
         )
-    return {"pca": stats, "raw": stats_raw, "centered": stats_centered}
+        stats_out["pca"] = stats
+
+    if write_raw:
+        motion_raw = replace(motion, delta_proj=motion.delta_embed)
+        stats_raw = compute_action_alignment_stats(
+            motion_raw.delta_proj,
+            motion_raw.action_ids,
+            diagnostics_cfg.min_action_count,
+            diagnostics_cfg.cosine_high_threshold,
+        )
+        debug_raw = build_action_alignment_debug(
+            stats_raw,
+            motion_raw.delta_proj,
+            motion_raw.action_ids,
+        )
+        save_action_alignment_detail_plot(
+            alignment_raw_dir / f"action_alignment_detail_{global_step:07d}.png",
+            debug_raw,
+            diagnostics_cfg.cosine_high_threshold,
+            motion_raw.action_dim,
+            alignment_label="raw delta",
+        )
+        write_action_alignment_crosscheck(
+            stats_raw,
+            motion_raw,
+            alignment_raw_dir,
+            global_step,
+        )
+        write_action_alignment_csv(
+            alignment_raw_dir,
+            global_step,
+            motion.action_dim,
+            stats_raw,
+        )
+        write_action_alignment_full_csv(
+            alignment_raw_dir,
+            global_step,
+            motion.action_dim,
+            stats_raw,
+        )
+        write_action_alignment_pairwise_csv(
+            alignment_raw_dir,
+            global_step,
+            motion.action_dim,
+            debug_raw,
+        )
+        write_action_alignment_overview_txt(
+            alignment_raw_dir,
+            global_step,
+            diagnostics_cfg.cosine_high_threshold,
+            debug_raw,
+        )
+        stats_out["raw"] = stats_raw
+
+    if write_centered:
+        motion_centered = replace(motion, delta_proj=motion.delta_centered)
+        stats_centered = compute_action_alignment_stats(
+            motion_centered.delta_proj,
+            motion_centered.action_ids,
+            diagnostics_cfg.min_action_count,
+            diagnostics_cfg.cosine_high_threshold,
+        )
+        debug_centered = build_action_alignment_debug(
+            stats_centered,
+            motion_centered.delta_proj,
+            motion_centered.action_ids,
+        )
+        save_action_alignment_detail_plot(
+            alignment_centered_dir / f"action_alignment_detail_{global_step:07d}.png",
+            debug_centered,
+            diagnostics_cfg.cosine_high_threshold,
+            motion_centered.action_dim,
+            alignment_label="centered delta",
+        )
+        write_action_alignment_crosscheck(
+            stats_centered,
+            motion_centered,
+            alignment_centered_dir,
+            global_step,
+        )
+        write_action_alignment_csv(
+            alignment_centered_dir,
+            global_step,
+            motion.action_dim,
+            stats_centered,
+        )
+        write_action_alignment_full_csv(
+            alignment_centered_dir,
+            global_step,
+            motion.action_dim,
+            stats_centered,
+        )
+        write_action_alignment_pairwise_csv(
+            alignment_centered_dir,
+            global_step,
+            motion.action_dim,
+            debug_centered,
+        )
+        write_action_alignment_overview_txt(
+            alignment_centered_dir,
+            global_step,
+            diagnostics_cfg.cosine_high_threshold,
+            debug_centered,
+        )
+        stats_out["centered"] = stats_centered
+
+    return stats_out
 
 
 def write_cycle_error_artifacts(
@@ -257,4 +314,3 @@ def write_cycle_error_artifacts(
         cycle_per_action,
     )
     return cycle_errors, cycle_per_action
-

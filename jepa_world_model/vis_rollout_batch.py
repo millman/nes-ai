@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 from jepa_world_model.vis_rollout import VisualizationSequence
 from jepa_world_model.vis_rollout_visualization import save_rollout_visualization
@@ -13,12 +13,18 @@ def save_rollout_sequence_batch(
     grad_label: str,
     global_step: int,
     include_pixel_delta: bool,
+    indices: Optional[Sequence[int]] = None,
 ) -> None:
     if not sequences:
         return
+    if indices is None:
+        indices = range(len(sequences))
     base_parent = template_dir.parent
     base_name = template_dir.name
-    for idx, sequence in enumerate(sequences):
+    for idx in indices:
+        if idx < 0 or idx >= len(sequences):
+            continue
+        sequence = sequences[idx]
         sample_dir = base_parent / f"{base_name}_{idx}"
         sample_dir.mkdir(parents=True, exist_ok=True)
         out_path = sample_dir / f"rollout_{global_step:07d}.png"

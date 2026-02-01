@@ -85,54 +85,71 @@ class DiagnosticsOutputSpec:
 
 
 DIAGNOSTICS_OUTPUT_CATALOG = {
-    "rollout_fixed": DiagnosticsOutputSpec(True, "Fixed batch rollout sequence grid."),
-    "rollout_rolling": DiagnosticsOutputSpec(True, "Rolling batch rollout sequence grid."),
-    "off_manifold": DiagnosticsOutputSpec(True, "Off-manifold rollout error visualization."),
+    "vis_fixed_0": DiagnosticsOutputSpec(True, "Fixed batch rollout sequence grid (view 0)."),
+    "vis_fixed_1": DiagnosticsOutputSpec(True, "Fixed batch rollout sequence grid (view 1)."),
+    "vis_rolling_0": DiagnosticsOutputSpec(True, "Rolling batch rollout sequence grid (view 0)."),
+    "vis_rolling_1": DiagnosticsOutputSpec(True, "Rolling batch rollout sequence grid (view 1)."),
+    "vis_off_manifold": DiagnosticsOutputSpec(True, "Off-manifold rollout error visualization."),
     "pca_z": DiagnosticsOutputSpec(True, "PCA projection plot for z embeddings."),
     "pca_h": DiagnosticsOutputSpec(True, "PCA projection plot for h states."),
     "pca_p": DiagnosticsOutputSpec(True, "PCA projection plot for p embeddings."),
-    "hard_examples_train": DiagnosticsOutputSpec(True, "Hard-example grid from the training reservoir."),
-    "hard_examples_val": DiagnosticsOutputSpec(True, "Hard-example grid from the validation reservoir."),
-    "self_distance_z": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for z."),
-    "self_distance_h": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for h."),
-    "self_distance_p": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for p."),
-    "state_embedding": DiagnosticsOutputSpec(False, "State embedding projections + odometry visuals."),
-    "diagnostics_action_field_z": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for z."),
-    "diagnostics_action_field_h": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for h."),
-    "diagnostics_action_field_p": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for p."),
-    "diagnostics_action_time_z": DiagnosticsOutputSpec(True, "Action delta time-slice plots for z."),
-    "diagnostics_action_time_h": DiagnosticsOutputSpec(True, "Action delta time-slice plots for h."),
-    "diagnostics_action_time_p": DiagnosticsOutputSpec(True, "Action delta time-slice plots for p."),
-    "diagnostics_composability_z": DiagnosticsOutputSpec(True, "Composability plots for z."),
-    "diagnostics_composability_h": DiagnosticsOutputSpec(True, "Composability plots for h."),
-    "diagnostics_composability_p": DiagnosticsOutputSpec(True, "Composability plots for p."),
-    "diagnostics_motion_pca_z": DiagnosticsOutputSpec(True, "Motion PCA artifacts for z."),
-    "diagnostics_motion_pca_h": DiagnosticsOutputSpec(True, "Motion PCA artifacts for h."),
-    "diagnostics_motion_pca_p": DiagnosticsOutputSpec(True, "Motion PCA artifacts for p."),
-    "diagnostics_alignment_z": DiagnosticsOutputSpec(True, "Action-alignment artifacts for z."),
-    "diagnostics_alignment_h": DiagnosticsOutputSpec(True, "Action-alignment artifacts for h."),
-    "diagnostics_alignment_p": DiagnosticsOutputSpec(True, "Action-alignment artifacts for p."),
-    "diagnostics_cycle_z": DiagnosticsOutputSpec(False, "Cycle-error artifacts for z."),
-    "diagnostics_cycle_h": DiagnosticsOutputSpec(False, "Cycle-error artifacts for h."),
-    "diagnostics_cycle_p": DiagnosticsOutputSpec(False, "Cycle-error artifacts for p."),
+    "samples_hard": DiagnosticsOutputSpec(True, "Hard-example grid from the training reservoir."),
+    "samples_hard_val": DiagnosticsOutputSpec(True, "Hard-example grid from the validation reservoir."),
+    "vis_self_distance_z": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for z."),
+    "vis_self_distance_h": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for h."),
+    "vis_self_distance_p": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for p."),
+    "vis_state_embedding": DiagnosticsOutputSpec(True, "State embedding histogram."),
+    "vis_odometry_current_z": DiagnosticsOutputSpec(True, "Odometry cumulative Δz plots."),
+    "vis_odometry_current_p": DiagnosticsOutputSpec(True, "Odometry cumulative Δp plots."),
+    "vis_odometry_current_h": DiagnosticsOutputSpec(True, "Odometry cumulative Δh plots."),
+    "vis_odometry_z_vs_z_hat": DiagnosticsOutputSpec(True, "Odometry z vs z_hat plots."),
+    "vis_odometry_p_vs_p_hat": DiagnosticsOutputSpec(True, "Odometry p vs p_hat plots."),
+    "vis_odometry_h_vs_h_hat": DiagnosticsOutputSpec(True, "Odometry h vs h_hat plots."),
+    "vis_action_field_z": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for z."),
+    "vis_action_field_h": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for h."),
+    "vis_action_field_p": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for p."),
+    "vis_action_time_z": DiagnosticsOutputSpec(True, "Action delta time-slice plots for z."),
+    "vis_action_time_h": DiagnosticsOutputSpec(True, "Action delta time-slice plots for h."),
+    "vis_action_time_p": DiagnosticsOutputSpec(True, "Action delta time-slice plots for p."),
+    "vis_composability_z": DiagnosticsOutputSpec(True, "Composability plots for z."),
+    "vis_composability_h": DiagnosticsOutputSpec(True, "Composability plots for h."),
+    "vis_composability_p": DiagnosticsOutputSpec(True, "Composability plots for p."),
+    "vis_delta_z_pca": DiagnosticsOutputSpec(True, "Motion PCA artifacts for z."),
+    "vis_delta_h_pca": DiagnosticsOutputSpec(True, "Motion PCA artifacts for h."),
+    "vis_delta_p_pca": DiagnosticsOutputSpec(True, "Motion PCA artifacts for p."),
+    "vis_action_alignment_detail_z": DiagnosticsOutputSpec(True, "Action-alignment detail plot for z (PCA)."),
+    "vis_action_alignment_detail_raw_z": DiagnosticsOutputSpec(True, "Action-alignment detail plot for z (raw)."),
+    "vis_action_alignment_detail_centered_z": DiagnosticsOutputSpec(True, "Action-alignment detail plot for z (centered)."),
+    "vis_action_alignment_detail_h": DiagnosticsOutputSpec(True, "Action-alignment detail plot for h (PCA)."),
+    "vis_action_alignment_detail_raw_h": DiagnosticsOutputSpec(True, "Action-alignment detail plot for h (raw)."),
+    "vis_action_alignment_detail_centered_h": DiagnosticsOutputSpec(True, "Action-alignment detail plot for h (centered)."),
+    "vis_action_alignment_detail_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for p (PCA)."),
+    "vis_action_alignment_detail_raw_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for p (raw)."),
+    "vis_action_alignment_detail_centered_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for p (centered)."),
+    "vis_cycle_error_z": DiagnosticsOutputSpec(False, "Cycle-error artifacts for z."),
+    "vis_cycle_error_h": DiagnosticsOutputSpec(False, "Cycle-error artifacts for h."),
+    "vis_cycle_error_p": DiagnosticsOutputSpec(False, "Cycle-error artifacts for p."),
+    "vis_straightline_p": DiagnosticsOutputSpec(True, "Straight-line rollout plot in p."),
+    "vis_rollout_divergence_z": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for z."),
+    "vis_rollout_divergence_h": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for h."),
+    "vis_rollout_divergence_p": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for p."),
+    "vis_rollout_divergence_excess_z": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for z."),
+    "vis_rollout_divergence_excess_h": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for h."),
+    "vis_rollout_divergence_excess_p": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for p."),
+    "vis_h_ablation": DiagnosticsOutputSpec(True, "H-ablation divergence plots/CSVs."),
+    "vis_z_consistency": DiagnosticsOutputSpec(True, "Z consistency plots/CSVs."),
+    "vis_z_monotonicity": DiagnosticsOutputSpec(True, "Z monotonicity plots/CSVs."),
+    "vis_path_independence": DiagnosticsOutputSpec(True, "Path-independence plots/CSVs."),
+    "vis_h_drift_by_action": DiagnosticsOutputSpec(True, "H drift-by-action plot/CSV."),
+    "vis_norm_timeseries": DiagnosticsOutputSpec(True, "Norm timeseries plot."),
     "diagnostics_frames": DiagnosticsOutputSpec(False, "Diagnostics frame dumps + CSV."),
     "diagnostics_scalars": DiagnosticsOutputSpec(True, "Diagnostics scalar CSV summary."),
-    "diagnostics_norm_timeseries": DiagnosticsOutputSpec(True, "Norm timeseries plot."),
-    "diagnostics_straightline_p": DiagnosticsOutputSpec(True, "Straight-line rollout plot in p."),
-    "diagnostics_rollout_divergence_z": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for z."),
-    "diagnostics_rollout_divergence_h": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for h."),
-    "diagnostics_rollout_divergence_p": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for p."),
-    "diagnostics_h_ablation": DiagnosticsOutputSpec(True, "H-ablation divergence plots/CSVs."),
-    "diagnostics_z_consistency": DiagnosticsOutputSpec(True, "Z consistency plots/CSVs."),
-    "diagnostics_z_monotonicity": DiagnosticsOutputSpec(True, "Z monotonicity plots/CSVs."),
-    "diagnostics_path_independence": DiagnosticsOutputSpec(True, "Path-independence plots/CSVs."),
-    "diagnostics_h_drift": DiagnosticsOutputSpec(True, "H drift-by-action plot/CSV."),
     "vis_ctrl_smoothness_z": DiagnosticsOutputSpec(False, "Vis-ctrl smoothness spectrum for z."),
     "vis_ctrl_smoothness_h": DiagnosticsOutputSpec(False, "Vis-ctrl smoothness spectrum for h."),
     "vis_ctrl_smoothness_p": DiagnosticsOutputSpec(False, "Vis-ctrl smoothness spectrum for p."),
-    "vis_ctrl_composition_error_z": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for z."),
-    "vis_ctrl_composition_error_h": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for h."),
-    "vis_ctrl_composition_error_p": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for p."),
+    "vis_ctrl_composition_z": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for z."),
+    "vis_ctrl_composition_h": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for h."),
+    "vis_ctrl_composition_p": DiagnosticsOutputSpec(False, "Vis-ctrl two-step composition error for p."),
     "vis_ctrl_stability_z": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for z."),
     "vis_ctrl_stability_h": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for h."),
     "vis_ctrl_stability_p": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for p."),
@@ -155,19 +172,76 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
 }
 
 DIAGNOSTICS_OUTPUT_GROUPS = {
-    "rollouts": ("rollout_fixed", "rollout_rolling"),
+    "rollouts": ("vis_fixed_0", "vis_fixed_1", "vis_rolling_0", "vis_rolling_1"),
     "pca": ("pca_z", "pca_h", "pca_p"),
-    "hard_examples": ("hard_examples_train", "hard_examples_val"),
-    "self_distance": ("self_distance_z", "self_distance_h", "self_distance_p", "state_embedding"),
-    "diagnostics": tuple(key for key in DIAGNOSTICS_OUTPUT_CATALOG.keys() if key.startswith("diagnostics_")),
-    "vis_ctrl": tuple(key for key in DIAGNOSTICS_OUTPUT_CATALOG.keys() if key.startswith("vis_ctrl_")),
+    "hard_examples": ("samples_hard", "samples_hard_val"),
+    "self_distance": (
+        "vis_self_distance_z",
+        "vis_self_distance_h",
+        "vis_self_distance_p",
+        "vis_state_embedding",
+        "vis_odometry_current_z",
+        "vis_odometry_current_p",
+        "vis_odometry_current_h",
+        "vis_odometry_z_vs_z_hat",
+        "vis_odometry_p_vs_p_hat",
+        "vis_odometry_h_vs_h_hat",
+    ),
+    "diagnostics": tuple(
+        key
+        for key in DIAGNOSTICS_OUTPUT_CATALOG.keys()
+        if key.startswith("vis_")
+        and not key.startswith("vis_ctrl_")
+        and key
+        not in (
+            "vis_fixed_0",
+            "vis_fixed_1",
+            "vis_rolling_0",
+            "vis_rolling_1",
+            "vis_off_manifold",
+            "vis_self_distance_z",
+            "vis_self_distance_h",
+            "vis_self_distance_p",
+            "vis_state_embedding",
+            "vis_odometry_current_z",
+            "vis_odometry_current_p",
+            "vis_odometry_current_h",
+            "vis_odometry_z_vs_z_hat",
+            "vis_odometry_p_vs_p_hat",
+            "vis_odometry_h_vs_h_hat",
+        )
+    ),
+    "vis_ctrl": (
+        "vis_ctrl_smoothness_z",
+        "vis_ctrl_smoothness_h",
+        "vis_ctrl_smoothness_p",
+        "vis_ctrl_composition_z",
+        "vis_ctrl_composition_h",
+        "vis_ctrl_composition_p",
+        "vis_ctrl_stability_z",
+        "vis_ctrl_stability_h",
+        "vis_ctrl_stability_p",
+        "vis_ctrl_summary",
+    ),
     "graph": tuple(key for key in DIAGNOSTICS_OUTPUT_CATALOG.keys() if key.startswith("graph_")),
 }
 
 OUTPUT_KIND_OVERRIDES = {
-    "diagnostics_h_ablation": "p",
-    "diagnostics_path_independence": "p",
-    "state_embedding": "p",
+    "vis_h_ablation": "p",
+    "vis_path_independence": "p",
+    "vis_state_embedding": "p",
+    "vis_h_drift_by_action": "h",
+    "vis_odometry_current_z": "z",
+    "vis_odometry_current_p": "p",
+    "vis_odometry_current_h": "h",
+    "vis_odometry_z_vs_z_hat": "z",
+    "vis_odometry_p_vs_p_hat": "p",
+    "vis_odometry_h_vs_h_hat": "h",
+    "vis_delta_z_pca": "z",
+    "vis_delta_h_pca": "h",
+    "vis_delta_p_pca": "p",
+    "vis_z_consistency": "z",
+    "vis_z_monotonicity": "z",
 }
 
 
@@ -213,8 +287,8 @@ def _resolve_outputs(
                 resolved[key] = DiagnosticsOutputSpec(enabled, spec.description)
                 continue
             kind = _output_kind(key)
-            if kind is not None and not enabled_kinds.get(kind, False):
-                enabled = False
+        if kind is not None and not enabled_kinds.get(kind, False):
+            enabled = False
         resolved[key] = DiagnosticsOutputSpec(enabled, spec.description)
     return resolved
 
@@ -623,7 +697,7 @@ def run_diagnostics_step(
         and graph_diag_batch_cpu is None
     ):
         raise AssertionError("Graph diagnostics requested but graph_diag_batch_cpu is missing.")
-    if resolved_outputs["off_manifold"].enabled and off_manifold_batch_cpu is None:
+    if resolved_outputs["vis_off_manifold"].enabled and off_manifold_batch_cpu is None:
         raise AssertionError("Off-manifold outputs requested but off_manifold_batch_cpu is missing.")
 
     run_dir = Path(run_dir)
@@ -684,11 +758,36 @@ def run_diagnostics_step(
     graph_diagnostics_p_dir = run_dir / "graph_diagnostics_p"
     graph_diagnostics_h_dir = run_dir / "graph_diagnostics_h"
 
+    alignment_detail_z_enabled = any(
+        resolved_outputs[key].enabled
+        for key in (
+            "vis_action_alignment_detail_z",
+            "vis_action_alignment_detail_raw_z",
+            "vis_action_alignment_detail_centered_z",
+        )
+    )
+    alignment_detail_h_enabled = any(
+        resolved_outputs[key].enabled
+        for key in (
+            "vis_action_alignment_detail_h",
+            "vis_action_alignment_detail_raw_h",
+            "vis_action_alignment_detail_centered_h",
+        )
+    )
+    alignment_detail_p_enabled = any(
+        resolved_outputs[key].enabled
+        for key in (
+            "vis_action_alignment_detail_p",
+            "vis_action_alignment_detail_raw_p",
+            "vis_action_alignment_detail_centered_p",
+        )
+    )
+
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["rollout_fixed"].enabled:
+    if resolved_outputs["vis_fixed_0"].enabled or resolved_outputs["vis_fixed_1"].enabled:
         fixed_vis_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["rollout_rolling"].enabled:
+    if resolved_outputs["vis_rolling_0"].enabled or resolved_outputs["vis_rolling_1"].enabled:
         rolling_vis_dir.mkdir(parents=True, exist_ok=True)
     if resolved_outputs["pca_z"].enabled:
         pca_z_dir.mkdir(parents=True, exist_ok=True)
@@ -696,88 +795,111 @@ def run_diagnostics_step(
         pca_p_dir.mkdir(parents=True, exist_ok=True)
     if resolved_outputs["pca_h"].enabled:
         pca_h_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["off_manifold"].enabled:
+    if resolved_outputs["vis_off_manifold"].enabled:
         vis_off_manifold_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["hard_examples_train"].enabled:
+    if resolved_outputs["samples_hard"].enabled:
         samples_hard_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["hard_examples_val"].enabled:
+    if resolved_outputs["samples_hard_val"].enabled:
         samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["self_distance_z"].enabled:
+    if resolved_outputs["vis_self_distance_z"].enabled:
         vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
         self_distance_z_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["self_distance_p"].enabled or resolved_outputs["state_embedding"].enabled:
+    if resolved_outputs["vis_self_distance_p"].enabled:
         vis_self_distance_p_dir.mkdir(parents=True, exist_ok=True)
         self_distance_p_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["self_distance_h"].enabled:
+    if resolved_outputs["vis_self_distance_h"].enabled:
         vis_self_distance_h_dir.mkdir(parents=True, exist_ok=True)
         self_distance_h_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["state_embedding"].enabled:
+    if resolved_outputs["vis_state_embedding"].enabled:
         vis_state_embedding_dir.mkdir(parents=True, exist_ok=True)
+    if (
+        resolved_outputs["vis_odometry_current_z"].enabled
+        or resolved_outputs["vis_odometry_current_p"].enabled
+        or resolved_outputs["vis_odometry_current_h"].enabled
+        or resolved_outputs["vis_odometry_z_vs_z_hat"].enabled
+        or resolved_outputs["vis_odometry_p_vs_p_hat"].enabled
+        or resolved_outputs["vis_odometry_h_vs_h_hat"].enabled
+    ):
         vis_odometry_dir.mkdir(parents=True, exist_ok=True)
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["diagnostics"]):
-        if resolved_outputs["diagnostics_motion_pca_z"].enabled:
+        if resolved_outputs["vis_delta_z_pca"].enabled:
             diagnostics_delta_z_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_motion_pca_p"].enabled:
+        if resolved_outputs["vis_delta_p_pca"].enabled:
             diagnostics_delta_p_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_motion_pca_h"].enabled:
+        if resolved_outputs["vis_delta_h_pca"].enabled:
             diagnostics_delta_h_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_alignment_z"].enabled:
+        if alignment_detail_z_enabled:
             diagnostics_alignment_z_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_alignment_detail_raw_z"].enabled:
             diagnostics_alignment_z_raw_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_alignment_detail_centered_z"].enabled:
             diagnostics_alignment_z_centered_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_alignment_p"].enabled:
+        if alignment_detail_p_enabled:
             diagnostics_alignment_p_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_alignment_detail_raw_p"].enabled:
             diagnostics_alignment_p_raw_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_alignment_detail_centered_p"].enabled:
             diagnostics_alignment_p_centered_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_alignment_h"].enabled:
+        if alignment_detail_h_enabled:
             diagnostics_alignment_h_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_alignment_detail_raw_h"].enabled:
             diagnostics_alignment_h_raw_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_alignment_detail_centered_h"].enabled:
             diagnostics_alignment_h_centered_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_cycle_z"].enabled:
+        if resolved_outputs["vis_cycle_error_z"].enabled:
             diagnostics_cycle_z_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_cycle_p"].enabled:
+        if resolved_outputs["vis_cycle_error_p"].enabled:
             diagnostics_cycle_p_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_cycle_h"].enabled:
+        if resolved_outputs["vis_cycle_error_h"].enabled:
             diagnostics_cycle_h_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["diagnostics_frames"].enabled:
             diagnostics_frames_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_composability_z"].enabled:
+        if resolved_outputs["vis_composability_z"].enabled:
             vis_composability_z_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_composability_p"].enabled:
+        if resolved_outputs["vis_composability_p"].enabled:
             vis_composability_p_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_composability_h"].enabled:
+        if resolved_outputs["vis_composability_h"].enabled:
             vis_composability_h_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_rollout_divergence_z"].enabled:
+        if (
+            resolved_outputs["vis_rollout_divergence_z"].enabled
+            or resolved_outputs["vis_rollout_divergence_excess_z"].enabled
+        ):
             diagnostics_rollout_divergence_z_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_rollout_divergence_h"].enabled:
+        if (
+            resolved_outputs["vis_rollout_divergence_h"].enabled
+            or resolved_outputs["vis_rollout_divergence_excess_h"].enabled
+        ):
             diagnostics_rollout_divergence_h_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_rollout_divergence_p"].enabled:
+        if (
+            resolved_outputs["vis_rollout_divergence_p"].enabled
+            or resolved_outputs["vis_rollout_divergence_excess_p"].enabled
+        ):
             diagnostics_rollout_divergence_p_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_action_field_z"].enabled:
+        if resolved_outputs["vis_action_field_z"].enabled:
             diagnostics_action_field_z_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_action_field_h"].enabled:
+        if resolved_outputs["vis_action_field_h"].enabled:
             diagnostics_action_field_h_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_action_field_p"].enabled:
+        if resolved_outputs["vis_action_field_p"].enabled:
             diagnostics_action_field_p_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_action_time_z"].enabled:
+        if resolved_outputs["vis_action_time_z"].enabled:
             diagnostics_action_time_z_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_action_time_h"].enabled:
+        if resolved_outputs["vis_action_time_h"].enabled:
             diagnostics_action_time_h_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_action_time_p"].enabled:
+        if resolved_outputs["vis_action_time_p"].enabled:
             diagnostics_action_time_p_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_straightline_p"].enabled:
+        if resolved_outputs["vis_straightline_p"].enabled:
             diagnostics_straightline_p_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_z_consistency"].enabled:
+        if resolved_outputs["vis_z_consistency"].enabled:
             diagnostics_z_consistency_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_z_monotonicity"].enabled:
+        if resolved_outputs["vis_z_monotonicity"].enabled:
             diagnostics_z_monotonicity_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_path_independence"].enabled:
+        if resolved_outputs["vis_path_independence"].enabled:
             diagnostics_path_independence_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_h_ablation"].enabled:
+        if resolved_outputs["vis_h_ablation"].enabled:
             diagnostics_h_ablation_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_h_drift"].enabled:
+        if resolved_outputs["vis_h_drift_by_action"].enabled:
             diagnostics_h_drift_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_outputs["diagnostics_norm_timeseries"].enabled:
+        if resolved_outputs["vis_norm_timeseries"].enabled:
             diagnostics_norm_timeseries_dir.mkdir(parents=True, exist_ok=True)
     if graph_cfg.enabled:
         if _any_outputs_enabled(resolved_outputs, ("graph_rank_cdf_z", "graph_neff_violin_z", "graph_in_degree_z", "graph_edge_consistency_z", "graph_history_z")):
@@ -791,7 +913,12 @@ def run_diagnostics_step(
 
     model.eval()
 
-    if resolved_outputs["rollout_fixed"].enabled:
+    fixed_indices = []
+    if resolved_outputs["vis_fixed_0"].enabled:
+        fixed_indices.append(0)
+    if resolved_outputs["vis_fixed_1"].enabled:
+        fixed_indices.append(1)
+    if fixed_indices:
         sequences, grad_label = build_visualization_sequences(
             batch_cpu=fixed_batch_cpu,
             selection=fixed_selection,
@@ -810,9 +937,15 @@ def run_diagnostics_step(
             grad_label,
             global_step,
             include_pixel_delta=(weights.pixel_delta > 0 or weights.pixel_delta_multi_box > 0),
+            indices=fixed_indices,
         )
 
-    if resolved_outputs["rollout_rolling"].enabled:
+    rolling_indices = []
+    if resolved_outputs["vis_rolling_0"].enabled:
+        rolling_indices.append(0)
+    if resolved_outputs["vis_rolling_1"].enabled:
+        rolling_indices.append(1)
+    if rolling_indices:
         sequences, grad_label = build_visualization_sequences(
             batch_cpu=rolling_batch_cpu,
             selection=None,
@@ -831,9 +964,10 @@ def run_diagnostics_step(
             grad_label,
             global_step,
             include_pixel_delta=(weights.pixel_delta > 0 or weights.pixel_delta_multi_box > 0),
+            indices=rolling_indices,
         )
 
-    if resolved_outputs["off_manifold"].enabled and off_manifold_batch_cpu is not None:
+    if resolved_outputs["vis_off_manifold"].enabled and off_manifold_batch_cpu is not None:
         with torch.no_grad():
             step_indices, errors = compute_off_manifold_errors(
                 model=model,
@@ -886,7 +1020,7 @@ def run_diagnostics_step(
                 "PCA p",
             )
 
-    if resolved_outputs["hard_examples_train"].enabled:
+    if resolved_outputs["samples_hard"].enabled:
         hard_samples = hard_reservoir.topk(hard_example_cfg.vis_rows * hard_example_cfg.vis_columns)
         save_hard_example_grid(
             samples_hard_dir / f"hard_{global_step:07d}.png",
@@ -895,7 +1029,7 @@ def run_diagnostics_step(
             hard_example_cfg.vis_rows,
             dataset.image_hw,
         )
-    if resolved_outputs["hard_examples_val"].enabled:
+    if resolved_outputs["samples_hard_val"].enabled:
         hard_samples_val = hard_reservoir_val.topk(hard_example_cfg.vis_rows * hard_example_cfg.vis_columns)
         save_hard_example_grid(
             samples_hard_val_dir / f"hard_{global_step:07d}.png",
@@ -919,7 +1053,7 @@ def run_diagnostics_step(
             )
             self_dist_h_states = self_dist_h_states_batch[0]
 
-        if resolved_outputs["self_distance_z"].enabled:
+        if resolved_outputs["vis_self_distance_z"].enabled:
             write_self_distance_outputs(
                 self_dist_embeddings,
                 self_distance_inputs,
@@ -931,7 +1065,7 @@ def run_diagnostics_step(
                 file_prefix="self_distance_z",
                 cosine_prefix="self_distance_z_cosine",
             )
-        if resolved_outputs["self_distance_h"].enabled:
+        if resolved_outputs["vis_self_distance_h"].enabled:
             write_self_distance_outputs(
                 self_dist_h_states,
                 self_distance_inputs,
@@ -943,7 +1077,7 @@ def run_diagnostics_step(
                 file_prefix="self_distance_h",
                 cosine_prefix="self_distance_h_cosine",
             )
-        if resolved_outputs["self_distance_p"].enabled:
+        if resolved_outputs["vis_self_distance_p"].enabled:
             _, self_dist_p_batch, _ = rollout_pose(
                 model,
                 self_dist_h_states_batch,
@@ -963,7 +1097,15 @@ def run_diagnostics_step(
                 file_prefix="self_distance_p",
                 cosine_prefix="self_distance_p_cosine",
             )
-        if resolved_outputs["state_embedding"].enabled:
+        if (
+            resolved_outputs["vis_state_embedding"].enabled
+            or resolved_outputs["vis_odometry_current_z"].enabled
+            or resolved_outputs["vis_odometry_current_p"].enabled
+            or resolved_outputs["vis_odometry_current_h"].enabled
+            or resolved_outputs["vis_odometry_z_vs_z_hat"].enabled
+            or resolved_outputs["vis_odometry_p_vs_p_hat"].enabled
+            or resolved_outputs["vis_odometry_h_vs_h_hat"].enabled
+        ):
             if model.p_action_delta_projector is None:
                 raise AssertionError("State embedding outputs require p_action_delta_projector.")
             write_state_embedding_outputs(
@@ -979,6 +1121,14 @@ def run_diagnostics_step(
                 force_h_zero=force_h_zero,
                 hist_frames_cpu=rolling_batch_cpu[0],
                 hist_actions_cpu=rolling_batch_cpu[1],
+                write_self_distance=False,
+                write_state_hist=resolved_outputs["vis_state_embedding"].enabled,
+                write_odometry_current_z=resolved_outputs["vis_odometry_current_z"].enabled,
+                write_odometry_current_p=resolved_outputs["vis_odometry_current_p"].enabled,
+                write_odometry_current_h=resolved_outputs["vis_odometry_current_h"].enabled,
+                write_odometry_z_vs_z_hat=resolved_outputs["vis_odometry_z_vs_z_hat"].enabled,
+                write_odometry_p_vs_p_hat=resolved_outputs["vis_odometry_p_vs_p_hat"].enabled,
+                write_odometry_h_vs_h_hat=resolved_outputs["vis_odometry_h_vs_h_hat"].enabled,
             )
 
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["diagnostics"]):
@@ -993,14 +1143,14 @@ def run_diagnostics_step(
 
         action_ids_flat = diag_state.action_metadata.action_ids_flat
         if (
-            resolved_outputs["diagnostics_action_field_z"].enabled
-            or resolved_outputs["diagnostics_action_time_z"].enabled
+            resolved_outputs["vis_action_field_z"].enabled
+            or resolved_outputs["vis_action_time_z"].enabled
         ):
             z_embed_np = diag_state.embeddings.detach().cpu().numpy()
             z_deltas = z_embed_np[:, 1:] - z_embed_np[:, :-1]
             z_action_dim = diag_state.motion_z.action_dim
 
-            if resolved_outputs["diagnostics_action_field_z"].enabled:
+            if resolved_outputs["vis_action_field_z"].enabled:
                 save_action_vector_field_plot(
                     diagnostics_action_field_z_dir / f"action_field_z_{global_step:07d}.png",
                     z_embed_np[:, :-1].reshape(-1, z_embed_np.shape[-1]),
@@ -1011,7 +1161,7 @@ def run_diagnostics_step(
                     min_count=diagnostics_cfg.min_action_count,
                     title="Action-conditioned vector field (Z)",
                 )
-            if resolved_outputs["diagnostics_action_time_z"].enabled:
+            if resolved_outputs["vis_action_time_z"].enabled:
                 save_action_time_slice_plot(
                     diagnostics_action_time_z_dir / f"action_time_z_{global_step:07d}.png",
                     z_deltas,
@@ -1023,14 +1173,14 @@ def run_diagnostics_step(
                 )
 
         if (
-            resolved_outputs["diagnostics_action_field_h"].enabled
-            or resolved_outputs["diagnostics_action_time_h"].enabled
+            resolved_outputs["vis_action_field_h"].enabled
+            or resolved_outputs["vis_action_time_h"].enabled
         ):
             h_embed_np = diag_state.h_states.detach().cpu().numpy()
             h_deltas = h_embed_np[:, 1:] - h_embed_np[:, :-1]
             h_action_dim = diag_state.motion_h.action_dim
 
-            if resolved_outputs["diagnostics_action_field_h"].enabled:
+            if resolved_outputs["vis_action_field_h"].enabled:
                 save_action_vector_field_plot(
                     diagnostics_action_field_h_dir / f"action_field_h_{global_step:07d}.png",
                     h_embed_np[:, :-1].reshape(-1, h_embed_np.shape[-1]),
@@ -1041,7 +1191,7 @@ def run_diagnostics_step(
                     min_count=diagnostics_cfg.min_action_count,
                     title="Action-conditioned vector field (H)",
                 )
-            if resolved_outputs["diagnostics_action_time_h"].enabled:
+            if resolved_outputs["vis_action_time_h"].enabled:
                 save_action_time_slice_plot(
                     diagnostics_action_time_h_dir / f"action_time_h_{global_step:07d}.png",
                     h_deltas,
@@ -1052,14 +1202,14 @@ def run_diagnostics_step(
                     title="Action delta time slices (H)",
                 )
         if (
-            resolved_outputs["diagnostics_action_field_p"].enabled
-            or resolved_outputs["diagnostics_action_time_p"].enabled
+            resolved_outputs["vis_action_field_p"].enabled
+            or resolved_outputs["vis_action_time_p"].enabled
         ):
             p_embed_np = diag_state.p_embeddings.detach().cpu().numpy()
             p_deltas = p_embed_np[:, 1:] - p_embed_np[:, :-1]
             p_action_dim = diag_state.motion_p.action_dim
 
-            if resolved_outputs["diagnostics_action_field_p"].enabled:
+            if resolved_outputs["vis_action_field_p"].enabled:
                 save_action_vector_field_plot(
                     diagnostics_action_field_p_dir / f"action_field_p_{global_step:07d}.png",
                     p_embed_np[:, :-1].reshape(-1, p_embed_np.shape[-1]),
@@ -1070,7 +1220,7 @@ def run_diagnostics_step(
                     min_count=diagnostics_cfg.min_action_count,
                     title="Action-conditioned vector field (P)",
                 )
-            if resolved_outputs["diagnostics_action_time_p"].enabled:
+            if resolved_outputs["vis_action_time_p"].enabled:
                 save_action_time_slice_plot(
                     diagnostics_action_time_p_dir / f"action_time_p_{global_step:07d}.png",
                     p_deltas,
@@ -1082,19 +1232,19 @@ def run_diagnostics_step(
                 )
 
         if diag_state.composability is not None:
-            if resolved_outputs[f"diagnostics_composability_z"].enabled:
+            if resolved_outputs[f"vis_composability_z"].enabled:
                 save_composability_plot(
                     vis_composability_z_dir / f"composability_z_{global_step:07d}.png",
                     diag_state.composability["z"],
                     "z",
                 )
-            if resolved_outputs[f"diagnostics_composability_h"].enabled:
+            if resolved_outputs[f"vis_composability_h"].enabled:
                 save_composability_plot(
                     vis_composability_h_dir / f"composability_h_{global_step:07d}.png",
                     diag_state.composability["h"],
                     "h",
                 )
-            if resolved_outputs[f"diagnostics_composability_p"].enabled:
+            if resolved_outputs[f"vis_composability_p"].enabled:
                 save_composability_plot(
                     vis_composability_p_dir / f"composability_p_{global_step:07d}.png",
                     diag_state.p_series,
@@ -1102,9 +1252,16 @@ def run_diagnostics_step(
                 )
 
         for kind in ["z", "h", "p"]:
-            motion_pca_enabled = resolved_outputs[f"diagnostics_motion_pca_{kind}"].enabled
-            alignment_enabled = resolved_outputs[f"diagnostics_alignment_{kind}"].enabled
-            cycle_enabled = resolved_outputs[f"diagnostics_cycle_{kind}"].enabled
+            motion_pca_enabled = resolved_outputs[f"vis_delta_{kind}_pca"].enabled
+            alignment_enabled = any(
+                resolved_outputs[key].enabled
+                for key in (
+                    f"vis_action_alignment_detail_{kind}",
+                    f"vis_action_alignment_detail_raw_{kind}",
+                    f"vis_action_alignment_detail_centered_{kind}",
+                )
+            )
+            cycle_enabled = resolved_outputs[f"vis_cycle_error_{kind}"].enabled
 
             if not (motion_pca_enabled or alignment_enabled or cycle_enabled):
                 continue
@@ -1149,6 +1306,9 @@ def run_diagnostics_step(
                     alignment_dir=align_dir,
                     alignment_raw_dir=align_raw_dir,
                     alignment_centered_dir=align_center_dir,
+                    write_pca=resolved_outputs[f"vis_action_alignment_detail_{kind}"].enabled,
+                    write_raw=resolved_outputs[f"vis_action_alignment_detail_raw_{kind}"].enabled,
+                    write_centered=resolved_outputs[f"vis_action_alignment_detail_centered_{kind}"].enabled,
                 )
             if cycle_enabled:
                 write_cycle_error_artifacts(
@@ -1177,7 +1337,7 @@ def run_diagnostics_step(
             )
 
         scalars_enabled = resolved_outputs["diagnostics_scalars"].enabled
-        norm_timeseries_enabled = resolved_outputs["diagnostics_norm_timeseries"].enabled
+        norm_timeseries_enabled = resolved_outputs["vis_norm_timeseries"].enabled
         if norm_timeseries_enabled and not scalars_enabled:
             raise AssertionError("Norm timeseries requires diagnostics_scalars to be enabled.")
         if scalars_enabled or norm_timeseries_enabled:
@@ -1297,7 +1457,7 @@ def run_diagnostics_step(
                 except OSError:
                     pass
 
-        if resolved_outputs["diagnostics_straightline_p"].enabled:
+        if resolved_outputs["vis_straightline_p"].enabled:
             trajectories = _build_straightline_trajectories(
                 diagnostics_cfg=diagnostics_cfg,
                 diag_state=diag_state,
@@ -1313,7 +1473,9 @@ def run_diagnostics_step(
         start_span = diag_state.frames.shape[1] - 1 - diag_state.warmup_frames
         can_rollout = rollout_horizon > 0 and start_span > 0
         rollout_outputs_enabled = any(
-            resolved_outputs[f"diagnostics_rollout_divergence_{kind}"].enabled for kind in ["z", "h", "p"]
+            resolved_outputs[f"vis_rollout_divergence_{kind}"].enabled
+            or resolved_outputs[f"vis_rollout_divergence_excess_{kind}"].enabled
+            for kind in ["z", "h", "p"]
         )
         if can_rollout and rollout_outputs_enabled:
             horizons, pixel_mean, pixel_teacher_mean, z_mean, h_mean, p_mean = compute_rollout_divergence_metrics(
@@ -1334,7 +1496,9 @@ def run_diagnostics_step(
             pixel_excess = (np.maximum(np.asarray(pixel_mean) - np.asarray(pixel_teacher_mean), 0.0)).tolist()
 
             for kind in ["z", "h", "p"]:
-                if not resolved_outputs[f"diagnostics_rollout_divergence_{kind}"].enabled:
+                base_enabled = resolved_outputs[f"vis_rollout_divergence_{kind}"].enabled
+                excess_enabled = resolved_outputs[f"vis_rollout_divergence_excess_{kind}"].enabled
+                if not (base_enabled or excess_enabled):
                     continue
 
                 if kind == "z":
@@ -1356,38 +1520,40 @@ def run_diagnostics_step(
                     title = "Rollout divergence (P)"
                     csv_cols = ["k", "pixel_error", "p_error"]
 
-                save_rollout_divergence_plot(
-                    out_dir / f"rollout_divergence_{kind}_{global_step:07d}.png",
-                    horizons,
-                    pixel_mean,
-                    metric,
-                    latent_label=latent_label,
-                    title=title,
-                )
-                save_rollout_divergence_plot(
-                    out_dir / f"rollout_divergence_excess_{kind}_{global_step:07d}.png",
-                    horizons,
-                    pixel_excess,
-                    metric,
-                    pixel_label="Excess pixel error (MSE - recon)",
-                    latent_label=latent_label,
-                    title=f"{title} (excess)",
-                )
-                write_step_csv(
-                    out_dir,
-                    f"rollout_divergence_{kind}_{global_step:07d}.csv",
-                    csv_cols,
-                    zip(horizons, pixel_mean, metric),
-                )
-                write_step_csv(
-                    out_dir,
-                    f"rollout_divergence_excess_{kind}_{global_step:07d}.csv",
-                    csv_cols,
-                    zip(horizons, pixel_excess, metric),
-                )
+                if base_enabled:
+                    save_rollout_divergence_plot(
+                        out_dir / f"rollout_divergence_{kind}_{global_step:07d}.png",
+                        horizons,
+                        pixel_mean,
+                        metric,
+                        latent_label=latent_label,
+                        title=title,
+                    )
+                    write_step_csv(
+                        out_dir,
+                        f"rollout_divergence_{kind}_{global_step:07d}.csv",
+                        csv_cols,
+                        zip(horizons, pixel_mean, metric),
+                    )
+                if excess_enabled:
+                    save_rollout_divergence_plot(
+                        out_dir / f"rollout_divergence_excess_{kind}_{global_step:07d}.png",
+                        horizons,
+                        pixel_excess,
+                        metric,
+                        pixel_label="Excess pixel error (MSE - recon)",
+                        latent_label=latent_label,
+                        title=f"{title} (excess)",
+                    )
+                    write_step_csv(
+                        out_dir,
+                        f"rollout_divergence_excess_{kind}_{global_step:07d}.csv",
+                        csv_cols,
+                        zip(horizons, pixel_excess, metric),
+                    )
         if (
             can_rollout
-            and resolved_outputs["diagnostics_h_ablation"].enabled
+            and resolved_outputs["vis_h_ablation"].enabled
             and diag_state.has_p
             and diag_state.p_embeddings is not None
             and diag_state.p_embeddings.shape[1] >= 2
@@ -1422,7 +1588,7 @@ def run_diagnostics_step(
                 zip(horizons, pixel_mean, pixel_zero_mean, latent_mean, latent_zero_mean),
             )
 
-        if resolved_outputs["diagnostics_z_consistency"].enabled:
+        if resolved_outputs["vis_z_consistency"].enabled:
             z_consistency_samples = min(
                 diagnostics_cfg.z_consistency_samples,
                 diag_state.frames.shape[0] * diag_state.frames.shape[1],
@@ -1447,7 +1613,7 @@ def run_diagnostics_step(
                 [(idx, d, c) for idx, (d, c) in enumerate(zip(distances, cosines))],
             )
 
-        if resolved_outputs["diagnostics_z_monotonicity"].enabled:
+        if resolved_outputs["vis_z_monotonicity"].enabled:
             monotonicity_samples = min(
                 diagnostics_cfg.z_monotonicity_samples,
                 diag_state.frames.shape[0] * diag_state.frames.shape[1],
@@ -1473,7 +1639,7 @@ def run_diagnostics_step(
                 zip(shifts, distances),
             )
 
-        if resolved_outputs["diagnostics_path_independence"].enabled:
+        if resolved_outputs["vis_path_independence"].enabled:
             stats = _compute_path_independence_stats(
                 diagnostics_cfg=diagnostics_cfg,
                 diag_state=diag_state,
@@ -1495,7 +1661,7 @@ def run_diagnostics_step(
                 [(label, z_mean, p_mean)],
             )
 
-        if resolved_outputs["diagnostics_h_drift"].enabled:
+        if resolved_outputs["vis_h_drift_by_action"].enabled:
             drift_stats = _compute_h_drift_stats(
                 diagnostics_cfg=diagnostics_cfg,
                 diag_state=diag_state,
@@ -1542,7 +1708,7 @@ def run_diagnostics_step(
         for kind in ["z", "h", "p"]:
             needs_metrics = summary_enabled and kind in ("z", "h")
             needs_metrics = needs_metrics or resolved_outputs[f"vis_ctrl_smoothness_{kind}"].enabled
-            needs_metrics = needs_metrics or resolved_outputs[f"vis_ctrl_composition_error_{kind}"].enabled
+            needs_metrics = needs_metrics or resolved_outputs[f"vis_ctrl_composition_{kind}"].enabled
             needs_metrics = needs_metrics or resolved_outputs[f"vis_ctrl_stability_{kind}"].enabled
             if kind == "p" and summary_enabled and vis_kind_inputs.get("p") is not None:
                 needs_metrics = True
@@ -1570,7 +1736,7 @@ def run_diagnostics_step(
                     metrics,
                     kind,
                 )
-            if resolved_outputs[f"vis_ctrl_composition_error_{kind}"].enabled:
+            if resolved_outputs[f"vis_ctrl_composition_{kind}"].enabled:
                 save_two_step_composition_error_plot(
                     vis_ctrl_dir / f"composition_error_{kind}_{global_step:07d}.png",
                     metrics,

@@ -73,6 +73,14 @@ def write_state_embedding_outputs(
     force_h_zero: bool = False,
     hist_frames_cpu: Optional[torch.Tensor] = None,
     hist_actions_cpu: Optional[torch.Tensor] = None,
+    write_self_distance: bool = True,
+    write_state_hist: bool = True,
+    write_odometry_current_z: bool = True,
+    write_odometry_current_p: bool = True,
+    write_odometry_current_h: bool = True,
+    write_odometry_z_vs_z_hat: bool = True,
+    write_odometry_p_vs_p_hat: bool = True,
+    write_odometry_h_vs_h_hat: bool = True,
 ) -> None:
     if traj_inputs.frames.shape[1] < 2:
         return
@@ -98,23 +106,24 @@ def write_state_embedding_outputs(
     if p.shape[0] < 1:
         return
 
-    write_self_distance_outputs_from_embeddings(
-        p,
-        traj_inputs,
-        csv_dir,
-        plot_dir,
-        global_step,
-        embedding_label="p",
-        title_prefix="Self-distance (P)",
-        file_prefix="self_distance_p",
-        cosine_prefix="self_distance_cosine",
-        start_index=warmup,
-    )
+    if write_self_distance:
+        write_self_distance_outputs_from_embeddings(
+            p,
+            traj_inputs,
+            csv_dir,
+            plot_dir,
+            global_step,
+            embedding_label="p",
+            title_prefix="Self-distance (P)",
+            file_prefix="self_distance_p",
+            cosine_prefix="self_distance_cosine",
+            start_index=warmup,
+        )
 
     if odometry_plot_dir is not None:
         z = embeddings[0].detach().cpu().numpy()
         z_seq = z[warmup:]
-        if z_seq.shape[0] >= 2:
+        if write_odometry_current_z and z_seq.shape[0] >= 2:
             delta_z = z_seq[1:] - z_seq[:-1]
             current_z = np.cumsum(delta_z, axis=0)
             _plot_odometry_embeddings(
@@ -124,7 +133,7 @@ def write_state_embedding_outputs(
             )
 
         p_np = p.detach().cpu().numpy()
-        if p_np.shape[0] >= 2:
+        if write_odometry_current_p and p_np.shape[0] >= 2:
             delta_p = p_np[1:] - p_np[:-1]
             current_p = np.cumsum(delta_p, axis=0)
             _plot_odometry_embeddings(
@@ -135,7 +144,7 @@ def write_state_embedding_outputs(
 
         h_np = h_states[0].detach().cpu().numpy()
         h_seq = h_np[warmup:] if warmup > 0 else h_np
-        if h_seq.shape[0] >= 2:
+        if write_odometry_current_h and h_seq.shape[0] >= 2:
             delta_h = h_seq[1:] - h_seq[:-1]
             current_h = np.cumsum(delta_h, axis=0)
             _plot_odometry_embeddings(
@@ -154,7 +163,7 @@ def write_state_embedding_outputs(
             z_next = z[1 + warmup :]
             z_hat_trim = z_hat[warmup:]
             min_len = min(z_next.shape[0], z_hat_trim.shape[0])
-            if min_len >= 2:
+            if write_odometry_z_vs_z_hat and min_len >= 2:
                 _plot_latent_prediction_comparison(
                     odometry_plot_dir / f"z_vs_z_hat_{global_step:07d}.png",
                     z_next[:min_len],
@@ -178,7 +187,7 @@ def write_state_embedding_outputs(
             p_hat_trim = p_hat[warmup:]
             p_next_trim = p_next[warmup:] if warmup < p_next.shape[0] else p_next[:0]
             min_len = min(p_next_trim.shape[0], p_hat_trim.shape[0])
-            if min_len >= 2:
+            if write_odometry_p_vs_p_hat and min_len >= 2:
                 _plot_latent_prediction_comparison(
                     odometry_plot_dir / f"p_vs_p_hat_{global_step:07d}.png",
                     p_next_trim[:min_len],
@@ -189,7 +198,7 @@ def write_state_embedding_outputs(
             h_next = h_seq[1:]
             h_hat_trim = h_hat[warmup:] if warmup > 0 else h_hat
             min_len = min(h_next.shape[0], h_hat_trim.shape[0])
-            if min_len >= 2:
+            if write_odometry_h_vs_h_hat and min_len >= 2:
                 _plot_latent_prediction_comparison(
                     odometry_plot_dir / f"h_vs_h_hat_{global_step:07d}.png",
                     h_next[:min_len],
@@ -197,6 +206,8 @@ def write_state_embedding_outputs(
                     "h",
                 )
 
+    if not write_state_hist:
+        return
     hist_frames = hist_frames_cpu if hist_frames_cpu is not None else traj_inputs.frames
     if hist_frames.ndim != 5 or hist_frames.shape[1] < 1:
         return
