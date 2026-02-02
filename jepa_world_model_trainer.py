@@ -169,7 +169,11 @@ from jepa_world_model.vis_vis_ctrl_metrics import (
     compute_vis_ctrl_metrics,
     write_vis_ctrl_metrics_csv,
 )
-from jepa_world_model.diagnostics_runner import run_diagnostics_step
+from jepa_world_model.diagnostics_runner import (
+    planning_outputs_enabled,
+    run_diagnostics_step,
+    run_planning_diagnostics_step,
+)
 from jepa_world_model.diagnostics_utils import append_csv_row, should_use_z2h_init
 from jepa_world_model.planning.planning_eval import (
     DIRECTION_ORDER,
@@ -347,15 +351,15 @@ class LossWeights:
     # --- P ---
     # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
     # p_odometry: 1-step odometry consistency (pose_t + Δp_t ≈ pose_{t+1}).
-    action_delta_p: float = 0.0
+    action_delta_p: float = 0.1
 
     # Explicit additivity of p deltas across steps.
     # p_odometry: short-horizon composition/additivity of increments.
-    additivity_p: float = 0.0
+    additivity_p: float = 0.1
 
     # k-step rollout consistency in p-space.
     # p_odometry: k-step odometry consistency (multi-step integration).
-    rollout_kstep_p: float = 0.0
+    rollout_kstep_p: float = 0.1
 
     # Pose scale anchoring (distribution-level).
     # p_odometry: scale/magnitude anchor to limit drift.
@@ -364,7 +368,7 @@ class LossWeights:
     # Goal-conditioned ranking loss on the pose rollout.
     # Keeps pose useful for planning geometry while avoiding action algebra constraints.
     # p_odometry: planning geometry / ranking head over the pose space.
-    geometry_rank_p: float = 0.0
+    geometry_rank_p: float = 0.1
 
 
 @dataclass
@@ -717,15 +721,17 @@ def _rollout_pose(
     if model.cfg.pose_correction_use_z:
         if model.p_correction_projector is None:
             raise AssertionError("pose_correction_use_z requires p_correction_projector to be enabled.")
-        pose_pred, pose_deltas = rollout_pose_sequence_with_correction(
+        pose_obs, _ = rollout_pose_sequence_with_correction(
             model,
             h_states,
             actions,
             z_embeddings,
         )
+        pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
     else:
         pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
-    return pose_pred, pose_pred, pose_deltas
+        pose_obs = pose_pred
+    return pose_obs, pose_pred, pose_deltas
 
 
 def rollout_z_loss(
@@ -1230,6 +1236,7 @@ def rollout_h_delta_loss(
 
 
 def rollout_p_loss(
+    pose_pred: torch.Tensor,
     pose_obs: torch.Tensor,
     pose_deltas: torch.Tensor,
     rollout_horizon: int,
@@ -1237,18 +1244,20 @@ def rollout_p_loss(
 ) -> torch.Tensor:
     if rollout_horizon <= 1:
         raise AssertionError("rollout_horizon must be > 1 for rollout_p_loss.")
-    if pose_obs.shape[1] < 2:
+    if pose_pred.shape[1] < 2:
         raise AssertionError("rollout_p_loss requires at least two timesteps.")
     if pose_deltas.shape[1] < 1:
         raise AssertionError("rollout_p_loss requires at least one delta.")
-    max_k = min(rollout_horizon, pose_obs.shape[1] - 1)
+    if pose_obs.shape[1] < 2:
+        raise AssertionError("rollout_p_loss requires at least two observation timesteps.")
+    max_k = min(rollout_horizon, pose_pred.shape[1] - 1, pose_obs.shape[1] - 1)
     if max_k < 2:
         raise AssertionError("rollout_horizon leaves no rollout steps for rollout_p_loss.")
-    total = pose_obs.new_tensor(0.0)
+    total = pose_pred.new_tensor(0.0)
     steps = 0
     delta_cumsum = pose_deltas.cumsum(dim=1)
     for k in range(2, max_k + 1):
-        end = pose_obs.shape[1] - k
+        end = min(pose_pred.shape[1], pose_obs.shape[1]) - k
         if end <= start_frame:
             continue
         delta_end = delta_cumsum[:, start_frame + k - 1 : end + k - 1]
@@ -1257,7 +1266,7 @@ def rollout_p_loss(
             delta_sum_k = delta_end - delta_start
         else:
             delta_sum_k = delta_end
-        pose_hat = pose_obs[:, start_frame:end] + delta_sum_k
+        pose_hat = pose_pred[:, start_frame:end] + delta_sum_k
         pose_target_k = pose_obs[:, start_frame + k : end + k]
         if pose_hat.numel() > 0:
             total = total + F.mse_loss(pose_hat, pose_target_k.detach())
@@ -1703,8 +1712,9 @@ def _compute_losses_and_metrics(
     pose_obs: Optional[torch.Tensor] = None
     pose_pred: Optional[torch.Tensor] = None
     pose_deltas: Optional[torch.Tensor] = None
+    pose_pred_rollout: Optional[torch.Tensor] = None
     if use_pose_rollout:
-        pose_obs, _, _ = _rollout_pose(
+        pose_obs, pose_pred, pose_deltas = _rollout_pose(
             model,
             h_states,
             a_seq,
@@ -1714,7 +1724,7 @@ def _compute_losses_and_metrics(
         h_pred_states = h_preds
         if h_pred_states.shape[1] + 1 == h_states.shape[1]:
             h_pred_states = torch.cat([h_states[:, :1], h_pred_states], dim=1)
-        pose_pred, _, pose_deltas = _rollout_pose(
+        pose_pred_rollout, _, _ = _rollout_pose(
             model,
             h_pred_states,
             a_seq,
@@ -1737,7 +1747,10 @@ def _compute_losses_and_metrics(
         p_norm_mean = x_frames.new_tensor(0.0)
         p_norm_std = x_frames.new_tensor(0.0)
         p_norm_max = x_frames.new_tensor(0.0)
-        if pose_obs is not None:
+        if pose_pred is not None:
+            p_embeddings = pose_pred.detach()
+            p_norm_mean, p_norm_std, p_norm_max = _norm_stats(p_embeddings)
+        elif pose_obs is not None:
             p_embeddings = pose_obs.detach()
             p_norm_mean, p_norm_std, p_norm_max = _norm_stats(p_embeddings)
 
@@ -1838,10 +1851,10 @@ def _compute_losses_and_metrics(
     # p (Geometry)
     if weights.geometry_rank_p > 0:
         # p_odometry: planning geometry/ranking head (goal-conditioned ordering in pose space).
-        if pose_obs is None:
+        if pose_pred is None:
             raise AssertionError("geometry_rank_p requires pose rollouts to be computed.")
         loss_geometry_rank_p, geometry_rank_p_accuracy, geometry_rank_p_pairs = geometry_rank_loss(
-            pose_obs,
+            pose_pred,
             cfg.geometry,
         )
 
@@ -1863,35 +1876,36 @@ def _compute_losses_and_metrics(
 
     if weights.action_delta_p > 0:
         # p_odometry: 1-step odometry consistency (pose_pred[t+1] vs pose_obs[t+1]).
-        if pose_obs is None or pose_pred is None:
+        if pose_obs is None or pose_pred_rollout is None:
             raise AssertionError("action_delta_p requires pose rollouts to be computed.")
         assert pose_obs.shape[1] >= 2, "action_delta_p requires at least two pose timesteps."
-        pose_curr = pose_pred[:, start_frame:-1]
+        pose_curr = pose_pred_rollout[:, start_frame:-1]
         pose_next_obs = pose_obs[:, start_frame + 1 :]
         assert pose_curr.numel() > 0, "action_delta_p requires non-empty pose_curr."
         loss_action_delta_p = F.mse_loss(
-            pose_pred[:, start_frame + 1 :],
+            pose_pred_rollout[:, start_frame + 1 :],
             pose_next_obs.detach(),
         )
 
     if weights.additivity_p > 0:
         # p_odometry: additivity of increments (Δp_t + Δp_{t+1} ≈ pose_{t+2} - pose_t).
-        if pose_obs is None or pose_deltas is None:
+        if pose_pred is None or pose_deltas is None:
             raise AssertionError("additivity_p requires pose rollouts to be computed.")
-        assert pose_obs.shape[1] >= start_frame + 3, "additivity_p requires at least three pose timesteps."
+        assert pose_pred.shape[1] >= start_frame + 3, "additivity_p requires at least three pose timesteps."
         assert pose_deltas.shape[1] >= start_frame + 2, "additivity_p requires at least two deltas."
         delta_sum = pose_deltas[:, start_frame:-1] + pose_deltas[:, start_frame + 1 :]
-        pose_target = pose_obs[:, start_frame + 2 :] - pose_obs[:, start_frame:-2]
+        pose_target = pose_pred[:, start_frame + 2 :] - pose_pred[:, start_frame:-2]
         assert delta_sum.numel() > 0 and pose_target.numel() > 0, "additivity_p requires non-empty tensors."
         loss_additivity_p = F.mse_loss(delta_sum, pose_target.detach())
 
     if weights.rollout_kstep_p > 0:
         # p_odometry: k-step integration consistency.
-        if pose_obs is None or pose_deltas is None:
+        if pose_obs is None or pose_pred is None or pose_deltas is None:
             raise AssertionError("rollout_kstep_p requires pose rollouts to be computed.")
-        assert pose_obs.shape[1] >= 2, "rollout_kstep_p requires at least two pose timesteps."
+        assert pose_pred.shape[1] >= 2, "rollout_kstep_p requires at least two pose timesteps."
         assert pose_deltas.shape[1] >= 2, "rollout_kstep_p requires at least one delta."
         loss_rollout_kstep_p = rollout_p_loss(
+            pose_pred,
             pose_obs,
             pose_deltas,
             cfg.rollout_horizon,
@@ -1900,10 +1914,10 @@ def _compute_losses_and_metrics(
 
     if weights.scale_p > 0:
         # p_odometry: scale anchor for pose drift control.
-        if pose_obs is None:
+        if pose_pred is None:
             raise AssertionError("scale_p requires pose observations to be computed.")
-        assert pose_obs.shape[1] >= start_frame + 2, "scale_p requires at least two pose timesteps after start."
-        loss_scale_p = scale_p_loss(pose_obs, start_frame, cfg.scale_p)
+        assert pose_pred.shape[1] >= start_frame + 2, "scale_p requires at least two pose timesteps after start."
+        loss_scale_p = scale_p_loss(pose_pred, start_frame, cfg.scale_p)
 
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
@@ -1923,10 +1937,10 @@ def _compute_losses_and_metrics(
     if weights.inverse_dynamics_p > 0:
         if model.inverse_dynamics_p is None:
             raise AssertionError("inverse_dynamics_p head is disabled but inverse_dynamics_p loss is enabled.")
-        if pose_obs is None:
-            pose_obs, _, _ = _rollout_pose(model, h_states, a_seq, z_embeddings=z_embeddings)
-        assert pose_obs.shape[1] >= 2
-        p_for_inverse = pose_obs
+        if pose_pred is None:
+            _, pose_pred, _ = _rollout_pose(model, h_states, a_seq, z_embeddings=z_embeddings)
+        assert pose_pred.shape[1] >= 2
+        p_for_inverse = pose_pred
         action_logits_p = model.inverse_dynamics_p(p_for_inverse[:, :-1], p_for_inverse[:, 1:])
         loss_inverse_dynamics_p = INVERSE_DYNAMICS_LOSS(action_logits_p, a_seq[:, :-1])
 
@@ -2924,6 +2938,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.h2z,
             history.z2h,
             history.z2h_init_zero,
+            history.z2h_match_h,
             history.h2z_delta,
             history.geometry_rank_p,
             history.geometry_rank_p_accuracy,
@@ -3708,12 +3723,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     print(f"[run] Writing outputs to {run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.planning_diagnostics.enabled:
-        planning_action_stats_dir.mkdir(parents=True, exist_ok=True)
-        planning_pca_dir.mkdir(parents=True, exist_ok=True)
-        planning_exec_dir.mkdir(parents=True, exist_ok=True)
-        planning_reachable_dir.mkdir(parents=True, exist_ok=True)
-        planning_graph_dir.mkdir(parents=True, exist_ok=True)
     if cfg.spike_diagnostics.enabled:
         spike_diagnostics_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -3849,6 +3858,20 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         device=device,
     )
 
+    planning_enabled = planning_outputs_enabled(
+        weights=weights,
+        model=model,
+        hard_example_cfg=cfg.hard_example,
+        graph_cfg=cfg.graph_diagnostics,
+        planning_cfg=cfg.planning_diagnostics,
+    )
+    if planning_enabled:
+        planning_action_stats_dir.mkdir(parents=True, exist_ok=True)
+        planning_pca_dir.mkdir(parents=True, exist_ok=True)
+        planning_exec_dir.mkdir(parents=True, exist_ok=True)
+        planning_reachable_dir.mkdir(parents=True, exist_ok=True)
+        planning_graph_dir.mkdir(parents=True, exist_ok=True)
+
     # --- Fixed visualization batch (required later) ---
     fixed_batch_cpu, fixed_selection = _build_fixed_vis_batch(dataloader, cfg.vis.rows)
     off_manifold_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
@@ -3890,7 +3913,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
     planning_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
     planning_env: Optional[GridworldKeyEnv] = None
-    if cfg.planning_diagnostics.enabled:
+    if planning_enabled:
         if cfg.planning_diagnostics.sample_sequences <= 0:
             raise AssertionError(
                 "Planning diagnostics requested but planning_diagnostics.sample_sequences is not positive."
@@ -4088,6 +4111,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 hard_example_cfg=cfg.hard_example,
                 vis_ctrl_cfg=cfg.vis_ctrl,
                 graph_cfg=cfg.graph_diagnostics,
+                planning_cfg=cfg.planning_diagnostics,
                 model=model,
                 decoder=decoder,
                 device=device,
@@ -4114,204 +4138,22 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             )
             timing_totals["vis"] += perf_counter() - vis_start
 
-        if (
-            cfg.planning_diagnostics.enabled
-            and planning_batch_cpu is not None
-            and _should_run_schedule(global_step, cfg.plan_schedule)
-        ):
+        if planning_batch_cpu is not None and _should_run_schedule(global_step, cfg.plan_schedule):
             plan_start = perf_counter()
-            model.eval()
-            if planning_env is None:
-                raise AssertionError("Planning diagnostics enabled but planning_env is missing.")
-            plan_frames = planning_batch_cpu[0]
-            plan_actions = planning_batch_cpu[1]
-            if plan_frames.shape[1] < 2:
-                raise AssertionError("Planning diagnostics require sequences with at least two frames.")
-            (
-                p_t,
-                p_tp1,
-                h_t,
-                h_tp1,
-                actions_np,
-                action_labels,
-                deltas,
-                plan_h_states,
-            ) = _extract_planning_latents(
-                model,
-                plan_frames,
-                plan_actions,
-                device,
-                use_z2h_init=should_use_z2h_init(weights),
+            run_planning_diagnostics_step(
+                planning_cfg=cfg.planning_diagnostics,
+                hard_example_cfg=cfg.hard_example,
+                graph_cfg=cfg.graph_diagnostics,
+                model_cfg=model_cfg,
+                model=model,
+                device=device,
+                weights=weights,
+                global_step=global_step,
+                planning_batch_cpu=planning_batch_cpu,
+                planning_env=planning_env,
+                run_dir=run_dir,
                 force_h_zero=cfg.force_h_zero,
             )
-            stats, graph_h, graph_p, tau_h_merge = _compute_planning_graphs(
-                p_t,
-                p_tp1,
-                h_t,
-                h_tp1,
-                actions_np,
-                action_labels,
-                min_action_count=cfg.planning_diagnostics.min_action_count,
-            )
-
-            plot_action_stats(
-                planning_action_stats_dir / f"action_stats_{global_step:07d}.png",
-                deltas,
-                action_labels,
-                stats.mu,
-            )
-            plot_action_strip(
-                planning_action_stats_dir / f"action_stats_strip_{global_step:07d}.png",
-                deltas,
-                action_labels,
-                stats.mu,
-            )
-
-            rng = random.Random(global_step)
-            h_reach = reachable_fractions(
-                graph_h,
-                sample_limit=cfg.planning_diagnostics.reachable_fraction_samples,
-                rng=rng,
-            )
-            p_reach = reachable_fractions(
-                graph_p,
-                sample_limit=cfg.planning_diagnostics.reachable_fraction_samples,
-                rng=rng,
-            )
-            save_planning_graph_plot(
-                planning_graph_dir / f"graph_h_{global_step:07d}.png",
-                h_t,
-                graph_h.centers,
-                graph_h.edges,
-                title="Planning graph (h)",
-                max_samples=cfg.planning_diagnostics.pca_samples,
-                max_edges=4000,
-            )
-            save_planning_graph_plot(
-                planning_graph_dir / f"graph_p_{global_step:07d}.png",
-                p_t,
-                graph_p.centers,
-                graph_p.edges,
-                title="Planning graph (p)",
-                max_samples=cfg.planning_diagnostics.pca_samples,
-                max_edges=4000,
-            )
-
-            h_local_success = _run_h_local_sanity(
-                graph_h,
-                plan_h_states,
-                tau_h_merge,
-                cfg.planning_diagnostics,
-                rng,
-            )
-            test_cases = _build_planning_tests(planning_env, cfg.planning_diagnostics)
-
-            test_results: Dict[str, PlanningTestResult] = {}
-            plan_nodes_for_plot: Dict[str, Optional[np.ndarray]] = {}
-            action_dim = plan_actions.shape[-1]
-            for label, start_tile, goal_tile in test_cases:
-                obs_start, _ = planning_env.reset(options={"start_tile": start_tile})
-                obs_goal, _ = planning_env.reset(options={"start_tile": goal_tile})
-                pose_seq = _pose_from_frames(
-                    [obs_start, obs_goal],
-                    model,
-                    model_cfg,
-                    device,
-                    use_z2h_init=should_use_z2h_init(weights),
-                    action_dim=action_dim,
-                    force_h_zero=cfg.force_h_zero,
-                )
-                p_start = pose_seq[0]
-                p_goal = pose_seq[1]
-                plan = delta_lattice_astar(
-                    p_start,
-                    p_goal,
-                    stats.mu,
-                    r_goal=stats.r_goal,
-                    r_merge=stats.r_merge,
-                    step_scale=stats.L_scale,
-                    max_nodes=cfg.planning_diagnostics.astar_max_nodes,
-                )
-                visited: List[Tuple[int, int]] = [start_tile]
-                final_frame = None
-                if plan is None:
-                    test_results[label] = PlanningTestResult(
-                        success=False,
-                        steps=0,
-                        final_p_distance=float("inf"),
-                        goal_distance=float(np.linalg.norm(p_goal - p_start)),
-                        visited_cells=visited,
-                    )
-                    plan_nodes_for_plot[label] = None
-                else:
-                    visited, final_frame = run_plan_in_env(
-                        planning_env,
-                        plan.actions,
-                        start_tile=start_tile,
-                    )
-                    final_cell = visited[-1] if visited else start_tile
-                    success = final_cell == goal_tile
-                    final_p_distance = float("inf")
-                    if final_frame is not None:
-                        final_pose = _pose_from_frames(
-                            [obs_start, final_frame],
-                            model,
-                            model_cfg,
-                            device,
-                            use_z2h_init=should_use_z2h_init(weights),
-                            action_dim=action_dim,
-                            force_h_zero=cfg.force_h_zero,
-                        )
-                        final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))
-                    test_results[label] = PlanningTestResult(
-                        success=success,
-                        steps=len(plan.actions),
-                        final_p_distance=final_p_distance,
-                        goal_distance=float(np.linalg.norm(p_goal - p_start)),
-                        visited_cells=visited,
-                    )
-                    plan_nodes_for_plot[label] = np.stack(plan.nodes, axis=0) if plan.nodes else None
-                plot_grid_trace(
-                    planning_exec_dir / f"exec_{label}_{global_step:07d}.png",
-                    planning_env.grid_rows,
-                    planning_env.grid_cols,
-                    visited,
-                    start_tile,
-                    goal_tile,
-                )
-                plot_pca_path(
-                    planning_pca_dir / f"pca_{label}_{global_step:07d}.png",
-                    p_t,
-                    plan_nodes_for_plot[label],
-                    p_start,
-                    p_goal,
-                    max_samples=cfg.planning_diagnostics.pca_samples,
-                )
-
-            save_reachable_fraction_hist_plot(
-                planning_reachable_dir / f"reachable_h_{global_step:07d}.png",
-                h_reach,
-                "Reachable fraction (h)",
-            )
-            save_reachable_fraction_hist_plot(
-                planning_reachable_dir / f"reachable_p_{global_step:07d}.png",
-                p_reach,
-                "Reachable fraction (p)",
-            )
-
-            _write_planning_metrics_row(
-                metrics_dir,
-                stats,
-                graph_h,
-                graph_p,
-                h_reach,
-                p_reach,
-                h_local_success,
-                test_results,
-                global_step=global_step,
-            )
-
-            model.train()
             timing_totals["plan"] += perf_counter() - plan_start
 
         if (

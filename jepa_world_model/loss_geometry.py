@@ -12,7 +12,7 @@ import torch.nn.functional as F
 @dataclass
 class LossGeometryConfig:
     margin: float = 0.1
-    max_pairs: int = 0
+    max_pairs: int = 1024
 
 
 def geometry_ranking_loss(states: torch.Tensor, cfg: LossGeometryConfig) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

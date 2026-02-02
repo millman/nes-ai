@@ -20,10 +20,7 @@ from jepa_world_model.vis_odometry import (
     _plot_latent_prediction_comparison,
     _plot_odometry_embeddings,
 )
-from jepa_world_model.pose_rollout import (
-    rollout_pose_sequence,
-    rollout_pose_sequence_with_correction,
-)
+from jepa_world_model.pose_rollout import rollout_pose
 
 
 def write_state_embedding_histogram(
@@ -95,10 +92,10 @@ def write_state_embedding_outputs(
             use_z2h_init=use_z2h_init,
             force_h_zero=force_h_zero,
         )
-        if model.p_correction_projector is not None and embeddings is not None:
-            p = rollout_pose_sequence_with_correction(model, h_states, actions, embeddings)[0]
-        else:
-            p = rollout_pose_sequence(model, h_states, actions)[0]
+        if embeddings is None:
+            raise AssertionError("State embedding outputs require embeddings.")
+        _, p, _ = rollout_pose(model, h_states, actions, z_embeddings=embeddings)
+        p = p[0]
 
     warmup_frames = max(model.cfg.warmup_frames_h, 0)
     warmup = max(min(warmup_frames, p.shape[0] - 1), 0)
@@ -178,11 +175,10 @@ def write_state_embedding_outputs(
             use_z2h_init=use_z2h_init,
         )
         if h_hat_open.shape[1] > 0:
-            if model.p_correction_projector is not None and embeddings is not None:
-                p_hat = rollout_pose_sequence_with_correction(model, h_hat_open, actions, embeddings)[0]
-            else:
-                p_hat = rollout_pose_sequence(model, h_hat_open, actions)[0]
-            p_hat = p_hat.detach().cpu().numpy()
+            if embeddings is None:
+                raise AssertionError("State embedding outputs require embeddings.")
+            _, p_hat, _ = rollout_pose(model, h_hat_open, actions, z_embeddings=embeddings)
+            p_hat = p_hat[0].detach().cpu().numpy()
             p_next = p_np[1:]
             p_hat_trim = p_hat[warmup:]
             p_next_trim = p_next[warmup:] if warmup < p_next.shape[0] else p_next[:0]
@@ -223,10 +219,10 @@ def write_state_embedding_outputs(
             hist_actions,
             use_z2h_init=use_z2h_init,
         )
-        if model.p_correction_projector is not None and hist_embeddings is not None:
-            hist_p = rollout_pose_sequence_with_correction(model, hist_h_states, hist_actions, hist_embeddings)[0]
-        else:
-            hist_p = rollout_pose_sequence(model, hist_h_states, hist_actions)[0]
+        if hist_embeddings is None:
+            raise AssertionError("State embedding outputs require hist_embeddings.")
+        _, hist_p, _ = rollout_pose(model, hist_h_states, hist_actions, z_embeddings=hist_embeddings)
+        hist_p = hist_p[0]
     hist_warmup = max(min(warmup_frames, hist_p.shape[1] - 1), 0)
     hist_p = hist_p[:, hist_warmup:]
     if hist_p.shape[1] < 1:

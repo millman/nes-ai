@@ -14,6 +14,17 @@ def save_action_delta_stats_plot(
     labels: Sequence[Optional[str]],
     mu: Dict[str, np.ndarray],
 ) -> None:
+    def _safe_hist(ax, values: np.ndarray, bins: int, label: str) -> None:
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return
+        vmin = float(finite.min())
+        vmax = float(finite.max())
+        if np.isclose(vmin, vmax):
+            ax.hist([vmin], bins=1, alpha=0.6, label=label)
+        else:
+            ax.hist(finite, bins=bins, alpha=0.6, label=label)
+
     fig, axes = plt.subplots(2, 2, figsize=(9, 6))
     axes = axes.flatten()
     for idx, action in enumerate(("L", "R", "U", "D")):
@@ -27,8 +38,8 @@ def save_action_delta_stats_plot(
         mu_vec = mu[action]
         denom = np.maximum(np.linalg.norm(d, axis=1) * np.linalg.norm(mu_vec), 1e-8)
         cos = (d @ mu_vec) / denom
-        ax.hist(norms, bins=30, alpha=0.6, label="||d||")
-        ax.hist(cos, bins=30, alpha=0.6, label="cos(d,mu)")
+        _safe_hist(ax, norms, bins=30, label="||d||")
+        _safe_hist(ax, cos, bins=30, label="cos(d,mu)")
         ax.set_title(action)
         ax.legend(fontsize=8)
     fig.tight_layout()

@@ -132,12 +132,14 @@ def rollout_pose(
     if model.cfg.pose_correction_use_z:
         if model.p_correction_projector is None:
             raise AssertionError("pose_correction_use_z requires p_correction_projector to be enabled.")
-        pose_pred, pose_deltas = rollout_pose_sequence_with_correction(
+        pose_obs, _ = rollout_pose_sequence_with_correction(
             model,
             h_states,
             actions,
             z_embeddings,
         )
+        pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
     else:
         pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
-    return pose_pred, pose_pred, pose_deltas
+        pose_obs = pose_pred
+    return pose_obs, pose_pred, pose_deltas

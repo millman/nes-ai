@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 @dataclass
 class PlanningDiagnosticsConfig:
-    enabled: bool = False
     sample_sequences: int = 128
     min_action_count: int = 5
     astar_max_nodes: int = 3000
