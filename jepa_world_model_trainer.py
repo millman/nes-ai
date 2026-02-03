@@ -351,7 +351,7 @@ class LossWeights:
     # --- P ---
     # State-conditioned delta alignment (ΔP): Δp_t vs observed pose delta.
     # p_odometry: 1-step odometry consistency on ΔP (action algebra lives in ΔP).
-    action_delta_dp: float = 0.0
+    action_delta_dp: float = 0.1
 
     # Explicit additivity of ΔP across steps (action algebra lives in ΔP).
     # p_odometry: short-horizon composition/additivity of increments.
@@ -375,7 +375,7 @@ class LossWeights:
     dz_anchor_dp: float = 0.1
 
     # Soft loop closure: nearby z should imply nearby p.
-    loop_closure_p: float = 0.0
+    loop_closure_p: float = 0.1
 
     # --- Inverse-cycle ---
     # Learn inverse actions in h (cycle in h), then enforce inverse/cancel in ΔP.
