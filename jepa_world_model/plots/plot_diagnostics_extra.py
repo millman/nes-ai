@@ -151,16 +151,24 @@ def save_path_independence_plot(
     s_distances: Sequence[float],
     title: str = "Path independence",
 ) -> None:
-    idx = np.arange(len(labels))
-    width = 0.35
-    fig, ax = plt.subplots(1, 1, figsize=(6.4, 3.2))
-    ax.bar(idx - width / 2, z_distances, width, label="Z distance")
-    ax.bar(idx + width / 2, s_distances, width, label="S distance")
+    expanded_labels: List[str] = []
+    expanded_values: List[float] = []
+    expanded_colors: List[str] = []
+    for label, z_val, s_val in zip(labels, z_distances, s_distances):
+        expanded_labels.append(f"Z: {label}")
+        expanded_values.append(z_val)
+        expanded_colors.append("#4c72b0")
+        expanded_labels.append(f"P: {label}")
+        expanded_values.append(s_val)
+        expanded_colors.append("#dd8452")
+
+    idx = np.arange(len(expanded_labels))
+    fig, ax = plt.subplots(1, 1, figsize=(6.8, 3.4))
+    ax.bar(idx, expanded_values, color=expanded_colors)
     ax.set_xticks(idx)
-    ax.set_xticklabels(labels, rotation=15, ha="right")
+    ax.set_xticklabels(expanded_labels, rotation=15, ha="right")
     ax.set_ylabel("Distance")
     ax.set_title(title)
-    ax.legend(fontsize=8)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=DEFAULT_DPI)

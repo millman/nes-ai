@@ -177,7 +177,11 @@ def write_state_embedding_outputs(
         if h_hat_open.shape[1] > 0:
             if embeddings is None:
                 raise AssertionError("State embedding outputs require embeddings.")
-            _, p_hat, _ = rollout_pose(model, h_hat_open, actions, z_embeddings=embeddings)
+            z_hat_len = h_hat_open.shape[1]
+            if z_hat_len <= 0:
+                raise AssertionError("State embedding outputs require non-empty h_hat_open.")
+            z_hat = embeddings[:, :z_hat_len]
+            _, p_hat, _ = rollout_pose(model, h_hat_open, actions[:, :z_hat_len], z_embeddings=z_hat)
             p_hat = p_hat[0].detach().cpu().numpy()
             p_next = p_np[1:]
             p_hat_trim = p_hat[warmup:]

@@ -58,6 +58,8 @@ const IMAGE_FOLDER_DESCRIPTIONS = {
   vis_z_monotonicity: "Z distance vs pixel shift. Read: smooth monotonic increase indicates perceptual alignment. Good: steadily rising curve.",
   vis_path_independence: "Path independence for Z and P. Read: compare end-state distances for alternate paths. Good: low distances.",
   vis_straightline_p: "Straight-line action rays in P. Read: repeated actions trace straight paths; opposite actions mirror. Good: clean rays.",
+  vis_straightline_z: "Straight-line action rays in Z. Read: repeated actions trace straight paths; opposite actions mirror. Good: clean rays.",
+  vis_straightline_h: "Straight-line action rays in H. Read: repeated actions trace straight paths; opposite actions mirror. Good: clean rays.",
   vis_h_ablation: "H ablation divergence. Read: compare rollout errors with normal vs zeroed H. Good: minimal gap in fully observable settings.",
   vis_h_drift_by_action: "H drift by action. Read: mean ||h_{t+1}-h_t|| grouped by action. Good: low, consistent drift.",
   vis_norm_timeseries: "Norm stability for Z/H/P. Read: mean and p95 norms over steps. Good: stable, bounded lines.",

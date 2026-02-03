@@ -256,44 +256,35 @@ class PoseActionDeltaProjector(nn.Module):
         return delta.view(*original_shape, delta.shape[-1])
 
 
-class PoseCorrectionProjector(nn.Module):
-    """Predict observation-conditioned pose correction from pose and z."""
+class InverseActionHead(nn.Module):
+    """Predict inverse-action logits from current state and action."""
 
     def __init__(
         self,
-        pose_dim: int,
-        z_dim: int,
+        state_dim: int,
+        action_dim: int,
         hidden_dim: int,
-        use_layer_norm: bool = False,
     ) -> None:
         super().__init__()
-        input_dim = pose_dim + z_dim
-        layers = []
-        if use_layer_norm:
-            layers.append(nn.LayerNorm(input_dim))
-        layers.extend(
-            [
-                nn.Linear(input_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, pose_dim),
-            ]
+        input_dim = state_dim + action_dim
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, action_dim),
         )
-        self.net = nn.Sequential(*layers)
-        self.pose_dim = pose_dim
-        self.z_dim = z_dim
+        self.state_dim = state_dim
+        self.action_dim = action_dim
         self.hidden_dim = hidden_dim
-        self.use_layer_norm = use_layer_norm
 
-    def forward(self, pose: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        if pose.shape[:-1] != z.shape[:-1]:
-            raise ValueError("Pose and z must share leading dimensions.")
-        original_shape = pose.shape[:-1]
-        pose_flat = pose.reshape(-1, pose.shape[-1])
-        z_flat = z.reshape(-1, z.shape[-1])
-        correction = self.net(torch.cat([pose_flat, z_flat], dim=-1))
-        return correction.view(*original_shape, correction.shape[-1])
+    def forward(self, h: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        if h.shape[:-1] != actions.shape[:-1]:
+            raise ValueError("Hidden state and actions must share leading dimensions.")
+        h_flat = h.reshape(-1, h.shape[-1])
+        act_flat = actions.reshape(-1, actions.shape[-1])
+        logits = self.net(torch.cat([h_flat, act_flat], dim=-1))
+        return logits.view(*h.shape[:-1], logits.shape[-1])
 
 
 class ActionDeltaProjector(nn.Module):
@@ -313,6 +304,27 @@ class ActionDeltaProjector(nn.Module):
     def forward(self, actions: torch.Tensor) -> torch.Tensor:
         original_shape = actions.shape[:-1]
         flat = actions.reshape(-1, actions.shape[-1])
+        projected = self.net(flat)
+        return projected.view(*original_shape, projected.shape[-1])
+
+
+class DeltaToDeltaProjector(nn.Module):
+    """Project one delta space into another (e.g., Δz -> Δp)."""
+
+    def __init__(self, input_dim: int, target_dim: int, use_layer_norm: bool = True) -> None:
+        super().__init__()
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(input_dim))
+        layers.append(nn.Linear(input_dim, target_dim, bias=False))
+        self.net = nn.Sequential(*layers)
+        self.input_dim = input_dim
+        self.target_dim = target_dim
+        self.use_layer_norm = use_layer_norm
+
+    def forward(self, delta: torch.Tensor) -> torch.Tensor:
+        original_shape = delta.shape[:-1]
+        flat = delta.reshape(-1, delta.shape[-1])
         projected = self.net(flat)
         return projected.view(*original_shape, projected.shape[-1])
 
@@ -342,6 +354,33 @@ class InverseDynamicsHead(nn.Module):
         if z_t.shape != z_next.shape:
             raise ValueError("z_t and z_next must have matching shapes.")
         delta = z_next - z_t
+        original_shape = delta.shape[:-1]
+        flat = delta.reshape(-1, delta.shape[-1])
+        logits = self.net(flat)
+        return logits.view(*original_shape, logits.shape[-1])
+
+
+class InverseDynamicsDeltaHead(nn.Module):
+    """Predict action directly from delta embeddings."""
+
+    def __init__(self, delta_dim: int, hidden_dim: int, action_dim: int, use_layer_norm: bool = True) -> None:
+        super().__init__()
+        layers = []
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(delta_dim))
+        layers.extend(
+            [
+                nn.Linear(delta_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, action_dim),
+            ]
+        )
+        self.net = nn.Sequential(*layers)
+        self.use_layer_norm = use_layer_norm
+
+    def forward(self, delta: torch.Tensor) -> torch.Tensor:
         original_shape = delta.shape[:-1]
         flat = delta.reshape(-1, delta.shape[-1])
         logits = self.net(flat)
@@ -412,6 +451,7 @@ class JEPAWorldModel(nn.Module):
             "enable_action_delta_z",
             "enable_action_delta_h",
             "enable_action_delta_p",
+            "enable_dz_to_dp_projector",
             "enable_h2z_delta",
         ):
             if getattr(cfg, name) is None:
@@ -487,6 +527,21 @@ class JEPAWorldModel(nn.Module):
             if cfg.enable_inverse_dynamics_p
             else None
         )
+        self.inverse_dynamics_dp = (
+            InverseDynamicsDeltaHead(
+                pose_dim if pose_dim is not None else cfg.state_dim,
+                cfg.hidden_dim,
+                cfg.action_dim,
+                use_layer_norm=cfg.layer_norms.inverse_dynamics_dp,
+            )
+            if cfg.enable_inverse_dynamics_dp
+            else None
+        )
+        self.inverse_action_head = InverseActionHead(
+            cfg.state_dim,
+            cfg.action_dim,
+            cfg.hidden_dim,
+        )
         self.z_action_delta_projector = (
             # Action-only prototypes for z; no state/pose conditioning.
             ActionDeltaProjector(
@@ -518,14 +573,22 @@ class JEPAWorldModel(nn.Module):
             if cfg.enable_action_delta_p
             else None
         )
-        self.p_correction_projector = (
-            PoseCorrectionProjector(
+        self.dp_action_delta_projector = (
+            ActionDeltaProjector(
+                cfg.action_dim,
                 pose_dim if pose_dim is not None else cfg.state_dim,
-                self.embedding_dim,
-                cfg.hidden_dim,
-                use_layer_norm=cfg.layer_norms.pose_correction_projector,
+                use_layer_norm=cfg.layer_norms.action_delta_projector_dp,
             )
-            if cfg.pose_correction_use_z
+            if cfg.enable_action_delta_p
+            else None
+        )
+        self.dz_to_dp_projector = (
+            DeltaToDeltaProjector(
+                self.embedding_dim,
+                pose_dim if pose_dim is not None else cfg.state_dim,
+                use_layer_norm=cfg.layer_norms.dz_to_dp_projector,
+            )
+            if cfg.enable_dz_to_dp_projector
             else None
         )
 

@@ -1285,6 +1285,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "variance_spectrum": selected.diagnostics_variance_spectrum_images,
             "action_alignment_detail": selected.diagnostics_action_alignment_detail_images,
             "cycle_error": selected.diagnostics_cycle_error_images,
+            "straightline_z": selected.diagnostics_z_straightline_images,
             "rollout_divergence": selected.diagnostics_rollout_divergence_images,
             "rollout_divergence_z": selected.diagnostics_rollout_divergence_z_images,
             "z_consistency": selected.diagnostics_z_consistency_images,
@@ -1797,6 +1798,9 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         )
         diagnostics_map_h["cycle_error_h"] = _collect_step_map_from_dir(
             selected.id, selected.path, "vis_cycle_error_h", "cycle_error_*.png", "cycle_error_"
+        )
+        diagnostics_map_h["straightline_h"] = _collect_step_map_from_dir(
+            selected.id, selected.path, "vis_straightline_h", "straightline_h_*.png", "straightline_h_"
         )
         diagnostics_map_h["self_distance_h"] = _collect_step_map_from_dir(
             selected.id, selected.path, "vis_self_distance_h", "self_distance_h_*.png", "self_distance_h_"

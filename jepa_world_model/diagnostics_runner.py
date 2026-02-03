@@ -131,28 +131,30 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "vis_odometry_h_vs_h_hat": DiagnosticsOutputSpec(True, "Odometry h vs h_hat plots."),
     "vis_action_field_z": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for z."),
     "vis_action_field_h": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for h."),
-    "vis_action_field_p": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for p."),
+    "vis_action_field_p": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for ΔP."),
     "vis_action_time_z": DiagnosticsOutputSpec(True, "Action delta time-slice plots for z."),
     "vis_action_time_h": DiagnosticsOutputSpec(True, "Action delta time-slice plots for h."),
-    "vis_action_time_p": DiagnosticsOutputSpec(True, "Action delta time-slice plots for p."),
+    "vis_action_time_p": DiagnosticsOutputSpec(True, "Action delta time-slice plots for ΔP."),
     "vis_composability_z": DiagnosticsOutputSpec(True, "Composability plots for z."),
     "vis_composability_h": DiagnosticsOutputSpec(True, "Composability plots for h."),
     "vis_composability_p": DiagnosticsOutputSpec(True, "Composability plots for p."),
     "vis_delta_z_pca": DiagnosticsOutputSpec(True, "Motion PCA artifacts for z."),
     "vis_delta_h_pca": DiagnosticsOutputSpec(True, "Motion PCA artifacts for h."),
-    "vis_delta_p_pca": DiagnosticsOutputSpec(True, "Motion PCA artifacts for p."),
+    "vis_delta_p_pca": DiagnosticsOutputSpec(True, "Motion PCA artifacts for ΔP."),
     "vis_action_alignment_detail_z": DiagnosticsOutputSpec(True, "Action-alignment detail plot for z (PCA)."),
     "vis_action_alignment_detail_raw_z": DiagnosticsOutputSpec(True, "Action-alignment detail plot for z (raw)."),
     "vis_action_alignment_detail_centered_z": DiagnosticsOutputSpec(True, "Action-alignment detail plot for z (centered)."),
     "vis_action_alignment_detail_h": DiagnosticsOutputSpec(True, "Action-alignment detail plot for h (PCA)."),
     "vis_action_alignment_detail_raw_h": DiagnosticsOutputSpec(True, "Action-alignment detail plot for h (raw)."),
     "vis_action_alignment_detail_centered_h": DiagnosticsOutputSpec(True, "Action-alignment detail plot for h (centered)."),
-    "vis_action_alignment_detail_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for p (PCA)."),
-    "vis_action_alignment_detail_raw_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for p (raw)."),
-    "vis_action_alignment_detail_centered_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for p (centered)."),
+    "vis_action_alignment_detail_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for ΔP (PCA)."),
+    "vis_action_alignment_detail_raw_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for ΔP (raw)."),
+    "vis_action_alignment_detail_centered_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for ΔP (centered)."),
     "vis_cycle_error_z": DiagnosticsOutputSpec(False, "Cycle-error artifacts for z."),
     "vis_cycle_error_h": DiagnosticsOutputSpec(False, "Cycle-error artifacts for h."),
     "vis_cycle_error_p": DiagnosticsOutputSpec(False, "Cycle-error artifacts for p."),
+    "vis_straightline_z": DiagnosticsOutputSpec(True, "Straight-line rollout plot in z."),
+    "vis_straightline_h": DiagnosticsOutputSpec(True, "Straight-line rollout plot in h."),
     "vis_straightline_p": DiagnosticsOutputSpec(True, "Straight-line rollout plot in p."),
     "vis_rollout_divergence_z": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for z."),
     "vis_rollout_divergence_h": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for h."),
@@ -617,29 +619,12 @@ def _write_planning_metrics_row(
     append_csv_row(planning_metrics_path, header, row)
 
 
-def _build_straightline_trajectories(
+def _select_straightline_ids(
     *,
-    diagnostics_cfg: Any,
-    diag_state: Any,
-    model: Any,
-    diagnostics_generator: torch.Generator,
-) -> List[StraightLineTrajectory]:
-    if diag_state.p_embeddings is None or not diag_state.has_p:
-        raise AssertionError("Straightline diagnostics require p_embeddings.")
-    if diag_state.p_embeddings.shape[1] < 2:
-        raise AssertionError("Straightline diagnostics require at least two timesteps.")
-
-    max_starts = min(diagnostics_cfg.straightline_starts, diag_state.p_embeddings.shape[0])
-    if max_starts <= 0:
-        raise AssertionError("Straightline diagnostics require at least one start.")
-    if len(diag_state.action_metadata.unique_actions) == 0:
-        raise AssertionError("Straightline diagnostics require at least one action ID.")
-
-    action_labels = diag_state.action_metadata.action_labels
-    action_vectors = diag_state.action_metadata.action_vectors
-    unique_actions = diag_state.action_metadata.unique_actions
-    action_counts = diag_state.action_metadata.action_counts
-
+    action_labels: Dict[int, str],
+    unique_actions: np.ndarray,
+    action_counts: np.ndarray,
+) -> List[int]:
     right_id = next((aid for aid, label in action_labels.items() if "RIGHT" in label), None)
     left_id = next((aid for aid, label in action_labels.items() if "LEFT" in label), None)
     up_id = next((aid for aid, label in action_labels.items() if "UP" in label), None)
@@ -653,19 +638,67 @@ def _build_straightline_trajectories(
             reverse=True,
         )
     ]
+    straightline_ids: List[int] = []
     if right_id is not None and left_id is not None:
-        straightline_ids = [right_id, left_id]
-    elif up_id is not None and down_id is not None:
-        straightline_ids = [up_id, down_id]
+        straightline_ids.extend([right_id, left_id])
+    if up_id is not None and down_id is not None:
+        straightline_ids.extend([up_id, down_id])
+    # Preserve order and uniqueness.
+    straightline_ids = list(dict.fromkeys(straightline_ids))
+    if len(straightline_ids) < 2:
+        for aid in sorted_ids:
+            if aid not in straightline_ids:
+                straightline_ids.append(aid)
+            if len(straightline_ids) >= 2:
+                break
+    return straightline_ids
+
+
+def _build_straightline_trajectories(
+    *,
+    diagnostics_cfg: Any,
+    diag_state: Any,
+    model: Any,
+    diagnostics_generator: torch.Generator,
+    space: str,
+) -> List[StraightLineTrajectory]:
+    if space == "p":
+        if diag_state.p_embeddings is None or not diag_state.has_p:
+            raise AssertionError("Straightline diagnostics require p_embeddings.")
+        embeddings = diag_state.p_embeddings
+    elif space == "h":
+        embeddings = diag_state.h_states
+    elif space == "z":
+        embeddings = diag_state.embeddings
     else:
-        straightline_ids = sorted_ids[:2]
+        raise AssertionError(f"Unknown straightline space: {space}")
+
+    if embeddings.shape[1] < 2:
+        raise AssertionError("Straightline diagnostics require at least two timesteps.")
+
+    max_starts = min(diagnostics_cfg.straightline_starts, embeddings.shape[0])
+    if max_starts <= 0:
+        raise AssertionError("Straightline diagnostics require at least one start.")
+    if len(diag_state.action_metadata.unique_actions) == 0:
+        raise AssertionError("Straightline diagnostics require at least one action ID.")
+
+    action_labels = diag_state.action_metadata.action_labels
+    action_vectors = diag_state.action_metadata.action_vectors
+    unique_actions = diag_state.action_metadata.unique_actions
+    action_counts = diag_state.action_metadata.action_counts
+
+    straightline_ids = _select_straightline_ids(
+        action_labels=action_labels,
+        unique_actions=unique_actions,
+        action_counts=action_counts,
+    )
 
     if not straightline_ids:
         raise AssertionError("Straightline diagnostics require at least one action ID.")
 
-    p_flat = diag_state.p_embeddings.detach().cpu().reshape(-1, diag_state.p_embeddings.shape[-1]).numpy()
-    p_center = p_flat.mean(axis=0, keepdims=True)
-    centered = p_flat - p_center
+    embed_flat = embeddings.detach().cpu().reshape(-1, embeddings.shape[-1]).numpy()
+    embed_center = embed_flat.mean(axis=0, keepdims=True)
+    centered = embed_flat - embed_center
     try:
         _, _, vt = np.linalg.svd(centered, full_matrices=False)
     except np.linalg.LinAlgError:
@@ -675,9 +708,9 @@ def _build_straightline_trajectories(
     if projection is None:
         raise AssertionError("Straightline diagnostics require a 2D projection.")
 
-    seq_len = diag_state.p_embeddings.shape[1]
+    seq_len = embeddings.shape[1]
     start_frame = max(min(diag_state.warmup_frames, seq_len - 2), 0)
-    perm = torch.randperm(diag_state.p_embeddings.shape[0], generator=diagnostics_generator)[:max_starts]
+    perm = torch.randperm(embeddings.shape[0], generator=diagnostics_generator)[:max_starts]
     trajectories: List[StraightLineTrajectory] = []
     palette = ["#4c72b0", "#55a868", "#c44e52", "#8172b3"]
     for action_idx, action_id in enumerate(straightline_ids):
@@ -690,26 +723,44 @@ def _build_straightline_trajectories(
             b = int(b_idx.item())
             z_t = diag_state.embeddings[b, start_frame]
             h_t = diag_state.h_states[b, start_frame]
-            p_t = diag_state.p_embeddings[b, start_frame]
-            p_points = [p_t.detach().cpu().numpy()]
+            if space == "p":
+                p_t = diag_state.p_embeddings[b, start_frame]
+                points = [p_t.detach().cpu().numpy()]
+            elif space == "h":
+                points = [h_t.detach().cpu().numpy()]
+            else:
+                points = [z_t.detach().cpu().numpy()]
             for _ in range(diagnostics_cfg.straightline_steps):
-                h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
-                delta = model.p_action_delta_projector(
-                    p_t.unsqueeze(0),
-                    h_in.unsqueeze(0),
-                    action_vec.unsqueeze(0),
-                ).squeeze(0)
-                p_t = p_t + delta
-                h_next = model.predictor(
-                    z_t.unsqueeze(0),
-                    h_t.unsqueeze(0),
-                    action_vec.unsqueeze(0),
-                )
-                z_t = model.h_to_z(h_next).squeeze(0)
-                h_t = h_next.squeeze(0)
-                p_points.append(p_t.detach().cpu().numpy())
-            p_points_np = np.stack(p_points, axis=0)
-            proj = (p_points_np - p_center) @ projection
+                if space == "p":
+                    h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
+                    delta = model.p_action_delta_projector(
+                        p_t.unsqueeze(0),
+                        h_in.unsqueeze(0),
+                        action_vec.unsqueeze(0),
+                    ).squeeze(0)
+                    p_t = p_t + delta
+                    h_next = model.predictor(
+                        z_t.unsqueeze(0),
+                        h_t.unsqueeze(0),
+                        action_vec.unsqueeze(0),
+                    )
+                    z_t = model.h_to_z(h_next).squeeze(0)
+                    h_t = h_next.squeeze(0)
+                    points.append(p_t.detach().cpu().numpy())
+                else:
+                    h_next = model.predictor(
+                        z_t.unsqueeze(0),
+                        h_t.unsqueeze(0),
+                        action_vec.unsqueeze(0),
+                    )
+                    z_t = model.h_to_z(h_next).squeeze(0)
+                    h_t = h_next.squeeze(0)
+                    if space == "h":
+                        points.append(h_t.detach().cpu().numpy())
+                    else:
+                        points.append(z_t.detach().cpu().numpy())
+            points_np = np.stack(points, axis=0)
+            proj = (points_np - embed_center) @ projection
             traj_label = f"{label} (start {row_offset + 1})"
             trajectories.append(StraightLineTrajectory(points=proj, label=traj_label, color=color))
     return trajectories
@@ -960,10 +1011,11 @@ def _enabled_kinds(weights, model) -> dict[str, bool]:
             getattr(weights, name, 0.0) > 0
             for name in (
                 "inverse_dynamics_p",
-                "action_delta_p",
-                "additivity_p",
+                "inverse_dynamics_dp",
+                "action_delta_dp",
+                "additivity_dp",
                 "rollout_kstep_p",
-                "scale_p",
+                "scale_dp",
                 "geometry_rank_p",
             )
         )
@@ -1072,6 +1124,8 @@ def run_diagnostics_step(
     diagnostics_action_time_z_dir = run_dir / "vis_action_time_z"
     diagnostics_action_time_h_dir = run_dir / "vis_action_time_h"
     diagnostics_action_time_p_dir = run_dir / "vis_action_time_p"
+    diagnostics_straightline_z_dir = run_dir / "vis_straightline_z"
+    diagnostics_straightline_h_dir = run_dir / "vis_straightline_h"
     diagnostics_straightline_p_dir = run_dir / "vis_straightline_p"
     diagnostics_z_consistency_dir = run_dir / "vis_z_consistency"
     diagnostics_z_monotonicity_dir = run_dir / "vis_z_monotonicity"
@@ -1213,6 +1267,10 @@ def run_diagnostics_step(
             diagnostics_action_time_h_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_action_time_p"].enabled:
             diagnostics_action_time_p_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_straightline_z"].enabled:
+            diagnostics_straightline_z_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_straightline_h"].enabled:
+            diagnostics_straightline_h_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_straightline_p"].enabled:
             diagnostics_straightline_p_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_z_consistency"].enabled:
@@ -1544,7 +1602,7 @@ def run_diagnostics_step(
                     p_action_dim,
                     max_actions=diagnostics_cfg.max_actions_to_plot,
                     min_count=diagnostics_cfg.min_action_count,
-                    title="Action-conditioned vector field (P)",
+                    title="Action-conditioned vector field (ΔP)",
                 )
             if resolved_outputs["vis_action_time_p"].enabled:
                 save_action_time_slice_plot(
@@ -1554,7 +1612,7 @@ def run_diagnostics_step(
                     p_action_dim,
                     max_actions=diagnostics_cfg.max_actions_to_plot,
                     min_count=diagnostics_cfg.min_action_count,
-                    title="Action delta time slices (P)",
+                    title="Action delta time slices (ΔP)",
                 )
 
         if diag_state.composability is not None:
@@ -1690,6 +1748,7 @@ def run_diagnostics_step(
             id_acc_z = 0.0
             id_acc_h = 0.0
             id_acc_p = 0.0
+            id_acc_dp = 0.0
             if weights.inverse_dynamics_z > 0 and diag_state.embeddings.shape[1] >= 2:
                 action_logits_z = model.inverse_dynamics_z(
                     diag_state.embeddings[:, :-1],
@@ -1716,6 +1775,15 @@ def run_diagnostics_step(
                 )
                 action_preds = (torch.sigmoid(action_logits_p) > 0.5).to(diag_state.actions_device.dtype)
                 id_acc_p = float((action_preds == diag_state.actions_device[:, :-1]).float().mean().item())
+            if (
+                diag_state.has_p
+                and weights.inverse_dynamics_dp > 0
+                and diag_state.p_deltas is not None
+                and diag_state.p_deltas.shape[1] >= 1
+            ):
+                action_logits_dp = model.inverse_dynamics_dp(diag_state.p_deltas)
+                action_preds_dp = (torch.sigmoid(action_logits_dp) > 0.5).to(diag_state.actions_device.dtype)
+                id_acc_dp = float((action_preds_dp == diag_state.actions_device[:, :-1]).float().mean().item())
 
             if scalars_enabled:
                 append_csv_row(
@@ -1733,6 +1801,7 @@ def run_diagnostics_step(
                         "id_acc_z",
                         "id_acc_h",
                         "id_acc_p",
+                        "id_acc_dp",
                     ],
                     [
                         global_step,
@@ -1747,6 +1816,7 @@ def run_diagnostics_step(
                         id_acc_z,
                         id_acc_h,
                         id_acc_p,
+                        id_acc_dp,
                     ],
                 )
 
@@ -1783,16 +1853,44 @@ def run_diagnostics_step(
                 except OSError:
                     pass
 
+        if resolved_outputs["vis_straightline_z"].enabled:
+            trajectories = _build_straightline_trajectories(
+                diagnostics_cfg=diagnostics_cfg,
+                diag_state=diag_state,
+                model=model,
+                diagnostics_generator=diagnostics_generator,
+                space="z",
+            )
+            save_straightline_plot(
+                diagnostics_straightline_z_dir / f"straightline_z_{global_step:07d}.png",
+                trajectories,
+                title="Straight-line action rays (Z)",
+            )
+        if resolved_outputs["vis_straightline_h"].enabled:
+            trajectories = _build_straightline_trajectories(
+                diagnostics_cfg=diagnostics_cfg,
+                diag_state=diag_state,
+                model=model,
+                diagnostics_generator=diagnostics_generator,
+                space="h",
+            )
+            save_straightline_plot(
+                diagnostics_straightline_h_dir / f"straightline_h_{global_step:07d}.png",
+                trajectories,
+                title="Straight-line action rays (H)",
+            )
         if resolved_outputs["vis_straightline_p"].enabled:
             trajectories = _build_straightline_trajectories(
                 diagnostics_cfg=diagnostics_cfg,
                 diag_state=diag_state,
                 model=model,
                 diagnostics_generator=diagnostics_generator,
+                space="p",
             )
             save_straightline_plot(
                 diagnostics_straightline_p_dir / f"straightline_p_{global_step:07d}.png",
                 trajectories,
+                title="Straight-line action rays (P)",
             )
 
         rollout_horizon = min(diagnostics_cfg.rollout_divergence_horizon, diag_state.frames.shape[1] - 1)

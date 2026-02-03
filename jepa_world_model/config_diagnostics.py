@@ -35,6 +35,7 @@ class SpikeDiagnosticsConfig:
         "loss_recon_multi_box",
         "loss_inverse_dynamics_h",
         "loss_inverse_dynamics_p",
+        "loss_inverse_dynamics_dp",
         "grad_world",
     )
     warmup_steps: int = 100

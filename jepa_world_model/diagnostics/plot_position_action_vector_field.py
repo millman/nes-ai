@@ -21,7 +21,7 @@ from jepa_world_model.diagnostics.run_position_bucket_alignment import (
     _read_metadata,
 )
 from jepa_world_model.plots.build_motion_subspace import build_motion_subspace
-from jepa_world_model.pose_rollout import rollout_pose_sequence, rollout_pose_sequence_with_correction
+from jepa_world_model.pose_rollout import rollout_pose_sequence
 from jepa_world_model.rollout import rollout_teacher_forced
 from jepa_world_model.model import JEPAWorldModel
 
@@ -50,10 +50,7 @@ def _extract_embeddings(
         return h_states
     if target == "p":
         _, _, h_states = rollout_teacher_forced(model, z_embeddings, actions)
-        if model.cfg.pose_correction_use_z:
-            pose_pred, _ = rollout_pose_sequence_with_correction(model, h_states, actions, z_embeddings)
-        else:
-            pose_pred, _ = rollout_pose_sequence(model, h_states, actions)
+        pose_pred, _ = rollout_pose_sequence(model, h_states, actions)
         return pose_pred
     raise ValueError(f"Unsupported target={target}")
 

@@ -109,6 +109,8 @@ def write_alignment_artifacts(
 ) -> Dict[str, Dict[int, Dict[str, float]]]:
     stats_out: Dict[str, Dict[int, Dict[str, float]]] = {}
 
+    delta_label = f"Δ{name.upper()}"
+
     if write_pca:
         stats = compute_action_alignment_stats(
             motion.delta_proj,
@@ -126,7 +128,7 @@ def write_alignment_artifacts(
             debug,
             diagnostics_cfg.cosine_high_threshold,
             motion.action_dim,
-            alignment_label="PCA",
+            alignment_label=f"{delta_label} PCA",
         )
         write_action_alignment_report(
             stats,
@@ -191,7 +193,7 @@ def write_alignment_artifacts(
             debug_raw,
             diagnostics_cfg.cosine_high_threshold,
             motion_raw.action_dim,
-            alignment_label="raw delta",
+            alignment_label=f"{delta_label} raw",
         )
         write_action_alignment_crosscheck(
             stats_raw,
@@ -243,7 +245,7 @@ def write_alignment_artifacts(
             debug_centered,
             diagnostics_cfg.cosine_high_threshold,
             motion_centered.action_dim,
-            alignment_label="centered delta",
+            alignment_label=f"{delta_label} centered",
         )
         write_action_alignment_crosscheck(
             stats_centered,

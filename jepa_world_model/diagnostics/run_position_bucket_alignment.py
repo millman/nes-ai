@@ -58,16 +58,18 @@ def _read_metadata(run_dir: Path) -> RunMetadata:
     enable_inverse_dynamics_z = loss_weights.get("inverse_dynamics_z", 0) > 0
     enable_inverse_dynamics_h = loss_weights.get("inverse_dynamics_h", 0) > 0
     enable_inverse_dynamics_p = loss_weights.get("inverse_dynamics_p", 0) > 0
+    enable_inverse_dynamics_dp = loss_weights.get("inverse_dynamics_dp", 0) > 0
     enable_action_delta_z = loss_weights.get("action_delta_z", 0) > 0
     enable_action_delta_h = (
         loss_weights.get("action_delta_h", 0) > 0
         or loss_weights.get("additivity_h", 0) > 0
     )
     enable_action_delta_p = (
-        loss_weights.get("action_delta_p", 0) > 0
-        or loss_weights.get("additivity_p", 0) > 0
+        loss_weights.get("action_delta_dp", 0) > 0
+        or loss_weights.get("additivity_dp", 0) > 0
         or loss_weights.get("rollout_kstep_p", 0) > 0
     )
+    enable_dz_to_dp_projector = loss_weights.get("dz_anchor_dp", 0) > 0
     enable_h2z_delta = loss_weights.get("h2z_delta", 0) > 0
     model = ModelConfig(
         in_channels=int(model_cfg.get("in_channels", 3)),
@@ -80,16 +82,16 @@ def _read_metadata(run_dir: Path) -> RunMetadata:
         warmup_frames_h=int(model_cfg.get("warmup_frames_h", 0)),
         pose_dim=model_cfg.get("pose_dim"),
         pose_delta_detach_h=bool(model_cfg.get("pose_delta_detach_h", True)),
-        pose_correction_use_z=bool(model_cfg.get("pose_correction_use_z", False)),
-        pose_correction_detach_z=bool(model_cfg.get("pose_correction_detach_z", True)),
         layer_norms=layer_norms,
         predictor_spectral_norm=bool(model_cfg.get("predictor_spectral_norm", True)),
         enable_inverse_dynamics_z=_resolve_toggle("enable_inverse_dynamics_z", enable_inverse_dynamics_z),
         enable_inverse_dynamics_h=_resolve_toggle("enable_inverse_dynamics_h", enable_inverse_dynamics_h),
         enable_inverse_dynamics_p=_resolve_toggle("enable_inverse_dynamics_p", enable_inverse_dynamics_p),
+        enable_inverse_dynamics_dp=_resolve_toggle("enable_inverse_dynamics_dp", enable_inverse_dynamics_dp),
         enable_action_delta_z=_resolve_toggle("enable_action_delta_z", enable_action_delta_z),
         enable_action_delta_h=_resolve_toggle("enable_action_delta_h", enable_action_delta_h),
         enable_action_delta_p=_resolve_toggle("enable_action_delta_p", enable_action_delta_p),
+        enable_dz_to_dp_projector=_resolve_toggle("enable_dz_to_dp_projector", enable_dz_to_dp_projector),
         enable_h2z_delta=_resolve_toggle("enable_h2z_delta", enable_h2z_delta),
     )
     data_root = Path(train_cfg.get("data_root") or "")

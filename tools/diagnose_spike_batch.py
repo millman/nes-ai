@@ -137,6 +137,7 @@ def _parse_model_config(cfg: dict, train_cfg: dict, weights: LossWeights) -> Mod
         enable_inverse_dynamics_z=_normalize_optional(cfg.get("enable_inverse_dynamics_z")),
         enable_inverse_dynamics_h=_normalize_optional(cfg.get("enable_inverse_dynamics_h")),
         enable_inverse_dynamics_p=_normalize_optional(cfg.get("enable_inverse_dynamics_p")),
+        enable_inverse_dynamics_dp=_normalize_optional(cfg.get("enable_inverse_dynamics_dp")),
         enable_action_delta_z=_normalize_optional(cfg.get("enable_action_delta_z")),
         enable_action_delta_h=_normalize_optional(cfg.get("enable_action_delta_h")),
         enable_action_delta_p=_normalize_optional(cfg.get("enable_action_delta_p")),
@@ -148,9 +149,10 @@ def _parse_model_config(cfg: dict, train_cfg: dict, weights: LossWeights) -> Mod
         enable_inverse_dynamics_z=weights.inverse_dynamics_z > 0,
         enable_inverse_dynamics_h=weights.inverse_dynamics_h > 0,
         enable_inverse_dynamics_p=weights.inverse_dynamics_p > 0,
+        enable_inverse_dynamics_dp=weights.inverse_dynamics_dp > 0,
         enable_action_delta_z=weights.action_delta_z > 0,
         enable_action_delta_h=(weights.action_delta_h > 0 or weights.additivity_h > 0),
-        enable_action_delta_p=(weights.action_delta_p > 0 or weights.additivity_p > 0 or weights.rollout_kstep_p > 0),
+        enable_action_delta_p=(weights.action_delta_dp > 0 or weights.additivity_dp > 0 or weights.rollout_kstep_p > 0),
         enable_h2z_delta=weights.h2z_delta > 0,
     )
     return model_cfg_runtime

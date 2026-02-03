@@ -69,10 +69,7 @@ from jepa_world_model.vis_temporal_pairs import save_temporal_pair_visualization
 from jepa_world_model.actions import compress_actions_to_ids, decode_action_id
 from jepa_world_model.config_diagnostics import DiagnosticsConfig, SpikeDiagnosticsConfig
 from jepa_world_model.config_planning import PlanningDiagnosticsConfig
-from jepa_world_model.pose_rollout import (
-    rollout_pose_sequence,
-    rollout_pose_sequence_with_correction,
-)
+from jepa_world_model.pose_rollout import rollout_pose_sequence
 from jepa_world_model.plots.write_action_alignment_crosscheck import (
     write_action_alignment_crosscheck,
 )
@@ -283,6 +280,9 @@ class LossWeights:
     # Keep at 0: pushes p to encode action identity/scale, which conflicts with geometric invariance
     # (p should encode place/pose, allow no-motion steps, and stay bounded for planning).
     inverse_dynamics_p: float = 0.0
+    # Inverse dynamics from consecutive Δp (pose deltas).
+    # Encodes action identity in Δp without forcing pose to be action-conditioned.
+    inverse_dynamics_dp: float = 0.1
 
     # Robust temporal smoothness on z (Huber on consecutive z distances).
     z_smooth: float = 0.1
@@ -332,7 +332,7 @@ class LossWeights:
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 0.1
+    additivity_h: float = 0.0
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
@@ -349,31 +349,50 @@ class LossWeights:
     rollout_recon_multi_box_h: float = 0.0
 
     # --- P ---
-    # State-conditioned delta alignment: p_{t+1} - p_t vs E(p_t, a_t).
-    # p_odometry: 1-step odometry consistency (pose_t + Δp_t ≈ pose_{t+1}).
-    action_delta_p: float = 0.1
+    # State-conditioned delta alignment (ΔP): Δp_t vs observed pose delta.
+    # p_odometry: 1-step odometry consistency on ΔP (action algebra lives in ΔP).
+    action_delta_dp: float = 0.0
 
-    # Explicit additivity of p deltas across steps.
+    # Explicit additivity of ΔP across steps (action algebra lives in ΔP).
     # p_odometry: short-horizon composition/additivity of increments.
-    additivity_p: float = 0.1
+    additivity_dp: float = 0.1
 
-    # k-step rollout consistency in p-space.
-    # p_odometry: k-step odometry consistency (multi-step integration).
+    # k-step rollout consistency in P-space (pose accumulation).
+    # p_odometry: k-step odometry consistency (multi-step integration of ΔP).
     rollout_kstep_p: float = 0.1
 
     # Pose scale anchoring (distribution-level).
     # p_odometry: scale/magnitude anchor to limit drift.
-    scale_p: float = 0.0
+    scale_dp: float = 0.0
 
     # Goal-conditioned ranking loss on the pose rollout.
     # Keeps pose useful for planning geometry while avoiding action algebra constraints.
     # p_odometry: planning geometry / ranking head over the pose space.
-    geometry_rank_p: float = 0.1
+    geometry_rank_p: float = 0.0
+
+    # Anchor ΔP using ΔZ (project Δz -> Δp).
+    # Provides a direct perceptual anchor for pose increments.
+    dz_anchor_dp: float = 0.1
+
+    # Soft loop closure: nearby z should imply nearby p.
+    loop_closure_p: float = 0.0
+
+    # --- Inverse-cycle ---
+    # Learn inverse actions in h (cycle in h), then enforce inverse/cancel in ΔP.
+    inverse_cycle_h: float = 0.1
+    inverse_cycle_dp: float = 0.1
 
 
 @dataclass
 class LossSigRegConfig:
     projections: int = 64
+
+
+@dataclass
+class LossLoopClosureConfig:
+    samples_per_seq: int = 6
+    min_gap: int = 2
+    tau_scale: float = 1.0
 
 
 @dataclass
@@ -431,7 +450,7 @@ class LossMultiScaleBoxReconConfig:
 
 
 @dataclass
-class ScalePConfig:
+class ScaleDPConfig:
     mode: str = "median"
     target: float = 1.0
     trim: float = 0.2
@@ -549,6 +568,7 @@ class TrainConfig:
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
     z_smooth: LossZTemporalSmoothConfig = field(default_factory=LossZTemporalSmoothConfig)
+    loop_closure_p: LossLoopClosureConfig = field(default_factory=LossLoopClosureConfig)
     jepa_open_loop: LossJEPAOpenLoopConfig = field(default_factory=LossJEPAOpenLoopConfig)
     geometry: LossGeometryConfig = field(default_factory=LossGeometryConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
@@ -556,7 +576,7 @@ class TrainConfig:
     recon_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
     recon_zhat_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
     recon_multi_box_mse: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
-    scale_p: ScalePConfig = field(default_factory=ScalePConfig)
+    scale_dp: ScaleDPConfig = field(default_factory=ScaleDPConfig)
 
     # Visualization
     vis: VisConfig = field(default_factory=VisConfig)
@@ -718,19 +738,8 @@ def _rollout_pose(
         raise AssertionError("z_embeddings and h_states must share the batch dimension.")
     if z_embeddings.shape[1] != h_states.shape[1]:
         raise AssertionError("z_embeddings and h_states must share the time dimension.")
-    if model.cfg.pose_correction_use_z:
-        if model.p_correction_projector is None:
-            raise AssertionError("pose_correction_use_z requires p_correction_projector to be enabled.")
-        pose_obs, _ = rollout_pose_sequence_with_correction(
-            model,
-            h_states,
-            actions,
-            z_embeddings,
-        )
-        pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
-    else:
-        pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
-        pose_obs = pose_pred
+    pose_pred, pose_deltas = rollout_pose_sequence(model, h_states, actions)
+    pose_obs = pose_pred
     return pose_obs, pose_pred, pose_deltas
 
 
@@ -1485,7 +1494,7 @@ def z_smooth_huber_loss(
     return loss.mean()
 
 
-def scale_p_loss(pose: torch.Tensor, start: int, cfg: ScalePConfig) -> torch.Tensor:
+def scale_dp_loss(pose: torch.Tensor, start: int, cfg: ScaleDPConfig) -> torch.Tensor:
     if pose.shape[1] <= start + 1:
         return pose.new_tensor(0.0)
     deltas = pose[:, start + 1 :] - pose[:, start:-1]
@@ -1508,8 +1517,58 @@ def scale_p_loss(pose: torch.Tensor, start: int, cfg: ScalePConfig) -> torch.Ten
         else:
             scale = norms.mean()
     else:
-        raise ValueError(f"scale_p.mode must be 'median' or 'trimmed_mean', got {cfg.mode!r}.")
+        raise ValueError(f"scale_dp.mode must be 'median' or 'trimmed_mean', got {cfg.mode!r}.")
     return (scale - cfg.target) ** 2
+
+
+def loop_closure_p_loss(
+    pose: torch.Tensor,
+    z_embeddings: torch.Tensor,
+    start: int,
+    cfg: LossLoopClosureConfig,
+) -> torch.Tensor:
+    if pose.shape[1] <= start + 1:
+        return pose.new_tensor(0.0)
+    if z_embeddings.shape[1] <= start + 1:
+        return pose.new_tensor(0.0)
+    seq_len = pose.shape[1] - start
+    if seq_len <= cfg.min_gap:
+        return pose.new_tensor(0.0)
+    samples = max(int(cfg.samples_per_seq), 1)
+    idx_i = []
+    idx_j = []
+    for _ in range(samples):
+        for _ in range(64):
+            i = int(torch.randint(0, seq_len, (1,), device=pose.device).item())
+            j = int(torch.randint(0, seq_len, (1,), device=pose.device).item())
+            if abs(i - j) >= cfg.min_gap:
+                idx_i.append(i)
+                idx_j.append(j)
+                break
+        else:
+            raise AssertionError("loop_closure_p_loss could not sample valid index pairs.")
+    idx_i_t = torch.tensor(idx_i, device=pose.device, dtype=torch.long)
+    idx_j_t = torch.tensor(idx_j, device=pose.device, dtype=torch.long)
+
+    pose_seq = pose[:, start:]
+    z_seq = z_embeddings[:, start:]
+    z_seq_det = z_seq.detach()
+    dz = z_seq_det[:, 1:] - z_seq_det[:, :-1]
+    dz_norm = dz.norm(dim=-1).reshape(-1)
+    if dz_norm.numel() == 0:
+        return pose.new_tensor(0.0)
+    tau = dz_norm.median() * float(cfg.tau_scale)
+    if tau.item() <= 1e-6:
+        tau = pose.new_tensor(1.0)
+
+    p_i = pose_seq[:, idx_i_t]
+    p_j = pose_seq[:, idx_j_t]
+    z_i = z_seq_det[:, idx_i_t]
+    z_j = z_seq_det[:, idx_j_t]
+    z_dist = (z_i - z_j).norm(dim=-1)
+    p_dist = (p_i - p_j).norm(dim=-1)
+    weights = torch.exp(-z_dist / (tau + 1e-8))
+    return (weights * p_dist.pow(2)).mean()
 
 
 
@@ -1650,6 +1709,7 @@ def _compute_losses_and_metrics(
     loss_inverse_dynamics_z = x_frames.new_tensor(0.0)
     loss_inverse_dynamics_h = x_frames.new_tensor(0.0)
     loss_inverse_dynamics_p = x_frames.new_tensor(0.0)
+    loss_inverse_dynamics_dp = x_frames.new_tensor(0.0)
     loss_action_delta_z = x_frames.new_tensor(0.0)
     loss_action_delta_h = x_frames.new_tensor(0.0)
     loss_rollout_kstep_z = x_frames.new_tensor(0.0)
@@ -1663,10 +1723,14 @@ def _compute_losses_and_metrics(
     loss_rollout_recon_h = x_frames.new_tensor(0.0)
     loss_rollout_recon_multi_box_h = x_frames.new_tensor(0.0)
     loss_rollout_kstep_delta_h = x_frames.new_tensor(0.0)
+    loss_inverse_cycle_h = x_frames.new_tensor(0.0)
+    loss_inverse_cycle_dp = x_frames.new_tensor(0.0)
     loss_additivity_h = x_frames.new_tensor(0.0)
-    loss_action_delta_p = x_frames.new_tensor(0.0)
-    loss_additivity_p = x_frames.new_tensor(0.0)
-    loss_scale_p = x_frames.new_tensor(0.0)
+    loss_action_delta_dp = x_frames.new_tensor(0.0)
+    loss_dz_anchor_dp = x_frames.new_tensor(0.0)
+    loss_loop_closure_p = x_frames.new_tensor(0.0)
+    loss_additivity_dp = x_frames.new_tensor(0.0)
+    loss_scale_dp = x_frames.new_tensor(0.0)
 
     # -------------------------------------------------------------------------
     # Calculate required inputs
@@ -1698,16 +1762,20 @@ def _compute_losses_and_metrics(
     # Warmup before applying hidden-state losses to avoid cold-start transients.
     start_frame = max(min(warmup_frames, seq_len - 1), 0)
 
-    use_action_delta_p = (
-        weights.action_delta_p > 0
-        or weights.additivity_p > 0
+    use_action_delta_dp = (
+        weights.action_delta_dp > 0
+        or weights.additivity_dp > 0
         or weights.rollout_kstep_p > 0
+        or weights.dz_anchor_dp > 0
     )
     use_pose_rollout = (
-        use_action_delta_p
+        use_action_delta_dp
         or weights.geometry_rank_p > 0
         or weights.inverse_dynamics_p > 0
-        or weights.scale_p > 0
+        or weights.inverse_dynamics_dp > 0
+        or weights.scale_dp > 0
+        or weights.dz_anchor_dp > 0
+        or weights.loop_closure_p > 0
     )
     pose_obs: Optional[torch.Tensor] = None
     pose_pred: Optional[torch.Tensor] = None
@@ -1720,7 +1788,7 @@ def _compute_losses_and_metrics(
             a_seq,
             z_embeddings=z_embeddings,
         )
-    if use_action_delta_p:
+    if use_action_delta_dp:
         h_pred_states = h_preds
         if h_pred_states.shape[1] + 1 == h_states.shape[1]:
             h_pred_states = torch.cat([h_states[:, :1], h_pred_states], dim=1)
@@ -1874,29 +1942,52 @@ def _compute_losses_and_metrics(
         dh_target = h_next - h_curr
         loss_action_delta_h = F.mse_loss(dh_pred, dh_target)
 
-    if weights.action_delta_p > 0:
-        # p_odometry: 1-step odometry consistency (pose_pred[t+1] vs pose_obs[t+1]).
-        if pose_obs is None or pose_pred_rollout is None:
-            raise AssertionError("action_delta_p requires pose rollouts to be computed.")
-        assert pose_obs.shape[1] >= 2, "action_delta_p requires at least two pose timesteps."
-        pose_curr = pose_pred_rollout[:, start_frame:-1]
-        pose_next_obs = pose_obs[:, start_frame + 1 :]
-        assert pose_curr.numel() > 0, "action_delta_p requires non-empty pose_curr."
-        loss_action_delta_p = F.mse_loss(
-            pose_pred_rollout[:, start_frame + 1 :],
-            pose_next_obs.detach(),
+    if weights.action_delta_dp > 0:
+        # p_odometry: action-prototype alignment in ΔP.
+        if model.dp_action_delta_projector is None:
+            raise AssertionError("dp_action_delta_projector is disabled but action_delta_dp is enabled.")
+        if pose_deltas is None:
+            raise AssertionError("action_delta_dp requires pose deltas to be computed.")
+        dp_pred = pose_deltas[:, start_frame:]
+        assert dp_pred.shape[1] >= 1, "action_delta_dp requires at least one delta."
+        actions_dp = a_seq[:, start_frame : start_frame + dp_pred.shape[1]]
+        delta_target = model.dp_action_delta_projector(actions_dp)
+        loss_action_delta_dp = F.mse_loss(dp_pred, delta_target.detach())
+
+    if weights.dz_anchor_dp > 0:
+        # p_odometry: anchor ΔP using ΔZ projected into pose delta space.
+        if model.dz_to_dp_projector is None:
+            raise AssertionError("dz_to_dp_projector is disabled but dz_anchor_dp is enabled.")
+        if pose_deltas is None:
+            raise AssertionError("dz_anchor_dp requires pose deltas to be computed.")
+        assert z_embeddings.shape[1] >= start_frame + 2, "dz_anchor_dp requires at least two z timesteps."
+        dz = z_embeddings[:, start_frame + 1 :] - z_embeddings[:, start_frame:-1]
+        dp_target = model.dz_to_dp_projector(dz)
+        dp_pred = pose_deltas[:, start_frame:]
+        assert dp_pred.shape == dp_target.shape, "dz_anchor_dp requires matching ΔP/ΔZ shapes."
+        loss_dz_anchor_dp = F.mse_loss(dp_pred, dp_target.detach())
+
+    if weights.loop_closure_p > 0:
+        # p_odometry: soft loop closure using z similarity.
+        if pose_pred is None:
+            raise AssertionError("loop_closure_p requires pose rollouts to be computed.")
+        loss_loop_closure_p = loop_closure_p_loss(
+            pose_pred,
+            z_embeddings,
+            start_frame,
+            cfg.loop_closure_p,
         )
 
-    if weights.additivity_p > 0:
-        # p_odometry: additivity of increments (Δp_t + Δp_{t+1} ≈ pose_{t+2} - pose_t).
-        if pose_pred is None or pose_deltas is None:
-            raise AssertionError("additivity_p requires pose rollouts to be computed.")
-        assert pose_pred.shape[1] >= start_frame + 3, "additivity_p requires at least three pose timesteps."
-        assert pose_deltas.shape[1] >= start_frame + 2, "additivity_p requires at least two deltas."
+    if weights.additivity_dp > 0:
+        # p_odometry: additivity of ΔP increments (Δp_t + Δp_{t+1} ≈ Δp_{t:t+2}).
+        if pose_pred is None or pose_deltas is None or pose_obs is None:
+            raise AssertionError("additivity_dp requires pose rollouts to be computed.")
+        assert pose_pred.shape[1] >= start_frame + 3, "additivity_dp requires at least three pose timesteps."
+        assert pose_deltas.shape[1] >= start_frame + 2, "additivity_dp requires at least two deltas."
         delta_sum = pose_deltas[:, start_frame:-1] + pose_deltas[:, start_frame + 1 :]
-        pose_target = pose_pred[:, start_frame + 2 :] - pose_pred[:, start_frame:-2]
-        assert delta_sum.numel() > 0 and pose_target.numel() > 0, "additivity_p requires non-empty tensors."
-        loss_additivity_p = F.mse_loss(delta_sum, pose_target.detach())
+        delta_target = pose_obs[:, start_frame + 2 :] - pose_obs[:, start_frame:-2]
+        assert delta_sum.numel() > 0 and delta_target.numel() > 0, "additivity_dp requires non-empty tensors."
+        loss_additivity_dp = F.mse_loss(delta_sum, delta_target.detach())
 
     if weights.rollout_kstep_p > 0:
         # p_odometry: k-step integration consistency.
@@ -1912,12 +2003,12 @@ def _compute_losses_and_metrics(
             start_frame,
         )
 
-    if weights.scale_p > 0:
+    if weights.scale_dp > 0:
         # p_odometry: scale anchor for pose drift control.
         if pose_pred is None:
-            raise AssertionError("scale_p requires pose observations to be computed.")
-        assert pose_pred.shape[1] >= start_frame + 2, "scale_p requires at least two pose timesteps after start."
-        loss_scale_p = scale_p_loss(pose_pred, start_frame, cfg.scale_p)
+            raise AssertionError("scale_dp requires pose observations to be computed.")
+        assert pose_pred.shape[1] >= start_frame + 2, "scale_dp requires at least two pose timesteps after start."
+        loss_scale_dp = scale_dp_loss(pose_pred, start_frame, cfg.scale_dp)
 
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
@@ -1943,6 +2034,17 @@ def _compute_losses_and_metrics(
         p_for_inverse = pose_pred
         action_logits_p = model.inverse_dynamics_p(p_for_inverse[:, :-1], p_for_inverse[:, 1:])
         loss_inverse_dynamics_p = INVERSE_DYNAMICS_LOSS(action_logits_p, a_seq[:, :-1])
+
+    if weights.inverse_dynamics_dp > 0:
+        if model.inverse_dynamics_dp is None:
+            raise AssertionError("inverse_dynamics_dp head is disabled but inverse_dynamics_dp loss is enabled.")
+        if pose_deltas is None:
+            raise AssertionError("inverse_dynamics_dp requires pose deltas to be computed.")
+        dp_for_inverse = pose_deltas[:, start_frame:]
+        assert dp_for_inverse.shape[1] >= 1, "inverse_dynamics_dp requires at least one delta."
+        actions_dp = a_seq[:, start_frame : start_frame + dp_for_inverse.shape[1]]
+        action_logits_dp = model.inverse_dynamics_dp(dp_for_inverse)
+        loss_inverse_dynamics_dp = INVERSE_DYNAMICS_LOSS(action_logits_dp, actions_dp)
 
     if weights.action_delta_z > 0:
         if model.z_action_delta_projector is None:
@@ -2088,6 +2190,48 @@ def _compute_losses_and_metrics(
             should_use_z2h_init(weights),
         )
 
+    if weights.inverse_cycle_h > 0 or weights.inverse_cycle_dp > 0:
+        if model.inverse_action_head is None:
+            raise AssertionError("inverse_action_head is missing for inverse cycle losses.")
+        assert h_states.shape[1] >= start_frame + 2, "inverse_cycle losses require at least two timesteps."
+        z_for_inv = z_embeddings.detach() if cfg.detach_z_from_h_and_p else z_embeddings
+        h_curr = h_states[:, start_frame:-1]
+        z_curr = z_for_inv[:, start_frame:-1]
+        a_curr = a_seq[:, start_frame:-1]
+        if h_curr.numel() == 0:
+            raise AssertionError("inverse_cycle losses require non-empty h_curr.")
+        inv_logits = model.inverse_action_head(h_curr.detach(), a_curr.detach())
+        a_inv_probs = F.softmax(inv_logits, dim=-1)
+        action_basis = torch.eye(a_curr.shape[-1], device=a_curr.device, dtype=a_curr.dtype)
+        a_inv = a_inv_probs @ action_basis
+        h_next = model.predictor(z_curr, h_curr, a_curr)
+        z_pred = model.h_to_z(h_next)
+        h_back = model.predictor(z_pred, h_next, a_inv)
+        if weights.inverse_cycle_h > 0:
+            loss_inverse_cycle_h = F.mse_loss(h_back, h_curr.detach())
+        if weights.inverse_cycle_dp > 0:
+            if model.p_action_delta_projector is None:
+                raise AssertionError("inverse_cycle_dp requires p_action_delta_projector.")
+            if pose_pred is None:
+                _, pose_pred, _ = _rollout_pose(
+                    model,
+                    h_states,
+                    a_seq,
+                    z_embeddings=z_embeddings,
+                )
+            p_curr = pose_pred[:, start_frame:-1]
+            if model.cfg.pose_delta_detach_h:
+                h_curr_for_p = h_curr.detach()
+                h_next_for_p = h_next.detach()
+            else:
+                h_curr_for_p = h_curr
+                h_next_for_p = h_next
+            delta1 = model.p_action_delta_projector(p_curr, h_curr_for_p, a_curr)
+            p1 = p_curr + delta1
+            delta2 = model.p_action_delta_projector(p1, h_next_for_p, a_inv.detach())
+            delta_sum = delta1 + delta2
+            loss_inverse_cycle_dp = F.mse_loss(delta_sum, torch.zeros_like(delta_sum))
+
     if weights.additivity_h > 0:
         assert dh_pred is not None, "additivity_h requires dh_pred to be computed."
         assert dh_pred.shape[1] >= 2, "additivity_h requires at least two predicted deltas."
@@ -2135,6 +2279,7 @@ def _compute_losses_and_metrics(
         + weights.inverse_dynamics_z * _scaled("loss_inverse_dynamics_z", loss_inverse_dynamics_z)
         + weights.inverse_dynamics_h * _scaled("loss_inverse_dynamics_h", loss_inverse_dynamics_h)
         + weights.inverse_dynamics_p * _scaled("loss_inverse_dynamics_p", loss_inverse_dynamics_p)
+        + weights.inverse_dynamics_dp * _scaled("loss_inverse_dynamics_dp", loss_inverse_dynamics_dp)
         + weights.action_delta_z * _scaled("loss_action_delta_z", loss_action_delta_z)
         + weights.action_delta_h * _scaled("loss_action_delta_h", loss_action_delta_h)
         + weights.rollout_kstep_z * _scaled("loss_rollout_kstep_z", loss_rollout_kstep_z)
@@ -2150,11 +2295,15 @@ def _compute_losses_and_metrics(
         * _scaled("loss_rollout_recon_multi_box_h", loss_rollout_recon_multi_box_h)
         + weights.rollout_kstep_h * _scaled("loss_rollout_kstep_h", loss_rollout_kstep_h)
         + weights.rollout_kstep_delta_h * _scaled("loss_rollout_kstep_delta_h", loss_rollout_kstep_delta_h)
+        + weights.inverse_cycle_h * _scaled("loss_inverse_cycle_h", loss_inverse_cycle_h)
         + weights.rollout_kstep_p * _scaled("loss_rollout_kstep_p", loss_rollout_kstep_p)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
-        + weights.scale_p * _scaled("loss_scale_p", loss_scale_p)
-        + weights.action_delta_p * _scaled("loss_action_delta_p", loss_action_delta_p)
-        + weights.additivity_p * _scaled("loss_additivity_p", loss_additivity_p)
+        + weights.scale_dp * _scaled("loss_scale_dp", loss_scale_dp)
+        + weights.action_delta_dp * _scaled("loss_action_delta_dp", loss_action_delta_dp)
+        + weights.dz_anchor_dp * _scaled("loss_dz_anchor_dp", loss_dz_anchor_dp)
+        + weights.loop_closure_p * _scaled("loss_loop_closure_p", loss_loop_closure_p)
+        + weights.additivity_dp * _scaled("loss_additivity_dp", loss_additivity_dp)
+        + weights.inverse_cycle_dp * _scaled("loss_inverse_cycle_dp", loss_inverse_cycle_dp)
     )
 
     world_grad_norm = 0.0
@@ -2209,6 +2358,7 @@ def _compute_losses_and_metrics(
         "loss_inverse_dynamics_z": loss_inverse_dynamics_z.item(),
         "loss_inverse_dynamics_h": loss_inverse_dynamics_h.item(),
         "loss_inverse_dynamics_p": loss_inverse_dynamics_p.item(),
+        "loss_inverse_dynamics_dp": loss_inverse_dynamics_dp.item(),
         "loss_action_delta_z": loss_action_delta_z.item(),
         "loss_action_delta_h": loss_action_delta_h.item(),
         "loss_rollout_kstep_z": loss_rollout_kstep_z.item(),
@@ -2221,11 +2371,15 @@ def _compute_losses_and_metrics(
         "loss_rollout_recon_multi_box_h": loss_rollout_recon_multi_box_h.item(),
         "loss_rollout_kstep_h": loss_rollout_kstep_h.item(),
         "loss_rollout_kstep_delta_h": loss_rollout_kstep_delta_h.item(),
+        "loss_inverse_cycle_h": loss_inverse_cycle_h.item(),
         "loss_rollout_kstep_p": loss_rollout_kstep_p.item(),
         "loss_additivity_h": loss_additivity_h.item(),
-        "loss_scale_p": loss_scale_p.item(),
-        "loss_action_delta_p": loss_action_delta_p.item(),
-        "loss_additivity_p": loss_additivity_p.item(),
+        "loss_scale_dp": loss_scale_dp.item(),
+        "loss_action_delta_dp": loss_action_delta_dp.item(),
+        "loss_dz_anchor_dp": loss_dz_anchor_dp.item(),
+        "loss_loop_closure_p": loss_loop_closure_p.item(),
+        "loss_additivity_dp": loss_additivity_dp.item(),
+        "loss_inverse_cycle_dp": loss_inverse_cycle_dp.item(),
         "z_norm_mean": z_norm_mean,
         "z_norm_std": z_norm_std,
         "z_norm_max": z_norm_max,
@@ -2653,6 +2807,8 @@ def log_metrics(
         filtered.pop("loss_inverse_dynamics_h", None)
     if weights.inverse_dynamics_p <= 0:
         filtered.pop("loss_inverse_dynamics_p", None)
+    if weights.inverse_dynamics_dp <= 0:
+        filtered.pop("loss_inverse_dynamics_dp", None)
     if weights.action_delta_z <= 0:
         filtered.pop("loss_action_delta_z", None)
     if weights.action_delta_h <= 0:
@@ -2677,16 +2833,24 @@ def log_metrics(
         filtered.pop("loss_rollout_kstep_h", None)
     if weights.rollout_kstep_delta_h <= 0:
         filtered.pop("loss_rollout_kstep_delta_h", None)
+    if weights.inverse_cycle_h <= 0:
+        filtered.pop("loss_inverse_cycle_h", None)
     if weights.rollout_kstep_p <= 0:
         filtered.pop("loss_rollout_kstep_p", None)
     if weights.additivity_h <= 0:
         filtered.pop("loss_additivity_h", None)
-    if weights.scale_p <= 0:
-        filtered.pop("loss_scale_p", None)
-    if weights.action_delta_p <= 0:
-        filtered.pop("loss_action_delta_p", None)
-    if weights.additivity_p <= 0:
-        filtered.pop("loss_additivity_p", None)
+    if weights.scale_dp <= 0:
+        filtered.pop("loss_scale_dp", None)
+    if weights.action_delta_dp <= 0:
+        filtered.pop("loss_action_delta_dp", None)
+    if weights.dz_anchor_dp <= 0:
+        filtered.pop("loss_dz_anchor_dp", None)
+    if weights.loop_closure_p <= 0:
+        filtered.pop("loss_loop_closure_p", None)
+    if weights.additivity_dp <= 0:
+        filtered.pop("loss_additivity_dp", None)
+    if weights.inverse_cycle_dp <= 0:
+        filtered.pop("loss_inverse_cycle_dp", None)
     pretty = ", ".join(f"{k}: {v:.4f}" for k, v in filtered.items())
     summary_parts: List[str] = []
     if pretty:
@@ -2737,6 +2901,7 @@ LOSS_COLUMNS = [
     "loss_inverse_dynamics_z",
     "loss_inverse_dynamics_h",
     "loss_inverse_dynamics_p",
+    "loss_inverse_dynamics_dp",
     "loss_action_delta_z",
     "loss_action_delta_h",
     "loss_rollout_kstep_z",
@@ -2749,11 +2914,15 @@ LOSS_COLUMNS = [
     "loss_rollout_recon_multi_box_h",
     "loss_rollout_kstep_h",
     "loss_rollout_kstep_delta_h",
+    "loss_inverse_cycle_h",
     "loss_rollout_kstep_p",
     "loss_additivity_h",
-    "loss_scale_p",
-    "loss_action_delta_p",
-    "loss_additivity_p",
+    "loss_scale_dp",
+    "loss_action_delta_dp",
+    "loss_dz_anchor_dp",
+    "loss_loop_closure_p",
+    "loss_additivity_dp",
+    "loss_inverse_cycle_dp",
     "z_norm_mean",
     "z_norm_std",
     "z_norm_max",
@@ -2805,6 +2974,7 @@ class LossHistory:
     inverse_dynamics_z: List[float] = field(default_factory=list)
     inverse_dynamics_h: List[float] = field(default_factory=list)
     inverse_dynamics_p: List[float] = field(default_factory=list)
+    inverse_dynamics_dp: List[float] = field(default_factory=list)
     action_delta_z: List[float] = field(default_factory=list)
     action_delta_h: List[float] = field(default_factory=list)
     rollout_kstep_z: List[float] = field(default_factory=list)
@@ -2817,11 +2987,15 @@ class LossHistory:
     rollout_recon_multi_box_h: List[float] = field(default_factory=list)
     rollout_kstep_h: List[float] = field(default_factory=list)
     rollout_kstep_delta_h: List[float] = field(default_factory=list)
+    inverse_cycle_h: List[float] = field(default_factory=list)
     rollout_kstep_p: List[float] = field(default_factory=list)
     additivity_h: List[float] = field(default_factory=list)
-    scale_p: List[float] = field(default_factory=list)
-    action_delta_p: List[float] = field(default_factory=list)
-    additivity_p: List[float] = field(default_factory=list)
+    scale_dp: List[float] = field(default_factory=list)
+    action_delta_dp: List[float] = field(default_factory=list)
+    dz_anchor_dp: List[float] = field(default_factory=list)
+    loop_closure_p: List[float] = field(default_factory=list)
+    additivity_dp: List[float] = field(default_factory=list)
+    inverse_cycle_dp: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
     z_norm_std: List[float] = field(default_factory=list)
     z_norm_max: List[float] = field(default_factory=list)
@@ -2870,6 +3044,7 @@ class LossHistory:
         self.inverse_dynamics_z.append(metrics.get("loss_inverse_dynamics_z", 0.0))
         self.inverse_dynamics_h.append(metrics.get("loss_inverse_dynamics_h", 0.0))
         self.inverse_dynamics_p.append(metrics.get("loss_inverse_dynamics_p", 0.0))
+        self.inverse_dynamics_dp.append(metrics.get("loss_inverse_dynamics_dp", 0.0))
         self.action_delta_z.append(metrics.get("loss_action_delta_z", 0.0))
         self.action_delta_h.append(metrics.get("loss_action_delta_h", 0.0))
         self.rollout_kstep_z.append(metrics.get("loss_rollout_kstep_z", 0.0))
@@ -2882,11 +3057,15 @@ class LossHistory:
         self.rollout_recon_multi_box_h.append(metrics.get("loss_rollout_recon_multi_box_h", 0.0))
         self.rollout_kstep_h.append(metrics.get("loss_rollout_kstep_h", 0.0))
         self.rollout_kstep_delta_h.append(metrics.get("loss_rollout_kstep_delta_h", 0.0))
+        self.inverse_cycle_h.append(metrics.get("loss_inverse_cycle_h", 0.0))
         self.rollout_kstep_p.append(metrics.get("loss_rollout_kstep_p", 0.0))
         self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
-        self.scale_p.append(metrics.get("loss_scale_p", 0.0))
-        self.action_delta_p.append(metrics.get("loss_action_delta_p", 0.0))
-        self.additivity_p.append(metrics.get("loss_additivity_p", 0.0))
+        self.scale_dp.append(metrics.get("loss_scale_dp", 0.0))
+        self.action_delta_dp.append(metrics.get("loss_action_delta_dp", 0.0))
+        self.dz_anchor_dp.append(metrics.get("loss_dz_anchor_dp", 0.0))
+        self.loop_closure_p.append(metrics.get("loss_loop_closure_p", 0.0))
+        self.additivity_dp.append(metrics.get("loss_additivity_dp", 0.0))
+        self.inverse_cycle_dp.append(metrics.get("loss_inverse_cycle_dp", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
         self.z_norm_std.append(metrics.get("z_norm_std", 0.0))
         self.z_norm_max.append(metrics.get("z_norm_max", 0.0))
@@ -2946,6 +3125,7 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.inverse_dynamics_z,
             history.inverse_dynamics_h,
             history.inverse_dynamics_p,
+            history.inverse_dynamics_dp,
             history.action_delta_z,
             history.action_delta_h,
             history.rollout_kstep_z,
@@ -2958,11 +3138,15 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.rollout_recon_multi_box_h,
             history.rollout_kstep_h,
             history.rollout_kstep_delta_h,
+            history.inverse_cycle_h,
             history.rollout_kstep_p,
             history.additivity_h,
-            history.scale_p,
-            history.action_delta_p,
-            history.additivity_p,
+            history.scale_dp,
+            history.action_delta_dp,
+            history.dz_anchor_dp,
+            history.loop_closure_p,
+            history.additivity_dp,
+            history.inverse_cycle_dp,
             history.z_norm_mean,
             history.z_norm_std,
             history.z_norm_max,
@@ -3021,9 +3205,12 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_inverse_dynamics_z", history.inverse_dynamics_z),
         ("loss_inverse_dynamics_h", history.inverse_dynamics_h),
         ("loss_inverse_dynamics_p", history.inverse_dynamics_p),
+        ("loss_inverse_dynamics_dp", history.inverse_dynamics_dp),
         ("loss_action_delta_z", history.action_delta_z),
         ("loss_action_delta_h", history.action_delta_h),
-        ("loss_action_delta_p", history.action_delta_p),
+        ("loss_action_delta_dp", history.action_delta_dp),
+        ("loss_dz_anchor_dp", history.dz_anchor_dp),
+        ("loss_loop_closure_p", history.loop_closure_p),
         ("loss_rollout_kstep_z", history.rollout_kstep_z),
         ("loss_rollout_recon_z", history.rollout_recon_z),
         ("loss_rollout_recon_multi_box_z", history.rollout_recon_multi_box_z),
@@ -3034,10 +3221,12 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_rollout_recon_multi_box_h", history.rollout_recon_multi_box_h),
         ("loss_rollout_kstep_h", history.rollout_kstep_h),
         ("loss_rollout_kstep_delta_h", history.rollout_kstep_delta_h),
+        ("loss_inverse_cycle_h", history.inverse_cycle_h),
         ("loss_rollout_kstep_p", history.rollout_kstep_p),
         ("loss_additivity_h", history.additivity_h),
-        ("loss_additivity_p", history.additivity_p),
-        ("loss_scale_p", history.scale_p),
+        ("loss_additivity_dp", history.additivity_dp),
+        ("loss_scale_dp", history.scale_dp),
+        ("loss_inverse_cycle_dp", history.inverse_cycle_dp),
     ]
     for idx, (label, series) in enumerate(loss_series):
         if any(val != 0.0 for val in series):
@@ -3638,9 +3827,11 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         "enable_inverse_dynamics_z",
         "enable_inverse_dynamics_h",
         "enable_inverse_dynamics_p",
+        "enable_inverse_dynamics_dp",
         "enable_action_delta_z",
         "enable_action_delta_h",
         "enable_action_delta_p",
+        "enable_dz_to_dp_projector",
         "enable_h2z_delta",
     ):
         if getattr(model_cfg, name) is not None:
@@ -3661,12 +3852,17 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 "rollout_kstep_delta_h",
                 "rollout_recon_h",
                 "rollout_recon_multi_box_h",
+                "inverse_cycle_h",
                 "inverse_dynamics_p",
-                "action_delta_p",
-                "additivity_p",
+                "inverse_dynamics_dp",
+                "action_delta_dp",
+                "dz_anchor_dp",
+                "loop_closure_p",
+                "additivity_dp",
                 "rollout_kstep_p",
-                "scale_p",
+                "scale_dp",
                 "geometry_rank_p",
+                "inverse_cycle_dp",
             )
             if getattr(weights, name, 0.0) > 0
         ]
@@ -3681,16 +3877,18 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         enable_inverse_dynamics_z=weights.inverse_dynamics_z > 0,
         enable_inverse_dynamics_h=weights.inverse_dynamics_h > 0,
         enable_inverse_dynamics_p=weights.inverse_dynamics_p > 0,
+        enable_inverse_dynamics_dp=weights.inverse_dynamics_dp > 0,
         enable_action_delta_z=weights.action_delta_z > 0,
         enable_action_delta_h=(
             weights.action_delta_h > 0
             or weights.additivity_h > 0
         ),
         enable_action_delta_p=(
-            weights.action_delta_p > 0
-            or weights.additivity_p > 0
+            weights.action_delta_dp > 0
+            or weights.additivity_dp > 0
             or weights.rollout_kstep_p > 0
         ),
+        enable_dz_to_dp_projector=weights.dz_anchor_dp > 0,
         enable_h2z_delta=weights.h2z_delta > 0,
     )
     diagnostics_generator = torch.Generator()

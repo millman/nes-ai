@@ -93,6 +93,7 @@ DIAGNOSTICS_Z_DIRS = [
     "vis_cycle_error_z",
     "vis_cycle_error",
     "vis_cycle_error_p",
+    "vis_straightline_z",
     "vis_diagnostics_frames",
     "vis_rollout_divergence",
     "vis_rollout_divergence_z",
@@ -118,6 +119,7 @@ DIAGNOSTICS_H_PATTERNS = [
     ("vis_delta_h_pca", "delta_h_pca_*.png"),
     ("vis_action_alignment_h", "action_alignment_detail_*.png"),
     ("vis_cycle_error_h", "cycle_error_*.png"),
+    ("vis_straightline_h", "straightline_h_*.png"),
     ("vis_self_distance_h", "self_distance_h_*.png"),
     ("vis_h_ablation", "h_ablation_*.png"),
     ("vis_h_drift_by_action", "h_drift_by_action_*.png"),
@@ -490,6 +492,14 @@ DIAGNOSTICS_P_STRAIGHTLINE_IMAGE_SPEC = VisSpec(
         ("vis_straightline_s", "straightline_s_*.png"),
     ],
 )
+DIAGNOSTICS_Z_STRAIGHTLINE_IMAGE_SPEC = VisSpec(
+    label="Diagnostics:Straight-line Z",
+    candidates=[("vis_straightline_z", "straightline_z_*.png")],
+)
+DIAGNOSTICS_H_STRAIGHTLINE_IMAGE_SPEC = VisSpec(
+    label="Diagnostics:Straight-line H",
+    candidates=[("vis_straightline_h", "straightline_h_*.png")],
+)
 DIAGNOSTICS_P_ROLLOUT_DIVERGENCE_IMAGE_SPEC = VisSpec(
     label="Diagnostics:Rollout divergence (P)",
     candidates=[
@@ -771,6 +781,8 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
     'vis_z_monotonicity': DIAGNOSTICS_Z_MONOTONICITY_IMAGE_SPEC,
     'vis_path_independence': DIAGNOSTICS_PATH_INDEPENDENCE_IMAGE_SPEC,
     'vis_straightline_p': DIAGNOSTICS_P_STRAIGHTLINE_IMAGE_SPEC,
+    'vis_straightline_z': DIAGNOSTICS_Z_STRAIGHTLINE_IMAGE_SPEC,
+    'vis_straightline_h': DIAGNOSTICS_H_STRAIGHTLINE_IMAGE_SPEC,
     'vis_straightline_s': VisSpec(
         label=None,
         candidates=[('vis_straightline_s', 'straightline_s_*.png', 'straightline_s_')],
@@ -1022,6 +1034,7 @@ class Experiment:
     diagnostics_variance_spectrum_images: List[Path]
     diagnostics_action_alignment_detail_images: List[Path]
     diagnostics_cycle_error_images: List[Path]
+    diagnostics_z_straightline_images: List[Path]
     diagnostics_rollout_divergence_images: List[Path]
     diagnostics_rollout_divergence_z_images: List[Path]
     diagnostics_z_consistency_images: List[Path]
@@ -1052,6 +1065,7 @@ class Experiment:
     diagnostics_p_cycle_error_images: List[Path]
     diagnostics_p_straightline_images: List[Path]
     diagnostics_p_rollout_divergence_images: List[Path]
+    diagnostics_h_straightline_images: List[Path]
     diagnostics_p_steps: List[int]
     diagnostics_h_steps: List[int]
     has_diagnostics_p_steps: bool
@@ -1417,6 +1431,7 @@ def _load_experiment_diagnostics(
             path, DIAGNOSTICS_ACTION_ALIGNMENT_DETAIL_IMAGE_SPEC
         )
         experiment.diagnostics_cycle_error_images = _collect_from_spec(path, DIAGNOSTICS_CYCLE_ERROR_IMAGE_SPEC)
+        experiment.diagnostics_z_straightline_images = _collect_from_spec(path, DIAGNOSTICS_Z_STRAIGHTLINE_IMAGE_SPEC)
         experiment.diagnostics_rollout_divergence_images = _collect_from_spec(path, DIAGNOSTICS_ROLLOUT_DIVERGENCE_IMAGE_SPEC)
         experiment.diagnostics_rollout_divergence_z_images = experiment.diagnostics_rollout_divergence_images
         experiment.diagnostics_z_consistency_images = _collect_from_spec(path, DIAGNOSTICS_Z_CONSISTENCY_IMAGE_SPEC)
@@ -1427,6 +1442,7 @@ def _load_experiment_diagnostics(
             _collect_steps_from_path_list(experiment.diagnostics_variance_spectrum_images),
             _collect_steps_from_path_list(experiment.diagnostics_action_alignment_detail_images),
             _collect_steps_from_path_list(experiment.diagnostics_cycle_error_images),
+            _collect_steps_from_path_list(experiment.diagnostics_z_straightline_images),
             _collect_steps_from_path_list(experiment.diagnostics_rollout_divergence_images),
             _collect_steps_from_path_list(experiment.diagnostics_rollout_divergence_z_images),
             _collect_steps_from_path_list(experiment.diagnostics_z_consistency_images),
@@ -1491,7 +1507,12 @@ def _load_experiment_diagnostics_h(experiment: Experiment, path: Path) -> None:
             list((path / "vis_self_distance_h").glob("self_distance_h_*.png")),
             prefix="self_distance_h_",
         ),
+        _collect_steps_from_path_list(
+            list((path / "vis_straightline_h").glob("straightline_h_*.png")),
+            prefix="straightline_h_",
+        ),
     )
+    experiment.diagnostics_h_straightline_images = _collect_from_spec(path, DIAGNOSTICS_H_STRAIGHTLINE_IMAGE_SPEC)
     experiment.has_diagnostics_h_steps = bool(experiment.diagnostics_h_steps)
 
 
@@ -1777,6 +1798,7 @@ def load_experiment(
         diagnostics_variance_spectrum_images=[],
         diagnostics_action_alignment_detail_images=[],
         diagnostics_cycle_error_images=[],
+        diagnostics_z_straightline_images=[],
         diagnostics_rollout_divergence_images=[],
         diagnostics_rollout_divergence_z_images=[],
         diagnostics_z_consistency_images=[],
@@ -1801,6 +1823,7 @@ def load_experiment(
         diagnostics_p_cycle_error_images=[],
         diagnostics_p_straightline_images=[],
         diagnostics_p_rollout_divergence_images=[],
+        diagnostics_h_straightline_images=[],
         diagnostics_p_steps=[],
         diagnostics_h_steps=[],
         has_diagnostics_p_steps=False,
@@ -1911,6 +1934,7 @@ def load_experiment(
             + len(experiment.diagnostics_variance_spectrum_images)
             + len(experiment.diagnostics_action_alignment_detail_images)
             + len(experiment.diagnostics_cycle_error_images)
+            + len(experiment.diagnostics_z_straightline_images)
             + len(experiment.diagnostics_rollout_divergence_images)
             + len(experiment.diagnostics_rollout_divergence_z_images)
             + len(experiment.diagnostics_z_consistency_images)

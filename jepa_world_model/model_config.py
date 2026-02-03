@@ -14,6 +14,8 @@ class LayerNormConfig:
     z2h_projector: bool = False
     h2z_delta_projector: bool = False
 
+    dz_to_dp_projector: Optional[bool] = True
+
     # Action deltas are learned residual updates applied repeatedly over rollout time,
     # so their scale directly compounds. Poorly scaled deltas can explode gradients
     # because each step adds another unnormalized update to h/p, amplifying errors and
@@ -27,13 +29,14 @@ class LayerNormConfig:
     action_delta_projector_z: Optional[bool] = True
     action_delta_projector_h: Optional[bool] = True
     action_delta_projector_p: Optional[bool] = True
+    action_delta_projector_dp: Optional[bool] = True
 
     inverse_dynamics_z: bool = False
     inverse_dynamics_h: bool = False
     inverse_dynamics_p: bool = False
+    inverse_dynamics_dp: bool = False
 
     h_next: bool = False
-    pose_correction_projector: bool = False
 
 @dataclass
 class ModelConfig:
@@ -71,10 +74,6 @@ class ModelConfig:
     pose_dim: Optional[int] = None
     # Stop-grad h when conditioning pose deltas to keep p losses from shaping dynamics.
     pose_delta_detach_h: bool = True
-    # Apply observation-conditioned pose correction using z_{t+1}.
-    pose_correction_use_z: bool = True
-    # Stop-grad z when applying pose correction.
-    pose_correction_detach_z: bool = True
 
     # LayerNorm toggles for debugging.
     layer_norms: LayerNormConfig = field(default_factory=LayerNormConfig)
@@ -89,9 +88,11 @@ class ModelConfig:
     enable_inverse_dynamics_z: Optional[bool] = None
     enable_inverse_dynamics_h: Optional[bool] = None
     enable_inverse_dynamics_p: Optional[bool] = None
+    enable_inverse_dynamics_dp: Optional[bool] = None
     enable_action_delta_z: Optional[bool] = None
     enable_action_delta_h: Optional[bool] = None
     enable_action_delta_p: Optional[bool] = None
+    enable_dz_to_dp_projector: Optional[bool] = None
     enable_h2z_delta: Optional[bool] = None
 
     @property
