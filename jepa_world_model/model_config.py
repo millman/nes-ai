@@ -14,7 +14,7 @@ class LayerNormConfig:
     z2h_projector: bool = False
     h2z_delta_projector: bool = False
 
-    dz_to_dp_projector: Optional[bool] = True
+    dz_to_dp_projector: Optional[bool] = False
 
     # Action deltas are learned residual updates applied repeatedly over rollout time,
     # so their scale directly compounds. Poorly scaled deltas can explode gradients
@@ -29,7 +29,7 @@ class LayerNormConfig:
     action_delta_projector_z: Optional[bool] = True
     action_delta_projector_h: Optional[bool] = True
     action_delta_projector_p: Optional[bool] = True
-    action_delta_projector_dp: Optional[bool] = True
+    action_delta_projector_dp: Optional[bool] = False
 
     inverse_dynamics_z: bool = False
     inverse_dynamics_h: bool = False

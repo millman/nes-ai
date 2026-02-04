@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from collections import defaultdict
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -287,7 +288,7 @@ class LossWeights:
     inverse_dynamics_p: float = 0.0
     # Inverse dynamics from consecutive Δp (pose deltas).
     # Encodes action identity in Δp without forcing pose to be action-conditioned.
-    inverse_dynamics_dp: float = 0.1
+    inverse_dynamics_dp: float = 0.0
 
     # Robust temporal smoothness on z (Huber on consecutive z distances).
     z_smooth: float = 0.1
@@ -337,7 +338,7 @@ class LossWeights:
 
     # Explicit additivity of state deltas across steps.
     # Promotes near-linear multi-step effects; keep light for Mario's nonlinearity.
-    additivity_h: float = 0.0
+    additivity_h: float = 0.1
 
     # k-step rollout consistency in h-space.
     # Encourages short-horizon compositionality in the dynamics state.
@@ -356,15 +357,15 @@ class LossWeights:
     # --- P ---
     # State-conditioned delta alignment (ΔP): Δp_t vs observed pose delta.
     # p_odometry: 1-step odometry consistency on ΔP (action algebra lives in ΔP).
-    action_delta_dp: float = 0.1
+    action_delta_dp: float = 0.0
 
     # Explicit additivity of ΔP across steps (action algebra lives in ΔP).
     # p_odometry: short-horizon composition/additivity of increments.
-    additivity_dp: float = 0.1
+    additivity_dp: float = 0.0
 
     # k-step rollout consistency in P-space (pose accumulation).
     # p_odometry: k-step odometry consistency (multi-step integration of ΔP).
-    rollout_kstep_p: float = 0.1
+    rollout_kstep_p: float = 0.0
 
     # Pose scale anchoring (distribution-level).
     # p_odometry: scale/magnitude anchor to limit drift.
@@ -377,15 +378,21 @@ class LossWeights:
 
     # Anchor ΔP using ΔZ (project Δz -> Δp).
     # Provides a direct perceptual anchor for pose increments.
-    dz_anchor_dp: float = 0.1
+    dz_anchor_dp: float = 0.0
 
     # Soft loop closure: nearby z should imply nearby p.
-    loop_closure_p: float = 0.1
+    loop_closure_p: float = 0.0
+
+    # NOOP should produce near-zero ΔP.
+    noop_residual_dp: float = 0.0
+
+    # Distance correlation between z and p (repulsive + attractive).
+    distance_corr_p: float = 0.0
 
     # --- Inverse-cycle ---
     # Learn inverse actions in h (cycle in h), then enforce inverse/cancel in ΔP.
-    inverse_cycle_h: float = 0.1
-    inverse_cycle_dp: float = 0.1
+    inverse_cycle_h: float = 0.0
+    inverse_cycle_dp: float = 0.0
 
 
 @dataclass
@@ -397,6 +404,14 @@ class LossSigRegConfig:
 class LossLoopClosureConfig:
     samples_per_seq: int = 6
     min_gap: int = 2
+    tau_scale: float = 1.0
+
+
+@dataclass
+class LossDistanceCorrelationConfig:
+    samples_per_seq: int = 32
+    min_gap: int = 2
+    eps: float = 1e-6
     tau_scale: float = 1.0
 
 
@@ -575,6 +590,7 @@ class TrainConfig:
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
     z_smooth: LossZTemporalSmoothConfig = field(default_factory=LossZTemporalSmoothConfig)
     loop_closure_p: LossLoopClosureConfig = field(default_factory=LossLoopClosureConfig)
+    distance_corr_p: LossDistanceCorrelationConfig = field(default_factory=LossDistanceCorrelationConfig)
     jepa_open_loop: LossJEPAOpenLoopConfig = field(default_factory=LossJEPAOpenLoopConfig)
     geometry: LossGeometryConfig = field(default_factory=LossGeometryConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
@@ -1577,6 +1593,54 @@ def loop_closure_p_loss(
     return (weights * p_dist.pow(2)).mean()
 
 
+def distance_corr_p_loss(
+    pose: torch.Tensor,
+    z_embeddings: torch.Tensor,
+    start: int,
+    cfg: LossDistanceCorrelationConfig,
+) -> torch.Tensor:
+    if pose.shape[1] <= start + 1:
+        return pose.new_tensor(0.0)
+    if z_embeddings.shape[1] <= start + 1:
+        return pose.new_tensor(0.0)
+    seq_len = pose.shape[1] - start
+    if seq_len <= cfg.min_gap:
+        return pose.new_tensor(0.0)
+    samples = max(int(cfg.samples_per_seq), 1)
+    idx_i = []
+    idx_j = []
+    for _ in range(samples):
+        for _ in range(64):
+            i = int(torch.randint(0, seq_len, (1,), device=pose.device).item())
+            j = int(torch.randint(0, seq_len, (1,), device=pose.device).item())
+            if abs(i - j) >= cfg.min_gap:
+                idx_i.append(i)
+                idx_j.append(j)
+                break
+        else:
+            raise AssertionError("distance_corr_p_loss could not sample valid index pairs.")
+    idx_i_t = torch.tensor(idx_i, device=pose.device, dtype=torch.long)
+    idx_j_t = torch.tensor(idx_j, device=pose.device, dtype=torch.long)
+
+    pose_seq = pose[:, start:]
+    z_seq = z_embeddings[:, start:].detach()
+
+    p_i = pose_seq[:, idx_i_t]
+    p_j = pose_seq[:, idx_j_t]
+    z_i = z_seq[:, idx_i_t]
+    z_j = z_seq[:, idx_j_t]
+
+    p_dist = (p_i - p_j).norm(dim=-1).reshape(-1)
+    z_dist = (z_i - z_j).norm(dim=-1).reshape(-1)
+
+    p_centered = p_dist - p_dist.mean()
+    z_centered = z_dist - z_dist.mean()
+    cov = (p_centered * z_centered).mean()
+    denom = (p_centered.std(unbiased=False) * z_centered.std(unbiased=False)).clamp_min(cfg.eps)
+    corr = cov / denom
+    return 1.0 - corr
+
+
 
 
 # ------------------------------------------------------------
@@ -1735,8 +1799,10 @@ def _compute_losses_and_metrics(
     loss_action_delta_dp = x_frames.new_tensor(0.0)
     loss_dz_anchor_dp = x_frames.new_tensor(0.0)
     loss_loop_closure_p = x_frames.new_tensor(0.0)
+    loss_noop_residual_dp = x_frames.new_tensor(0.0)
     loss_additivity_dp = x_frames.new_tensor(0.0)
     loss_scale_dp = x_frames.new_tensor(0.0)
+    loss_distance_corr_p = x_frames.new_tensor(0.0)
 
     # -------------------------------------------------------------------------
     # Calculate required inputs
@@ -1782,6 +1848,7 @@ def _compute_losses_and_metrics(
         or weights.scale_dp > 0
         or weights.dz_anchor_dp > 0
         or weights.loop_closure_p > 0
+        or weights.distance_corr_p > 0
     )
     pose_obs: Optional[torch.Tensor] = None
     pose_pred: Optional[torch.Tensor] = None
@@ -1983,6 +2050,37 @@ def _compute_losses_and_metrics(
             start_frame,
             cfg.loop_closure_p,
         )
+
+    if weights.distance_corr_p > 0:
+        # p_odometry: distance correlation between z and p.
+        if pose_pred is None:
+            raise AssertionError("distance_corr_p requires pose rollouts to be computed.")
+        loss_distance_corr_p = distance_corr_p_loss(
+            pose_pred,
+            z_embeddings,
+            start_frame,
+            cfg.distance_corr_p,
+        )
+
+    if weights.noop_residual_dp > 0:
+        # p_odometry: NOOP should not change pose (ΔP ≈ 0).
+        if pose_deltas is None:
+            raise AssertionError("noop_residual_dp requires pose deltas to be computed.")
+        action_ids = compress_actions_to_ids(a_seq.detach().cpu().numpy())
+        if action_ids.ndim == 1:
+            action_ids = action_ids.reshape(a_seq.shape[0], a_seq.shape[1])
+        if action_ids.shape[1] == pose_deltas.shape[1] + 1:
+            action_ids = action_ids[:, :-1]
+        if action_ids.shape[1] != pose_deltas.shape[1]:
+            raise AssertionError("noop_residual_dp requires action/p_delta shape alignment.")
+        noop_mask = torch.as_tensor(action_ids == 0, device=pose_deltas.device)
+        dp_slice = pose_deltas[:, start_frame:]
+        mask_slice = noop_mask[:, start_frame : start_frame + dp_slice.shape[1]]
+        if mask_slice.any():
+            dp_noop = dp_slice[mask_slice]
+            loss_noop_residual_dp = (dp_noop.norm(dim=-1) ** 2).mean()
+        else:
+            loss_noop_residual_dp = pose_deltas.new_tensor(0.0)
 
     if weights.additivity_dp > 0:
         # p_odometry: additivity of ΔP increments (Δp_t + Δp_{t+1} ≈ Δp_{t:t+2}).
@@ -2308,6 +2406,8 @@ def _compute_losses_and_metrics(
         + weights.action_delta_dp * _scaled("loss_action_delta_dp", loss_action_delta_dp)
         + weights.dz_anchor_dp * _scaled("loss_dz_anchor_dp", loss_dz_anchor_dp)
         + weights.loop_closure_p * _scaled("loss_loop_closure_p", loss_loop_closure_p)
+        + weights.distance_corr_p * _scaled("loss_distance_corr_p", loss_distance_corr_p)
+        + weights.noop_residual_dp * _scaled("loss_noop_residual_dp", loss_noop_residual_dp)
         + weights.additivity_dp * _scaled("loss_additivity_dp", loss_additivity_dp)
         + weights.inverse_cycle_dp * _scaled("loss_inverse_cycle_dp", loss_inverse_cycle_dp)
     )
@@ -2339,6 +2439,19 @@ def _compute_losses_and_metrics(
             scores=sample_scores.detach().cpu().tolist(),
             frame_indices=hardest_frames.detach().cpu().tolist(),
         )
+
+    dp_norm_median = 0.0
+    dz_to_dp_norm_median = 0.0
+    with torch.no_grad():
+        if pose_deltas is not None and pose_deltas.numel() > 0:
+            dp_norms = pose_deltas.norm(dim=-1).reshape(-1)
+            dp_norm_median = float(dp_norms.median().item())
+        if model.dz_to_dp_projector is not None and z_embeddings.shape[1] >= start_frame + 2:
+            dz = z_embeddings[:, start_frame + 1 :] - z_embeddings[:, start_frame:-1]
+            if dz.numel() > 0:
+                dp_from_dz = model.dz_to_dp_projector(dz)
+                dz_norms = dp_from_dz.norm(dim=-1).reshape(-1)
+                dz_to_dp_norm_median = float(dz_norms.median().item())
 
     metrics = {
         "loss_jepa": loss_jepa.item(),
@@ -2385,6 +2498,8 @@ def _compute_losses_and_metrics(
         "loss_action_delta_dp": loss_action_delta_dp.item(),
         "loss_dz_anchor_dp": loss_dz_anchor_dp.item(),
         "loss_loop_closure_p": loss_loop_closure_p.item(),
+        "loss_distance_corr_p": loss_distance_corr_p.item(),
+        "loss_noop_residual_dp": loss_noop_residual_dp.item(),
         "loss_additivity_dp": loss_additivity_dp.item(),
         "loss_inverse_cycle_dp": loss_inverse_cycle_dp.item(),
         "z_norm_mean": z_norm_mean,
@@ -2396,6 +2511,8 @@ def _compute_losses_and_metrics(
         "p_norm_mean": p_norm_mean,
         "p_norm_std": p_norm_std,
         "p_norm_max": p_norm_max,
+        "dp_norm_median": dp_norm_median,
+        "dz_to_dp_norm_median": dz_to_dp_norm_median,
         "loss_world": world_loss.item(),
     }
     if for_training:
@@ -2854,6 +2971,10 @@ def log_metrics(
         filtered.pop("loss_dz_anchor_dp", None)
     if weights.loop_closure_p <= 0:
         filtered.pop("loss_loop_closure_p", None)
+    if weights.distance_corr_p <= 0:
+        filtered.pop("loss_distance_corr_p", None)
+    if weights.noop_residual_dp <= 0:
+        filtered.pop("loss_noop_residual_dp", None)
     if weights.additivity_dp <= 0:
         filtered.pop("loss_additivity_dp", None)
     if weights.inverse_cycle_dp <= 0:
@@ -2928,6 +3049,8 @@ LOSS_COLUMNS = [
     "loss_action_delta_dp",
     "loss_dz_anchor_dp",
     "loss_loop_closure_p",
+    "loss_distance_corr_p",
+    "loss_noop_residual_dp",
     "loss_additivity_dp",
     "loss_inverse_cycle_dp",
     "z_norm_mean",
@@ -2939,6 +3062,8 @@ LOSS_COLUMNS = [
     "p_norm_mean",
     "p_norm_std",
     "p_norm_max",
+    "dp_norm_median",
+    "dz_to_dp_norm_median",
     "grad_world",
     "grad_decoder",
 ]
@@ -3001,6 +3126,8 @@ class LossHistory:
     action_delta_dp: List[float] = field(default_factory=list)
     dz_anchor_dp: List[float] = field(default_factory=list)
     loop_closure_p: List[float] = field(default_factory=list)
+    distance_corr_p: List[float] = field(default_factory=list)
+    noop_residual_dp: List[float] = field(default_factory=list)
     additivity_dp: List[float] = field(default_factory=list)
     inverse_cycle_dp: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
@@ -3012,6 +3139,8 @@ class LossHistory:
     p_norm_mean: List[float] = field(default_factory=list)
     p_norm_std: List[float] = field(default_factory=list)
     p_norm_max: List[float] = field(default_factory=list)
+    dp_norm_median: List[float] = field(default_factory=list)
+    dz_to_dp_norm_median: List[float] = field(default_factory=list)
     grad_world: List[float] = field(default_factory=list)
     grad_decoder: List[float] = field(default_factory=list)
 
@@ -3071,6 +3200,8 @@ class LossHistory:
         self.action_delta_dp.append(metrics.get("loss_action_delta_dp", 0.0))
         self.dz_anchor_dp.append(metrics.get("loss_dz_anchor_dp", 0.0))
         self.loop_closure_p.append(metrics.get("loss_loop_closure_p", 0.0))
+        self.distance_corr_p.append(metrics.get("loss_distance_corr_p", 0.0))
+        self.noop_residual_dp.append(metrics.get("loss_noop_residual_dp", 0.0))
         self.additivity_dp.append(metrics.get("loss_additivity_dp", 0.0))
         self.inverse_cycle_dp.append(metrics.get("loss_inverse_cycle_dp", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
@@ -3082,6 +3213,8 @@ class LossHistory:
         self.p_norm_mean.append(metrics.get("p_norm_mean", 0.0))
         self.p_norm_std.append(metrics.get("p_norm_std", 0.0))
         self.p_norm_max.append(metrics.get("p_norm_max", 0.0))
+        self.dp_norm_median.append(metrics.get("dp_norm_median", 0.0))
+        self.dz_to_dp_norm_median.append(metrics.get("dz_to_dp_norm_median", 0.0))
         self.grad_world.append(metrics["grad_world"])
         self.grad_decoder.append(metrics["grad_decoder"])
 
@@ -3152,6 +3285,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.action_delta_dp,
             history.dz_anchor_dp,
             history.loop_closure_p,
+            history.distance_corr_p,
+            history.noop_residual_dp,
             history.additivity_dp,
             history.inverse_cycle_dp,
             history.z_norm_mean,
@@ -3163,6 +3298,8 @@ def write_loss_csv(history: LossHistory, path: Path) -> None:
             history.p_norm_mean,
             history.p_norm_std,
             history.p_norm_max,
+            history.dp_norm_median,
+            history.dz_to_dp_norm_median,
             history.grad_world,
             history.grad_decoder,
         ):
@@ -3218,6 +3355,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_action_delta_dp", history.action_delta_dp),
         ("loss_dz_anchor_dp", history.dz_anchor_dp),
         ("loss_loop_closure_p", history.loop_closure_p),
+        ("loss_distance_corr_p", history.distance_corr_p),
+        ("loss_noop_residual_dp", history.noop_residual_dp),
         ("loss_rollout_kstep_z", history.rollout_kstep_z),
         ("loss_rollout_recon_z", history.rollout_recon_z),
         ("loss_rollout_recon_multi_box_z", history.rollout_recon_multi_box_z),
@@ -3280,14 +3419,27 @@ def grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
     return float(total**0.5)
 
 
-def _infer_raw_frame_shape(dataset: TrajectorySequenceDataset) -> Tuple[int, int, int]:
+TrajectoryDataset = Union[TrajectorySequenceDataset, PreloadedTrajectorySequenceDataset]
+
+
+def _infer_raw_frame_shape(dataset: TrajectoryDataset) -> Tuple[int, int, int]:
     if not dataset.samples:
         raise ValueError("Cannot infer frame shape without dataset samples.")
-    frame_paths, _, start = dataset.samples[0]
-    if not frame_paths:
-        raise ValueError("Dataset sample contains no frame paths for shape inference.")
-    index = min(max(start, 0), len(frame_paths) - 1)
-    path = frame_paths[index]
+    if isinstance(dataset, PreloadedTrajectorySequenceDataset):
+        traj_idx, start = dataset.samples[0]
+        if traj_idx < 0 or traj_idx >= len(dataset.trajs):
+            raise ValueError("Dataset sample refers to missing preloaded trajectory.")
+        _, _, traj_paths = dataset.trajs[traj_idx]
+        if not traj_paths:
+            raise ValueError("Preloaded trajectory contains no frame paths for shape inference.")
+        index = min(max(start, 0), len(traj_paths) - 1)
+        path = traj_paths[index]
+    else:
+        frame_paths, _, start = dataset.samples[0]
+        if not frame_paths:
+            raise ValueError("Dataset sample contains no frame paths for shape inference.")
+        index = min(max(start, 0), len(frame_paths) - 1)
+        path = frame_paths[index]
     with Image.open(path) as img:
         width, height = img.size
         channels = len(img.getbands())
@@ -3329,7 +3481,7 @@ def _build_fixed_vis_batch(
 
 
 def _build_embedding_batch(
-    dataset: TrajectorySequenceDataset,
+    dataset: TrajectoryDataset,
     sample_count: int,
     generator: torch.Generator = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[List[str]]]:
@@ -3364,7 +3516,7 @@ def _prepare_graph_diag_dataset(
     if not cfg.graph_diagnostics.enabled:
         raise AssertionError("Graph diagnostics requested but graph_diagnostics.enabled is false.")
     graph_seq_len = max(cfg.graph_diagnostics.chunk_len, 3)
-    graph_diag_dataset = TrajectorySequenceDataset(
+    graph_diag_dataset = PreloadedTrajectorySequenceDataset(
         root=cfg.data_root,
         seq_len=graph_seq_len,
         image_hw=(model_cfg.image_size, model_cfg.image_size),
@@ -3393,7 +3545,7 @@ def _build_off_manifold_batch(
     sample_count: int,
     generator: torch.Generator,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[List[str]]]:
-    off_dataset = TrajectorySequenceDataset(
+    off_dataset = PreloadedTrajectorySequenceDataset(
         root=data_root,
         seq_len=seq_len,
         image_hw=image_hw,
@@ -3865,6 +4017,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 "action_delta_dp",
                 "dz_anchor_dp",
                 "loop_closure_p",
+                "noop_residual_dp",
                 "additivity_dp",
                 "rollout_kstep_p",
                 "scale_dp",
@@ -3894,6 +4047,15 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             weights.action_delta_dp > 0
             or weights.additivity_dp > 0
             or weights.rollout_kstep_p > 0
+            or weights.dz_anchor_dp > 0
+            or weights.loop_closure_p > 0
+            or weights.distance_corr_p > 0
+            or weights.noop_residual_dp > 0
+            or weights.scale_dp > 0
+            or weights.geometry_rank_p > 0
+            or weights.inverse_cycle_dp > 0
+            or weights.inverse_dynamics_p > 0
+            or weights.inverse_dynamics_dp > 0
         ),
         enable_dz_to_dp_projector=weights.dz_anchor_dp > 0,
         enable_h2z_delta=weights.h2z_delta > 0,
@@ -3953,16 +4115,16 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
     # --- Dataset initialization ---
     train_trajs, val_trajs = _split_trajectories(cfg.data_root, cfg.max_trajectories, cfg.val_fraction, cfg.val_split_seed)
-    dataset = TrajectorySequenceDataset(
+    dataset = PreloadedTrajectorySequenceDataset(
         root=cfg.data_root,
         seq_len=cfg.seq_len,
         image_hw=(model_cfg.image_size, model_cfg.image_size),
         max_traj=None,
         included_trajectories=train_trajs,
     )
-    val_dataset: Optional[TrajectorySequenceDataset] = None
+    val_dataset: Optional[TrajectoryDataset] = None
     if val_trajs:
-        val_dataset = TrajectorySequenceDataset(
+        val_dataset = PreloadedTrajectorySequenceDataset(
             root=cfg.data_root,
             seq_len=cfg.seq_len,
             image_hw=(model_cfg.image_size, model_cfg.image_size),

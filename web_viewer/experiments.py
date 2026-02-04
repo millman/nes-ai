@@ -102,6 +102,7 @@ DIAGNOSTICS_Z_DIRS = [
     "vis_z_consistency",
     "vis_z_monotonicity",
     "vis_path_independence",
+    "vis_zp_distance_scatter",
 ]
 DIAGNOSTICS_P_DIRS = [
     "vis_delta_p_pca",
@@ -548,6 +549,10 @@ DIAGNOSTICS_PATH_INDEPENDENCE_IMAGE_SPEC = VisSpec(
     label="Diagnostics:Path independence",
     candidates=[("vis_path_independence", "path_independence_*.png")],
 )
+DIAGNOSTICS_ZP_DISTANCE_SCATTER_IMAGE_SPEC = VisSpec(
+    label="Diagnostics:Z/P distance scatter",
+    candidates=[("vis_zp_distance_scatter", "zp_distance_scatter_*.png")],
+)
 VIS_ODOMETRY_IMAGES_SPEC = VisSpec(
     label="vis_odometry images",
     candidates=[("vis_odometry", "*.png")],
@@ -780,6 +785,7 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
     'vis_z_consistency': DIAGNOSTICS_Z_CONSISTENCY_IMAGE_SPEC,
     'vis_z_monotonicity': DIAGNOSTICS_Z_MONOTONICITY_IMAGE_SPEC,
     'vis_path_independence': DIAGNOSTICS_PATH_INDEPENDENCE_IMAGE_SPEC,
+    'vis_zp_distance_scatter': DIAGNOSTICS_ZP_DISTANCE_SCATTER_IMAGE_SPEC,
     'vis_straightline_p': DIAGNOSTICS_P_STRAIGHTLINE_IMAGE_SPEC,
     'vis_straightline_z': DIAGNOSTICS_Z_STRAIGHTLINE_IMAGE_SPEC,
     'vis_straightline_h': DIAGNOSTICS_H_STRAIGHTLINE_IMAGE_SPEC,
@@ -881,29 +887,69 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
         candidates=[('vis_vis_ctrl', 'stability_s_*.png', 'stability_s_')],
     ),
     'vis_ctrl_stability_h': VIS_CTRL_STABILITY_H_SPEC,
-    'vis_planning_action_stats': VisSpec(
+    'vis_planning_action_stats_p': VisSpec(
         label='Planning:Action stats (P)',
         candidates=[('vis_planning_action_stats', 'action_stats_*.png', 'action_stats_')],
     ),
-    'vis_planning_action_stats_strip': VisSpec(
+    'vis_planning_action_stats': VisSpec(
+        label=None,
+        candidates=[('vis_planning_action_stats', 'action_stats_*.png', 'action_stats_')],
+    ),
+    'vis_planning_action_stats_h': VisSpec(
+        label='Planning:Action stats (H)',
+        candidates=[('vis_planning_action_stats', 'action_stats_h_*.png', 'action_stats_h_')],
+    ),
+    'vis_planning_action_stats_strip_p': VisSpec(
         label='Planning:Action stats strip (P)',
         candidates=[('vis_planning_action_stats', 'action_stats_strip_*.png', 'action_stats_strip_')],
+    ),
+    'vis_planning_action_stats_strip': VisSpec(
+        label=None,
+        candidates=[('vis_planning_action_stats', 'action_stats_strip_*.png', 'action_stats_strip_')],
+    ),
+    'vis_planning_action_stats_strip_h': VisSpec(
+        label='Planning:Action stats strip (H)',
+        candidates=[('vis_planning_action_stats', 'action_stats_strip_h_*.png', 'action_stats_strip_h_')],
     ),
     'vis_planning_pca_test1': VisSpec(
         label='Planning:PCA path (test1)',
         candidates=[('vis_planning_pca', 'pca_test1_*.png', 'pca_test1_')],
     ),
+    'vis_planning_pca_test1_h': VisSpec(
+        label='Planning:PCA path (test1, H)',
+        candidates=[('vis_planning_pca', 'pca_test1_h_*.png', 'pca_test1_h_')],
+    ),
     'vis_planning_pca_test2': VisSpec(
         label='Planning:PCA path (test2)',
         candidates=[('vis_planning_pca', 'pca_test2_*.png', 'pca_test2_')],
     ),
-    'vis_planning_exec_test1': VisSpec(
+    'vis_planning_pca_test2_h': VisSpec(
+        label='Planning:PCA path (test2, H)',
+        candidates=[('vis_planning_pca', 'pca_test2_h_*.png', 'pca_test2_h_')],
+    ),
+    'vis_planning_exec_test1_p': VisSpec(
         label='Planning:Exec trace (test1)',
         candidates=[('vis_planning_exec', 'exec_test1_*.png', 'exec_test1_')],
     ),
-    'vis_planning_exec_test2': VisSpec(
+    'vis_planning_exec_test1': VisSpec(
+        label=None,
+        candidates=[('vis_planning_exec', 'exec_test1_*.png', 'exec_test1_')],
+    ),
+    'vis_planning_exec_test1_h': VisSpec(
+        label='Planning:Exec trace (test1, H)',
+        candidates=[('vis_planning_exec', 'exec_test1_h_*.png', 'exec_test1_h_')],
+    ),
+    'vis_planning_exec_test2_p': VisSpec(
         label='Planning:Exec trace (test2)',
         candidates=[('vis_planning_exec', 'exec_test2_*.png', 'exec_test2_')],
+    ),
+    'vis_planning_exec_test2': VisSpec(
+        label=None,
+        candidates=[('vis_planning_exec', 'exec_test2_*.png', 'exec_test2_')],
+    ),
+    'vis_planning_exec_test2_h': VisSpec(
+        label='Planning:Exec trace (test2, H)',
+        candidates=[('vis_planning_exec', 'exec_test2_h_*.png', 'exec_test2_h_')],
     ),
     'vis_planning_reachable_h': VisSpec(
         label='Planning:Reachable fraction (H)',
@@ -1040,6 +1086,7 @@ class Experiment:
     diagnostics_z_consistency_images: List[Path]
     diagnostics_z_monotonicity_images: List[Path]
     diagnostics_path_independence_images: List[Path]
+    diagnostics_zp_distance_scatter_images: List[Path]
     diagnostics_z_steps: List[int]
     has_diagnostics_z_steps: bool
 
@@ -1437,6 +1484,10 @@ def _load_experiment_diagnostics(
         experiment.diagnostics_z_consistency_images = _collect_from_spec(path, DIAGNOSTICS_Z_CONSISTENCY_IMAGE_SPEC)
         experiment.diagnostics_z_monotonicity_images = _collect_from_spec(path, DIAGNOSTICS_Z_MONOTONICITY_IMAGE_SPEC)
         experiment.diagnostics_path_independence_images = _collect_from_spec(path, DIAGNOSTICS_PATH_INDEPENDENCE_IMAGE_SPEC)
+        experiment.diagnostics_zp_distance_scatter_images = _collect_from_spec(
+            path,
+            DIAGNOSTICS_ZP_DISTANCE_SCATTER_IMAGE_SPEC,
+        )
         experiment.diagnostics_z_steps = _merge_steps(
             _collect_steps_from_path_list(experiment.diagnostics_delta_z_pca_images),
             _collect_steps_from_path_list(experiment.diagnostics_variance_spectrum_images),
@@ -1448,6 +1499,7 @@ def _load_experiment_diagnostics(
             _collect_steps_from_path_list(experiment.diagnostics_z_consistency_images),
             _collect_steps_from_path_list(experiment.diagnostics_z_monotonicity_images),
             _collect_steps_from_path_list(experiment.diagnostics_path_independence_images),
+            _collect_steps_from_path_list(experiment.diagnostics_zp_distance_scatter_images),
         )
         experiment.has_diagnostics_z_steps = bool(experiment.diagnostics_z_steps)
         experiment.diagnostics_delta_z_pca_csvs = _collect_csvs_by_folders(path, DIAGNOSTICS_DELTA_Z_PCA_CSV_FOLDERS)
@@ -1804,6 +1856,7 @@ def load_experiment(
         diagnostics_z_consistency_images=[],
         diagnostics_z_monotonicity_images=[],
         diagnostics_path_independence_images=[],
+        diagnostics_zp_distance_scatter_images=[],
         diagnostics_z_steps=[],
         has_diagnostics_z_steps=False,
         diagnostics_delta_z_pca_csvs=[],
@@ -1940,6 +1993,7 @@ def load_experiment(
             + len(experiment.diagnostics_z_consistency_images)
             + len(experiment.diagnostics_z_monotonicity_images)
             + len(experiment.diagnostics_path_independence_images)
+            + len(experiment.diagnostics_zp_distance_scatter_images)
         ),
         steps=len(experiment.diagnostics_z_steps),
         csvs=diagnostics_csv_count,
@@ -1995,6 +2049,7 @@ def load_experiment(
             + len(experiment.diagnostics_z_consistency_images)
             + len(experiment.diagnostics_z_monotonicity_images)
             + len(experiment.diagnostics_path_independence_images)
+            + len(experiment.diagnostics_zp_distance_scatter_images)
         ),
         diagnostics_frames=sum(len(entries) for entries in experiment.diagnostics_frame_entries),
         diagnostics_csvs=diagnostics_csv_count,

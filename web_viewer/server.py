@@ -1291,6 +1291,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "z_consistency": selected.diagnostics_z_consistency_images,
             "z_monotonicity": selected.diagnostics_z_monotonicity_images,
             "path_independence": selected.diagnostics_path_independence_images,
+            "zp_distance_scatter": selected.diagnostics_zp_distance_scatter_images,
         }
         diagnostics_map: Dict[str, Dict[int, str]] = {}
         for name, paths in diagnostics_images.items():
@@ -1747,6 +1748,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             "z_consistency": selected.diagnostics_z_consistency_images,
             "z_monotonicity": selected.diagnostics_z_monotonicity_images,
             "path_independence": selected.diagnostics_path_independence_images,
+            "zp_distance_scatter": selected.diagnostics_zp_distance_scatter_images,
         }
         diagnostics_map_z: Dict[str, Dict[int, str]] = {}
         for name, paths in diagnostics_images.items():

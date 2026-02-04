@@ -25,6 +25,8 @@ class DiagnosticsConfig:
     path_independence_steps: int = 4
     path_independence_samples: int = 16
     h_drift_max_actions: int = 12
+    zp_distance_pairs: int = 512
+    zp_distance_min_gap: int = 2
 
 
 @dataclass

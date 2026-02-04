@@ -71,6 +71,7 @@ from jepa_world_model.plots.plot_smoothness_knn_distance_eigenvalue_spectrum imp
     save_smoothness_knn_distance_eigenvalue_spectrum_plot,
 )
 from jepa_world_model.plots.plot_two_step_composition_error import save_two_step_composition_error_plot
+from jepa_world_model.plots.plot_zp_distance_scatter import save_zp_distance_scatter
 from jepa_world_model.plots.write_alignment_debug_csv import write_alignment_debug_csv
 from jepa_world_model.planning.planning_eval import (
     DIRECTION_ORDER,
@@ -122,19 +123,19 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "vis_self_distance_z": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for z."),
     "vis_self_distance_h": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for h."),
     "vis_self_distance_p": DiagnosticsOutputSpec(True, "Self-distance metrics + visuals for p."),
-    "vis_state_embedding": DiagnosticsOutputSpec(True, "State embedding histogram."),
+    "vis_state_embedding": DiagnosticsOutputSpec(False, "State embedding histogram."),
     "vis_odometry_current_z": DiagnosticsOutputSpec(True, "Odometry cumulative Δz plots."),
     "vis_odometry_current_p": DiagnosticsOutputSpec(True, "Odometry cumulative Δp plots."),
     "vis_odometry_current_h": DiagnosticsOutputSpec(True, "Odometry cumulative Δh plots."),
-    "vis_odometry_z_vs_z_hat": DiagnosticsOutputSpec(True, "Odometry z vs z_hat plots."),
-    "vis_odometry_p_vs_p_hat": DiagnosticsOutputSpec(True, "Odometry p vs p_hat plots."),
-    "vis_odometry_h_vs_h_hat": DiagnosticsOutputSpec(True, "Odometry h vs h_hat plots."),
+    "vis_odometry_z_vs_z_hat": DiagnosticsOutputSpec(False, "Odometry z vs z_hat plots."),
+    "vis_odometry_p_vs_p_hat": DiagnosticsOutputSpec(False, "Odometry p vs p_hat plots."),
+    "vis_odometry_h_vs_h_hat": DiagnosticsOutputSpec(False, "Odometry h vs h_hat plots."),
     "vis_action_field_z": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for z."),
     "vis_action_field_h": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for h."),
     "vis_action_field_p": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for ΔP."),
-    "vis_action_time_z": DiagnosticsOutputSpec(True, "Action delta time-slice plots for z."),
-    "vis_action_time_h": DiagnosticsOutputSpec(True, "Action delta time-slice plots for h."),
-    "vis_action_time_p": DiagnosticsOutputSpec(True, "Action delta time-slice plots for ΔP."),
+    "vis_action_time_z": DiagnosticsOutputSpec(False, "Action delta time-slice plots for z."),
+    "vis_action_time_h": DiagnosticsOutputSpec(False, "Action delta time-slice plots for h."),
+    "vis_action_time_p": DiagnosticsOutputSpec(False, "Action delta time-slice plots for ΔP."),
     "vis_composability_z": DiagnosticsOutputSpec(True, "Composability plots for z."),
     "vis_composability_h": DiagnosticsOutputSpec(True, "Composability plots for h."),
     "vis_composability_p": DiagnosticsOutputSpec(True, "Composability plots for p."),
@@ -151,21 +152,22 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "vis_action_alignment_detail_raw_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for ΔP (raw)."),
     "vis_action_alignment_detail_centered_p": DiagnosticsOutputSpec(True, "Action-alignment detail plot for ΔP (centered)."),
     "vis_cycle_error_z": DiagnosticsOutputSpec(False, "Cycle-error artifacts for z."),
-    "vis_cycle_error_h": DiagnosticsOutputSpec(False, "Cycle-error artifacts for h."),
-    "vis_cycle_error_p": DiagnosticsOutputSpec(False, "Cycle-error artifacts for p."),
+    "vis_cycle_error_h": DiagnosticsOutputSpec(True, "Cycle-error artifacts for h."),
+    "vis_cycle_error_p": DiagnosticsOutputSpec(True, "Cycle-error artifacts for p."),
     "vis_straightline_z": DiagnosticsOutputSpec(True, "Straight-line rollout plot in z."),
     "vis_straightline_h": DiagnosticsOutputSpec(True, "Straight-line rollout plot in h."),
     "vis_straightline_p": DiagnosticsOutputSpec(True, "Straight-line rollout plot in p."),
-    "vis_rollout_divergence_z": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for z."),
-    "vis_rollout_divergence_h": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for h."),
-    "vis_rollout_divergence_p": DiagnosticsOutputSpec(True, "Rollout divergence plots/CSVs for p."),
+    "vis_rollout_divergence_z": DiagnosticsOutputSpec(False, "Rollout divergence plots/CSVs for z."),
+    "vis_rollout_divergence_h": DiagnosticsOutputSpec(False, "Rollout divergence plots/CSVs for h."),
+    "vis_rollout_divergence_p": DiagnosticsOutputSpec(False, "Rollout divergence plots/CSVs for p."),
     "vis_rollout_divergence_excess_z": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for z."),
     "vis_rollout_divergence_excess_h": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for h."),
     "vis_rollout_divergence_excess_p": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for p."),
-    "vis_h_ablation": DiagnosticsOutputSpec(True, "H-ablation divergence plots/CSVs."),
-    "vis_z_consistency": DiagnosticsOutputSpec(True, "Z consistency plots/CSVs."),
-    "vis_z_monotonicity": DiagnosticsOutputSpec(True, "Z monotonicity plots/CSVs."),
+    "vis_h_ablation": DiagnosticsOutputSpec(False, "H-ablation divergence plots/CSVs."),
+    "vis_z_consistency": DiagnosticsOutputSpec(False, "Z consistency plots/CSVs."),
+    "vis_z_monotonicity": DiagnosticsOutputSpec(False, "Z monotonicity plots/CSVs."),
     "vis_path_independence": DiagnosticsOutputSpec(True, "Path-independence plots/CSVs."),
+    "vis_zp_distance_scatter": DiagnosticsOutputSpec(True, "Z/P distance scatter (fixed pairs)."),
     "vis_h_drift_by_action": DiagnosticsOutputSpec(True, "H drift-by-action plot/CSV."),
     "vis_norm_timeseries": DiagnosticsOutputSpec(True, "Norm timeseries plot."),
     "diagnostics_frames": DiagnosticsOutputSpec(False, "Diagnostics frame dumps + CSV."),
@@ -180,12 +182,18 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "vis_ctrl_stability_h": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for h."),
     "vis_ctrl_stability_p": DiagnosticsOutputSpec(False, "Vis-ctrl neighborhood stability plot for p."),
     "vis_ctrl_summary": DiagnosticsOutputSpec(False, "Vis-ctrl metrics CSV summary."),
-    "vis_planning_action_stats": DiagnosticsOutputSpec(True, "Planning action delta stats plot (P)."),
-    "vis_planning_action_stats_strip": DiagnosticsOutputSpec(True, "Planning action delta strip plot (P)."),
-    "vis_planning_pca_test1": DiagnosticsOutputSpec(True, "Planning PCA path visualization (test1)."),
-    "vis_planning_pca_test2": DiagnosticsOutputSpec(True, "Planning PCA path visualization (test2)."),
-    "vis_planning_exec_test1": DiagnosticsOutputSpec(True, "Planning execution trace (test1)."),
-    "vis_planning_exec_test2": DiagnosticsOutputSpec(True, "Planning execution trace (test2)."),
+    "vis_planning_action_stats_p": DiagnosticsOutputSpec(False, "Planning action delta stats plot (P)."),
+    "vis_planning_action_stats_h": DiagnosticsOutputSpec(False, "Planning action delta stats plot (H)."),
+    "vis_planning_action_stats_strip_p": DiagnosticsOutputSpec(True, "Planning action delta strip plot (P)."),
+    "vis_planning_action_stats_strip_h": DiagnosticsOutputSpec(True, "Planning action delta strip plot (H)."),
+    "vis_planning_pca_test1": DiagnosticsOutputSpec(False, "Planning PCA path visualization (test1, P)."),
+    "vis_planning_pca_test1_h": DiagnosticsOutputSpec(True, "Planning PCA path visualization (test1, H)."),
+    "vis_planning_pca_test2": DiagnosticsOutputSpec(False, "Planning PCA path visualization (test2, P)."),
+    "vis_planning_pca_test2_h": DiagnosticsOutputSpec(True, "Planning PCA path visualization (test2, H)."),
+    "vis_planning_exec_test1_p": DiagnosticsOutputSpec(False, "Planning execution trace (test1, P)."),
+    "vis_planning_exec_test1_h": DiagnosticsOutputSpec(True, "Planning execution trace (test1, H)."),
+    "vis_planning_exec_test2_p": DiagnosticsOutputSpec(False, "Planning execution trace (test2, P)."),
+    "vis_planning_exec_test2_h": DiagnosticsOutputSpec(True, "Planning execution trace (test2, H)."),
     "vis_planning_reachable_h": DiagnosticsOutputSpec(True, "Planning reachable fraction histogram (H)."),
     "vis_planning_reachable_p": DiagnosticsOutputSpec(True, "Planning reachable fraction histogram (P)."),
     "vis_planning_graph_h": DiagnosticsOutputSpec(True, "Planning graph visualization (H)."),
@@ -245,12 +253,18 @@ DIAGNOSTICS_OUTPUT_GROUPS = {
             "vis_odometry_z_vs_z_hat",
             "vis_odometry_p_vs_p_hat",
             "vis_odometry_h_vs_h_hat",
-            "vis_planning_action_stats",
-            "vis_planning_action_stats_strip",
+            "vis_planning_action_stats_p",
+            "vis_planning_action_stats_h",
+            "vis_planning_action_stats_strip_p",
+            "vis_planning_action_stats_strip_h",
             "vis_planning_pca_test1",
+            "vis_planning_pca_test1_h",
             "vis_planning_pca_test2",
-            "vis_planning_exec_test1",
-            "vis_planning_exec_test2",
+            "vis_planning_pca_test2_h",
+            "vis_planning_exec_test1_p",
+            "vis_planning_exec_test1_h",
+            "vis_planning_exec_test2_p",
+            "vis_planning_exec_test2_h",
             "vis_planning_reachable_h",
             "vis_planning_reachable_p",
             "vis_planning_graph_h",
@@ -258,12 +272,18 @@ DIAGNOSTICS_OUTPUT_GROUPS = {
         )
     ),
     "planning": (
-        "vis_planning_action_stats",
-        "vis_planning_action_stats_strip",
+        "vis_planning_action_stats_p",
+        "vis_planning_action_stats_h",
+        "vis_planning_action_stats_strip_p",
+        "vis_planning_action_stats_strip_h",
         "vis_planning_pca_test1",
+        "vis_planning_pca_test1_h",
         "vis_planning_pca_test2",
-        "vis_planning_exec_test1",
-        "vis_planning_exec_test2",
+        "vis_planning_pca_test2_h",
+        "vis_planning_exec_test1_p",
+        "vis_planning_exec_test1_h",
+        "vis_planning_exec_test2_p",
+        "vis_planning_exec_test2_h",
         "vis_planning_reachable_h",
         "vis_planning_reachable_p",
         "vis_planning_graph_h",
@@ -287,6 +307,7 @@ DIAGNOSTICS_OUTPUT_GROUPS = {
 OUTPUT_KIND_OVERRIDES = {
     "vis_h_ablation": "p",
     "vis_path_independence": "p",
+    "vis_zp_distance_scatter": "p",
     "vis_state_embedding": "p",
     "vis_h_drift_by_action": "h",
     "vis_odometry_current_z": "z",
@@ -300,12 +321,18 @@ OUTPUT_KIND_OVERRIDES = {
     "vis_delta_p_pca": "p",
     "vis_z_consistency": "z",
     "vis_z_monotonicity": "z",
-    "vis_planning_action_stats": "p",
-    "vis_planning_action_stats_strip": "p",
+    "vis_planning_action_stats_p": "p",
+    "vis_planning_action_stats_strip_p": "p",
+    "vis_planning_action_stats_h": "h",
+    "vis_planning_action_stats_strip_h": "h",
     "vis_planning_pca_test1": "p",
     "vis_planning_pca_test2": "p",
-    "vis_planning_exec_test1": "p",
-    "vis_planning_exec_test2": "p",
+    "vis_planning_pca_test1_h": "h",
+    "vis_planning_pca_test2_h": "h",
+    "vis_planning_exec_test1_p": "p",
+    "vis_planning_exec_test2_p": "p",
+    "vis_planning_exec_test1_h": "h",
+    "vis_planning_exec_test2_h": "h",
     "vis_planning_reachable_h": "h",
     "vis_planning_reachable_p": "p",
     "vis_planning_graph_h": "h",
@@ -335,6 +362,11 @@ def _resolve_outputs(
     planning_cfg: Any,
 ) -> dict[str, DiagnosticsOutputSpec]:
     enabled_kinds = _enabled_kinds(weights, model)
+    planning_kind = getattr(planning_cfg, "latent_kind", "p")
+    if planning_kind not in ("p", "h", "auto"):
+        raise AssertionError(
+            f"planning_cfg.latent_kind must be 'p', 'h', or 'auto', got {planning_kind!r}."
+        )
     group_enabled = {
         "hard_examples": getattr(hard_example_cfg, "reservoir", 0) > 0,
         "planning": bool(getattr(planning_cfg, "enabled", True)),
@@ -353,6 +385,40 @@ def _resolve_outputs(
                 not enabled_kinds.get("z", False) or not enabled_kinds.get("h", False)
             ):
                 enabled = False
+            if not enabled_kinds.get("p", False) and key in (
+                "vis_state_embedding",
+                "vis_odometry_current_z",
+                "vis_odometry_current_p",
+                "vis_odometry_current_h",
+                "vis_odometry_z_vs_z_hat",
+                "vis_odometry_p_vs_p_hat",
+                "vis_odometry_h_vs_h_hat",
+            ):
+                enabled = False
+            if key.startswith("vis_planning_"):
+                if planning_kind == "p" and key.endswith("_h"):
+                    enabled = False
+                if planning_kind == "h" and (key.endswith("_p") or key in (
+                    "vis_planning_action_stats_p",
+                    "vis_planning_action_stats_strip_p",
+                    "vis_planning_pca_test1",
+                    "vis_planning_pca_test2",
+                    "vis_planning_exec_test1_p",
+                    "vis_planning_exec_test2_p",
+                )):
+                    enabled = False
+                if planning_kind == "auto" and not enabled_kinds.get("p", False):
+                    if key.endswith("_p") or key in (
+                        "vis_planning_action_stats_p",
+                        "vis_planning_action_stats_strip_p",
+                        "vis_planning_pca_test1",
+                        "vis_planning_pca_test2",
+                        "vis_planning_exec_test1_p",
+                        "vis_planning_exec_test2_p",
+                        "vis_planning_reachable_p",
+                        "vis_planning_graph_p",
+                    ):
+                        enabled = False
             if not enabled:
                 resolved[key] = DiagnosticsOutputSpec(enabled, spec.description)
                 continue
@@ -379,6 +445,48 @@ def planning_outputs_enabled(
         planning_cfg=planning_cfg,
     )
     return _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["planning"])
+
+
+def _load_or_sample_zp_pairs(
+    *,
+    run_dir: Path,
+    diag_state,
+    diagnostics_cfg,
+) -> np.ndarray:
+    pairs_path = run_dir / "vis_zp_distance_scatter" / "zp_distance_pairs.npy"
+    if pairs_path.exists():
+        pairs = np.load(pairs_path)
+        if pairs.ndim == 2 and pairs.shape[1] == 4:
+            bsz, seq_len = diag_state.embeddings.shape[:2]
+            if (
+                pairs[:, 0].max(initial=-1) < bsz
+                and pairs[:, 2].max(initial=-1) < bsz
+                and pairs[:, 1].max(initial=-1) < seq_len
+                and pairs[:, 3].max(initial=-1) < seq_len
+            ):
+                return pairs
+    bsz, seq_len = diag_state.embeddings.shape[:2]
+    start = max(diag_state.warmup_frames, 0)
+    if seq_len - start < 2:
+        raise AssertionError("Z/P distance scatter requires at least two timesteps after warmup.")
+    num_pairs = max(int(diagnostics_cfg.zp_distance_pairs), 1)
+    min_gap = max(int(diagnostics_cfg.zp_distance_min_gap), 0)
+    rng = np.random.default_rng(0)
+    pairs = np.zeros((num_pairs, 4), dtype=np.int64)
+    for idx in range(num_pairs):
+        for _ in range(256):
+            b = int(rng.integers(0, bsz))
+            i = int(rng.integers(start, seq_len))
+            j = int(rng.integers(start, seq_len))
+            if abs(i - j) < min_gap:
+                continue
+            pairs[idx] = (b, i, b, j)
+            break
+        else:
+            raise AssertionError("Z/P distance scatter failed to sample valid index pairs.")
+    pairs_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(pairs_path, pairs)
+    return pairs
 
 
 def _frame_to_tensor(frame: np.ndarray, image_size: int) -> torch.Tensor:
@@ -424,6 +532,36 @@ def _pose_from_frames(
     return pose_pred[0].detach().cpu().numpy()
 
 
+def _h_from_frames(
+    frames: Sequence[np.ndarray],
+    model: Any,
+    model_cfg: Any,
+    device: torch.device,
+    *,
+    use_z2h_init: bool,
+    action_dim: int,
+    force_h_zero: bool = False,
+) -> np.ndarray:
+    if len(frames) < 2:
+        raise AssertionError("Hidden-state extraction requires at least two frames.")
+    frames_tensor = torch.stack(
+        [_frame_to_tensor(f, model_cfg.image_size) for f in frames],
+        dim=0,
+    ).unsqueeze(0)
+    frames_tensor = frames_tensor.to(device)
+    actions_zero = torch.zeros((1, frames_tensor.shape[1] - 1, action_dim), device=device)
+    with torch.no_grad():
+        embeds = model.encode_sequence(frames_tensor)["embeddings"]
+        _, _, h_states = rollout_teacher_forced(
+            model,
+            embeds,
+            actions_zero,
+            use_z2h_init=use_z2h_init,
+            force_h_zero=force_h_zero,
+        )
+    return h_states[0].detach().cpu().numpy()
+
+
 def _extract_planning_latents(
     model: Any,
     plan_frames: torch.Tensor,
@@ -432,7 +570,17 @@ def _extract_planning_latents(
     *,
     use_z2h_init: bool,
     force_h_zero: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Optional[str]], np.ndarray, torch.Tensor]:
+    use_pose: bool = True,
+) -> Tuple[
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    List[Optional[str]],
+    Optional[np.ndarray],
+    torch.Tensor,
+]:
     assert torch.is_grad_enabled()
     with torch.no_grad():
         plan_frames_device = plan_frames.to(device)
@@ -445,35 +593,50 @@ def _extract_planning_latents(
             use_z2h_init=use_z2h_init,
             force_h_zero=force_h_zero,
         )
-        _, plan_p_embeddings, _ = rollout_pose(
-            model,
-            plan_h_states,
-            plan_actions_device,
-            z_embeddings=plan_embeddings,
-        )
-    p_t = plan_p_embeddings[:, :-1].detach().cpu().reshape(-1, plan_p_embeddings.shape[-1]).numpy()
-    p_tp1 = plan_p_embeddings[:, 1:].detach().cpu().reshape(-1, plan_p_embeddings.shape[-1]).numpy()
+        plan_p_embeddings = None
+        if use_pose:
+            _, plan_p_embeddings, _ = rollout_pose(
+                model,
+                plan_h_states,
+                plan_actions_device,
+                z_embeddings=plan_embeddings,
+            )
+    p_t = None
+    p_tp1 = None
+    deltas = None
+    if plan_p_embeddings is not None:
+        p_t = plan_p_embeddings[:, :-1].detach().cpu().reshape(-1, plan_p_embeddings.shape[-1]).numpy()
+        p_tp1 = plan_p_embeddings[:, 1:].detach().cpu().reshape(-1, plan_p_embeddings.shape[-1]).numpy()
     h_t = plan_h_states[:, :-1].detach().cpu().reshape(-1, plan_h_states.shape[-1]).numpy()
     h_tp1 = plan_h_states[:, 1:].detach().cpu().reshape(-1, plan_h_states.shape[-1]).numpy()
     actions_np = plan_actions[:, :-1].detach().cpu().reshape(-1, plan_actions.shape[-1]).numpy()
     action_labels = action_labels_from_vectors(actions_np)
-    deltas = p_tp1 - p_t
+    if p_t is not None and p_tp1 is not None:
+        deltas = p_tp1 - p_t
     return p_t, p_tp1, h_t, h_tp1, actions_np, action_labels, deltas, plan_h_states
 
 
 def _compute_planning_graphs(
-    p_t: np.ndarray,
-    p_tp1: np.ndarray,
+    p_t: Optional[np.ndarray],
+    p_tp1: Optional[np.ndarray],
     h_t: np.ndarray,
     h_tp1: np.ndarray,
     actions_np: np.ndarray,
     action_labels: Sequence[Optional[str]],
     *,
     min_action_count: int,
-) -> Tuple[ActionDeltaStats, DatasetGraph, DatasetGraph, float]:
-    stats = compute_action_delta_stats(
-        p_t,
-        p_tp1,
+) -> Tuple[Optional[ActionDeltaStats], ActionDeltaStats, DatasetGraph, Optional[DatasetGraph], float]:
+    stats_p = None
+    if p_t is not None and p_tp1 is not None:
+        stats_p = compute_action_delta_stats(
+            p_t,
+            p_tp1,
+            actions_np,
+            min_action_count=min_action_count,
+        )
+    stats_h = compute_action_delta_stats(
+        h_t,
+        h_tp1,
         actions_np,
         min_action_count=min_action_count,
     )
@@ -492,14 +655,16 @@ def _compute_planning_graphs(
         radius=tau_h_merge,
         metric="cosine",
     )
-    graph_p = build_dataset_graph(
-        p_t,
-        p_tp1,
-        actions_np,
-        radius=stats.r_cluster_p,
-        metric="l2",
-    )
-    return stats, graph_h, graph_p, tau_h_merge
+    graph_p = None
+    if stats_p is not None and p_t is not None and p_tp1 is not None:
+        graph_p = build_dataset_graph(
+            p_t,
+            p_tp1,
+            actions_np,
+            radius=stats_p.r_cluster_p,
+            metric="l2",
+        )
+    return stats_p, stats_h, graph_h, graph_p, tau_h_merge
 
 
 def _run_h_local_sanity(
@@ -544,9 +709,9 @@ def _build_planning_tests(
 
 def _write_planning_metrics_row(
     metrics_dir: Path,
-    stats: ActionDeltaStats,
+    stats: Optional[ActionDeltaStats],
     graph_h: DatasetGraph,
-    graph_p: DatasetGraph,
+    graph_p: Optional[DatasetGraph],
     h_reach: np.ndarray,
     p_reach: np.ndarray,
     h_local_success: bool,
@@ -588,18 +753,24 @@ def _write_planning_metrics_row(
         "test2_final_p_dist",
         "test2_goal_dist",
     ]
+    stats_L = stats.L_scale if stats is not None else float("nan")
+    stats_inv_lr = stats.inv_lr if stats is not None else float("nan")
+    stats_inv_ud = stats.inv_ud if stats is not None else float("nan")
+    stats_noop_ratio = stats.noop_ratio if stats is not None else float("nan")
+    stats_q = stats.q if stats is not None else {}
+    num_nodes_p = graph_p.centers.shape[0] if graph_p is not None else float("nan")
     row = [
         global_step,
-        stats.L_scale,
-        stats.inv_lr,
-        stats.inv_ud,
-        stats.noop_ratio,
-        stats.q.get("L", float("nan")),
-        stats.q.get("R", float("nan")),
-        stats.q.get("U", float("nan")),
-        stats.q.get("D", float("nan")),
+        stats_L,
+        stats_inv_lr,
+        stats_inv_ud,
+        stats_noop_ratio,
+        stats_q.get("L", float("nan")),
+        stats_q.get("R", float("nan")),
+        stats_q.get("U", float("nan")),
+        stats_q.get("D", float("nan")),
         graph_h.centers.shape[0],
-        graph_p.centers.shape[0],
+        num_nodes_p,
         float(np.median(h_reach)) if h_reach.size else float("nan"),
         _pct(h_reach, 0.10),
         _pct(h_reach, 0.90),
@@ -1017,6 +1188,11 @@ def _enabled_kinds(weights, model) -> dict[str, bool]:
                 "rollout_kstep_p",
                 "scale_dp",
                 "geometry_rank_p",
+                "dz_anchor_dp",
+                "loop_closure_p",
+                "noop_residual_dp",
+                "distance_corr_p",
+                "inverse_cycle_dp",
             )
         )
     )
@@ -1130,6 +1306,7 @@ def run_diagnostics_step(
     diagnostics_z_consistency_dir = run_dir / "vis_z_consistency"
     diagnostics_z_monotonicity_dir = run_dir / "vis_z_monotonicity"
     diagnostics_path_independence_dir = run_dir / "vis_path_independence"
+    diagnostics_zp_distance_dir = run_dir / "vis_zp_distance_scatter"
     diagnostics_h_ablation_dir = run_dir / "vis_h_ablation"
     diagnostics_h_drift_dir = run_dir / "vis_h_drift_by_action"
     diagnostics_norm_timeseries_dir = run_dir / "vis_norm_timeseries"
@@ -1279,6 +1456,8 @@ def run_diagnostics_step(
             diagnostics_z_monotonicity_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_path_independence"].enabled:
             diagnostics_path_independence_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_zp_distance_scatter"].enabled:
+            diagnostics_zp_distance_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_h_ablation"].enabled:
             diagnostics_h_ablation_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_h_drift_by_action"].enabled:
@@ -2085,6 +2264,31 @@ def run_diagnostics_step(
                 [(label, z_mean, p_mean)],
             )
 
+        if resolved_outputs["vis_zp_distance_scatter"].enabled:
+            if not diag_state.has_p or diag_state.p_embeddings is None:
+                raise AssertionError("Z/P distance scatter requires pose embeddings.")
+            pairs = _load_or_sample_zp_pairs(
+                run_dir=run_dir,
+                diag_state=diag_state,
+                diagnostics_cfg=diagnostics_cfg,
+            )
+            device = diag_state.embeddings.device
+            b_i = torch.tensor(pairs[:, 0], device=device, dtype=torch.long)
+            t_i = torch.tensor(pairs[:, 1], device=device, dtype=torch.long)
+            b_j = torch.tensor(pairs[:, 2], device=device, dtype=torch.long)
+            t_j = torch.tensor(pairs[:, 3], device=device, dtype=torch.long)
+            z_i = diag_state.embeddings[b_i, t_i]
+            z_j = diag_state.embeddings[b_j, t_j]
+            p_i = diag_state.p_embeddings[b_i, t_i]
+            p_j = diag_state.p_embeddings[b_j, t_j]
+            z_dist = (z_i - z_j).norm(dim=-1).detach().cpu().numpy()
+            p_dist = (p_i - p_j).norm(dim=-1).detach().cpu().numpy()
+            save_zp_distance_scatter(
+                diagnostics_zp_distance_dir / f"zp_distance_scatter_{global_step:07d}.png",
+                z_dist,
+                p_dist,
+            )
+
         if resolved_outputs["vis_h_drift_by_action"].enabled:
             drift_stats = _compute_h_drift_stats(
                 diagnostics_cfg=diagnostics_cfg,
@@ -2329,11 +2533,26 @@ def run_planning_diagnostics_step(
     planning_graph_dir = run_dir / "vis_planning_graph"
 
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["vis_planning_action_stats"].enabled or resolved_outputs["vis_planning_action_stats_strip"].enabled:
+    if (
+        resolved_outputs["vis_planning_action_stats_p"].enabled
+        or resolved_outputs["vis_planning_action_stats_h"].enabled
+        or resolved_outputs["vis_planning_action_stats_strip_p"].enabled
+        or resolved_outputs["vis_planning_action_stats_strip_h"].enabled
+    ):
         planning_action_stats_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["vis_planning_pca_test1"].enabled or resolved_outputs["vis_planning_pca_test2"].enabled:
+    if (
+        resolved_outputs["vis_planning_pca_test1"].enabled
+        or resolved_outputs["vis_planning_pca_test1_h"].enabled
+        or resolved_outputs["vis_planning_pca_test2"].enabled
+        or resolved_outputs["vis_planning_pca_test2_h"].enabled
+    ):
         planning_pca_dir.mkdir(parents=True, exist_ok=True)
-    if resolved_outputs["vis_planning_exec_test1"].enabled or resolved_outputs["vis_planning_exec_test2"].enabled:
+    if (
+        resolved_outputs["vis_planning_exec_test1_p"].enabled
+        or resolved_outputs["vis_planning_exec_test1_h"].enabled
+        or resolved_outputs["vis_planning_exec_test2_p"].enabled
+        or resolved_outputs["vis_planning_exec_test2_h"].enabled
+    ):
         planning_exec_dir.mkdir(parents=True, exist_ok=True)
     if resolved_outputs["vis_planning_reachable_h"].enabled or resolved_outputs["vis_planning_reachable_p"].enabled:
         planning_reachable_dir.mkdir(parents=True, exist_ok=True)
@@ -2341,6 +2560,14 @@ def run_planning_diagnostics_step(
         planning_graph_dir.mkdir(parents=True, exist_ok=True)
 
     model.eval()
+    planning_kind = getattr(planning_cfg, "latent_kind", "p")
+    use_p = planning_kind in ("p", "auto") and model.p_action_delta_projector is not None
+    if planning_kind == "p" and not use_p:
+        raise AssertionError(
+            "Planning diagnostics require p_action_delta_projector when latent_kind='p'. "
+            "Set planning_diagnostics.latent_kind='h' or 'auto' to use h instead."
+        )
+    use_h = planning_kind in ("h", "auto")
     (
         p_t,
         p_tp1,
@@ -2357,8 +2584,9 @@ def run_planning_diagnostics_step(
         device,
         use_z2h_init=should_use_z2h_init(weights),
         force_h_zero=force_h_zero,
+        use_pose=use_p,
     )
-    stats, graph_h, graph_p, tau_h_merge = _compute_planning_graphs(
+    stats_p, stats_h, graph_h, graph_p, tau_h_merge = _compute_planning_graphs(
         p_t,
         p_tp1,
         h_t,
@@ -2368,19 +2596,38 @@ def run_planning_diagnostics_step(
         min_action_count=planning_cfg.min_action_count,
     )
 
-    if resolved_outputs["vis_planning_action_stats"].enabled:
+    deltas_p = None
+    if p_t is not None and p_tp1 is not None:
+        deltas_p = p_tp1 - p_t
+    deltas_h = h_tp1 - h_t
+
+    if resolved_outputs["vis_planning_action_stats_p"].enabled and deltas_p is not None and stats_p is not None:
         plot_action_stats(
             planning_action_stats_dir / f"action_stats_{global_step:07d}.png",
-            deltas,
+            deltas_p,
             action_labels,
-            stats.mu,
+            stats_p.mu,
         )
-    if resolved_outputs["vis_planning_action_stats_strip"].enabled:
+    if resolved_outputs["vis_planning_action_stats_h"].enabled:
+        plot_action_stats(
+            planning_action_stats_dir / f"action_stats_h_{global_step:07d}.png",
+            deltas_h,
+            action_labels,
+            stats_h.mu,
+        )
+    if resolved_outputs["vis_planning_action_stats_strip_p"].enabled and deltas_p is not None and stats_p is not None:
         plot_action_strip(
             planning_action_stats_dir / f"action_stats_strip_{global_step:07d}.png",
-            deltas,
+            deltas_p,
             action_labels,
-            stats.mu,
+            stats_p.mu,
+        )
+    if resolved_outputs["vis_planning_action_stats_strip_h"].enabled:
+        plot_action_strip(
+            planning_action_stats_dir / f"action_stats_strip_h_{global_step:07d}.png",
+            deltas_h,
+            action_labels,
+            stats_h.mu,
         )
 
     rng = random.Random(global_step)
@@ -2389,11 +2636,13 @@ def run_planning_diagnostics_step(
         sample_limit=planning_cfg.reachable_fraction_samples,
         rng=rng,
     )
-    p_reach = reachable_fractions(
-        graph_p,
-        sample_limit=planning_cfg.reachable_fraction_samples,
-        rng=rng,
-    )
+    p_reach = np.array([], dtype=np.float32)
+    if graph_p is not None:
+        p_reach = reachable_fractions(
+            graph_p,
+            sample_limit=planning_cfg.reachable_fraction_samples,
+            rng=rng,
+        )
 
     if resolved_outputs["vis_planning_graph_h"].enabled:
         save_planning_graph_plot(
@@ -2405,7 +2654,7 @@ def run_planning_diagnostics_step(
             max_samples=planning_cfg.pca_samples,
             max_edges=4000,
         )
-    if resolved_outputs["vis_planning_graph_p"].enabled:
+    if resolved_outputs["vis_planning_graph_p"].enabled and graph_p is not None:
         save_planning_graph_plot(
             planning_graph_dir / f"graph_p_{global_step:07d}.png",
             p_t,
@@ -2416,82 +2665,132 @@ def run_planning_diagnostics_step(
             max_edges=4000,
         )
 
-    h_local_success = _run_h_local_sanity(
-        graph_h,
-        plan_h_states,
-        tau_h_merge,
-        planning_cfg,
-        rng,
-    )
+    h_local_success = False
+    if use_h:
+        h_local_success = _run_h_local_sanity(
+            graph_h,
+            plan_h_states,
+            tau_h_merge,
+            planning_cfg,
+            rng,
+        )
     test_cases = _build_planning_tests(planning_env, planning_cfg)
 
     test_results: Dict[str, PlanningTestResult] = {}
     plan_nodes_for_plot: Dict[str, Optional[np.ndarray]] = {}
+    plan_nodes_for_plot_h: Dict[str, Optional[np.ndarray]] = {}
+    want_planning_h = (
+        resolved_outputs["vis_planning_exec_test1_h"].enabled
+        or resolved_outputs["vis_planning_exec_test2_h"].enabled
+        or resolved_outputs["vis_planning_pca_test1_h"].enabled
+        or resolved_outputs["vis_planning_pca_test2_h"].enabled
+    )
     action_dim = plan_actions.shape[-1]
     for label, start_tile, goal_tile in test_cases:
         obs_start, _ = planning_env.reset(options={"start_tile": start_tile})
         obs_goal, _ = planning_env.reset(options={"start_tile": goal_tile})
-        pose_seq = _pose_from_frames(
-            [obs_start, obs_goal],
-            model,
-            model_cfg,
-            device,
-            use_z2h_init=should_use_z2h_init(weights),
-            action_dim=action_dim,
-            force_h_zero=force_h_zero,
-        )
-        p_start = pose_seq[0]
-        p_goal = pose_seq[1]
-        plan = delta_lattice_astar(
-            p_start,
-            p_goal,
-            stats.mu,
-            r_goal=stats.r_goal,
-            r_merge=stats.r_merge,
-            step_scale=stats.L_scale,
-            max_nodes=planning_cfg.astar_max_nodes,
-        )
-        visited: List[Tuple[int, int]] = [start_tile]
-        final_frame = None
-        if plan is None:
+        if use_p and stats_p is not None:
+            pose_seq = _pose_from_frames(
+                [obs_start, obs_goal],
+                model,
+                model_cfg,
+                device,
+                use_z2h_init=should_use_z2h_init(weights),
+                action_dim=action_dim,
+                force_h_zero=force_h_zero,
+            )
+            p_start = pose_seq[0]
+            p_goal = pose_seq[1]
+            plan = delta_lattice_astar(
+                p_start,
+                p_goal,
+                stats_p.mu,
+                r_goal=stats_p.r_goal,
+                r_merge=stats_p.r_merge,
+                step_scale=stats_p.L_scale,
+                max_nodes=planning_cfg.astar_max_nodes,
+            )
+            visited: List[Tuple[int, int]] = [start_tile]
+            final_frame = None
+            if plan is None:
+                test_results[label] = PlanningTestResult(
+                    success=False,
+                    steps=0,
+                    final_p_distance=float("inf"),
+                    goal_distance=float(np.linalg.norm(p_goal - p_start)),
+                    visited_cells=visited,
+                )
+                plan_nodes_for_plot[label] = None
+            else:
+                visited, final_frame = run_plan_in_env(
+                    planning_env,
+                    plan.actions,
+                    start_tile=start_tile,
+                )
+                final_cell = visited[-1] if visited else start_tile
+                success = final_cell == goal_tile
+                final_p_distance = float("inf")
+                if final_frame is not None:
+                    final_pose = _pose_from_frames(
+                        [obs_start, final_frame],
+                        model,
+                        model_cfg,
+                        device,
+                        use_z2h_init=should_use_z2h_init(weights),
+                        action_dim=action_dim,
+                        force_h_zero=force_h_zero,
+                    )
+                    final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))
+                test_results[label] = PlanningTestResult(
+                    success=success,
+                    steps=len(plan.actions),
+                    final_p_distance=final_p_distance,
+                    goal_distance=float(np.linalg.norm(p_goal - p_start)),
+                    visited_cells=visited,
+                )
+                plan_nodes_for_plot[label] = np.stack(plan.nodes, axis=0) if plan.nodes else None
+        elif label not in test_results:
             test_results[label] = PlanningTestResult(
                 success=False,
                 steps=0,
-                final_p_distance=float("inf"),
-                goal_distance=float(np.linalg.norm(p_goal - p_start)),
-                visited_cells=visited,
+                final_p_distance=float("nan"),
+                goal_distance=float("nan"),
+                visited_cells=[start_tile],
             )
-            plan_nodes_for_plot[label] = None
-        else:
-            visited, final_frame = run_plan_in_env(
-                planning_env,
-                plan.actions,
-                start_tile=start_tile,
+        if want_planning_h:
+            h_seq = _h_from_frames(
+                [obs_start, obs_goal],
+                model,
+                model_cfg,
+                device,
+                use_z2h_init=should_use_z2h_init(weights),
+                action_dim=action_dim,
+                force_h_zero=force_h_zero,
             )
-            final_cell = visited[-1] if visited else start_tile
-            success = final_cell == goal_tile
-            final_p_distance = float("inf")
-            if final_frame is not None:
-                final_pose = _pose_from_frames(
-                    [obs_start, final_frame],
-                    model,
-                    model_cfg,
-                    device,
-                    use_z2h_init=should_use_z2h_init(weights),
-                    action_dim=action_dim,
-                    force_h_zero=force_h_zero,
+            h_start = h_seq[0]
+            h_goal = h_seq[1]
+            plan_h = delta_lattice_astar(
+                h_start,
+                h_goal,
+                stats_h.mu,
+                r_goal=stats_h.r_goal,
+                r_merge=stats_h.r_merge,
+                step_scale=stats_h.L_scale,
+                max_nodes=planning_cfg.astar_max_nodes,
+            )
+            visited_h: List[Tuple[int, int]] = [start_tile]
+            final_frame_h = None
+            if plan_h is None:
+                plan_nodes_for_plot_h[label] = None
+            else:
+                visited_h, final_frame_h = run_plan_in_env(
+                    planning_env,
+                    plan_h.actions,
+                    start_tile=start_tile,
                 )
-                final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))
-            test_results[label] = PlanningTestResult(
-                success=success,
-                steps=len(plan.actions),
-                final_p_distance=final_p_distance,
-                goal_distance=float(np.linalg.norm(p_goal - p_start)),
-                visited_cells=visited,
-            )
-            plan_nodes_for_plot[label] = np.stack(plan.nodes, axis=0) if plan.nodes else None
+                plan_nodes_for_plot_h[label] = np.stack(plan_h.nodes, axis=0) if plan_h.nodes else None
 
-        if label == "test1" and resolved_outputs["vis_planning_exec_test1"].enabled:
+        if label == "test1" and resolved_outputs["vis_planning_exec_test1_p"].enabled and use_p:
             plot_grid_trace(
                 planning_exec_dir / f"exec_{label}_{global_step:07d}.png",
                 planning_env.grid_rows,
@@ -2500,7 +2799,7 @@ def run_planning_diagnostics_step(
                 start_tile,
                 goal_tile,
             )
-        if label == "test2" and resolved_outputs["vis_planning_exec_test2"].enabled:
+        if label == "test2" and resolved_outputs["vis_planning_exec_test2_p"].enabled and use_p:
             plot_grid_trace(
                 planning_exec_dir / f"exec_{label}_{global_step:07d}.png",
                 planning_env.grid_rows,
@@ -2509,7 +2808,33 @@ def run_planning_diagnostics_step(
                 start_tile,
                 goal_tile,
             )
-        if label == "test1" and resolved_outputs["vis_planning_pca_test1"].enabled:
+        if (
+            label == "test1"
+            and resolved_outputs["vis_planning_exec_test1_h"].enabled
+            and want_planning_h
+        ):
+            plot_grid_trace(
+                planning_exec_dir / f"exec_{label}_h_{global_step:07d}.png",
+                planning_env.grid_rows,
+                planning_env.grid_cols,
+                visited_h,
+                start_tile,
+                goal_tile,
+            )
+        if (
+            label == "test2"
+            and resolved_outputs["vis_planning_exec_test2_h"].enabled
+            and want_planning_h
+        ):
+            plot_grid_trace(
+                planning_exec_dir / f"exec_{label}_h_{global_step:07d}.png",
+                planning_env.grid_rows,
+                planning_env.grid_cols,
+                visited_h,
+                start_tile,
+                goal_tile,
+            )
+        if label == "test1" and resolved_outputs["vis_planning_pca_test1"].enabled and use_p:
             plot_pca_path(
                 planning_pca_dir / f"pca_{label}_{global_step:07d}.png",
                 p_t,
@@ -2518,13 +2843,39 @@ def run_planning_diagnostics_step(
                 p_goal,
                 max_samples=planning_cfg.pca_samples,
             )
-        if label == "test2" and resolved_outputs["vis_planning_pca_test2"].enabled:
+        if label == "test2" and resolved_outputs["vis_planning_pca_test2"].enabled and use_p:
             plot_pca_path(
                 planning_pca_dir / f"pca_{label}_{global_step:07d}.png",
                 p_t,
                 plan_nodes_for_plot[label],
                 p_start,
                 p_goal,
+                max_samples=planning_cfg.pca_samples,
+            )
+        if (
+            label == "test1"
+            and resolved_outputs["vis_planning_pca_test1_h"].enabled
+            and want_planning_h
+        ):
+            plot_pca_path(
+                planning_pca_dir / f"pca_{label}_h_{global_step:07d}.png",
+                h_t,
+                plan_nodes_for_plot_h.get(label),
+                h_start,
+                h_goal,
+                max_samples=planning_cfg.pca_samples,
+            )
+        if (
+            label == "test2"
+            and resolved_outputs["vis_planning_pca_test2_h"].enabled
+            and want_planning_h
+        ):
+            plot_pca_path(
+                planning_pca_dir / f"pca_{label}_h_{global_step:07d}.png",
+                h_t,
+                plan_nodes_for_plot_h.get(label),
+                h_start,
+                h_goal,
                 max_samples=planning_cfg.pca_samples,
             )
 
@@ -2543,7 +2894,7 @@ def run_planning_diagnostics_step(
 
     _write_planning_metrics_row(
         metrics_dir,
-        stats,
+        stats_p,
         graph_h,
         graph_p,
         h_reach,

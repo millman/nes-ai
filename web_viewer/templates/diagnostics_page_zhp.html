@@ -192,6 +192,19 @@
             </div>
         </div>
         <div class="card h-100">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-zp-distance-header">
+                <span class="image-preview-card-title">Z/P distance scatter</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Step: <span class="step-label-value">—</span></span>
+                    <span class="diagnostic-info-icon" data-bs-toggle="tooltip" data-bs-placement="left" title="Scatter of ||z_i-z_j|| vs ||p_i-p_j|| for fixed pairs. Look for small z to imply small p.">i</span>
+                </div>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <img id="diagnostics-zp-distance-img" class="img-fluid rounded border d-none" alt="Z/P distance scatter">
+                <div class="text-muted small" id="diagnostics-zp-distance-caption"></div>
+            </div>
+        </div>
+        <div class="card h-100">
             <div class="card-header py-2 d-flex justify-content-between align-items-center" id="diagnostics-z-straightline-header">
                 <span class="image-preview-card-title">Straight-line action rays (Z)</span>
                 <div class="d-flex align-items-center gap-2">
@@ -501,6 +514,13 @@ document.addEventListener("DOMContentLoaded", () => {
             header: document.getElementById("diagnostics-z-path-header"),
             title: "Path independence",
             label: "vis_path_independence",
+        },
+        zp_distance_scatter: {
+            img: document.getElementById("diagnostics-zp-distance-img"),
+            caption: document.getElementById("diagnostics-zp-distance-caption"),
+            header: document.getElementById("diagnostics-zp-distance-header"),
+            title: "Z/P distance scatter",
+            label: "vis_zp_distance_scatter",
         },
         straightline_z: {
             img: document.getElementById("diagnostics-z-straightline-img"),

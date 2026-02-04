@@ -15,3 +15,5 @@ class PlanningDiagnosticsConfig:
     local_k_max: int = 10
     interior_goal_col_offset: int = 2
     pca_samples: int = 4096
+    # Which latent to use for planning diagnostics: "p", "h", or "auto" (use p when available).
+    latent_kind: str = "h"
