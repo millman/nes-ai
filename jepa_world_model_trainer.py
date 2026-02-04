@@ -192,7 +192,12 @@ from jepa_world_model.planning.planning_eval import (
 )
 from jepa_world_model.encoder_schedule import _derive_encoder_schedule, _suggest_encoder_schedule
 from jepa_world_model.step_schedule import _parse_schedule, _should_run_schedule
-from jepa_world_model.data import TrajectorySequenceDataset, collate_batch, load_actions_for_trajectory
+from jepa_world_model.data import (
+    PreloadedTrajectorySequenceDataset,
+    TrajectorySequenceDataset,
+    collate_batch,
+    load_actions_for_trajectory,
+)
 from jepa_world_model.hard_sample_reservoir import HardSampleReservoir, inject_hard_examples_into_batch
 from jepa_world_model.vis_rollout import (
     VisualizationSelection,
@@ -545,6 +550,7 @@ class TrainConfig:
     weight_decay: float = 0.03
     device: Optional[str] = "mps"
     use_soap: bool = False
+    detect_anomaly: bool = False
 
     # Loss configuration
     loss_weights: LossWeights = field(default_factory=LossWeights)
@@ -2310,7 +2316,8 @@ def _compute_losses_and_metrics(
     decoder_grad_norm = 0.0
     if for_training and optimizer is not None:
         optimizer.zero_grad()
-        with torch.autograd.set_detect_anomaly(True):
+        anomaly_ctx = torch.autograd.set_detect_anomaly(True) if cfg.detect_anomaly else nullcontext()
+        with anomaly_ctx:
             world_loss.backward()
         world_grad_norm = grad_norm(model.parameters())
         decoder_grad_norm = grad_norm(decoder.parameters())

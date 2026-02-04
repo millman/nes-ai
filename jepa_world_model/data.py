@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 import warnings
+import sys
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 from recon.data import list_trajectories, load_frame_as_tensor
 
@@ -67,7 +69,7 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
             items = items[:max_traj]
         self.samples: List[Tuple[List[Path], np.ndarray, int]] = []
         self.action_dim: Optional[int] = None
-        for traj_name, frame_paths in items:
+        for traj_name, frame_paths in tqdm(items, desc="Preloading trajectories", unit="traj"):
             if len(frame_paths) < self.seq_len:
                 warnings.warn(
                     f"Skipping trajectory {traj_name} shorter than seq_len {self.seq_len}",
@@ -113,4 +115,120 @@ class TrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[s
         return torch.stack(frames, dim=0), torch.from_numpy(action_slice), path_slice, index
 
 
-__all__ = ["TrajectorySequenceDataset", "collate_batch", "load_actions_for_trajectory"]
+def _estimate_tensor_bytes(tensor: torch.Tensor) -> int:
+    return int(tensor.numel()) * int(tensor.element_size())
+
+
+def _estimate_strings_bytes(strings: Sequence[str]) -> int:
+    total = 0
+    for value in strings:
+        total += sys.getsizeof(value)
+    return total
+
+
+class PreloadedTrajectorySequenceDataset(Dataset[Tuple[torch.Tensor, torch.Tensor, List[str], int]]):
+    """Preload contiguous frame/action sequences from recorded trajectories."""
+
+    def __init__(
+        self,
+        root: Path,
+        seq_len: int,
+        image_hw: Tuple[int, int],
+        max_traj: Optional[int] = None,
+        included_trajectories: Optional[Sequence[str]] = None,
+    ) -> None:
+        self.root = Path(root)
+        self.seq_len = seq_len
+        self.image_hw = image_hw
+        if self.seq_len < 1:
+            raise ValueError("seq_len must be positive.")
+        trajectories = list_trajectories(self.root)
+        if included_trajectories is not None:
+            include_set = set(included_trajectories)
+            items = [(name, frames) for name, frames in trajectories.items() if name in include_set]
+        else:
+            items = list(trajectories.items())
+        if max_traj is not None:
+            items = items[:max_traj]
+
+        self.trajs: List[Tuple[torch.Tensor, torch.Tensor, List[str]]] = []
+        self.samples: List[Tuple[int, int]] = []
+        self.action_dim: Optional[int] = None
+
+        for traj_name, frame_paths in items:
+            if len(frame_paths) < self.seq_len:
+                warnings.warn(
+                    f"Skipping trajectory {traj_name} shorter than seq_len {self.seq_len}",
+                    RuntimeWarning,
+                )
+                continue
+            action_arr = load_actions_for_trajectory(self.root / traj_name, expected_length=len(frame_paths))
+            if self.action_dim is None:
+                self.action_dim = action_arr.shape[1]
+            elif self.action_dim != action_arr.shape[1]:
+                raise ValueError(
+                    f"Inconsistent action dimension for {traj_name}: expected {self.action_dim}, got {action_arr.shape[1]}"
+                )
+            frames: List[torch.Tensor] = []
+            paths: List[str] = []
+            for path in tqdm(frame_paths, desc=f"Preloading {traj_name}", unit="frame", leave=False):
+                frames.append(load_frame_as_tensor(path, size=self.image_hw))
+                paths.append(str(path))
+            traj_frames = torch.stack(frames, dim=0)
+            traj_actions = torch.from_numpy(action_arr)
+            traj_index = len(self.trajs)
+            self.trajs.append((traj_frames, traj_actions, paths))
+            max_start = len(frame_paths) - self.seq_len
+            for start in range(max_start + 1):
+                self.samples.append((traj_index, start))
+        if not self.samples:
+            raise AssertionError(f"No usable sequences found under {self.root}")
+        if self.action_dim is None:
+            raise AssertionError("Failed to infer action dimensionality.")
+
+        self._print_memory_estimate()
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, List[str], int]:
+        traj_idx, start = self.samples[index]
+        traj_frames, traj_actions, traj_paths = self.trajs[traj_idx]
+        frames = traj_frames[start : start + self.seq_len]
+        actions = traj_actions[start : start + self.seq_len]
+        paths = traj_paths[start : start + self.seq_len]
+        # Each frame/action pair must stay aligned so the predictor knows which action follows each observation.
+        assert frames.shape[0] == self.seq_len, f"Expected {self.seq_len} frames, got {frames.shape[0]}"
+        assert actions.shape[0] == self.seq_len, f"Expected {self.seq_len} actions, got {actions.shape[0]}"
+        assert actions.shape[1] == traj_actions.shape[1], "Action dimensionality changed unexpectedly."
+        return frames, actions, list(paths), index
+
+    def _print_memory_estimate(self) -> None:
+        traj_tensor_bytes = 0
+        traj_paths_bytes = 0
+        for traj_frames, traj_actions, traj_paths in self.trajs:
+            traj_tensor_bytes += _estimate_tensor_bytes(traj_frames)
+            traj_tensor_bytes += _estimate_tensor_bytes(traj_actions)
+            traj_paths_bytes += _estimate_strings_bytes(traj_paths)
+        traj_list_bytes = sys.getsizeof(self.trajs)
+        sample_list_bytes = sys.getsizeof(self.samples)
+        sample_tuple_bytes = 0
+        if self.samples:
+            sample_tuple_bytes = sys.getsizeof(self.samples[0]) * len(self.samples)
+        underlying_bytes = traj_tensor_bytes + traj_paths_bytes + traj_list_bytes
+        samples_bytes = sample_list_bytes + sample_tuple_bytes
+        total_bytes = underlying_bytes + samples_bytes
+        print(
+            "[dataset preload memory] "
+            f"total={total_bytes / (1024 ** 2):.2f} MiB "
+            f"underlying={underlying_bytes / (1024 ** 2):.2f} MiB "
+            f"samples={samples_bytes / (1024 ** 2):.2f} MiB"
+        )
+
+
+__all__ = [
+    "TrajectorySequenceDataset",
+    "PreloadedTrajectorySequenceDataset",
+    "collate_batch",
+    "load_actions_for_trajectory",
+]
