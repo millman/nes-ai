@@ -1,20 +1,24 @@
 # Prompt Logging Protocol
 
 ## General Workflow
-1. Track each batch of edits triggered by a user prompt by creating a fresh Markdown file under `.agent/changes/`. Use descriptive filenames such as `.agent/changes/2024-06-10_14-23-45.simple_change.md` so entries remain chronological and searchable.
-2. Inside that file, paste every prompt that directly influenced the edits and record a concise summary of the resulting changes.
+1. Track each batch of edits triggered by a user request by creating a fresh Markdown file under `.agent/changes/`. Use descriptive filenames such as `.agent/changes/2024-06-10_14-23-45.simple_change.md` so entries remain chronological and searchable.
+2. Inside that file, capture all relevant prior conversation that influenced the edits, including back-and-forth between user prompts and Codex responses, and record a concise summary of the resulting changes.
 3. Repeat this process for each distinct batch of edits. Do not append unrelated changes to an existing log file.
+4. After each change batch, prepare a full commit message and create an actual commit that includes only the relevant changes.
 
-## Recording Prompts After a Change
+## Recording Conversation After a Change
 For every change-inducing prompt set:
 - Open (or create) the relevant `.agent/changes/<name>.md` file.
-- Append the literal prompt text in the order received, using the numbered block format below.
-- Follow each prompt with a `Changes` section containing one or more bullet points summarizing the modifications triggered by that prompt.
+- Append the literal user prompts and the Codex responses that influenced the edits in strict chronological order, using the numbered block format below.
+- Follow each prompt/response group with a `Changes` section containing one or more bullet points summarizing the modifications triggered by that prompt/response thread.
 
 Format for each prompt entry:
 ```
 [Prompt <n>]
 <verbatim prompt text>
+
+[Response <n>]
+<verbatim Codex response text>
 
 [Changes]:
 * <bullet describing the resulting edits>
@@ -22,11 +26,11 @@ Format for each prompt entry:
 * ...
 ```
 
-## Preparing a Commit Message
-When the user requests that a commit be prepared:
-1. Read every Markdown file inside `.agent/changes/` and order them by filename to preserve chronology.
-   - If the user explicitly requests a commit message for a subset of changes, only use the specified `.agent/changes/` files and ignore the rest.
-2. Combine their contents into a single message using the template:
+## Preparing a Commit Message and Committing
+After each change batch:
+1. Read the relevant Markdown file(s) inside `.agent/changes/` and order them by filename to preserve chronology.
+   - If the change batch is scoped to a subset of files, only use the `.agent/changes/` entries relevant to that batch.
+2. Combine their contents into a single commit message using the template:
    ```
    <one line summary>
 
@@ -50,18 +54,21 @@ When the user requests that a commit be prepared:
    ```
 3. Materialize the commit message by creating a directory `.agent/commits/<YYYY-MM-DD_HH-MM-SS>.<summary>/`. Inside that directory, write the combined message to `commit.md`. If there is exactly one `.agent/changes/` file involved, reuse that file's base name for the directory (e.g., `.agent/changes/2024-06-10_14-23-45.simple_change.md` → `.agent/commits/2024-06-10_14-23-45.simple_change/`).
 4. For every `.agent/changes/` file included in the commit, move it into a `changes/` subdirectory under the commit directory while preserving filenames (e.g., `.agent/changes/foo.md` → `.agent/commits/<dirname>/changes/foo.md`). Ensure the `changes/` directory is created first.
-5. Echo a command that the user can paste directly, chaining the commit with moving the directory into `.agent/done/` using the same name. Format:
-   ```
-   git commit -F .agent/commits/<YYYY-MM-DD_HH-MM-SS>.<summary>/commit.md && mv .agent/commits/<dirname> .agent/done/<dirname>
-   ```
+5. Stage only the relevant changes for the commit (use `git add -p` when unrelated working changes exist).
+6. Create the commit using `git commit -F .agent/commits/<YYYY-MM-DD_HH-MM-SS>.<summary>/commit.md`.
+7. Move the commit directory into `.agent/done/` using the same name (e.g., `.agent/commits/<dirname>` → `.agent/done/<dirname>`).
 
 ## Additional Notes
 - Always capture prompts verbatim; do not paraphrase user requests in the `Prompt` blocks.
+- Always capture the Codex responses verbatim in the `Response` blocks when they influenced the changes.
 - Keep change summaries short and action-oriented.
 - Include prompts that clarified requirements or triggered follow-up adjustments if those instructions influenced the final code.
 - When a changes file covers work that was planned across earlier prompts, include those prior prompts as well—provided they are relevant to the current edits and have not already been logged elsewhere.
-- When the user asks for a "commit," prepare the commit message and output the `git commit` command instead of staging files or invoking `git commit` yourself.
 - Always use `uv` to run Python code.
 - Prefer explicit assertions for invalid preconditions in diagnostics/utilities instead of returning empty placeholders; fail fast to surface misconfigured calls.
 - If a function depends on a feature toggle or required module, assert with a clear error message rather than silently skipping.
 - Use early assertions for minimum sequence length/shape requirements to avoid silently degraded metrics.
+
+## jepa_world_model_trainer.py Changes
+- When making non-trivial changes to `jepa_world_model_trainer.py`, run a very short training run up to the first visualization/planning dump (10 steps in the current config).
+- Use a title indicating it is a test run (e.g., `test: <short description>`).
