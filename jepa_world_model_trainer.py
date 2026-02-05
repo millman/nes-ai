@@ -8,7 +8,7 @@ from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
-from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Sequence, TextIO, Tuple, Union
 
 import math
 import random
@@ -172,6 +172,10 @@ from jepa_world_model.diagnostics_runner import (
     run_diagnostics_step,
     run_planning_diagnostics_step,
 )
+from jepa_world_model.diagnostics.grid_overlay import (
+    build_grid_overlay_frames,
+    save_grid_overlay_frame_grid,
+)
 from jepa_world_model.diagnostics_utils import append_csv_row, should_use_z2h_init
 from jepa_world_model.planning.planning_eval import (
     DIRECTION_ORDER,
@@ -205,7 +209,7 @@ from jepa_world_model.vis_rollout import (
     VisualizationSequence,
     render_rollout_batch,
 )
-from gridworldkey_env import GridworldKeyEnv
+from gridworldkey_env import GridworldKeyEnv, create_env_with_theme
 
 
 
@@ -292,6 +296,8 @@ class LossWeights:
 
     # Robust temporal smoothness on z (Huber on consecutive z distances).
     z_smooth: float = 0.1
+    # Robust temporal smoothness on h (Huber on consecutive h distances).
+    h_smooth: float = 0.1
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
@@ -353,6 +359,9 @@ class LossWeights:
 
     # Multi-scale box reconstruction on predicted h rollouts with detached z inputs.
     rollout_recon_multi_box_h: float = 0.0
+
+    # NOOP should produce near-zero ΔH.
+    noop_residual_dh: float = 0.1
 
     # --- P ---
     # State-conditioned delta alignment (ΔP): Δp_t vs observed pose delta.
@@ -423,6 +432,16 @@ class LossZTemporalSmoothConfig:
             help=(
                 "Huber threshold for z temporal smoothness; with cosine distance in [0,2], 0.3 treats small motions as smooth."
             )
+        ),
+    ] = 0.3
+
+
+@dataclass
+class LossHTemporalSmoothConfig:
+    delta: Annotated[
+        float,
+        tyro.conf.arg(
+            help="Huber threshold for h temporal smoothness (L2 distance); smaller values push h to be more stable."
         ),
     ] = 0.3
 
@@ -589,6 +608,7 @@ class TrainConfig:
     # Specific losses
     sigreg: LossSigRegConfig = field(default_factory=LossSigRegConfig)
     z_smooth: LossZTemporalSmoothConfig = field(default_factory=LossZTemporalSmoothConfig)
+    h_smooth: LossHTemporalSmoothConfig = field(default_factory=LossHTemporalSmoothConfig)
     loop_closure_p: LossLoopClosureConfig = field(default_factory=LossLoopClosureConfig)
     distance_corr_p: LossDistanceCorrelationConfig = field(default_factory=LossDistanceCorrelationConfig)
     jepa_open_loop: LossJEPAOpenLoopConfig = field(default_factory=LossJEPAOpenLoopConfig)
@@ -1516,6 +1536,26 @@ def z_smooth_huber_loss(
     return loss.mean()
 
 
+def h_smooth_huber_loss(
+    h_states: torch.Tensor,
+    delta: float,
+    *,
+    start: int,
+) -> torch.Tensor:
+    if h_states.shape[1] < start + 2:
+        raise AssertionError("h_smooth_huber_loss requires at least two timesteps after start.")
+    h_t = h_states[:, start:-1]
+    h_tp1 = h_states[:, start + 1 :]
+    distances = torch.norm(h_tp1 - h_t, dim=-1)
+    delta_tensor = h_states.new_tensor(delta)
+    loss = torch.where(
+        distances <= delta_tensor,
+        0.5 * distances * distances,
+        delta_tensor * (distances - 0.5 * delta_tensor),
+    )
+    return loss.mean()
+
+
 def scale_dp_loss(pose: torch.Tensor, start: int, cfg: ScaleDPConfig) -> torch.Tensor:
     if pose.shape[1] <= start + 1:
         return pose.new_tensor(0.0)
@@ -1762,6 +1802,7 @@ def _compute_losses_and_metrics(
     loss_pixel_delta = x_frames.new_tensor(0.0)
     loss_pixel_delta_multi_box = x_frames.new_tensor(0.0)
     loss_z_smooth = x_frames.new_tensor(0.0)
+    loss_h_smooth = x_frames.new_tensor(0.0)
 
     # h (Hidden) losses
     loss_h2z = x_frames.new_tensor(0.0)
@@ -1800,6 +1841,7 @@ def _compute_losses_and_metrics(
     loss_dz_anchor_dp = x_frames.new_tensor(0.0)
     loss_loop_closure_p = x_frames.new_tensor(0.0)
     loss_noop_residual_dp = x_frames.new_tensor(0.0)
+    loss_noop_residual_dh = x_frames.new_tensor(0.0)
     loss_additivity_dp = x_frames.new_tensor(0.0)
     loss_scale_dp = x_frames.new_tensor(0.0)
     loss_distance_corr_p = x_frames.new_tensor(0.0)
@@ -1925,6 +1967,12 @@ def _compute_losses_and_metrics(
             z_embeddings,
             cfg.z_smooth.delta,
             cfg.z_norm,
+        )
+    if weights.h_smooth > 0:
+        loss_h_smooth = h_smooth_huber_loss(
+            h_states,
+            cfg.h_smooth.delta,
+            start=start_frame,
         )
 
     # z (Recon) Reconstruction and pixel-space losses
@@ -2081,6 +2129,24 @@ def _compute_losses_and_metrics(
             loss_noop_residual_dp = (dp_noop.norm(dim=-1) ** 2).mean()
         else:
             loss_noop_residual_dp = pose_deltas.new_tensor(0.0)
+
+    if weights.noop_residual_dh > 0:
+        # NOOP should not change hidden state (ΔH ≈ 0).
+        action_ids = compress_actions_to_ids(a_seq.detach().cpu().numpy())
+        if action_ids.ndim == 1:
+            action_ids = action_ids.reshape(a_seq.shape[0], a_seq.shape[1])
+        if action_ids.shape[1] == h_states.shape[1]:
+            action_ids = action_ids[:, :-1]
+        if action_ids.shape[1] != h_states.shape[1] - 1:
+            raise AssertionError("noop_residual_dh requires action/h_state shape alignment.")
+        noop_mask = torch.as_tensor(action_ids == 0, device=h_states.device)
+        dh_slice = h_states[:, start_frame + 1 :] - h_states[:, start_frame:-1]
+        mask_slice = noop_mask[:, start_frame : start_frame + dh_slice.shape[1]]
+        if mask_slice.any():
+            dh_noop = dh_slice[mask_slice]
+            loss_noop_residual_dh = (dh_noop.norm(dim=-1) ** 2).mean()
+        else:
+            loss_noop_residual_dh = h_states.new_tensor(0.0)
 
     if weights.additivity_dp > 0:
         # p_odometry: additivity of ΔP increments (Δp_t + Δp_{t+1} ≈ Δp_{t:t+2}).
@@ -2402,12 +2468,14 @@ def _compute_losses_and_metrics(
         + weights.inverse_cycle_h * _scaled("loss_inverse_cycle_h", loss_inverse_cycle_h)
         + weights.rollout_kstep_p * _scaled("loss_rollout_kstep_p", loss_rollout_kstep_p)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
+        + weights.h_smooth * _scaled("loss_h_smooth", loss_h_smooth)
         + weights.scale_dp * _scaled("loss_scale_dp", loss_scale_dp)
         + weights.action_delta_dp * _scaled("loss_action_delta_dp", loss_action_delta_dp)
         + weights.dz_anchor_dp * _scaled("loss_dz_anchor_dp", loss_dz_anchor_dp)
         + weights.loop_closure_p * _scaled("loss_loop_closure_p", loss_loop_closure_p)
         + weights.distance_corr_p * _scaled("loss_distance_corr_p", loss_distance_corr_p)
         + weights.noop_residual_dp * _scaled("loss_noop_residual_dp", loss_noop_residual_dp)
+        + weights.noop_residual_dh * _scaled("loss_noop_residual_dh", loss_noop_residual_dh)
         + weights.additivity_dp * _scaled("loss_additivity_dp", loss_additivity_dp)
         + weights.inverse_cycle_dp * _scaled("loss_inverse_cycle_dp", loss_inverse_cycle_dp)
     )
@@ -2494,12 +2562,14 @@ def _compute_losses_and_metrics(
         "loss_inverse_cycle_h": loss_inverse_cycle_h.item(),
         "loss_rollout_kstep_p": loss_rollout_kstep_p.item(),
         "loss_additivity_h": loss_additivity_h.item(),
+        "loss_h_smooth": loss_h_smooth.item(),
         "loss_scale_dp": loss_scale_dp.item(),
         "loss_action_delta_dp": loss_action_delta_dp.item(),
         "loss_dz_anchor_dp": loss_dz_anchor_dp.item(),
         "loss_loop_closure_p": loss_loop_closure_p.item(),
         "loss_distance_corr_p": loss_distance_corr_p.item(),
         "loss_noop_residual_dp": loss_noop_residual_dp.item(),
+        "loss_noop_residual_dh": loss_noop_residual_dh.item(),
         "loss_additivity_dp": loss_additivity_dp.item(),
         "loss_inverse_cycle_dp": loss_inverse_cycle_dp.item(),
         "z_norm_mean": z_norm_mean,
@@ -2880,6 +2950,8 @@ def log_metrics(
         filtered.pop("loss_sigreg", None)
     if weights.z_smooth <= 0:
         filtered.pop("loss_z_smooth", None)
+    if weights.h_smooth <= 0:
+        filtered.pop("loss_h_smooth", None)
     if weights.recon <= 0:
         filtered.pop("loss_recon", None)
     if weights.recon_multi_gauss <= 0:
@@ -2975,6 +3047,8 @@ def log_metrics(
         filtered.pop("loss_distance_corr_p", None)
     if weights.noop_residual_dp <= 0:
         filtered.pop("loss_noop_residual_dp", None)
+    if weights.noop_residual_dh <= 0:
+        filtered.pop("loss_noop_residual_dh", None)
     if weights.additivity_dp <= 0:
         filtered.pop("loss_additivity_dp", None)
     if weights.inverse_cycle_dp <= 0:
@@ -3010,6 +3084,7 @@ LOSS_COLUMNS = [
     "loss_jepa_open_loop",
     "loss_sigreg",
     "loss_z_smooth",
+    "loss_h_smooth",
     "loss_recon",
     "loss_recon_multi_gauss",
     "loss_recon_multi_box",
@@ -3050,7 +3125,10 @@ LOSS_COLUMNS = [
     "loss_dz_anchor_dp",
     "loss_loop_closure_p",
     "loss_distance_corr_p",
-    "loss_noop_residual_dp",
+                "loss_noop_residual_dp",
+                "loss_noop_residual_dh",
+                "loss_h_smooth",
+    "loss_noop_residual_dh",
     "loss_additivity_dp",
     "loss_inverse_cycle_dp",
     "z_norm_mean",
@@ -3087,6 +3165,7 @@ class LossHistory:
     jepa_open_loop: List[float] = field(default_factory=list)
     sigreg: List[float] = field(default_factory=list)
     z_smooth: List[float] = field(default_factory=list)
+    h_smooth: List[float] = field(default_factory=list)
     recon: List[float] = field(default_factory=list)
     recon_multi_gauss: List[float] = field(default_factory=list)
     recon_multi_box: List[float] = field(default_factory=list)
@@ -3128,6 +3207,7 @@ class LossHistory:
     loop_closure_p: List[float] = field(default_factory=list)
     distance_corr_p: List[float] = field(default_factory=list)
     noop_residual_dp: List[float] = field(default_factory=list)
+    noop_residual_dh: List[float] = field(default_factory=list)
     additivity_dp: List[float] = field(default_factory=list)
     inverse_cycle_dp: List[float] = field(default_factory=list)
     z_norm_mean: List[float] = field(default_factory=list)
@@ -3161,6 +3241,7 @@ class LossHistory:
         self.jepa_open_loop.append(metrics.get("loss_jepa_open_loop", 0.0))
         self.sigreg.append(metrics["loss_sigreg"])
         self.z_smooth.append(metrics.get("loss_z_smooth", 0.0))
+        self.h_smooth.append(metrics.get("loss_h_smooth", 0.0))
         self.recon.append(metrics["loss_recon"])
         self.recon_multi_gauss.append(metrics["loss_recon_multi_gauss"])
         self.recon_multi_box.append(metrics["loss_recon_multi_box"])
@@ -3202,6 +3283,7 @@ class LossHistory:
         self.loop_closure_p.append(metrics.get("loss_loop_closure_p", 0.0))
         self.distance_corr_p.append(metrics.get("loss_distance_corr_p", 0.0))
         self.noop_residual_dp.append(metrics.get("loss_noop_residual_dp", 0.0))
+        self.noop_residual_dh.append(metrics.get("loss_noop_residual_dh", 0.0))
         self.additivity_dp.append(metrics.get("loss_additivity_dp", 0.0))
         self.inverse_cycle_dp.append(metrics.get("loss_inverse_cycle_dp", 0.0))
         self.z_norm_mean.append(metrics.get("z_norm_mean", 0.0))
@@ -3222,88 +3304,124 @@ class LossHistory:
         return len(self.steps)
 
 
-def write_loss_csv(history: LossHistory, path: Path) -> None:
-    if len(history) == 0:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(LOSS_COLUMNS)
-        for row in zip(
-            history.steps,
-            history.elapsed_seconds,
-            history.cumulative_flops,
-            history.world,
-            history.val_world,
-            history.val_recon,
-            history.val_recon_multi_gauss,
-            history.val_recon_multi_box,
-            history.val_recon_zhat_multi_box,
-            history.val_recon_multi_box_mse,
-            history.val_recon_patch,
-            history.jepa,
-            history.jepa_rep,
-            history.jepa_open_loop,
-            history.sigreg,
-            history.z_smooth,
-            history.recon,
-            history.recon_multi_gauss,
-            history.recon_multi_box,
-            history.recon_zhat_multi_box,
-            history.recon_multi_box_mse,
-            history.recon_patch,
-            history.pixel_delta,
-            history.pixel_delta_multi_box,
-            history.h2z,
-            history.z2h,
-            history.z2h_init_zero,
-            history.z2h_match_h,
-            history.h2z_delta,
-            history.geometry_rank_p,
-            history.geometry_rank_p_accuracy,
-            history.geometry_rank_p_pairs,
-            history.inverse_dynamics_z,
-            history.inverse_dynamics_h,
-            history.inverse_dynamics_p,
-            history.inverse_dynamics_dp,
-            history.action_delta_z,
-            history.action_delta_h,
-            history.rollout_kstep_z,
-            history.rollout_recon_z,
-            history.rollout_recon_multi_box_z,
-            history.rollout_recon_delta_z,
-            history.rollout_recon_multi_box_delta_z,
-            history.rollout_project_z,
-            history.rollout_recon_h,
-            history.rollout_recon_multi_box_h,
-            history.rollout_kstep_h,
-            history.rollout_kstep_delta_h,
-            history.inverse_cycle_h,
-            history.rollout_kstep_p,
-            history.additivity_h,
-            history.scale_dp,
-            history.action_delta_dp,
-            history.dz_anchor_dp,
-            history.loop_closure_p,
-            history.distance_corr_p,
-            history.noop_residual_dp,
-            history.additivity_dp,
-            history.inverse_cycle_dp,
-            history.z_norm_mean,
-            history.z_norm_std,
-            history.z_norm_max,
-            history.h_norm_mean,
-            history.h_norm_std,
-            history.h_norm_max,
-            history.p_norm_mean,
-            history.p_norm_std,
-            history.p_norm_max,
-            history.dp_norm_median,
-            history.dz_to_dp_norm_median,
-            history.grad_world,
-            history.grad_decoder,
-        ):
-            writer.writerow(row)
+def _loss_history_row(history: LossHistory, index: int) -> Tuple[object, ...]:
+    return (
+        history.steps[index],
+        history.elapsed_seconds[index],
+        history.cumulative_flops[index],
+        history.world[index],
+        history.val_world[index],
+        history.val_recon[index],
+        history.val_recon_multi_gauss[index],
+        history.val_recon_multi_box[index],
+        history.val_recon_zhat_multi_box[index],
+        history.val_recon_multi_box_mse[index],
+        history.val_recon_patch[index],
+        history.jepa[index],
+        history.jepa_rep[index],
+        history.jepa_open_loop[index],
+        history.sigreg[index],
+        history.z_smooth[index],
+        history.recon[index],
+        history.recon_multi_gauss[index],
+        history.recon_multi_box[index],
+        history.recon_zhat_multi_box[index],
+        history.recon_multi_box_mse[index],
+        history.recon_patch[index],
+        history.pixel_delta[index],
+        history.pixel_delta_multi_box[index],
+        history.h2z[index],
+        history.z2h[index],
+        history.z2h_init_zero[index],
+        history.z2h_match_h[index],
+        history.h2z_delta[index],
+        history.geometry_rank_p[index],
+        history.geometry_rank_p_accuracy[index],
+        history.geometry_rank_p_pairs[index],
+        history.inverse_dynamics_z[index],
+        history.inverse_dynamics_h[index],
+        history.inverse_dynamics_p[index],
+        history.inverse_dynamics_dp[index],
+        history.action_delta_z[index],
+        history.action_delta_h[index],
+        history.rollout_kstep_z[index],
+        history.rollout_recon_z[index],
+        history.rollout_recon_multi_box_z[index],
+        history.rollout_recon_delta_z[index],
+        history.rollout_recon_multi_box_delta_z[index],
+        history.rollout_project_z[index],
+        history.rollout_recon_h[index],
+        history.rollout_recon_multi_box_h[index],
+        history.rollout_kstep_h[index],
+        history.rollout_kstep_delta_h[index],
+        history.inverse_cycle_h[index],
+        history.rollout_kstep_p[index],
+        history.additivity_h[index],
+        history.scale_dp[index],
+        history.action_delta_dp[index],
+        history.dz_anchor_dp[index],
+        history.loop_closure_p[index],
+        history.distance_corr_p[index],
+        history.noop_residual_dp[index],
+        history.additivity_dp[index],
+        history.inverse_cycle_dp[index],
+        history.z_norm_mean[index],
+        history.z_norm_std[index],
+        history.z_norm_max[index],
+        history.h_norm_mean[index],
+        history.h_norm_std[index],
+        history.h_norm_max[index],
+        history.p_norm_mean[index],
+        history.p_norm_std[index],
+        history.p_norm_max[index],
+        history.dp_norm_median[index],
+        history.dz_to_dp_norm_median[index],
+        history.grad_world[index],
+        history.grad_decoder[index],
+    )
+
+
+class LossCsvWriter:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle: Optional[TextIO] = None
+        self._writer: Optional[csv.writer] = None
+        self._last_step: Optional[float] = None
+
+    def open(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        needs_header = True
+        if self.path.exists():
+            try:
+                if self.path.stat().st_size > 0:
+                    needs_header = False
+            except OSError:
+                needs_header = True
+        self._handle = self.path.open("a", newline="")
+        self._writer = csv.writer(self._handle)
+        if needs_header:
+            self._writer.writerow(LOSS_COLUMNS)
+            self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+        self._handle = None
+        self._writer = None
+        self._last_step = None
+
+    def append_latest(self, history: LossHistory) -> None:
+        if len(history) == 0:
+            return
+        if self._writer is None:
+            raise AssertionError("LossCsvWriter is not open.")
+        step = history.steps[-1]
+        if self._last_step is not None and step == self._last_step:
+            return
+        self._writer.writerow(_loss_history_row(history, -1))
+        assert self._handle is not None
+        self._handle.flush()
+        self._last_step = step
 
 
 def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
@@ -3357,6 +3475,8 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_loop_closure_p", history.loop_closure_p),
         ("loss_distance_corr_p", history.distance_corr_p),
         ("loss_noop_residual_dp", history.noop_residual_dp),
+        ("loss_noop_residual_dh", history.noop_residual_dh),
+        ("loss_h_smooth", history.h_smooth),
         ("loss_rollout_kstep_z", history.rollout_kstep_z),
         ("loss_rollout_recon_z", history.rollout_recon_z),
         ("loss_rollout_recon_multi_box_z", history.rollout_recon_multi_box_z),
@@ -4051,6 +4171,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             or weights.loop_closure_p > 0
             or weights.distance_corr_p > 0
             or weights.noop_residual_dp > 0
+            or weights.noop_residual_dh > 0
+            or weights.h_smooth > 0
             or weights.scale_dp > 0
             or weights.geometry_rank_p > 0
             or weights.inverse_cycle_dp > 0
@@ -4101,6 +4223,8 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
         pair_vis_dir.mkdir(parents=True, exist_ok=True)
 
     loss_history = LossHistory()
+    loss_csv_writer = LossCsvWriter(metrics_dir / "loss.csv")
+    loss_csv_writer.open()
     spike_tracker = SpikeTracker(cfg.spike_diagnostics) if cfg.spike_diagnostics.enabled else None
     spike_events_path = metrics_dir / "spike_events.csv"
     recon_overlay_path = metrics_dir / "recon_spike_action_overlay.csv"
@@ -4280,6 +4404,7 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
 
     planning_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
     planning_env: Optional[GridworldKeyEnv] = None
+    grid_overlay_frames = None
     if planning_enabled:
         if cfg.planning_diagnostics.sample_sequences <= 0:
             raise AssertionError(
@@ -4290,7 +4415,20 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             cfg.planning_diagnostics.sample_sequences,
             generator=diagnostics_generator,
         )
-        planning_env = GridworldKeyEnv(render_mode="rgb_array", keyboard_override=False, start_manual_control=False)
+        planning_env = create_env_with_theme(
+            theme=cfg.planning_diagnostics.env_theme,
+            render_mode="rgb_array",
+            keyboard_override=False,
+            start_manual_control=False,
+        )
+        grid_overlay_frames = build_grid_overlay_frames(theme=cfg.planning_diagnostics.env_theme)
+        grid_overlay_dir = run_dir / "vis_grid_overlay"
+        grid_overlay_dir.mkdir(parents=True, exist_ok=True)
+        save_grid_overlay_frame_grid(
+            image_size=model_cfg.image_size,
+            out_path=grid_overlay_dir / "grid_frames.png",
+            frames_data=grid_overlay_frames,
+        )
 
     vis_ctrl_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]] = None
     if cfg.vis_ctrl.sample_sequences <= 0:
@@ -4308,254 +4446,262 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
     run_start_time = perf_counter()
     loss_norm_ema: Dict[str, float] = {}
 
-    # --- Main optimization loop ---
-    data_iter = iter(dataloader)
-    val_iter = iter(val_dataloader) if val_dataloader is not None else None
-    last_step = -1
-    for global_step in range(cfg.steps):
-        # Get next batch of inputs.
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            data_iter = iter(dataloader)
-            batch = next(data_iter)
+    try:
+        # --- Main optimization loop ---
+        data_iter = iter(dataloader)
+        val_iter = iter(val_dataloader) if val_dataloader is not None else None
+        last_step = -1
+        for global_step in range(cfg.steps):
+            # Get next batch of inputs.
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(dataloader)
+                batch = next(data_iter)
 
-        # Update batch with hard examples.
-        inject_hard_examples_into_batch(batch, dataset, hard_reservoir, cfg.hard_example.mix_ratio)
+            # Update batch with hard examples.
+            inject_hard_examples_into_batch(batch, dataset, hard_reservoir, cfg.hard_example.mix_ratio)
 
-        batch_size = int(batch[0].shape[0]) if hasattr(batch[0], "shape") else cfg.batch_size
-        total_samples_processed += batch_size
+            batch_size = int(batch[0].shape[0]) if hasattr(batch[0], "shape") else cfg.batch_size
+            total_samples_processed += batch_size
 
-        # Take a training step.
-        train_start = perf_counter()
-        metrics, difficulty_info = training_step(model, decoder, optimizer, batch, cfg, weights, loss_norm_ema)
-        timing_totals["train"] += perf_counter() - train_start
+            # Take a training step.
+            train_start = perf_counter()
+            metrics, difficulty_info = training_step(model, decoder, optimizer, batch, cfg, weights, loss_norm_ema)
+            timing_totals["train"] += perf_counter() - train_start
 
-        if spike_tracker is not None:
-            spike_events = spike_tracker.detect(metrics)
-            for event in spike_events:
-                _write_spike_event_row(spike_events_path, global_step, event)
-                _write_spike_batch(
-                    spike_diagnostics_dir,
-                    global_step,
-                    event,
-                    batch,
-                    metrics,
-                    cfg.spike_diagnostics,
-                )
-                print(
-                    f"[spike] step {global_step} {event['metric']}={event['value']:.4f} "
-                    f"(mean {event['mean']:.4f}, std {event['std']:.4f}, z {event['z']:.2f})"
-                )
-        if cfg.spike_diagnostics.enabled:
-            recon_event = None
             if spike_tracker is not None:
-                recon_event = next(
-                    (event for event in spike_events if event["metric"] == "loss_recon_multi_box"),
-                    None,
-                )
-            recon_value = float(metrics.get("loss_recon_multi_box", 0.0))
-            _write_recon_spike_action_overlay_row(
-                recon_overlay_path,
-                global_step,
-                batch[1],
-                recon_value,
-                recon_event,
-            )
-
-        # Update hard examples.
-        if hard_reservoir is not None and difficulty_info is not None:
-            hard_reservoir.update(
-                difficulty_info.indices, difficulty_info.paths, difficulty_info.scores, difficulty_info.frame_indices
-            )
-
-        # Log outputs.
-        if _should_run_schedule(global_step, cfg.log_schedule):
-            log_start = perf_counter()
-            val_metrics: Optional[Dict[str, float]] = None
-            val_difficulty: Optional[BatchDifficultyInfo] = None
-            if val_iter is not None:
-                try:
-                    val_batch = next(val_iter)
-                except StopIteration:
-                    val_iter = iter(val_dataloader)
-                    val_batch = next(val_iter)
-                val_metrics, val_difficulty = validation_step(model, decoder, val_batch, cfg, weights, loss_norm_ema)
-                if hard_reservoir_val is not None and val_difficulty is not None:
-                    hard_reservoir_val.update(
-                        val_difficulty.indices,
-                        val_difficulty.paths,
-                        val_difficulty.scores,
-                        val_difficulty.frame_indices,
+                spike_events = spike_tracker.detect(metrics)
+                for event in spike_events:
+                    _write_spike_event_row(spike_events_path, global_step, event)
+                    _write_spike_batch(
+                        spike_diagnostics_dir,
+                        global_step,
+                        event,
+                        batch,
+                        metrics,
+                        cfg.spike_diagnostics,
                     )
-            elapsed_seconds = max(log_start - run_start_time, 0.0)
-            samples_per_sec: float
-            if elapsed_seconds > 0:
-                samples_per_sec = total_samples_processed / elapsed_seconds
-            else:
-                samples_per_sec = 0.0
-            metrics_for_log = dict(metrics)
-            if val_metrics is not None:
-                metrics_for_log["loss_val_world"] = val_metrics["loss_world"]
-                metrics_for_log["loss_val_recon"] = val_metrics["loss_recon"]
-                metrics_for_log["loss_val_recon_multi_gauss"] = val_metrics["loss_recon_multi_gauss"]
-                metrics_for_log["loss_val_recon_multi_box"] = val_metrics["loss_recon_multi_box"]
-                metrics_for_log["loss_val_recon_zhat_multi_box"] = val_metrics["loss_recon_zhat_multi_box"]
-                metrics_for_log["loss_val_recon_multi_box_mse"] = val_metrics["loss_recon_multi_box_mse"]
-                metrics_for_log["loss_val_recon_patch"] = val_metrics["loss_recon_patch"]
-            log_metrics(
-                global_step,
-                metrics_for_log,
-                weights,
-                samples_per_sec=samples_per_sec,
-                elapsed_seconds=elapsed_seconds,
+                    print(
+                        f"[spike] step {global_step} {event['metric']}={event['value']:.4f} "
+                        f"(mean {event['mean']:.4f}, std {event['std']:.4f}, z {event['z']:.2f})"
+                    )
+            if cfg.spike_diagnostics.enabled:
+                recon_event = None
+                if spike_tracker is not None:
+                    recon_event = next(
+                        (event for event in spike_events if event["metric"] == "loss_recon_multi_box"),
+                        None,
+                    )
+                recon_value = float(metrics.get("loss_recon_multi_box", 0.0))
+                _write_recon_spike_action_overlay_row(
+                    recon_overlay_path,
+                    global_step,
+                    batch[1],
+                    recon_value,
+                    recon_event,
+                )
+
+            # Update hard examples.
+            if hard_reservoir is not None and difficulty_info is not None:
+                hard_reservoir.update(
+                    difficulty_info.indices, difficulty_info.paths, difficulty_info.scores, difficulty_info.frame_indices
+                )
+
+            # Log outputs.
+            if _should_run_schedule(global_step, cfg.log_schedule):
+                log_start = perf_counter()
+                val_metrics: Optional[Dict[str, float]] = None
+                val_difficulty: Optional[BatchDifficultyInfo] = None
+                if val_iter is not None:
+                    try:
+                        val_batch = next(val_iter)
+                    except StopIteration:
+                        val_iter = iter(val_dataloader)
+                        val_batch = next(val_iter)
+                    val_metrics, val_difficulty = validation_step(
+                        model, decoder, val_batch, cfg, weights, loss_norm_ema
+                    )
+                    if hard_reservoir_val is not None and val_difficulty is not None:
+                        hard_reservoir_val.update(
+                            val_difficulty.indices,
+                            val_difficulty.paths,
+                            val_difficulty.scores,
+                            val_difficulty.frame_indices,
+                        )
+                elapsed_seconds = max(log_start - run_start_time, 0.0)
+                samples_per_sec: float
+                if elapsed_seconds > 0:
+                    samples_per_sec = total_samples_processed / elapsed_seconds
+                else:
+                    samples_per_sec = 0.0
+                metrics_for_log = dict(metrics)
+                if val_metrics is not None:
+                    metrics_for_log["loss_val_world"] = val_metrics["loss_world"]
+                    metrics_for_log["loss_val_recon"] = val_metrics["loss_recon"]
+                    metrics_for_log["loss_val_recon_multi_gauss"] = val_metrics["loss_recon_multi_gauss"]
+                    metrics_for_log["loss_val_recon_multi_box"] = val_metrics["loss_recon_multi_box"]
+                    metrics_for_log["loss_val_recon_zhat_multi_box"] = val_metrics["loss_recon_zhat_multi_box"]
+                    metrics_for_log["loss_val_recon_multi_box_mse"] = val_metrics["loss_recon_multi_box_mse"]
+                    metrics_for_log["loss_val_recon_patch"] = val_metrics["loss_recon_patch"]
+                log_metrics(
+                    global_step,
+                    metrics_for_log,
+                    weights,
+                    samples_per_sec=samples_per_sec,
+                    elapsed_seconds=elapsed_seconds,
+                )
+
+                cumulative_flops = (global_step + 1) * flops_per_step
+                loss_history.append(global_step, elapsed_seconds, cumulative_flops, metrics_for_log)
+                loss_csv_writer.append_latest(loss_history)
+
+                plot_loss_curves(loss_history, metrics_dir)
+                timing_totals["log"] += perf_counter() - log_start
+                if cfg.show_timing_breakdown:
+                    _print_timing_summary(global_step, timing_totals)
+                model.train()
+
+            # --- Visualization of raw inputs/pairs ---
+            if len(batch) <= 2 or batch[2] is None:
+                raise AssertionError("Rolling visualization batch requires frame paths.")
+            rolling_batch_cpu = (
+                batch[0].clone(),
+                batch[1].clone(),
+                [list(paths) for paths in batch[2]],
             )
 
-            cumulative_flops = (global_step + 1) * flops_per_step
-            loss_history.append(global_step, elapsed_seconds, cumulative_flops, metrics_for_log)
-            write_loss_csv(loss_history, metrics_dir / "loss.csv")
+            if (
+                debug_vis.input_vis_every_steps > 0
+                and global_step % debug_vis.input_vis_every_steps == 0
+            ):
+                recon_vis: torch.Tensor
+                assert torch.is_grad_enabled()
+                with torch.no_grad():
+                    was_training = model.training
+                    decoder_was_training = decoder.training
+                    model.eval()
+                    decoder.eval()
+                    vis_frames = rolling_batch_cpu[0].to(device)
+                    vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
+                    recon_vis = decoder(vis_embeddings).cpu()
+                    if was_training:
+                        model.train()
+                    if decoder_was_training:
+                        decoder.train()
+                assert torch.is_grad_enabled()
+                save_input_batch_visualization(
+                    inputs_vis_dir / f"inputs_{global_step:07d}.png",
+                    rolling_batch_cpu[0],
+                    rolling_batch_cpu[1],
+                    debug_vis.input_vis_rows,
+                    recon=recon_vis,
+                    include_deltas=True,
+                )
+            if (
+                debug_vis.pair_vis_every_steps > 0
+                and global_step % debug_vis.pair_vis_every_steps == 0
+            ):
+                save_temporal_pair_visualization(
+                    pair_vis_dir / f"pairs_{global_step:07d}.png",
+                    rolling_batch_cpu[0],
+                    rolling_batch_cpu[1],
+                    debug_vis.pair_vis_rows,
+                    generator=training_vis_generator,
+                )
 
-            plot_loss_curves(loss_history, metrics_dir)
-            timing_totals["log"] += perf_counter() - log_start
-            if cfg.show_timing_breakdown:
-                _print_timing_summary(global_step, timing_totals)
-            model.train()
+            # --- Rollout/embedding/hard-sample visualizations ---
+            if _should_run_schedule(global_step, cfg.vis_schedule):
+                vis_start = perf_counter()
+                run_diagnostics_step(
+                    diagnostics_cfg=cfg.diagnostics,
+                    vis_cfg=cfg.vis,
+                    hard_example_cfg=cfg.hard_example,
+                    vis_ctrl_cfg=cfg.vis_ctrl,
+                    graph_cfg=cfg.graph_diagnostics,
+                    planning_cfg=cfg.planning_diagnostics,
+                    planning_env=planning_env,
+                    grid_overlay_frames=grid_overlay_frames,
+                    model=model,
+                    decoder=decoder,
+                    device=device,
+                    weights=weights,
+                    global_step=global_step,
+                    fixed_batch_cpu=fixed_batch_cpu,
+                    fixed_selection=fixed_selection,
+                    rolling_batch_cpu=rolling_batch_cpu,
+                    off_manifold_batch_cpu=off_manifold_batch_cpu,
+                    off_manifold_steps=off_manifold_steps,
+                    embedding_batch_cpu=embedding_batch_cpu,
+                    diagnostics_batch_cpu=diagnostics_batch_cpu,
+                    vis_ctrl_batch_cpu=vis_ctrl_batch_cpu,
+                    graph_diag_batch_cpu=graph_diag_batch_cpu,
+                    hard_reservoir=hard_reservoir,
+                    hard_reservoir_val=hard_reservoir_val,
+                    dataset=dataset,
+                    self_distance_inputs=self_distance_inputs,
+                    diagnostics_generator=diagnostics_generator,
+                    vis_selection_generator=vis_selection_generator,
+                    run_dir=run_dir,
+                    render_mode=cfg.render_mode,
+                    force_h_zero=cfg.force_h_zero,
+                )
+                timing_totals["vis"] += perf_counter() - vis_start
 
-        # --- Visualization of raw inputs/pairs ---
-        if len(batch) <= 2 or batch[2] is None:
-            raise AssertionError("Rolling visualization batch requires frame paths.")
-        rolling_batch_cpu = (
-            batch[0].clone(),
-            batch[1].clone(),
-            [list(paths) for paths in batch[2]],
-        )
+            if planning_batch_cpu is not None and _should_run_schedule(global_step, cfg.plan_schedule):
+                plan_start = perf_counter()
+                run_planning_diagnostics_step(
+                    planning_cfg=cfg.planning_diagnostics,
+                    hard_example_cfg=cfg.hard_example,
+                    graph_cfg=cfg.graph_diagnostics,
+                    model_cfg=model_cfg,
+                    model=model,
+                    device=device,
+                    weights=weights,
+                    global_step=global_step,
+                    planning_batch_cpu=planning_batch_cpu,
+                    planning_env=planning_env,
+                    grid_overlay_frames=grid_overlay_frames,
+                    run_dir=run_dir,
+                    force_h_zero=cfg.force_h_zero,
+                )
+                timing_totals["plan"] += perf_counter() - plan_start
 
-        if (
-            debug_vis.input_vis_every_steps > 0
-            and global_step % debug_vis.input_vis_every_steps == 0
-        ):
-            recon_vis: torch.Tensor
-            assert torch.is_grad_enabled()
-            with torch.no_grad():
-                was_training = model.training
-                decoder_was_training = decoder.training
-                model.eval()
-                decoder.eval()
-                vis_frames = rolling_batch_cpu[0].to(device)
-                vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
-                recon_vis = decoder(vis_embeddings).cpu()
-                if was_training:
-                    model.train()
-                if decoder_was_training:
-                    decoder.train()
-            assert torch.is_grad_enabled()
-            save_input_batch_visualization(
-                inputs_vis_dir / f"inputs_{global_step:07d}.png",
-                rolling_batch_cpu[0],
-                rolling_batch_cpu[1],
-                debug_vis.input_vis_rows,
-                recon=recon_vis,
-                include_deltas=True,
-            )
-        if (
-            debug_vis.pair_vis_every_steps > 0
-            and global_step % debug_vis.pair_vis_every_steps == 0
-        ):
-            save_temporal_pair_visualization(
-                pair_vis_dir / f"pairs_{global_step:07d}.png",
-                rolling_batch_cpu[0],
-                rolling_batch_cpu[1],
-                debug_vis.pair_vis_rows,
-                generator=training_vis_generator,
-            )
+            if (
+                cfg.checkpoint_every_steps > 0
+                and global_step % cfg.checkpoint_every_steps == 0
+            ):
+                _save_checkpoint(
+                    checkpoints_dir,
+                    model,
+                    decoder,
+                    optimizer,
+                    global_step,
+                    tag="last",
+                )
+            last_step = global_step
 
-        # --- Rollout/embedding/hard-sample visualizations ---
-        if _should_run_schedule(global_step, cfg.vis_schedule):
-            vis_start = perf_counter()
-            run_diagnostics_step(
-                diagnostics_cfg=cfg.diagnostics,
-                vis_cfg=cfg.vis,
-                hard_example_cfg=cfg.hard_example,
-                vis_ctrl_cfg=cfg.vis_ctrl,
-                graph_cfg=cfg.graph_diagnostics,
-                planning_cfg=cfg.planning_diagnostics,
-                model=model,
-                decoder=decoder,
-                device=device,
-                weights=weights,
-                global_step=global_step,
-                fixed_batch_cpu=fixed_batch_cpu,
-                fixed_selection=fixed_selection,
-                rolling_batch_cpu=rolling_batch_cpu,
-                off_manifold_batch_cpu=off_manifold_batch_cpu,
-                off_manifold_steps=off_manifold_steps,
-                embedding_batch_cpu=embedding_batch_cpu,
-                diagnostics_batch_cpu=diagnostics_batch_cpu,
-                vis_ctrl_batch_cpu=vis_ctrl_batch_cpu,
-                graph_diag_batch_cpu=graph_diag_batch_cpu,
-                hard_reservoir=hard_reservoir,
-                hard_reservoir_val=hard_reservoir_val,
-                dataset=dataset,
-                self_distance_inputs=self_distance_inputs,
-                diagnostics_generator=diagnostics_generator,
-                vis_selection_generator=vis_selection_generator,
-                run_dir=run_dir,
-                render_mode=cfg.render_mode,
-                force_h_zero=cfg.force_h_zero,
-            )
-            timing_totals["vis"] += perf_counter() - vis_start
+        if planning_env is not None:
+            planning_env.close()
 
-        if planning_batch_cpu is not None and _should_run_schedule(global_step, cfg.plan_schedule):
-            plan_start = perf_counter()
-            run_planning_diagnostics_step(
-                planning_cfg=cfg.planning_diagnostics,
-                hard_example_cfg=cfg.hard_example,
-                graph_cfg=cfg.graph_diagnostics,
-                model_cfg=model_cfg,
-                model=model,
-                device=device,
-                weights=weights,
-                global_step=global_step,
-                planning_batch_cpu=planning_batch_cpu,
-                planning_env=planning_env,
-                run_dir=run_dir,
-                force_h_zero=cfg.force_h_zero,
-            )
-            timing_totals["plan"] += perf_counter() - plan_start
+        # --- Final metrics export ---
+        last_step = global_step if cfg.steps > 0 else last_step
+        model.eval()
 
-        if (
-            cfg.checkpoint_every_steps > 0
-            and global_step % cfg.checkpoint_every_steps == 0
-        ):
+        if last_step >= 0:
             _save_checkpoint(
                 checkpoints_dir,
                 model,
                 decoder,
                 optimizer,
-                global_step,
+                last_step,
                 tag="last",
             )
-        last_step = global_step
-
-    if planning_env is not None:
-        planning_env.close()
-
-    # --- Final metrics export ---
-    last_step = global_step if cfg.steps > 0 else last_step
-    model.eval()
-
-    if last_step >= 0:
-        _save_checkpoint(
-            checkpoints_dir,
-            model,
-            decoder,
-            optimizer,
-            last_step,
-            tag="last",
-        )
-    if len(loss_history):
-        write_loss_csv(loss_history, metrics_dir / "loss.csv")
-        plot_loss_curves(loss_history, metrics_dir)
+        if len(loss_history):
+            loss_csv_writer.append_latest(loss_history)
+            plot_loss_curves(loss_history, metrics_dir)
+    finally:
+        loss_csv_writer.close()
 
 
 def main() -> None:
@@ -4569,6 +4715,16 @@ def main() -> None:
         vis_schedule=_parse_schedule(cfg.vis_schedule),
         plan_schedule=_parse_schedule(cfg.plan_schedule),
     )
+    h_metric = cfg.planning_diagnostics.h_distance_metric
+    if isinstance(h_metric, str) and h_metric.lower() == "null":
+        h_metric = "l2"
+    if h_metric not in ("l2", "cosine"):
+        raise AssertionError(f"planning_diagnostics.h_distance_metric must be 'l2' or 'cosine', got {h_metric!r}.")
+    if h_metric != cfg.planning_diagnostics.h_distance_metric:
+        cfg = replace(
+            cfg,
+            planning_diagnostics=replace(cfg.planning_diagnostics, h_distance_metric=h_metric),
+        )
     model_cfg = ModelConfig()
     run_training(cfg, model_cfg, cfg.loss_weights, title=cfg.title)
 

@@ -15,6 +15,8 @@ def save_grid_execution_trace_plot(
     visited: Sequence[Tuple[int, int]],
     start: Tuple[int, int],
     goal: Tuple[int, int],
+    *,
+    title: str = "Execution trace",
 ) -> None:
     fig, ax = plt.subplots(figsize=(5, 5))
     ax.set_xlim(-0.5, grid_cols - 0.5)
@@ -40,7 +42,7 @@ def save_grid_execution_trace_plot(
     ax.scatter([start[1]], [start[0]], s=60, marker="o", color="green", label="start")
     ax.scatter([goal[1]], [goal[0]], s=60, marker="x", color="red", label="goal")
     ax.legend(fontsize=8)
-    ax.set_title("Execution trace")
+    ax.set_title(title)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

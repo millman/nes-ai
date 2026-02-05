@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -20,7 +20,7 @@ from jepa_world_model.diagnostics.run_position_bucket_alignment import (
     PositionResolver,
     _read_metadata,
 )
-from jepa_world_model.plots.build_motion_subspace import build_motion_subspace
+from jepa_world_model.plots.build_motion_subspace import MotionSubspace, build_motion_subspace
 from jepa_world_model.pose_rollout import rollout_pose_sequence
 from jepa_world_model.rollout import rollout_teacher_forced
 from jepa_world_model.model import JEPAWorldModel
@@ -160,6 +160,69 @@ def _write_vectors_csv(
                 writer.writerow([row, col, aid, decode_action_id(aid, action_dim), count, u, v])
 
 
+def save_position_action_vector_field_from_motion(
+    *,
+    motion: MotionSubspace,
+    grid_rows: int,
+    grid_cols: int,
+    agent_color: Tuple[int, int, int],
+    inventory_height: Optional[int],
+    min_action_count: int,
+    out_path: Path,
+    csv_path: Path,
+    scale: float,
+) -> None:
+    if motion.actions_seq.ndim != 3:
+        raise AssertionError("motion.actions_seq must be 3D.")
+    if motion.delta_proj.ndim != 2 or motion.delta_proj.shape[1] < 2:
+        raise AssertionError("motion.delta_proj must be 2D with at least two components.")
+    if not motion.paths:
+        raise AssertionError("motion.paths must be non-empty for position vector field.")
+    if min_action_count <= 0:
+        raise AssertionError("min_action_count must be positive.")
+
+    seq_len = motion.actions_seq.shape[1]
+    resolver = PositionResolver(
+        grid_rows=grid_rows,
+        grid_cols=grid_cols,
+        agent_color=agent_color,
+        inventory_height=inventory_height,
+    )
+    positions_by_seq = _collect_positions(resolver, motion.paths)
+    positions_flat = _flatten_positions(positions_by_seq, seq_len)
+    if len(positions_flat) != motion.delta_proj.shape[0]:
+        raise AssertionError(
+            f"Position count {len(positions_flat)} does not match deltas {motion.delta_proj.shape[0]}"
+        )
+
+    deltas_2d = motion.delta_proj[:, :2]
+    vectors: Dict[Tuple[int, int], Dict[int, List[np.ndarray]]] = {}
+    for idx, pos in enumerate(positions_flat):
+        aid = int(motion.action_ids[idx])
+        vectors.setdefault(pos, {}).setdefault(aid, [])
+        vectors[pos][aid].append(deltas_2d[idx])
+
+    summarized: Dict[Tuple[int, int], Dict[int, Tuple[float, float, int]]] = {}
+    for pos, per_action in vectors.items():
+        for aid, items in per_action.items():
+            arr = np.vstack(items)
+            count = arr.shape[0]
+            if count < min_action_count:
+                continue
+            mean_vec = arr.mean(axis=0)
+            summarized.setdefault(pos, {})[aid] = (float(mean_vec[0]), float(mean_vec[1]), count)
+
+    _plot_vector_field(
+        out_path,
+        grid_rows,
+        grid_cols,
+        summarized,
+        motion.action_dim,
+        scale,
+    )
+    _write_vectors_csv(csv_path, summarized, motion.action_dim)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot per-cell action vector field in PCA space.")
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -225,48 +288,27 @@ def main() -> None:
 
     embeddings_all = torch.cat(embeddings_list, dim=0)
     actions_all = torch.cat(actions_list, dim=0)
+    output_dir = args.output_dir or (run_dir / f"vis_action_vector_field_{args.target}_by_pos")
+    step = int(payload.get("global_step", 0))
+    img_path = output_dir / f"action_vector_field_{args.target}_{step:07d}.png"
+    csv_path = output_dir / f"action_vector_field_{args.target}_{step:07d}.csv"
     motion = build_motion_subspace(
         embeddings_all,
         actions_all,
         max(2, metadata.top_k_components),
         paths_list,
     )
-    positions_flat = _flatten_positions(positions_by_seq, metadata.seq_len)
-    if len(positions_flat) != motion.delta_proj.shape[0]:
-        raise AssertionError(
-            f"Position count {len(positions_flat)} does not match deltas {motion.delta_proj.shape[0]}"
-        )
-
-    deltas_2d = motion.delta_proj[:, :2]
-    vectors: Dict[Tuple[int, int], Dict[int, Tuple[float, float, int]]] = {}
-    for idx, pos in enumerate(positions_flat):
-        aid = int(motion.action_ids[idx])
-        vectors.setdefault(pos, {}).setdefault(aid, [])
-        vectors[pos][aid].append(deltas_2d[idx])
-
-    summarized: Dict[Tuple[int, int], Dict[int, Tuple[float, float, int]]] = {}
-    for pos, per_action in vectors.items():
-        for aid, items in per_action.items():
-            arr = np.vstack(items)
-            count = arr.shape[0]
-            if count < min_action_count:
-                continue
-            mean_vec = arr.mean(axis=0)
-            summarized.setdefault(pos, {})[aid] = (float(mean_vec[0]), float(mean_vec[1]), count)
-
-    output_dir = args.output_dir or (run_dir / f"vis_action_vector_field_{args.target}_by_pos")
-    step = int(payload.get("global_step", 0))
-    img_path = output_dir / f"action_vector_field_{args.target}_{step:07d}.png"
-    csv_path = output_dir / f"action_vector_field_{args.target}_{step:07d}.csv"
-    _plot_vector_field(
-        img_path,
-        args.grid_rows,
-        args.grid_cols,
-        summarized,
-        motion.action_dim,
-        args.scale,
+    save_position_action_vector_field_from_motion(
+        motion=motion,
+        grid_rows=args.grid_rows,
+        grid_cols=args.grid_cols,
+        agent_color=tuple(int(p) for p in args.agent_color.split(",")),
+        inventory_height=args.inventory_height,
+        min_action_count=min_action_count,
+        out_path=img_path,
+        csv_path=csv_path,
+        scale=args.scale,
     )
-    _write_vectors_csv(csv_path, summarized, motion.action_dim)
     print(f"Wrote vector field plot to {img_path}")
     print(f"Wrote vector field CSV to {csv_path}")
 

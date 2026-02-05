@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from jepa_world_model.plots.plot_layout import DEFAULT_DPI, apply_square_axes, figsize_for_grid
+from jepa_world_model.plots.plot_grid_overlay import GridOverlay, draw_grid_overlay
 
-def save_embedding_projection(embeddings: torch.Tensor, path: Path, title: str) -> None:
+def save_embedding_projection(
+    embeddings: torch.Tensor,
+    path: Path,
+    title: str,
+    *,
+    grid_overlay: Optional[GridOverlay] = None,
+) -> None:
     flat = embeddings.detach().cpu().numpy()
     b, t, dim = flat.shape
     flat = flat.reshape(b * t, dim)
-    flat = flat - flat.mean(axis=0, keepdims=True)
+    mean = flat.mean(axis=0, keepdims=True)
+    flat = flat - mean
     if flat.shape[0] < 2:
         return
     try:
@@ -29,6 +38,15 @@ def save_embedding_projection(embeddings: torch.Tensor, path: Path, title: str) 
     colors = colors / max(1, t - 1)
     fig, ax = plt.subplots(figsize=figsize_for_grid(1, 1), constrained_layout=True)
     sc = ax.scatter(coords[:, 0], coords[:, 1], c=colors, cmap="viridis", s=10, alpha=0.7)
+    if grid_overlay is not None:
+        grid_proj = (grid_overlay.points - mean) @ vt[:2].T
+        draw_grid_overlay(
+            ax,
+            grid_proj,
+            grid_overlay.positions,
+            grid_overlay.grid_rows,
+            grid_overlay.grid_cols,
+        )
     ax.set_title(title)
     ax.set_xlabel("PC1")
     ax.set_ylabel("PC2")

@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 
+from jepa_world_model.plots.plot_grid_overlay import GridOverlay, draw_grid_overlay
 
 def _pca_project(points: np.ndarray, *, max_samples: int) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     if points.ndim != 2:
@@ -38,10 +39,21 @@ def save_planning_pca_path_plot(
     goal: np.ndarray,
     *,
     max_samples: int,
+    grid_overlay: Optional[GridOverlay] = None,
+    title: str = "PCA(p) plan",
 ) -> None:
     proj, pca = _pca_project(p_points, max_samples=max_samples)
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.scatter(proj[:, 0], proj[:, 1], s=8, alpha=0.3, label="dataset")
+    if grid_overlay is not None:
+        grid_proj = _project_with_pca(grid_overlay.points, pca)
+        draw_grid_overlay(
+            ax,
+            grid_proj,
+            grid_overlay.positions,
+            grid_overlay.grid_rows,
+            grid_overlay.grid_cols,
+        )
     start_proj = _project_with_pca(start[None, :], pca)[0]
     goal_proj = _project_with_pca(goal[None, :], pca)[0]
     ax.scatter([start_proj[0]], [start_proj[1]], s=60, marker="o", label="start")
@@ -50,7 +62,7 @@ def save_planning_pca_path_plot(
         path_proj = _project_with_pca(plan_nodes, pca)
         ax.plot(path_proj[:, 0], path_proj[:, 1], color="tab:orange", linewidth=2, label="plan")
     ax.legend(fontsize=8)
-    ax.set_title("PCA(p) plan")
+    ax.set_title(title)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

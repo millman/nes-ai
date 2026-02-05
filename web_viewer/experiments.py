@@ -738,6 +738,14 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
         label='Diagnostics:Action vector field (P)',
         candidates=[('vis_action_field_p', 'action_field_p_*.png', 'action_field_p_')],
     ),
+    'vis_action_vector_field_h': VisSpec(
+        label='Diagnostics:Position action vector field (H)',
+        candidates=[('vis_action_vector_field_h', 'action_vector_field_h_*.png', 'action_vector_field_h_')],
+    ),
+    'vis_action_vector_field_p': VisSpec(
+        label='Diagnostics:Position action vector field (P)',
+        candidates=[('vis_action_vector_field_p', 'action_vector_field_p_*.png', 'action_vector_field_p_')],
+    ),
     'vis_action_time_z': VisSpec(
         label='Diagnostics:Action time slices (Z)',
         candidates=[('vis_action_time_z', 'action_time_z_*.png', 'action_time_z_')],
@@ -966,6 +974,26 @@ VIS_STEP_SPECS: Dict[str, VisSpec] = {
     'vis_planning_graph_p': VisSpec(
         label='Planning:Graph (P)',
         candidates=[('vis_planning_graph', 'graph_p_*.png', 'graph_p_')],
+    ),
+    'vis_planning_h_grid_dist': VisSpec(
+        label='Planning:H to grid distance',
+        candidates=[('vis_planning_h_grid_dist', 'h_grid_dist_*.png', 'h_grid_dist_')],
+    ),
+    'vis_planning_lattice_test1_h': VisSpec(
+        label='Planning:Lattice (test1, H)',
+        candidates=[('vis_planning_lattice', 'lattice_test1_h_*.png', 'lattice_test1_h_')],
+    ),
+    'vis_planning_lattice_test2_h': VisSpec(
+        label='Planning:Lattice (test2, H)',
+        candidates=[('vis_planning_lattice', 'lattice_test2_h_*.png', 'lattice_test2_h_')],
+    ),
+    'vis_planning_lattice_test1_p': VisSpec(
+        label='Planning:Lattice (test1, P)',
+        candidates=[('vis_planning_lattice', 'lattice_test1_p_*.png', 'lattice_test1_p_')],
+    ),
+    'vis_planning_lattice_test2_p': VisSpec(
+        label='Planning:Lattice (test2, P)',
+        candidates=[('vis_planning_lattice', 'lattice_test2_p_*.png', 'lattice_test2_p_')],
     ),
 }
 

@@ -538,6 +538,31 @@ class GridworldConfig:
     ] = None
 
 
+def create_env_with_theme(
+    *,
+    theme: Optional[str],
+    render_mode: Optional[str] = None,
+    keyboard_override: bool = True,
+    start_manual_control: bool = False,
+) -> "GridworldKeyEnv":
+    args = GridworldConfig(theme=theme, render_mode=render_mode or "rgb_array", keyboard_override=keyboard_override)
+    world = _build_world_config(args)
+    return GridworldKeyEnv(
+        render_mode=args.render_mode,
+        keyboard_override=keyboard_override,
+        obstacles=world.obstacles,
+        start_manual_control=start_manual_control,
+        agent_size=world.agent_size,
+        agent_speed=world.agent_speed,
+        world_size=world.world_size,
+        hide_key_and_inventory=world.hide_key_and_inventory,
+        black_background=world.black_background,
+        background_color=world.background_color,
+        box_color=world.box_color,
+        key_color=world.key_color,
+    )
+
+
 def _build_run_directory(args: GridworldConfig) -> tuple[Path, str]:
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_prefix = f"{ENV_ID}__{args.exp_name}__{args.seed}"

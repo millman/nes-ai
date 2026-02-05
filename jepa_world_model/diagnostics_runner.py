@@ -24,6 +24,15 @@ from jepa_world_model.diagnostics_consistency import (
 )
 from jepa_world_model.diagnostics_graph import prepare_graph_diagnostics
 from jepa_world_model.diagnostics_prepare import prepare_diagnostics_batch_state
+from jepa_world_model.diagnostics.grid_overlay import (
+    GridOverlayEmbeddings,
+    build_grid_overlay_embeddings,
+    GridOverlayFrames,
+    save_grid_overlay_frame_grid,
+)
+from jepa_world_model.diagnostics.plot_position_action_vector_field import (
+    save_position_action_vector_field_from_motion,
+)
 from jepa_world_model.diagnostics_rollout_divergence import (
     compute_h_ablation_divergence,
     compute_rollout_divergence_metrics,
@@ -55,6 +64,7 @@ from jepa_world_model.plots.plot_diagnostics_extra import (
     save_z_consistency_plot,
 )
 from jepa_world_model.plots.plot_diagnostics_frames import save_diagnostics_frames
+from jepa_world_model.plots.plot_grid_distance_hist import save_grid_distance_hist
 from jepa_world_model.plots.plot_edge_consistency_hist import save_edge_consistency_hist_plot
 from jepa_world_model.plots.plot_graph_diagnostics import (
     compute_graph_diagnostics_stats,
@@ -65,7 +75,10 @@ from jepa_world_model.plots.plot_neff_violin import save_neff_violin_plot
 from jepa_world_model.plots.plot_neighborhood_stability import save_neighborhood_stability_plot
 from jepa_world_model.plots.plot_off_manifold_error import save_off_manifold_visualization
 from jepa_world_model.plots.plot_planning_graph import save_planning_graph_plot
+from jepa_world_model.plots.plot_grid_overlay import GridOverlay
+from jepa_world_model.plots.plot_planning_lattice import save_planning_lattice_plot
 from jepa_world_model.plots.plot_rank_cdf import save_rank_cdf_plot
+from jepa_world_model.plots.build_motion_subspace import build_motion_subspace
 from jepa_world_model.plots.plot_reachable_fraction_hist import save_reachable_fraction_hist_plot
 from jepa_world_model.plots.plot_smoothness_knn_distance_eigenvalue_spectrum import (
     save_smoothness_knn_distance_eigenvalue_spectrum_plot,
@@ -133,6 +146,14 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "vis_action_field_z": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for z."),
     "vis_action_field_h": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for h."),
     "vis_action_field_p": DiagnosticsOutputSpec(True, "Action-conditioned vector field plots for ΔP."),
+    "vis_action_vector_field_h": DiagnosticsOutputSpec(
+        True,
+        "Per-position action vector field (H).",
+    ),
+    "vis_action_vector_field_p": DiagnosticsOutputSpec(
+        True,
+        "Per-position action vector field (P).",
+    ),
     "vis_action_time_z": DiagnosticsOutputSpec(False, "Action delta time-slice plots for z."),
     "vis_action_time_h": DiagnosticsOutputSpec(False, "Action delta time-slice plots for h."),
     "vis_action_time_p": DiagnosticsOutputSpec(False, "Action delta time-slice plots for ΔP."),
@@ -198,6 +219,12 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "vis_planning_reachable_p": DiagnosticsOutputSpec(True, "Planning reachable fraction histogram (P)."),
     "vis_planning_graph_h": DiagnosticsOutputSpec(True, "Planning graph visualization (H)."),
     "vis_planning_graph_p": DiagnosticsOutputSpec(True, "Planning graph visualization (P)."),
+    "vis_planning_lattice_h": DiagnosticsOutputSpec(True, "Planning lattice visualization (H)."),
+    "vis_planning_lattice_p": DiagnosticsOutputSpec(True, "Planning lattice visualization (P)."),
+    "vis_planning_h_grid_dist": DiagnosticsOutputSpec(
+        True,
+        "Planning H to grid nearest-neighbor distance histogram.",
+    ),
     "graph_rank_cdf_z": DiagnosticsOutputSpec(False, "Graph diagnostics rank CDF plots for z."),
     "graph_rank_cdf_h": DiagnosticsOutputSpec(False, "Graph diagnostics rank CDF plots for h."),
     "graph_rank_cdf_p": DiagnosticsOutputSpec(False, "Graph diagnostics rank CDF plots for p."),
@@ -269,6 +296,9 @@ DIAGNOSTICS_OUTPUT_GROUPS = {
             "vis_planning_reachable_p",
             "vis_planning_graph_h",
             "vis_planning_graph_p",
+            "vis_planning_lattice_h",
+            "vis_planning_lattice_p",
+            "vis_planning_h_grid_dist",
         )
     ),
     "planning": (
@@ -288,6 +318,9 @@ DIAGNOSTICS_OUTPUT_GROUPS = {
         "vis_planning_reachable_p",
         "vis_planning_graph_h",
         "vis_planning_graph_p",
+        "vis_planning_lattice_h",
+        "vis_planning_lattice_p",
+        "vis_planning_h_grid_dist",
     ),
     "vis_ctrl": (
         "vis_ctrl_smoothness_z",
@@ -562,6 +595,49 @@ def _h_from_frames(
     return h_states[0].detach().cpu().numpy()
 
 
+def _grid_overlay_for_kind(
+    grid_embeddings: GridOverlayEmbeddings,
+    kind: str,
+) -> GridOverlay:
+    if kind == "z":
+        points = grid_embeddings.z
+    elif kind == "h":
+        points = grid_embeddings.h
+    elif kind == "p":
+        points = grid_embeddings.p
+    else:
+        raise AssertionError(f"Unsupported grid overlay kind={kind!r}.")
+    if points is None:
+        raise AssertionError(f"Grid overlay missing points for kind={kind!r}.")
+    return GridOverlay(
+        points=points,
+        positions=grid_embeddings.positions,
+        grid_rows=grid_embeddings.grid_rows,
+        grid_cols=grid_embeddings.grid_cols,
+    )
+
+
+def _cosine_distance_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    if a.ndim != 2 or b.ndim != 2:
+        raise AssertionError("Cosine distance expects 2D arrays.")
+    if a.shape[1] != b.shape[1]:
+        raise AssertionError("Cosine distance expects matching feature dimensions.")
+    a_norm = np.linalg.norm(a, axis=1, keepdims=True)
+    b_norm = np.linalg.norm(b, axis=1, keepdims=True)
+    denom = np.maximum(a_norm @ b_norm.T, 1e-8)
+    sims = (a @ b.T) / denom
+    return 1.0 - sims
+
+
+def _l2_distance_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    if a.ndim != 2 or b.ndim != 2:
+        raise AssertionError("L2 distance expects 2D arrays.")
+    if a.shape[1] != b.shape[1]:
+        raise AssertionError("L2 distance expects matching feature dimensions.")
+    diffs = a[:, None, :] - b[None, :, :]
+    return np.linalg.norm(diffs, axis=-1)
+
+
 def _extract_planning_latents(
     model: Any,
     plan_frames: torch.Tensor,
@@ -625,6 +701,7 @@ def _compute_planning_graphs(
     action_labels: Sequence[Optional[str]],
     *,
     min_action_count: int,
+    planning_cfg: PlanningDiagnosticsConfig,
 ) -> Tuple[Optional[ActionDeltaStats], ActionDeltaStats, DatasetGraph, Optional[DatasetGraph], float]:
     stats_p = None
     if p_t is not None and p_tp1 is not None:
@@ -643,17 +720,28 @@ def _compute_planning_graphs(
     non_noop = np.array([lbl in DIRECTION_ORDER for lbl in action_labels], dtype=bool)
     if not np.any(non_noop):
         raise AssertionError("Planning diagnostics require non-noop actions for h graph thresholds.")
-    h_dot = (h_t * h_tp1).sum(axis=1)
-    h_norms = np.maximum(np.linalg.norm(h_t, axis=1) * np.linalg.norm(h_tp1, axis=1), 1e-8)
-    h_cos = h_dot / h_norms
-    d_nn = float(np.median(1.0 - h_cos[non_noop]))
-    tau_h_merge = min(max(3.0 * d_nn, 0.02), 0.08)
+    h_metric = planning_cfg.h_distance_metric
+    if h_metric == "cosine":
+        h_dot = (h_t * h_tp1).sum(axis=1)
+        h_norms = np.maximum(np.linalg.norm(h_t, axis=1) * np.linalg.norm(h_tp1, axis=1), 1e-8)
+        h_cos = h_dot / h_norms
+        d_nn = float(np.median(1.0 - h_cos[non_noop]))
+    elif h_metric == "l2":
+        h_delta = h_tp1 - h_t
+        d_nn = float(np.median(np.linalg.norm(h_delta[non_noop], axis=1)))
+    else:
+        raise AssertionError(f"Unsupported h_distance_metric={h_metric!r}.")
+    tau_h_merge = planning_cfg.h_merge_multiplier * d_nn
+    if planning_cfg.h_merge_min is not None:
+        tau_h_merge = max(tau_h_merge, planning_cfg.h_merge_min)
+    if planning_cfg.h_merge_max is not None:
+        tau_h_merge = min(tau_h_merge, planning_cfg.h_merge_max)
     graph_h = build_dataset_graph(
         h_t,
         h_tp1,
         actions_np,
         radius=tau_h_merge,
-        metric="cosine",
+        metric=h_metric,
     )
     graph_p = None
     if stats_p is not None and p_t is not None and p_tp1 is not None:
@@ -709,7 +797,8 @@ def _build_planning_tests(
 
 def _write_planning_metrics_row(
     metrics_dir: Path,
-    stats: Optional[ActionDeltaStats],
+    stats_p: Optional[ActionDeltaStats],
+    stats_h: ActionDeltaStats,
     graph_h: DatasetGraph,
     graph_p: Optional[DatasetGraph],
     h_reach: np.ndarray,
@@ -727,14 +816,22 @@ def _write_planning_metrics_row(
     planning_metrics_path = metrics_dir / "planning_metrics.csv"
     header = [
         "step",
-        "L",
-        "inv_lr",
-        "inv_ud",
-        "noop_ratio",
-        "q_L",
-        "q_R",
-        "q_U",
-        "q_D",
+        "p_L",
+        "p_inv_lr",
+        "p_inv_ud",
+        "p_noop_ratio",
+        "p_q_L",
+        "p_q_R",
+        "p_q_U",
+        "p_q_D",
+        "h_L",
+        "h_inv_lr",
+        "h_inv_ud",
+        "h_noop_ratio",
+        "h_q_L",
+        "h_q_R",
+        "h_q_U",
+        "h_q_D",
         "num_nodes_h",
         "num_nodes_p",
         "reach_h_median",
@@ -753,22 +850,30 @@ def _write_planning_metrics_row(
         "test2_final_p_dist",
         "test2_goal_dist",
     ]
-    stats_L = stats.L_scale if stats is not None else float("nan")
-    stats_inv_lr = stats.inv_lr if stats is not None else float("nan")
-    stats_inv_ud = stats.inv_ud if stats is not None else float("nan")
-    stats_noop_ratio = stats.noop_ratio if stats is not None else float("nan")
-    stats_q = stats.q if stats is not None else {}
+    stats_p_L = stats_p.L_scale if stats_p is not None else float("nan")
+    stats_p_inv_lr = stats_p.inv_lr if stats_p is not None else float("nan")
+    stats_p_inv_ud = stats_p.inv_ud if stats_p is not None else float("nan")
+    stats_p_noop_ratio = stats_p.noop_ratio if stats_p is not None else float("nan")
+    stats_p_q = stats_p.q if stats_p is not None else {}
     num_nodes_p = graph_p.centers.shape[0] if graph_p is not None else float("nan")
     row = [
         global_step,
-        stats_L,
-        stats_inv_lr,
-        stats_inv_ud,
-        stats_noop_ratio,
-        stats_q.get("L", float("nan")),
-        stats_q.get("R", float("nan")),
-        stats_q.get("U", float("nan")),
-        stats_q.get("D", float("nan")),
+        stats_p_L,
+        stats_p_inv_lr,
+        stats_p_inv_ud,
+        stats_p_noop_ratio,
+        stats_p_q.get("L", float("nan")),
+        stats_p_q.get("R", float("nan")),
+        stats_p_q.get("U", float("nan")),
+        stats_p_q.get("D", float("nan")),
+        stats_h.L_scale,
+        stats_h.inv_lr,
+        stats_h.inv_ud,
+        stats_h.noop_ratio,
+        stats_h.q.get("L", float("nan")),
+        stats_h.q.get("R", float("nan")),
+        stats_h.q.get("U", float("nan")),
+        stats_h.q.get("D", float("nan")),
         graph_h.centers.shape[0],
         num_nodes_p,
         float(np.median(h_reach)) if h_reach.size else float("nan"),
@@ -1207,6 +1312,8 @@ def run_diagnostics_step(
     vis_ctrl_cfg: Any,
     graph_cfg: Any,
     planning_cfg: Any,
+    planning_env: Optional[GridworldKeyEnv],
+    grid_overlay_frames: Optional[GridOverlayFrames],
     model: Any,
     decoder: Any,
     device: torch.device,
@@ -1254,6 +1361,23 @@ def run_diagnostics_step(
     if resolved_outputs["vis_off_manifold"].enabled and off_manifold_batch_cpu is None:
         raise AssertionError("Off-manifold outputs requested but off_manifold_batch_cpu is missing.")
 
+    grid_overlay_embeddings = None
+    grid_overlay_needed = any(
+        resolved_outputs[key].enabled for key in ("pca_z", "pca_h", "pca_p")
+    )
+    if grid_overlay_needed:
+        if grid_overlay_frames is None:
+            raise AssertionError("Grid overlay requires precomputed frames.")
+        grid_overlay_embeddings = build_grid_overlay_embeddings(
+            model=model,
+            model_cfg=model.cfg,
+            device=device,
+            action_dim=model.cfg.action_dim,
+            use_z2h_init=should_use_z2h_init(weights),
+            force_h_zero=force_h_zero,
+            frames_data=grid_overlay_frames,
+        )
+
     run_dir = Path(run_dir)
     metrics_dir = run_dir / "metrics"
     fixed_vis_dir = run_dir / "vis_fixed"
@@ -1297,6 +1421,8 @@ def run_diagnostics_step(
     diagnostics_action_field_z_dir = run_dir / "vis_action_field_z"
     diagnostics_action_field_h_dir = run_dir / "vis_action_field_h"
     diagnostics_action_field_p_dir = run_dir / "vis_action_field_p"
+    diagnostics_action_vector_field_h_dir = run_dir / "vis_action_vector_field_h"
+    diagnostics_action_vector_field_p_dir = run_dir / "vis_action_vector_field_p"
     diagnostics_action_time_z_dir = run_dir / "vis_action_time_z"
     diagnostics_action_time_h_dir = run_dir / "vis_action_time_h"
     diagnostics_action_time_p_dir = run_dir / "vis_action_time_p"
@@ -1314,6 +1440,7 @@ def run_diagnostics_step(
     graph_diagnostics_dir = run_dir / "graph_diagnostics_z"
     graph_diagnostics_p_dir = run_dir / "graph_diagnostics_p"
     graph_diagnostics_h_dir = run_dir / "graph_diagnostics_h"
+    grid_overlay_dir = run_dir / "vis_grid_overlay"
 
     alignment_detail_z_enabled = any(
         resolved_outputs[key].enabled
@@ -1358,6 +1485,8 @@ def run_diagnostics_step(
         samples_hard_dir.mkdir(parents=True, exist_ok=True)
     if resolved_outputs["samples_hard_val"].enabled:
         samples_hard_val_dir.mkdir(parents=True, exist_ok=True)
+    if grid_overlay_embeddings is not None:
+        grid_overlay_dir.mkdir(parents=True, exist_ok=True)
     if resolved_outputs["vis_self_distance_z"].enabled:
         vis_self_distance_z_dir.mkdir(parents=True, exist_ok=True)
         self_distance_z_dir.mkdir(parents=True, exist_ok=True)
@@ -1438,6 +1567,10 @@ def run_diagnostics_step(
             diagnostics_action_field_h_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_action_field_p"].enabled:
             diagnostics_action_field_p_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_vector_field_h"].enabled:
+            diagnostics_action_vector_field_h_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_outputs["vis_action_vector_field_p"].enabled:
+            diagnostics_action_vector_field_p_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_action_time_z"].enabled:
             diagnostics_action_time_z_dir.mkdir(parents=True, exist_ok=True)
         if resolved_outputs["vis_action_time_h"].enabled:
@@ -1563,12 +1696,22 @@ def run_diagnostics_step(
                 embed_outputs["embeddings"],
                 pca_z_dir / f"pca_z_{global_step:07d}.png",
                 "PCA z",
+                grid_overlay=(
+                    None
+                    if grid_overlay_embeddings is None
+                    else _grid_overlay_for_kind(grid_overlay_embeddings, "z")
+                ),
             )
         if resolved_outputs["pca_h"].enabled:
             save_embedding_projection(
                 h_states,
                 pca_h_dir / f"pca_h_{global_step:07d}.png",
                 "PCA h",
+                grid_overlay=(
+                    None
+                    if grid_overlay_embeddings is None
+                    else _grid_overlay_for_kind(grid_overlay_embeddings, "h")
+                ),
             )
         if resolved_outputs["pca_p"].enabled:
             _, p_embeddings, _ = rollout_pose(
@@ -1581,6 +1724,11 @@ def run_diagnostics_step(
                 p_embeddings,
                 pca_p_dir / f"pca_p_{global_step:07d}.png",
                 "PCA p",
+                grid_overlay=(
+                    None
+                    if grid_overlay_embeddings is None
+                    else _grid_overlay_for_kind(grid_overlay_embeddings, "p")
+                ),
             )
 
     if resolved_outputs["samples_hard"].enabled:
@@ -1793,6 +1941,86 @@ def run_diagnostics_step(
                     min_count=diagnostics_cfg.min_action_count,
                     title="Action delta time slices (ΔP)",
                 )
+
+        if resolved_outputs["vis_action_vector_field_h"].enabled:
+            h_embed_np = diag_state.h_states.detach().cpu().numpy()
+            h_flat = h_embed_np[:, :-1].reshape(-1, h_embed_np.shape[-1])
+            h_tp1 = h_embed_np[:, 1:].reshape(-1, h_embed_np.shape[-1])
+            h_actions = (
+                diag_state.actions[:, :-1]
+                .detach()
+                .cpu()
+                .numpy()
+                .reshape(-1, diag_state.actions.shape[-1])
+            )
+            h_stats_scale = compute_action_delta_stats(
+                h_flat,
+                h_tp1,
+                h_actions,
+                min_action_count=1,
+            )
+            h_scale = diagnostics_cfg.position_vector_scale / h_stats_scale.L_scale
+            motion_h = build_motion_subspace(
+                diag_state.h_states,
+                diag_state.actions,
+                planning_cfg.position_vector_pca_components,
+                diag_state.paths,
+            )
+            save_position_action_vector_field_from_motion(
+                motion=motion_h,
+                grid_rows=diagnostics_cfg.position_grid_rows,
+                grid_cols=diagnostics_cfg.position_grid_cols,
+                agent_color=diagnostics_cfg.position_agent_color,
+                inventory_height=diagnostics_cfg.position_inventory_height,
+                min_action_count=diagnostics_cfg.min_action_count,
+                out_path=diagnostics_action_vector_field_h_dir
+                / f"action_vector_field_h_{global_step:07d}.png",
+                csv_path=diagnostics_action_vector_field_h_dir
+                / f"action_vector_field_h_{global_step:07d}.csv",
+                scale=h_scale,
+            )
+        if resolved_outputs["vis_action_vector_field_p"].enabled:
+            if diag_state.motion_p is None:
+                raise AssertionError("Position vector field (P) requires motion_p.")
+            p_embed = diag_state.p_embeddings
+            if p_embed is None:
+                raise AssertionError("Position vector field (P) requires p_embeddings.")
+            p_embed_np = p_embed.detach().cpu().numpy()
+            p_flat = p_embed_np[:, :-1].reshape(-1, p_embed_np.shape[-1])
+            p_tp1 = p_embed_np[:, 1:].reshape(-1, p_embed_np.shape[-1])
+            p_actions = (
+                diag_state.actions[:, :-1]
+                .detach()
+                .cpu()
+                .numpy()
+                .reshape(-1, diag_state.actions.shape[-1])
+            )
+            p_stats_scale = compute_action_delta_stats(
+                p_flat,
+                p_tp1,
+                p_actions,
+                min_action_count=1,
+            )
+            p_scale = diagnostics_cfg.position_vector_scale / p_stats_scale.L_scale
+            motion_p = build_motion_subspace(
+                p_embed,
+                diag_state.actions,
+                planning_cfg.position_vector_pca_components,
+                diag_state.paths,
+            )
+            save_position_action_vector_field_from_motion(
+                motion=motion_p,
+                grid_rows=diagnostics_cfg.position_grid_rows,
+                grid_cols=diagnostics_cfg.position_grid_cols,
+                agent_color=diagnostics_cfg.position_agent_color,
+                inventory_height=diagnostics_cfg.position_inventory_height,
+                min_action_count=diagnostics_cfg.min_action_count,
+                out_path=diagnostics_action_vector_field_p_dir
+                / f"action_vector_field_p_{global_step:07d}.png",
+                csv_path=diagnostics_action_vector_field_p_dir
+                / f"action_vector_field_p_{global_step:07d}.csv",
+                scale=p_scale,
+            )
 
         if diag_state.composability is not None:
             if resolved_outputs[f"vis_composability_z"].enabled:
@@ -2296,8 +2524,22 @@ def run_diagnostics_step(
             )
 
             action_labels = diag_state.action_metadata.action_labels
-            labels = [action_labels.get(aid, f"action {aid}") for aid, _, _, _ in drift_stats]
-            drift_samples = [samples for _, _, _, samples in drift_stats]
+            drift_items = []
+            for idx, (aid, count, drift, samples) in enumerate(drift_stats):
+                label = action_labels.get(aid, f"action {aid}")
+                drift_items.append((aid, count, drift, samples, label, idx))
+            order = {
+                "NOOP": 0,
+                "LEFT": 1,
+                "RIGHT": 2,
+                "UP": 3,
+                "DOWN": 4,
+            }
+            drift_items.sort(
+                key=lambda item: (order.get(item[4].upper(), 100), item[5])
+            )
+            labels = [label for _, _, _, _, label, _ in drift_items]
+            drift_samples = [samples for _, _, _, samples, _, _ in drift_items]
 
             save_drift_by_action_plot(
                 diagnostics_h_drift_dir / f"h_drift_by_action_{global_step:07d}.png",
@@ -2309,8 +2551,8 @@ def run_diagnostics_step(
                 f"h_drift_by_action_{global_step:07d}.csv",
                 ["action_id", "label", "count", "mean_drift"],
                 [
-                    (aid, action_labels.get(aid, f"action {aid}"), count, drift)
-                    for aid, count, drift, _ in drift_stats
+                    (aid, label, count, drift)
+                    for aid, count, drift, _, label, _ in drift_items
                 ],
             )
 
@@ -2503,6 +2745,7 @@ def run_planning_diagnostics_step(
     global_step: int,
     planning_batch_cpu: Optional[Tuple[torch.Tensor, torch.Tensor, List[List[str]]]],
     planning_env: Optional[GridworldKeyEnv],
+    grid_overlay_frames: Optional[GridOverlayFrames],
     run_dir: Path,
     force_h_zero: bool = False,
 ) -> None:
@@ -2524,6 +2767,33 @@ def run_planning_diagnostics_step(
     if plan_frames.shape[1] < 2:
         raise AssertionError("Planning diagnostics require sequences with at least two frames.")
 
+    grid_overlay_embeddings = None
+    grid_overlay_needed = any(
+        resolved_outputs[key].enabled
+        for key in (
+            "vis_planning_graph_h",
+            "vis_planning_graph_p",
+            "vis_planning_lattice_h",
+            "vis_planning_lattice_p",
+            "vis_planning_pca_test1",
+            "vis_planning_pca_test2",
+            "vis_planning_pca_test1_h",
+            "vis_planning_pca_test2_h",
+        )
+    )
+    if grid_overlay_needed:
+        if grid_overlay_frames is None:
+            raise AssertionError("Grid overlay requires precomputed frames.")
+        grid_overlay_embeddings = build_grid_overlay_embeddings(
+            model=model,
+            model_cfg=model_cfg,
+            device=device,
+            action_dim=plan_actions.shape[-1],
+            use_z2h_init=should_use_z2h_init(weights),
+            force_h_zero=force_h_zero,
+            frames_data=grid_overlay_frames,
+        )
+
     run_dir = Path(run_dir)
     metrics_dir = run_dir / "metrics"
     planning_action_stats_dir = run_dir / "vis_planning_action_stats"
@@ -2531,6 +2801,9 @@ def run_planning_diagnostics_step(
     planning_exec_dir = run_dir / "vis_planning_exec"
     planning_reachable_dir = run_dir / "vis_planning_reachable"
     planning_graph_dir = run_dir / "vis_planning_graph"
+    planning_lattice_dir = run_dir / "vis_planning_lattice"
+    planning_h_grid_dist_dir = run_dir / "vis_planning_h_grid_dist"
+    grid_overlay_dir = run_dir / "vis_grid_overlay"
 
     metrics_dir.mkdir(parents=True, exist_ok=True)
     if (
@@ -2558,6 +2831,12 @@ def run_planning_diagnostics_step(
         planning_reachable_dir.mkdir(parents=True, exist_ok=True)
     if resolved_outputs["vis_planning_graph_h"].enabled or resolved_outputs["vis_planning_graph_p"].enabled:
         planning_graph_dir.mkdir(parents=True, exist_ok=True)
+    if resolved_outputs["vis_planning_lattice_h"].enabled or resolved_outputs["vis_planning_lattice_p"].enabled:
+        planning_lattice_dir.mkdir(parents=True, exist_ok=True)
+    if resolved_outputs["vis_planning_h_grid_dist"].enabled:
+        planning_h_grid_dist_dir.mkdir(parents=True, exist_ok=True)
+    if grid_overlay_embeddings is not None:
+        grid_overlay_dir.mkdir(parents=True, exist_ok=True)
 
     model.eval()
     planning_kind = getattr(planning_cfg, "latent_kind", "p")
@@ -2594,6 +2873,7 @@ def run_planning_diagnostics_step(
         actions_np,
         action_labels,
         min_action_count=planning_cfg.min_action_count,
+        planning_cfg=planning_cfg,
     )
 
     deltas_p = None
@@ -2621,6 +2901,8 @@ def run_planning_diagnostics_step(
             deltas_p,
             action_labels,
             stats_p.mu,
+            delta_label="d_p",
+            title_prefix="P",
         )
     if resolved_outputs["vis_planning_action_stats_strip_h"].enabled:
         plot_action_strip(
@@ -2628,6 +2910,8 @@ def run_planning_diagnostics_step(
             deltas_h,
             action_labels,
             stats_h.mu,
+            delta_label="d_h",
+            title_prefix="H",
         )
 
     rng = random.Random(global_step)
@@ -2653,6 +2937,11 @@ def run_planning_diagnostics_step(
             title="Planning graph (h)",
             max_samples=planning_cfg.pca_samples,
             max_edges=4000,
+            grid_overlay=(
+                None
+                if grid_overlay_embeddings is None
+                else _grid_overlay_for_kind(grid_overlay_embeddings, "h")
+            ),
         )
     if resolved_outputs["vis_planning_graph_p"].enabled and graph_p is not None:
         save_planning_graph_plot(
@@ -2663,6 +2952,26 @@ def run_planning_diagnostics_step(
             title="Planning graph (p)",
             max_samples=planning_cfg.pca_samples,
             max_edges=4000,
+            grid_overlay=(
+                None
+                if grid_overlay_embeddings is None
+                else _grid_overlay_for_kind(grid_overlay_embeddings, "p")
+            ),
+        )
+    if resolved_outputs["vis_planning_h_grid_dist"].enabled:
+        if grid_overlay_embeddings is None:
+            raise AssertionError("H-to-grid histogram requires grid overlay embeddings.")
+        h_grid = grid_overlay_embeddings.h
+        h_flat = h_t
+        dist_matrix = _cosine_distance_matrix(h_flat, h_grid)
+        nearest = np.min(dist_matrix, axis=1)
+        l2_dist_matrix = _l2_distance_matrix(h_flat, h_grid)
+        nearest_l2 = np.min(l2_dist_matrix, axis=1)
+        save_grid_distance_hist(
+            planning_h_grid_dist_dir / f"h_grid_dist_{global_step:07d}.png",
+            nearest,
+            l2_distances=nearest_l2,
+            title="H to grid nearest cosine distance",
         )
 
     h_local_success = False
@@ -2701,6 +3010,9 @@ def run_planning_diagnostics_step(
             )
             p_start = pose_seq[0]
             p_goal = pose_seq[1]
+            lattice_dump_p: Optional[Dict[str, np.ndarray]] = None
+            if resolved_outputs["vis_planning_lattice_p"].enabled:
+                lattice_dump_p = {}
             plan = delta_lattice_astar(
                 p_start,
                 p_goal,
@@ -2709,6 +3021,7 @@ def run_planning_diagnostics_step(
                 r_merge=stats_p.r_merge,
                 step_scale=stats_p.L_scale,
                 max_nodes=planning_cfg.astar_max_nodes,
+                lattice_dump=lattice_dump_p,
             )
             visited: List[Tuple[int, int]] = [start_tile]
             final_frame = None
@@ -2749,6 +3062,27 @@ def run_planning_diagnostics_step(
                     visited_cells=visited,
                 )
                 plan_nodes_for_plot[label] = np.stack(plan.nodes, axis=0) if plan.nodes else None
+            if lattice_dump_p is not None:
+                lattice_nodes = lattice_dump_p["nodes"]
+                lattice_edges = lattice_dump_p["edges"]
+                np.savez(
+                    planning_lattice_dir / f"lattice_{label}_p_{global_step:07d}.npz",
+                    nodes=lattice_nodes,
+                    edges=lattice_edges,
+                )
+                save_planning_lattice_plot(
+                    planning_lattice_dir / f"lattice_{label}_p_{global_step:07d}.png",
+                    lattice_nodes,
+                    lattice_edges,
+                    title=f"Planning lattice ({label}, p)",
+                    max_samples=planning_cfg.pca_samples,
+                    max_edges=4000,
+                    grid_overlay=(
+                        None
+                        if grid_overlay_embeddings is None
+                        else _grid_overlay_for_kind(grid_overlay_embeddings, "p")
+                    ),
+                )
         elif label not in test_results:
             test_results[label] = PlanningTestResult(
                 success=False,
@@ -2769,6 +3103,9 @@ def run_planning_diagnostics_step(
             )
             h_start = h_seq[0]
             h_goal = h_seq[1]
+            lattice_dump_h: Optional[Dict[str, np.ndarray]] = None
+            if resolved_outputs["vis_planning_lattice_h"].enabled:
+                lattice_dump_h = {}
             plan_h = delta_lattice_astar(
                 h_start,
                 h_goal,
@@ -2777,6 +3114,7 @@ def run_planning_diagnostics_step(
                 r_merge=stats_h.r_merge,
                 step_scale=stats_h.L_scale,
                 max_nodes=planning_cfg.astar_max_nodes,
+                lattice_dump=lattice_dump_h,
             )
             visited_h: List[Tuple[int, int]] = [start_tile]
             final_frame_h = None
@@ -2789,6 +3127,27 @@ def run_planning_diagnostics_step(
                     start_tile=start_tile,
                 )
                 plan_nodes_for_plot_h[label] = np.stack(plan_h.nodes, axis=0) if plan_h.nodes else None
+            if lattice_dump_h is not None:
+                lattice_nodes = lattice_dump_h["nodes"]
+                lattice_edges = lattice_dump_h["edges"]
+                np.savez(
+                    planning_lattice_dir / f"lattice_{label}_h_{global_step:07d}.npz",
+                    nodes=lattice_nodes,
+                    edges=lattice_edges,
+                )
+                save_planning_lattice_plot(
+                    planning_lattice_dir / f"lattice_{label}_h_{global_step:07d}.png",
+                    lattice_nodes,
+                    lattice_edges,
+                    title=f"Planning lattice ({label}, h)",
+                    max_samples=planning_cfg.pca_samples,
+                    max_edges=4000,
+                    grid_overlay=(
+                        None
+                        if grid_overlay_embeddings is None
+                        else _grid_overlay_for_kind(grid_overlay_embeddings, "h")
+                    ),
+                )
 
         if label == "test1" and resolved_outputs["vis_planning_exec_test1_p"].enabled and use_p:
             plot_grid_trace(
@@ -2798,6 +3157,7 @@ def run_planning_diagnostics_step(
                 visited,
                 start_tile,
                 goal_tile,
+                title="Execution trace (p)",
             )
         if label == "test2" and resolved_outputs["vis_planning_exec_test2_p"].enabled and use_p:
             plot_grid_trace(
@@ -2807,6 +3167,7 @@ def run_planning_diagnostics_step(
                 visited,
                 start_tile,
                 goal_tile,
+                title="Execution trace (p)",
             )
         if (
             label == "test1"
@@ -2820,6 +3181,7 @@ def run_planning_diagnostics_step(
                 visited_h,
                 start_tile,
                 goal_tile,
+                title="Execution trace (h)",
             )
         if (
             label == "test2"
@@ -2833,6 +3195,7 @@ def run_planning_diagnostics_step(
                 visited_h,
                 start_tile,
                 goal_tile,
+                title="Execution trace (h)",
             )
         if label == "test1" and resolved_outputs["vis_planning_pca_test1"].enabled and use_p:
             plot_pca_path(
@@ -2842,6 +3205,12 @@ def run_planning_diagnostics_step(
                 p_start,
                 p_goal,
                 max_samples=planning_cfg.pca_samples,
+                title="PCA(p) plan",
+                grid_overlay=(
+                    None
+                    if grid_overlay_embeddings is None
+                    else _grid_overlay_for_kind(grid_overlay_embeddings, "p")
+                ),
             )
         if label == "test2" and resolved_outputs["vis_planning_pca_test2"].enabled and use_p:
             plot_pca_path(
@@ -2851,6 +3220,12 @@ def run_planning_diagnostics_step(
                 p_start,
                 p_goal,
                 max_samples=planning_cfg.pca_samples,
+                title="PCA(p) plan",
+                grid_overlay=(
+                    None
+                    if grid_overlay_embeddings is None
+                    else _grid_overlay_for_kind(grid_overlay_embeddings, "p")
+                ),
             )
         if (
             label == "test1"
@@ -2864,6 +3239,12 @@ def run_planning_diagnostics_step(
                 h_start,
                 h_goal,
                 max_samples=planning_cfg.pca_samples,
+                title="PCA(h) plan",
+                grid_overlay=(
+                    None
+                    if grid_overlay_embeddings is None
+                    else _grid_overlay_for_kind(grid_overlay_embeddings, "h")
+                ),
             )
         if (
             label == "test2"
@@ -2877,6 +3258,12 @@ def run_planning_diagnostics_step(
                 h_start,
                 h_goal,
                 max_samples=planning_cfg.pca_samples,
+                title="PCA(h) plan",
+                grid_overlay=(
+                    None
+                    if grid_overlay_embeddings is None
+                    else _grid_overlay_for_kind(grid_overlay_embeddings, "h")
+                ),
             )
 
     if resolved_outputs["vis_planning_reachable_h"].enabled:
@@ -2895,6 +3282,7 @@ def run_planning_diagnostics_step(
     _write_planning_metrics_row(
         metrics_dir,
         stats_p,
+        stats_h,
         graph_h,
         graph_p,
         h_reach,

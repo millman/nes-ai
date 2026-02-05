@@ -140,7 +140,7 @@ def _graph_history_path(out_dir: Path) -> Path:
 def _load_graph_history(path: Path) -> List[Dict[str, float]]:
     if not path.exists():
         return []
-    rows: List[Dict[str, float]] = []
+    rows_by_step: Dict[float, Dict[str, float]] = {}
     try:
         with path.open("r", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -151,18 +151,19 @@ def _load_graph_history(path: Path) -> List[Dict[str, float]]:
                         parsed[key] = float(value)
                     except (TypeError, ValueError):
                         continue
-                rows.append(parsed)
+                step = parsed.get("step")
+                if step is None:
+                    continue
+                rows_by_step[step] = parsed
     except (OSError, csv.Error):
         return []
+    rows = list(rows_by_step.values())
     rows.sort(key=lambda r: r.get("step", float("inf")))
     return rows
 
 
 def _write_graph_history(path: Path, metrics: Dict[str, float]) -> List[Dict[str, float]]:
     history = _load_graph_history(path)
-    history = [row for row in history if row.get("step") != metrics.get("step")]
-    history.append(metrics)
-    history.sort(key=lambda r: r.get("step", float("inf")))
     headers = [
         "step",
         "hit1_at_k",
@@ -177,12 +178,31 @@ def _write_graph_history(path: Path, metrics: Dict[str, float]) -> List[Dict[str
         "sample_size",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as handle:
+    write_header = True
+    if path.exists():
+        try:
+            with path.open("r", newline="") as handle:
+                reader = csv.reader(handle)
+                existing = next(reader, [])
+                if existing == headers:
+                    write_header = False
+                else:
+                    raise AssertionError("Graph history CSV header mismatch; refusing to append.")
+        except OSError:
+            write_header = True
+    mode = "w" if write_header else "a"
+    with path.open(mode, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
-        writer.writeheader()
-        for row in history:
-            writer.writerow({key: row.get(key, "") for key in headers})
-    return history
+        if write_header:
+            writer.writeheader()
+        writer.writerow({key: metrics.get(key, "") for key in headers})
+    history_by_step = {row.get("step"): row for row in history if "step" in row}
+    step = metrics.get("step")
+    if step is not None:
+        history_by_step[step] = metrics
+    merged = list(history_by_step.values())
+    merged.sort(key=lambda r: r.get("step", float("inf")))
+    return merged
 
 
 

@@ -27,6 +27,11 @@ class DiagnosticsConfig:
     h_drift_max_actions: int = 12
     zp_distance_pairs: int = 512
     zp_distance_min_gap: int = 2
+    position_grid_rows: int = 14
+    position_grid_cols: int = 16
+    position_agent_color: tuple[int, int, int] = (66, 167, 70)
+    position_inventory_height: int | None = None
+    position_vector_scale: float = 1.0
 
 
 @dataclass

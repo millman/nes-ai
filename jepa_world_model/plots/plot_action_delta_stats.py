@@ -52,8 +52,11 @@ def save_action_delta_strip_plot(
     deltas: np.ndarray,
     labels: Sequence[Optional[str]],
     mu: Dict[str, np.ndarray],
+    *,
+    delta_label: str = "d_p",
+    title_prefix: Optional[str] = None,
 ) -> None:
-    actions = ("L", "R", "U", "D")
+    actions = ("NOOP", "L", "R", "U", "D")
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     rng = np.random.default_rng(0)
     for ax, metric in zip(axes, ("norm", "cos")):
@@ -64,12 +67,12 @@ def save_action_delta_strip_plot(
             d = deltas[mask]
             if metric == "norm":
                 values = np.linalg.norm(d, axis=1)
-                ylabel = "||d_p||"
+                ylabel = f"||{delta_label}||"
             else:
                 mu_vec = mu[action]
                 denom = np.maximum(np.linalg.norm(d, axis=1) * np.linalg.norm(mu_vec), 1e-8)
                 values = (d @ mu_vec) / denom
-                ylabel = "cos(d_p, mu[a])"
+                ylabel = f"cos({delta_label}, mu[a])"
             jitter = rng.normal(scale=0.08, size=values.shape[0])
             ax.scatter(np.full(values.shape, idx) + jitter, values, s=10, alpha=0.5)
             mean_val = float(np.mean(values))
@@ -83,7 +86,10 @@ def save_action_delta_strip_plot(
         ax.set_xticks(range(len(actions)))
         ax.set_xticklabels(actions)
         ax.set_ylabel(ylabel)
-        ax.set_title(f"{ylabel} by action")
+        title = f"{ylabel} by action"
+        if title_prefix:
+            title = f"{title_prefix}: {title}"
+        ax.set_title(title)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

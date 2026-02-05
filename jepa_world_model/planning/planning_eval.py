@@ -306,6 +306,7 @@ def delta_lattice_astar(
     r_merge: float,
     step_scale: float,
     max_nodes: int,
+    lattice_dump: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[PlanResult]:
     if start.shape != goal.shape:
         raise AssertionError("start and goal must have matching shapes.")
@@ -321,6 +322,8 @@ def delta_lattice_astar(
     heapq.heappush(open_heap, (heuristic(start), 0, tie, start))
     parents: Dict[int, Tuple[int, str]] = {}
     nodes: List[np.ndarray] = [start]
+    collect_lattice = lattice_dump is not None
+    edges: List[Tuple[int, int]] = []
 
     def find_or_add(node: np.ndarray) -> int:
         for idx, existing in enumerate(nodes):
@@ -328,6 +331,18 @@ def delta_lattice_astar(
                 return idx
         nodes.append(node)
         return len(nodes) - 1
+
+    def _finalize_lattice() -> None:
+        if not collect_lattice:
+            return
+        if not nodes:
+            raise AssertionError("Lattice dump requires at least one node.")
+        lattice_dump.clear()
+        lattice_dump["nodes"] = np.stack(nodes, axis=0)
+        if edges:
+            lattice_dump["edges"] = np.asarray(edges, dtype=np.int32)
+        else:
+            lattice_dump["edges"] = np.zeros((0, 2), dtype=np.int32)
 
     start_idx = 0
     g_scores = {start_idx: 0}
@@ -350,6 +365,7 @@ def delta_lattice_astar(
                 stack.append(cur)
             for idx in reversed(stack[:-1]):
                 path.append(nodes[idx])
+            _finalize_lattice()
             return PlanResult(actions=actions, nodes=path)
         current_idx = find_or_add(current)
         for action in DIRECTION_ORDER:
@@ -357,6 +373,8 @@ def delta_lattice_astar(
                 continue
             nxt = current + mu[action]
             nxt_idx = find_or_add(nxt)
+            if collect_lattice:
+                edges.append((current_idx, nxt_idx))
             tentative = g + 1
             if tentative >= g_scores.get(nxt_idx, math.inf):
                 continue
@@ -365,6 +383,7 @@ def delta_lattice_astar(
             f_score = tentative + heuristic(nxt)
             tie += 1
             heapq.heappush(open_heap, (f_score, tentative, tie, nxt))
+    _finalize_lattice()
     return None
 
 
@@ -372,8 +391,23 @@ def plot_action_stats(out_path: Path, deltas: np.ndarray, labels: Sequence[Optio
     save_action_delta_stats_plot(out_path, deltas, labels, mu)
 
 
-def plot_action_strip(out_path: Path, deltas: np.ndarray, labels: Sequence[Optional[str]], mu: Dict[str, np.ndarray]) -> None:
-    save_action_delta_strip_plot(out_path, deltas, labels, mu)
+def plot_action_strip(
+    out_path: Path,
+    deltas: np.ndarray,
+    labels: Sequence[Optional[str]],
+    mu: Dict[str, np.ndarray],
+    *,
+    delta_label: str = "d_p",
+    title_prefix: Optional[str] = None,
+) -> None:
+    save_action_delta_strip_plot(
+        out_path,
+        deltas,
+        labels,
+        mu,
+        delta_label=delta_label,
+        title_prefix=title_prefix,
+    )
 
 
 def plot_pca_path(
@@ -384,6 +418,8 @@ def plot_pca_path(
     goal: np.ndarray,
     *,
     max_samples: int,
+    grid_overlay: Optional["GridOverlay"] = None,
+    title: str = "PCA(p) plan",
 ) -> None:
     save_planning_pca_path_plot(
         out_path,
@@ -392,6 +428,8 @@ def plot_pca_path(
         start,
         goal,
         max_samples=max_samples,
+        grid_overlay=grid_overlay,
+        title=title,
     )
 
 
@@ -402,8 +440,18 @@ def plot_grid_trace(
     visited: Sequence[Tuple[int, int]],
     start: Tuple[int, int],
     goal: Tuple[int, int],
+    *,
+    title: str = "Execution trace",
 ) -> None:
-    save_grid_execution_trace_plot(out_path, grid_rows, grid_cols, visited, start, goal)
+    save_grid_execution_trace_plot(
+        out_path,
+        grid_rows,
+        grid_cols,
+        visited,
+        start,
+        goal,
+        title=title,
+    )
 
 
 def run_plan_in_env(
