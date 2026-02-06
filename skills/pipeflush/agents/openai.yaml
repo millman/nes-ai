@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pipeflush"
+  short_description: "Run a quick JEPA trainer pipeflush test run"
+  default_prompt: "Use pipeflush to run a 10-step jepa_world_model_trainer.py smoke run after non-trivial changes and capture the outputs."

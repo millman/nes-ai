@@ -80,3 +80,8 @@ After each change batch:
 - When making non-trivial changes to `jepa_world_model_trainer.py`, run a very short training run up to the first visualization/planning dump (10 steps in the current config).
 - Use a title indicating it is a test run (e.g., `test: <short description>`).
 - For pipeflush smoke runs, use `data.gwbasic_rand_corner_loops2` unless explicitly overridden by the user.
+
+## Available skills
+- analysis: Analyze JEPA world model experiment behavior with a reproducible workflow for worktrees, hypotheses, utility scripts, and result logs. (file: `/Users/dave/rl/nes-ai/skills/analysis/SKILL.md`)
+- jepa-planning-experiment: Run iterative JEPA world model trainer planning experiments focused on h-based planning quality. (file: `/Users/dave/rl/nes-ai/skills/jepa-planning-experiment/SKILL.md`)
+- pipeflush: Run a short pipeflush smoke test for non-trivial changes to `jepa_world_model_trainer.py`, including a 10-step run to first visualization/planning dump. (file: `/Users/dave/rl/nes-ai/skills/pipeflush/SKILL.md`)

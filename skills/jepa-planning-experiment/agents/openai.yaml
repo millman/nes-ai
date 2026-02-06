@@ -1,0 +1,4 @@
+interface:
+  display_name: "JEPA Planning Experiment"
+  short_description: "Run iterative JEPA planning experiments"
+  default_prompt: "Use $jepa-planning-experiment to run an iterative JEPA world model trainer planning experiment with checkpoints, h-planning evaluation, and worklogs."

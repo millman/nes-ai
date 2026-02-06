@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analysis"
+  short_description: "Analyze JEPA planning behavior and root causes"
+  default_prompt: "Use analysis to run a structured JEPA experiment analysis with hypotheses, utility scripts, and worklog conclusions."
