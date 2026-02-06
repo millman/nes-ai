@@ -3383,6 +3383,7 @@ def _loss_history_row(history: LossHistory, index: int) -> Tuple[object, ...]:
         history.jepa_open_loop[index],
         history.sigreg[index],
         history.z_smooth[index],
+        history.h_smooth[index],
         history.recon[index],
         history.recon_multi_gauss[index],
         history.recon_multi_box[index],
