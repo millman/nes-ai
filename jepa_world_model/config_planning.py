@@ -27,5 +27,28 @@ class PlanningDiagnosticsConfig:
     h_merge_max: Optional[float] = None
     # Distance metric for H planning graph clustering.
     h_distance_metric: Literal["l2", "cosine"] = "l2"
+    # H planning node distance mode.
+    # - "legacy": use fixed multiplier over empirical non-noop step distance.
+    # - "anchor_h": derive radii from empirical 1-step h displacement scale.
+    h_distance_mode: Literal["legacy", "anchor_h"] = "anchor_h"
+    # Anchor-mode base multipliers (r = c * anchor_h).
+    h_anchor_c_merge: float = 1.1
+    h_anchor_c_add: float = 1.35
+    h_anchor_c_edge: float = 2.0
+    h_anchor_c_goal: float = 1.0
+    # Anchor-mode safety floor: merge radius >= h_anchor_noise_multiplier * noise_floor.
+    h_anchor_noise_multiplier: float = 1.1
+    # Controller target range for h graph node count.
+    h_anchor_target_nodes_min: int = 16
+    h_anchor_target_nodes_max: int = 28
+    # Controller step size for c_add adaptation.
+    h_anchor_c_add_adjust: float = 0.05
+    # Bounds for adaptive c_add.
+    h_anchor_c_add_min: float = 1.0
+    h_anchor_c_add_max: float = 2.0
+    # If true, adapt c_add online using node-count and reachability feedback.
+    h_anchor_adapt_c_add: bool = True
+    # Reachability threshold used by the c_add controller.
+    h_anchor_reachability_target: float = 0.95
     # PCA components used for position action vector field projections.
     position_vector_pca_components: int = 8

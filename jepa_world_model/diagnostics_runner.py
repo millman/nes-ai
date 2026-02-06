@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import random
 from pathlib import Path
 from dataclasses import dataclass
@@ -120,6 +121,26 @@ from jepa_world_model.vis_vis_ctrl_metrics import compute_vis_ctrl_metrics
 class DiagnosticsOutputSpec:
     enabled: bool
     description: str
+
+
+@dataclass
+class PlanningHRadiiDiagnostics:
+    mode: str
+    h_metric: str
+    d_move: float
+    d_noop_p90: float
+    d_same_frame_p90: float
+    d_noise_floor: float
+    anchor_h: float
+    c_add_before: float
+    c_add_after: float
+    c_merge: float
+    c_edge: float
+    c_goal: float
+    r_add: float
+    r_merge: float
+    r_edge: float
+    r_goal: float
 
 
 DIAGNOSTICS_OUTPUT_CATALOG = {
@@ -656,6 +677,7 @@ def _extract_planning_latents(
     List[Optional[str]],
     Optional[np.ndarray],
     torch.Tensor,
+    np.ndarray,
 ]:
     assert torch.is_grad_enabled()
     with torch.no_grad():
@@ -689,7 +711,34 @@ def _extract_planning_latents(
     action_labels = action_labels_from_vectors(actions_np)
     if p_t is not None and p_tp1 is not None:
         deltas = p_tp1 - p_t
-    return p_t, p_tp1, h_t, h_tp1, actions_np, action_labels, deltas, plan_h_states
+    frame_diffs = (plan_frames[:, 1:] - plan_frames[:, :-1]).abs()
+    same_frame_mask = (frame_diffs.flatten(start_dim=2).amax(dim=2) <= 1e-8).detach().cpu().reshape(-1).numpy()
+    return p_t, p_tp1, h_t, h_tp1, actions_np, action_labels, deltas, plan_h_states, same_frame_mask
+
+
+def _planning_anchor_state_path(metrics_dir: Path) -> Path:
+    return metrics_dir / "planning_anchor_state.json"
+
+
+def _load_planning_anchor_c_add(metrics_dir: Path, cfg: PlanningDiagnosticsConfig) -> float:
+    default = float(cfg.h_anchor_c_add)
+    state_path = _planning_anchor_state_path(metrics_dir)
+    if not state_path.exists():
+        return default
+    payload = json.loads(state_path.read_text())
+    value = float(payload.get("c_add", default))
+    return float(np.clip(value, cfg.h_anchor_c_add_min, cfg.h_anchor_c_add_max))
+
+
+def _save_planning_anchor_c_add(metrics_dir: Path, c_add: float) -> None:
+    state_path = _planning_anchor_state_path(metrics_dir)
+    state_path.write_text(json.dumps({"c_add": float(c_add)}, indent=2, sort_keys=True))
+
+
+def _quantile_or_zero(values: np.ndarray, q: float) -> float:
+    if values.size == 0:
+        return 0.0
+    return float(np.quantile(values, q))
 
 
 def _compute_planning_graphs(
@@ -699,10 +748,12 @@ def _compute_planning_graphs(
     h_tp1: np.ndarray,
     actions_np: np.ndarray,
     action_labels: Sequence[Optional[str]],
+    same_frame_mask: np.ndarray,
+    metrics_dir: Path,
     *,
     min_action_count: int,
     planning_cfg: PlanningDiagnosticsConfig,
-) -> Tuple[Optional[ActionDeltaStats], ActionDeltaStats, DatasetGraph, Optional[DatasetGraph], float]:
+) -> Tuple[Optional[ActionDeltaStats], ActionDeltaStats, DatasetGraph, Optional[DatasetGraph], PlanningHRadiiDiagnostics]:
     stats_p = None
     if p_t is not None and p_tp1 is not None:
         stats_p = compute_action_delta_stats(
@@ -721,27 +772,57 @@ def _compute_planning_graphs(
     if not np.any(non_noop):
         raise AssertionError("Planning diagnostics require non-noop actions for h graph thresholds.")
     h_metric = planning_cfg.h_distance_metric
+    h_delta = h_tp1 - h_t
     if h_metric == "cosine":
         h_dot = (h_t * h_tp1).sum(axis=1)
         h_norms = np.maximum(np.linalg.norm(h_t, axis=1) * np.linalg.norm(h_tp1, axis=1), 1e-8)
-        h_cos = h_dot / h_norms
-        d_nn = float(np.median(1.0 - h_cos[non_noop]))
+        h_step_dist = 1.0 - (h_dot / h_norms)
     elif h_metric == "l2":
-        h_delta = h_tp1 - h_t
-        d_nn = float(np.median(np.linalg.norm(h_delta[non_noop], axis=1)))
+        h_step_dist = np.linalg.norm(h_delta, axis=1)
     else:
         raise AssertionError(f"Unsupported h_distance_metric={h_metric!r}.")
-    tau_h_merge = planning_cfg.h_merge_multiplier * d_nn
-    if planning_cfg.h_merge_min is not None:
-        tau_h_merge = max(tau_h_merge, planning_cfg.h_merge_min)
-    if planning_cfg.h_merge_max is not None:
-        tau_h_merge = min(tau_h_merge, planning_cfg.h_merge_max)
+    if same_frame_mask.shape != h_step_dist.shape:
+        raise AssertionError("same_frame_mask must align with flattened planning transitions.")
+    noop_mask = np.array([lbl == "NOOP" for lbl in action_labels], dtype=bool)
+    d_move = float(np.median(h_step_dist[non_noop]))
+    if d_move <= 0:
+        raise AssertionError("Anchor mode requires positive median non-NOOP h displacement.")
+    d_noop_p90 = _quantile_or_zero(h_step_dist[noop_mask], 0.90)
+    d_same_frame_p90 = _quantile_or_zero(h_step_dist[same_frame_mask], 0.90)
+    d_noise_floor = max(d_noop_p90, d_same_frame_p90)
+    c_add_before = float(planning_cfg.h_anchor_c_add)
+    c_merge = float(planning_cfg.h_anchor_c_merge)
+    c_edge = float(planning_cfg.h_anchor_c_edge)
+    c_goal = float(planning_cfg.h_anchor_c_goal)
+    r_edge = float("nan")
+    d_nn = d_move
+    mode = planning_cfg.h_distance_mode
+    if mode == "anchor_h":
+        c_add_before = _load_planning_anchor_c_add(metrics_dir, planning_cfg)
+        r_merge = max(planning_cfg.h_anchor_noise_multiplier * d_noise_floor, c_merge * d_move)
+        r_add = max(r_merge, c_add_before * d_move)
+        r_edge = max(r_add, c_edge * d_move)
+        r_goal = max(r_merge, c_goal * d_move)
+    elif mode == "legacy":
+        r_add = planning_cfg.h_merge_multiplier * d_nn
+        if planning_cfg.h_merge_min is not None:
+            r_add = max(r_add, planning_cfg.h_merge_min)
+        if planning_cfg.h_merge_max is not None:
+            r_add = min(r_add, planning_cfg.h_merge_max)
+        r_merge = stats_h.r_merge
+        r_goal = stats_h.r_goal
+    else:
+        raise AssertionError(f"Unsupported h_distance_mode={mode!r}.")
+    stats_h.r_merge = float(r_merge)
+    stats_h.r_goal = float(r_goal)
     graph_h = build_dataset_graph(
         h_t,
         h_tp1,
         actions_np,
-        radius=tau_h_merge,
+        radius=float(r_add),
         metric=h_metric,
+        max_edge_distance=(float(r_edge) if np.isfinite(r_edge) else None),
+        edge_metric=h_metric,
     )
     graph_p = None
     if stats_p is not None and p_t is not None and p_tp1 is not None:
@@ -752,13 +833,32 @@ def _compute_planning_graphs(
             radius=stats_p.r_cluster_p,
             metric="l2",
         )
-    return stats_p, stats_h, graph_h, graph_p, tau_h_merge
+    radii_diag = PlanningHRadiiDiagnostics(
+        mode=mode,
+        h_metric=h_metric,
+        d_move=float(d_move),
+        d_noop_p90=float(d_noop_p90),
+        d_same_frame_p90=float(d_same_frame_p90),
+        d_noise_floor=float(d_noise_floor),
+        anchor_h=float(d_move),
+        c_add_before=float(c_add_before),
+        c_add_after=float(c_add_before),
+        c_merge=float(c_merge),
+        c_edge=float(c_edge),
+        c_goal=float(c_goal),
+        r_add=float(r_add),
+        r_merge=float(r_merge),
+        r_edge=float(r_edge),
+        r_goal=float(r_goal),
+    )
+    return stats_p, stats_h, graph_h, graph_p, radii_diag
 
 
 def _run_h_local_sanity(
     graph_h: DatasetGraph,
     plan_h_states: torch.Tensor,
-    tau_h_merge: float,
+    h_radius: float,
+    h_metric: str,
     cfg: PlanningDiagnosticsConfig,
     rng: random.Random,
 ) -> bool:
@@ -766,7 +866,7 @@ def _run_h_local_sanity(
     if seq_len <= cfg.local_k_min:
         raise AssertionError("Planning diagnostics require seq_len > local_k_min.")
     h_all = plan_h_states.detach().cpu().numpy().reshape(-1, plan_h_states.shape[-1])
-    _, h_nodes = cluster_latents(h_all, radius=tau_h_merge, metric="cosine")
+    _, h_nodes = cluster_latents(h_all, radius=h_radius, metric=h_metric)
     h_nodes = h_nodes.reshape(plan_h_states.shape[0], seq_len)
     b_idx = rng.randrange(plan_h_states.shape[0])
     max_start = seq_len - cfg.local_k_min - 1
@@ -893,6 +993,83 @@ def _write_planning_metrics_row(
         test_results["test2"].goal_distance,
     ]
     append_csv_row(planning_metrics_path, header, row)
+
+
+def _update_anchor_c_add(
+    *,
+    planning_cfg: PlanningDiagnosticsConfig,
+    radii_diag: PlanningHRadiiDiagnostics,
+    num_nodes_h: int,
+    h_reach: np.ndarray,
+) -> float:
+    if radii_diag.mode != "anchor_h":
+        return radii_diag.c_add_before
+    if not planning_cfg.h_anchor_adapt_c_add:
+        return radii_diag.c_add_before
+    c_add = radii_diag.c_add_before
+    reach_median = float(np.median(h_reach)) if h_reach.size else 0.0
+    if reach_median >= planning_cfg.h_anchor_reachability_target and num_nodes_h > planning_cfg.h_anchor_target_nodes_max:
+        c_add += planning_cfg.h_anchor_c_add_adjust
+    elif reach_median < planning_cfg.h_anchor_reachability_target:
+        c_add -= planning_cfg.h_anchor_c_add_adjust
+    elif num_nodes_h < planning_cfg.h_anchor_target_nodes_min:
+        c_add -= planning_cfg.h_anchor_c_add_adjust
+    return float(np.clip(c_add, planning_cfg.h_anchor_c_add_min, planning_cfg.h_anchor_c_add_max))
+
+
+def _write_planning_anchor_metrics_row(
+    metrics_dir: Path,
+    radii_diag: PlanningHRadiiDiagnostics,
+    *,
+    num_nodes_h: int,
+    h_reach: np.ndarray,
+    global_step: int,
+) -> None:
+    path = metrics_dir / "planning_anchor_metrics.csv"
+    reach_median = float(np.median(h_reach)) if h_reach.size else float("nan")
+    header = [
+        "step",
+        "mode",
+        "h_metric",
+        "anchor_h",
+        "d_move",
+        "d_noop_p90",
+        "d_same_frame_p90",
+        "d_noise_floor",
+        "c_add_before",
+        "c_add_after",
+        "c_merge",
+        "c_edge",
+        "c_goal",
+        "r_add",
+        "r_merge",
+        "r_edge",
+        "r_goal",
+        "num_nodes_h",
+        "reach_h_median",
+    ]
+    row = [
+        global_step,
+        radii_diag.mode,
+        radii_diag.h_metric,
+        radii_diag.anchor_h,
+        radii_diag.d_move,
+        radii_diag.d_noop_p90,
+        radii_diag.d_same_frame_p90,
+        radii_diag.d_noise_floor,
+        radii_diag.c_add_before,
+        radii_diag.c_add_after,
+        radii_diag.c_merge,
+        radii_diag.c_edge,
+        radii_diag.c_goal,
+        radii_diag.r_add,
+        radii_diag.r_merge,
+        radii_diag.r_edge,
+        radii_diag.r_goal,
+        num_nodes_h,
+        reach_median,
+    ]
+    append_csv_row(path, header, row)
 
 
 def _select_straightline_ids(
@@ -2856,6 +3033,7 @@ def run_planning_diagnostics_step(
         action_labels,
         deltas,
         plan_h_states,
+        same_frame_mask,
     ) = _extract_planning_latents(
         model,
         plan_frames,
@@ -2865,13 +3043,15 @@ def run_planning_diagnostics_step(
         force_h_zero=force_h_zero,
         use_pose=use_p,
     )
-    stats_p, stats_h, graph_h, graph_p, tau_h_merge = _compute_planning_graphs(
+    stats_p, stats_h, graph_h, graph_p, h_radii_diag = _compute_planning_graphs(
         p_t,
         p_tp1,
         h_t,
         h_tp1,
         actions_np,
         action_labels,
+        same_frame_mask,
+        metrics_dir,
         min_action_count=planning_cfg.min_action_count,
         planning_cfg=planning_cfg,
     )
@@ -2974,12 +3154,29 @@ def run_planning_diagnostics_step(
             title="H to grid nearest cosine distance",
         )
 
+    h_radii_diag.c_add_after = _update_anchor_c_add(
+        planning_cfg=planning_cfg,
+        radii_diag=h_radii_diag,
+        num_nodes_h=graph_h.centers.shape[0],
+        h_reach=h_reach,
+    )
+    if h_radii_diag.mode == "anchor_h":
+        _save_planning_anchor_c_add(metrics_dir, h_radii_diag.c_add_after)
+    _write_planning_anchor_metrics_row(
+        metrics_dir,
+        h_radii_diag,
+        num_nodes_h=graph_h.centers.shape[0],
+        h_reach=h_reach,
+        global_step=global_step,
+    )
+
     h_local_success = False
     if use_h:
         h_local_success = _run_h_local_sanity(
             graph_h,
             plan_h_states,
-            tau_h_merge,
+            h_radii_diag.r_add,
+            h_radii_diag.h_metric,
             planning_cfg,
             rng,
         )

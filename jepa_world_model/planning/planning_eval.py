@@ -220,6 +220,8 @@ def build_dataset_graph(
     *,
     radius: float,
     metric: str,
+    max_edge_distance: Optional[float] = None,
+    edge_metric: Optional[str] = None,
 ) -> DatasetGraph:
     if latents_t.shape != latents_tp1.shape:
         raise AssertionError("latents_t and latents_tp1 must share shape.")
@@ -232,6 +234,20 @@ def build_dataset_graph(
     for src, dst, label in zip(node_ids_t, node_ids_tp1, labels):
         if label is None:
             continue
+        if max_edge_distance is not None:
+            if max_edge_distance <= 0:
+                raise AssertionError("max_edge_distance must be positive when provided.")
+            src_center = centers[int(src)]
+            dst_center = centers[int(dst)]
+            metric_name = edge_metric or metric
+            if metric_name == "cosine":
+                dist = _cosine_distance(src_center, dst_center)
+            elif metric_name == "l2":
+                dist = float(np.linalg.norm(src_center - dst_center))
+            else:
+                raise AssertionError(f"Unsupported edge metric: {metric_name!r}")
+            if dist > max_edge_distance:
+                continue
         bucket = edges.setdefault(int(src), {})
         bucket.setdefault(label, []).append(int(dst))
     return DatasetGraph(centers=centers, node_ids_t=node_ids_t, node_ids_tp1=node_ids_tp1, edges=edges)
