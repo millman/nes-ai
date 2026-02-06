@@ -71,6 +71,7 @@ After each change batch:
 - Keep `.agent/` as local bookkeeping only; do not add `.agent` files to git commits.
 - For evaluation/experiment work (for example: hyperparameter sweeps, exploratory trainer edits, repeated run-analysis loops), always use a dedicated git worktree/branch rather than editing directly on `main`.
 - When creating worktrees, name them using `<concept>.<YYYY-MM-DD_HH-MM-SS>`.
+- Create worktrees under `/Users/dave/rl/nes-ai.worktrees/` (next to `/Users/dave/rl/nes-ai`), not under `/tmp`.
 - Only modify `main` directly when explicitly doing collaborative in-place changes requested by the user.
 - Prefer explicit assertions for invalid preconditions in diagnostics/utilities instead of returning empty placeholders; fail fast to surface misconfigured calls.
 - If a function depends on a feature toggle or required module, assert with a clear error message rather than silently skipping.

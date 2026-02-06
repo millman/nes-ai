@@ -11,7 +11,8 @@ Use this workflow for diagnosis-heavy experiment analysis.
 1. Create a dedicated worktree and branch.
 2. Name the worktree `<concept>.<YYYY-MM-DD_HH-MM-SS>`.
 3. Keep the branch prefixed with `codex/`.
-4. Create a matching worklog folder in the main repo at `worklog/<YYYY-MM-DD_HH-MM-SS>.<concept>/`.
+4. Create the worktree under `/Users/dave/rl/nes-ai.worktrees/` (next to `/Users/dave/rl/nes-ai`), not under `/tmp`.
+5. Create a matching worklog folder in the main repo at `worklog/<YYYY-MM-DD_HH-MM-SS>.<concept>/`.
 
 ## 2) Use analysis utility folder
 1. Place helper scripts under `jepa_world_model_analysis/scripts/`.

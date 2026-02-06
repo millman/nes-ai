@@ -30,11 +30,12 @@ Do not run an attempt without recording this hypothesis/tradeoff analysis first.
 ## Step 1: Isolate Work
 - Create a new branch with prefix `codex/` and a new worktree.
 - Keep source edits and outputs in that worktree for experiment hygiene.
+- Create worktrees under `/Users/dave/rl/nes-ai.worktrees/` (next to `/Users/dave/rl/nes-ai`), not under `/tmp`.
 
 Example:
 ```bash
 ts=$(date +%Y-%m-%d_%H-%M-%S)
-wt=/tmp/nes-ai-planning-$ts
+wt=/Users/dave/rl/nes-ai.worktrees/planning.$ts
 br=codex/planning-explore-$ts
 git worktree add -b "$br" "$wt" HEAD
 ```
@@ -52,7 +53,7 @@ Set or pass settings that keep metrics while avoiding expensive visual output.
   - recurring: every `1000` afterward
   - keep `last.pt` as rolling resume checkpoint.
 
-If working from a `/tmp` worktree, use an absolute `data_root` path if relative lookup fails.
+If relative dataset lookup fails from a worktree, use an absolute `data_root` path.
 
 ## Step 3: Runtime Environment (Learned Constraint)
 Use standard `uv run` in project context. Do not pin Python 3.9.

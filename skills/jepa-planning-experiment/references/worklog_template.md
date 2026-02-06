@@ -4,7 +4,7 @@
 - What planning behavior is targeted in this iteration?
 
 ## Setup
-- Branch/worktree:
+- Branch/worktree (under `/Users/dave/rl/nes-ai.worktrees/`):
 - Dataset:
 - Trainer command:
 - Code/config deltas:
