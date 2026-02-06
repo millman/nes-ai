@@ -64,6 +64,8 @@ After each change batch:
 - Keep change summaries short and action-oriented.
 - Include prompts that clarified requirements or triggered follow-up adjustments if those instructions influenced the final code.
 - When a changes file covers work that was planned across earlier prompts, include those prior prompts as well—provided they are relevant to the current edits and have not already been logged elsewhere.
+- If a prompt references earlier context (for example: "as discussed", "earlier recommendation", "that plan"), include the referenced prior prompt text verbatim in the same changes log and in the final commit message so the commit is self-contained.
+- Avoid ambiguous prompt-only commit sections; spell out the concrete recommendation/details directly in the commit message body or prompt blocks.
 - Always use `uv` to run Python code.
 - Keep `.agent/` as local bookkeeping only; do not add `.agent` files to git commits.
 - Prefer explicit assertions for invalid preconditions in diagnostics/utilities instead of returning empty placeholders; fail fast to surface misconfigured calls.
