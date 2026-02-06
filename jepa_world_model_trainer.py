@@ -2,7 +2,7 @@
 """Training loop for the JEPA world model with local/global specialization and SIGReg."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 import json
@@ -4277,6 +4277,16 @@ def _save_checkpoint(
 
 
 def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights, title: Optional[str] = None) -> None:
+    if asdict(weights) != asdict(cfg.loss_weights):
+        mismatched = [
+            name
+            for name, expected in asdict(cfg.loss_weights).items()
+            if asdict(weights)[name] != expected
+        ]
+        raise AssertionError(
+            "run_training received weights that differ from cfg.loss_weights; "
+            f"mismatched fields: {', '.join(sorted(mismatched))}"
+        )
     # --- Filesystem + metadata setup ---
     device = pick_device(cfg.device)
     seed_value, python_rng = _seed_everything(cfg.seed)
