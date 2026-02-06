@@ -9,8 +9,8 @@ import gymnasium as gym
 import pygame
 import tyro
 from gymnasium import spaces
-from search_mario import TrajectoryStore
 import numpy as np
+from trajectory_store import TrajectoryStore
 
 ENV_ID = "gridworldkey_env"
 

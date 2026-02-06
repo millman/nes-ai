@@ -22,6 +22,7 @@ from search_mario_actions import ACTION_INDEX_TO_CONTROLLER, CONTROLLER_TO_ACTIO
 from search_mario_viz import build_patch_histogram_rgb, draw_patch_grid, draw_patch_path, optimal_patch_layout
 from super_mario_env_search import SuperMarioEnv, SCREEN_H, SCREEN_W, get_x_pos, get_y_pos, get_level, get_world, _to_controller_presses, get_time_left, life, get_multi_part_progression, get_area_type
 from super_mario_env_ram_hacks import encode_world_level, _is_dying, _get_player_state, _get_y_viewport
+from trajectory_store import TrajectoryStore
 
 from gymnasium.envs.registration import register
 
@@ -838,66 +839,6 @@ def _save_action_history(filepath: Path, world_ram: int, level_ram: int, start_s
         }, out)
 
     print(f"Wrote action history to: {filepath_action_history}")
-
-
-class TrajectoryStore:
-
-    def __init__(self, dump_dir: Path, image_shape: tuple[int, int, int] = (224, 240, 3)):
-        self.dump_dir = dump_dir
-        self.image_shape = image_shape
-
-        self.traj_id = 0
-        self.states = []
-        self.actions = []
-        self.infos = {}
-
-    def record_state_action(self, state: NdArrayRGB8, action: NdArrayUint8, info: dict[str, Any]):
-        assert state.shape == self.image_shape, f"Unexpected state shape: {state.shape} != {self.image_shape}"
-
-        self.states.append(state.copy())
-        self.actions.append(action.copy())
-
-        if not self.infos:
-            for k, v in info.items():
-                self.infos[k] = []
-
-        assert self.infos.keys() == info.keys(), f"Mismatched keys: {self.infos.keys()} != {self.infos[0].keys()}"
-        for k, v in info.items():
-            self.infos[k].append(v)
-
-    def save(self, traj_subdir: str | None = None):
-        if not traj_subdir:
-            traj_subdir = f"traj_{self.traj_id}"
-
-        dump_states_dir = self.dump_dir / traj_subdir / 'states'
-        dump_actions_path = self.dump_dir / traj_subdir / 'actions.npz'
-        dump_infos_path = self.dump_dir / traj_subdir / 'infos.npz'
-
-        print(f"Writing trajectory[{self.traj_id}] (#={len(self.actions)}) to: {self.dump_dir}")
-        print(f"  {dump_states_dir}")
-        print(f"  {dump_actions_path}")
-        print(f"  {dump_infos_path}")
-
-        # Create a new directory for each trajectory.
-        dump_states_dir.mkdir(parents=True, exist_ok=True)
-
-        # Dump states (observation).
-        for i, state in enumerate(self.states):
-            dump_states_path = dump_states_dir / f'state_{i}.png'
-            obs_img = Image.fromarray(state, mode='RGB')
-            obs_img.save(dump_states_path)
-
-        # Dump action (controller).
-        np.savez(dump_actions_path, self.actions)
-
-        # Dump info metadata.
-        np.savez(dump_infos_path, **self.infos)
-
-        # Clear states, but leave frame counter in-tact.
-        self.states = []
-        self.actions = []
-        self.infos = {}
-        self.traj_id += 1
 
 
 @dataclass
