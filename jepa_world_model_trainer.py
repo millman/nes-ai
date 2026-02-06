@@ -298,7 +298,7 @@ class LossWeights:
     # Robust temporal smoothness on z (Huber on consecutive z distances).
     z_smooth: float = 0.1
     # Robust temporal smoothness on h (Huber on consecutive h distances).
-    h_smooth: float = 0.1
+    h_smooth: float = 0.0
 
     # -------------------------------------------------------------------------
     # Algebra losses for Mario: keep z light, push h to local translation + short composition, and make p algebraic for planning.
@@ -364,11 +364,11 @@ class LossWeights:
     # NOOP should produce near-zero ΔH.
     noop_residual_dh: float = 0.1
     # NOOP identity on h: ||h_{t+1} - h_t|| for NOOP transitions.
-    noop_h_identity: float = 0.0
+    noop_h_identity: float = 0.1
     # Same-frame identity on h: ||h_{t+1} - h_t|| when consecutive frames are pixel-identical.
-    same_frame_h_identity: float = 0.0
+    same_frame_h_identity: float = 0.1
     # Orthogonality leak penalty: discourage NOOP mean delta from aligning with move-action mean deltas.
-    noop_move_orth_h: float = 0.0
+    noop_move_orth_h: float = 0.1
 
     # --- P ---
     # State-conditioned delta alignment (ΔP): Δp_t vs observed pose delta.
