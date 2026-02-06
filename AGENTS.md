@@ -54,7 +54,7 @@ After each change batch:
    ```
 3. Materialize the commit message by creating a directory `.agent/commits/<YYYY-MM-DD_HH-MM-SS>.<summary>/`. Inside that directory, write the combined message to `commit.md`. If there is exactly one `.agent/changes/` file involved, reuse that file's base name for the directory (e.g., `.agent/changes/2024-06-10_14-23-45.simple_change.md` → `.agent/commits/2024-06-10_14-23-45.simple_change/`).
 4. For every `.agent/changes/` file included in the commit, move it into a `changes/` subdirectory under the commit directory while preserving filenames (e.g., `.agent/changes/foo.md` → `.agent/commits/<dirname>/changes/foo.md`). Ensure the `changes/` directory is created first.
-5. Stage only the relevant changes for the commit (use `git add -p` when unrelated working changes exist).
+5. Stage only the relevant source changes for the commit (use `git add -p` when unrelated working changes exist). Do **not** stage `.agent/` files.
 6. Create the commit using `git commit -F .agent/commits/<YYYY-MM-DD_HH-MM-SS>.<summary>/commit.md`.
 7. Move the commit directory into `.agent/done/` using the same name (e.g., `.agent/commits/<dirname>` → `.agent/done/<dirname>`).
 
@@ -65,6 +65,7 @@ After each change batch:
 - Include prompts that clarified requirements or triggered follow-up adjustments if those instructions influenced the final code.
 - When a changes file covers work that was planned across earlier prompts, include those prior prompts as well—provided they are relevant to the current edits and have not already been logged elsewhere.
 - Always use `uv` to run Python code.
+- Keep `.agent/` as local bookkeeping only; do not add `.agent` files to git commits.
 - Prefer explicit assertions for invalid preconditions in diagnostics/utilities instead of returning empty placeholders; fail fast to surface misconfigured calls.
 - If a function depends on a feature toggle or required module, assert with a clear error message rather than silently skipping.
 - Use early assertions for minimum sequence length/shape requirements to avoid silently degraded metrics.
@@ -72,3 +73,4 @@ After each change batch:
 ## jepa_world_model_trainer.py Changes
 - When making non-trivial changes to `jepa_world_model_trainer.py`, run a very short training run up to the first visualization/planning dump (10 steps in the current config).
 - Use a title indicating it is a test run (e.g., `test: <short description>`).
+- For pipeflush smoke runs, use `data.gwbasic_rand_corner_loops2` unless explicitly overridden by the user.

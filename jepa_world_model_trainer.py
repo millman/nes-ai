@@ -535,7 +535,7 @@ class VisCtrlConfig:
 
 @dataclass
 class TrainConfig:
-    data_root: Path = Path("data.gridworldkey_wander_to_key")
+    data_root: Path = Path("data.gwbasic_rand_corner_loops2")
     output_dir: Path = Path("out.jepa_world_model_trainer")
     log_schedule: Annotated[
         Union[str, Tuple[Tuple[int, Optional[int]], ...]],
