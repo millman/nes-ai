@@ -363,8 +363,6 @@ class LossWeights:
 
     # NOOP should produce near-zero ΔH.
     noop_residual_dh: float = 0.1
-    # NOOP identity on h: ||h_{t+1} - h_t|| for NOOP transitions.
-    noop_h_identity: float = 0.1
     # Same-frame identity on h: ||h_{t+1} - h_t|| when consecutive frames are pixel-identical.
     same_frame_h_identity: float = 0.1
     # Orthogonality leak penalty: discourage NOOP mean delta from aligning with move-action mean deltas.
@@ -1849,7 +1847,6 @@ def _compute_losses_and_metrics(
     loss_loop_closure_p = x_frames.new_tensor(0.0)
     loss_noop_residual_dp = x_frames.new_tensor(0.0)
     loss_noop_residual_dh = x_frames.new_tensor(0.0)
-    loss_noop_h_identity = x_frames.new_tensor(0.0)
     loss_same_frame_h_identity = x_frames.new_tensor(0.0)
     loss_noop_move_orth_h = x_frames.new_tensor(0.0)
     loss_additivity_dp = x_frames.new_tensor(0.0)
@@ -2158,28 +2155,17 @@ def _compute_losses_and_metrics(
         else:
             loss_noop_residual_dh = h_states.new_tensor(0.0)
 
-    if (
-        weights.noop_h_identity > 0
-        or weights.same_frame_h_identity > 0
-        or weights.noop_move_orth_h > 0
-    ):
+    if weights.same_frame_h_identity > 0 or weights.noop_move_orth_h > 0:
         action_ids = compress_actions_to_ids(a_seq.detach().cpu().numpy())
         if action_ids.ndim == 1:
             action_ids = action_ids.reshape(a_seq.shape[0], a_seq.shape[1])
         if action_ids.shape[1] == h_states.shape[1]:
             action_ids = action_ids[:, :-1]
         if action_ids.shape[1] != h_states.shape[1] - 1:
-            raise AssertionError("NOOP h-identity/orth losses require action/h_state shape alignment.")
+            raise AssertionError("same_frame_h_identity/noop_move_orth_h requires action/h_state shape alignment.")
         dh_slice = h_states[:, start_frame + 1 :] - h_states[:, start_frame:-1]
         action_ids_t = torch.as_tensor(action_ids, device=h_states.device)
         action_ids_slice = action_ids_t[:, start_frame : start_frame + dh_slice.shape[1]]
-
-        if weights.noop_h_identity > 0:
-            noop_mask = action_ids_slice == 0
-            if noop_mask.any():
-                loss_noop_h_identity = dh_slice[noop_mask].norm(dim=-1).mean()
-            else:
-                loss_noop_h_identity = h_states.new_tensor(0.0)
 
         if weights.same_frame_h_identity > 0:
             frame_delta = (x_frames[:, 1:] - x_frames[:, :-1]).abs().amax(dim=(2, 3, 4))
@@ -2539,7 +2525,6 @@ def _compute_losses_and_metrics(
         + weights.distance_corr_p * _scaled("loss_distance_corr_p", loss_distance_corr_p)
         + weights.noop_residual_dp * _scaled("loss_noop_residual_dp", loss_noop_residual_dp)
         + weights.noop_residual_dh * _scaled("loss_noop_residual_dh", loss_noop_residual_dh)
-        + weights.noop_h_identity * _scaled("loss_noop_h_identity", loss_noop_h_identity)
         + weights.same_frame_h_identity * _scaled("loss_same_frame_h_identity", loss_same_frame_h_identity)
         + weights.noop_move_orth_h * _scaled("loss_noop_move_orth_h", loss_noop_move_orth_h)
         + weights.additivity_dp * _scaled("loss_additivity_dp", loss_additivity_dp)
@@ -2636,7 +2621,6 @@ def _compute_losses_and_metrics(
         "loss_distance_corr_p": loss_distance_corr_p.item(),
         "loss_noop_residual_dp": loss_noop_residual_dp.item(),
         "loss_noop_residual_dh": loss_noop_residual_dh.item(),
-        "loss_noop_h_identity": loss_noop_h_identity.item(),
         "loss_same_frame_h_identity": loss_same_frame_h_identity.item(),
         "loss_noop_move_orth_h": loss_noop_move_orth_h.item(),
         "loss_additivity_dp": loss_additivity_dp.item(),
@@ -3118,8 +3102,6 @@ def log_metrics(
         filtered.pop("loss_noop_residual_dp", None)
     if weights.noop_residual_dh <= 0:
         filtered.pop("loss_noop_residual_dh", None)
-    if weights.noop_h_identity <= 0:
-        filtered.pop("loss_noop_h_identity", None)
     if weights.same_frame_h_identity <= 0:
         filtered.pop("loss_same_frame_h_identity", None)
     if weights.noop_move_orth_h <= 0:
@@ -3202,7 +3184,6 @@ LOSS_COLUMNS = [
     "loss_distance_corr_p",
     "loss_noop_residual_dp",
     "loss_noop_residual_dh",
-    "loss_noop_h_identity",
     "loss_same_frame_h_identity",
     "loss_noop_move_orth_h",
     "loss_additivity_dp",
@@ -3284,7 +3265,6 @@ class LossHistory:
     distance_corr_p: List[float] = field(default_factory=list)
     noop_residual_dp: List[float] = field(default_factory=list)
     noop_residual_dh: List[float] = field(default_factory=list)
-    noop_h_identity: List[float] = field(default_factory=list)
     same_frame_h_identity: List[float] = field(default_factory=list)
     noop_move_orth_h: List[float] = field(default_factory=list)
     additivity_dp: List[float] = field(default_factory=list)
@@ -3363,7 +3343,6 @@ class LossHistory:
         self.distance_corr_p.append(metrics.get("loss_distance_corr_p", 0.0))
         self.noop_residual_dp.append(metrics.get("loss_noop_residual_dp", 0.0))
         self.noop_residual_dh.append(metrics.get("loss_noop_residual_dh", 0.0))
-        self.noop_h_identity.append(metrics.get("loss_noop_h_identity", 0.0))
         self.same_frame_h_identity.append(metrics.get("loss_same_frame_h_identity", 0.0))
         self.noop_move_orth_h.append(metrics.get("loss_noop_move_orth_h", 0.0))
         self.additivity_dp.append(metrics.get("loss_additivity_dp", 0.0))
@@ -3446,7 +3425,6 @@ def _loss_history_row(history: LossHistory, index: int) -> Tuple[object, ...]:
         history.distance_corr_p[index],
         history.noop_residual_dp[index],
         history.noop_residual_dh[index],
-        history.noop_h_identity[index],
         history.same_frame_h_identity[index],
         history.noop_move_orth_h[index],
         history.additivity_dp[index],
@@ -3562,7 +3540,6 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_distance_corr_p", history.distance_corr_p),
         ("loss_noop_residual_dp", history.noop_residual_dp),
         ("loss_noop_residual_dh", history.noop_residual_dh),
-        ("loss_noop_h_identity", history.noop_h_identity),
         ("loss_same_frame_h_identity", history.same_frame_h_identity),
         ("loss_noop_move_orth_h", history.noop_move_orth_h),
         ("loss_h_smooth", history.h_smooth),
@@ -4345,7 +4322,6 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 "dz_anchor_dp",
                 "loop_closure_p",
                 "noop_residual_dp",
-                "noop_h_identity",
                 "same_frame_h_identity",
                 "noop_move_orth_h",
                 "additivity_dp",
