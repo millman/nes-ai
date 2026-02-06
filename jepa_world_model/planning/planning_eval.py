@@ -322,12 +322,21 @@ def delta_lattice_astar(
     r_merge: float,
     step_scale: float,
     max_nodes: int,
+    expansion_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     lattice_dump: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[PlanResult]:
     if start.shape != goal.shape:
         raise AssertionError("start and goal must have matching shapes.")
     if step_scale <= 0:
         raise AssertionError("step_scale must be positive.")
+    bounds_lo: Optional[np.ndarray] = None
+    bounds_hi: Optional[np.ndarray] = None
+    if expansion_bounds is not None:
+        bounds_lo, bounds_hi = expansion_bounds
+        if bounds_lo.shape != start.shape or bounds_hi.shape != start.shape:
+            raise AssertionError("expansion_bounds must match start/goal shape.")
+        if np.any(bounds_lo > bounds_hi):
+            raise AssertionError("expansion_bounds lower values must be <= upper values.")
     import heapq
 
     def heuristic(p: np.ndarray) -> float:
@@ -364,6 +373,10 @@ def delta_lattice_astar(
     g_scores = {start_idx: 0}
     while open_heap and len(nodes) < max_nodes:
         _, g, _, current = heapq.heappop(open_heap)
+        if bounds_lo is not None and bounds_hi is not None:
+            if np.any(current < bounds_lo) or np.any(current > bounds_hi):
+                _finalize_lattice()
+                return None
         if np.linalg.norm(current - goal) <= r_goal:
             goal_idx = find_or_add(current)
             actions: List[str] = []
@@ -388,6 +401,10 @@ def delta_lattice_astar(
             if action not in mu:
                 continue
             nxt = current + mu[action]
+            if bounds_lo is not None and bounds_hi is not None:
+                if np.any(nxt < bounds_lo) or np.any(nxt > bounds_hi):
+                    _finalize_lattice()
+                    return None
             nxt_idx = find_or_add(nxt)
             if collect_lattice:
                 edges.append((current_idx, nxt_idx))

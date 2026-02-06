@@ -205,9 +205,9 @@ DIAGNOSTICS_OUTPUT_CATALOG = {
     "vis_rollout_divergence_z": DiagnosticsOutputSpec(False, "Rollout divergence plots/CSVs for z."),
     "vis_rollout_divergence_h": DiagnosticsOutputSpec(False, "Rollout divergence plots/CSVs for h."),
     "vis_rollout_divergence_p": DiagnosticsOutputSpec(False, "Rollout divergence plots/CSVs for p."),
-    "vis_rollout_divergence_excess_z": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for z."),
-    "vis_rollout_divergence_excess_h": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for h."),
-    "vis_rollout_divergence_excess_p": DiagnosticsOutputSpec(True, "Rollout divergence excess plots/CSVs for p."),
+    "vis_rollout_divergence_excess_z": DiagnosticsOutputSpec(False, "Rollout divergence excess plots/CSVs for z."),
+    "vis_rollout_divergence_excess_h": DiagnosticsOutputSpec(False, "Rollout divergence excess plots/CSVs for h."),
+    "vis_rollout_divergence_excess_p": DiagnosticsOutputSpec(False, "Rollout divergence excess plots/CSVs for p."),
     "vis_h_ablation": DiagnosticsOutputSpec(False, "H-ablation divergence plots/CSVs."),
     "vis_z_consistency": DiagnosticsOutputSpec(False, "Z consistency plots/CSVs."),
     "vis_z_monotonicity": DiagnosticsOutputSpec(False, "Z monotonicity plots/CSVs."),
@@ -2521,12 +2521,14 @@ def run_diagnostics_step(
         rollout_horizon = min(diagnostics_cfg.rollout_divergence_horizon, diag_state.frames.shape[1] - 1)
         start_span = diag_state.frames.shape[1] - 1 - diag_state.warmup_frames
         can_rollout = rollout_horizon > 0 and start_span > 0
-        rollout_outputs_enabled = any(
+        rollout_outputs_requested = any(
             resolved_outputs[f"vis_rollout_divergence_{kind}"].enabled
             or resolved_outputs[f"vis_rollout_divergence_excess_{kind}"].enabled
             for kind in ["z", "h", "p"]
         )
-        if can_rollout and rollout_outputs_enabled:
+        # This metric pass is expensive; run it only when a rollout-divergence artifact is enabled.
+        needs_rollout_divergence_metrics = can_rollout and rollout_outputs_requested
+        if needs_rollout_divergence_metrics:
             with _timed_phase(phase_totals, "rollout_divergence_compute"):
                 horizons, pixel_mean, pixel_teacher_mean, z_mean, h_mean, p_mean = compute_rollout_divergence_metrics(
                     model=model,
@@ -3086,6 +3088,25 @@ def run_planning_diagnostics_step(
             "Set planning_diagnostics.latent_kind='h' or 'auto' to use h instead."
         )
     use_h = planning_kind in ("h", "auto")
+
+    def _expanded_bounds(points: Optional[np.ndarray]) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        if points is None:
+            return None
+        if points.ndim != 2:
+            raise AssertionError("Grid-bound expansion requires 2D point arrays.")
+        if points.shape[0] <= 0:
+            return None
+        mins = points.min(axis=0)
+        maxs = points.max(axis=0)
+        span = np.maximum(maxs - mins, 1e-8)
+        expand = span * planning_cfg.astar_grid_bounds_expand_fraction
+        return mins - expand, maxs + expand
+
+    astar_bounds_h: Optional[Tuple[np.ndarray, np.ndarray]] = None
+    astar_bounds_p: Optional[Tuple[np.ndarray, np.ndarray]] = None
+    if grid_overlay_embeddings is not None:
+        astar_bounds_h = _expanded_bounds(grid_overlay_embeddings.h)
+        astar_bounds_p = _expanded_bounds(grid_overlay_embeddings.p)
     with _timed_phase(phase_totals, "extract_planning_latents"):
         (
             p_t,
@@ -3286,6 +3307,7 @@ def run_planning_diagnostics_step(
                     r_merge=stats_p.r_merge,
                     step_scale=stats_p.L_scale,
                     max_nodes=planning_cfg.astar_max_nodes,
+                    expansion_bounds=astar_bounds_p,
                     lattice_dump=lattice_dump_p,
                 )
             visited: List[Tuple[int, int]] = [start_tile]
@@ -3383,6 +3405,7 @@ def run_planning_diagnostics_step(
                     r_merge=stats_h.r_merge,
                     step_scale=stats_h.L_scale,
                     max_nodes=planning_cfg.astar_max_nodes,
+                    expansion_bounds=astar_bounds_h,
                     lattice_dump=lattice_dump_h,
                 )
             visited_h: List[Tuple[int, int]] = [start_tile]

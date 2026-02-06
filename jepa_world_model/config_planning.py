@@ -50,5 +50,7 @@ class PlanningDiagnosticsConfig:
     h_anchor_adapt_c_add: bool = True
     # Reachability threshold used by the c_add controller.
     h_anchor_reachability_target: float = 0.95
+    # Stop A* when candidate lattice expansion exceeds known-grid bounds by this fraction.
+    astar_grid_bounds_expand_fraction: float = 0.5
     # PCA components used for position action vector field projections.
     position_vector_pca_components: int = 8
