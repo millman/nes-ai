@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import json
 import os
 from pathlib import Path
-from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Sequence, TextIO, Tuple, Union
+from typing import Annotated, Any, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, TextIO, Tuple, Union
 
 import math
 import random
@@ -24,6 +24,7 @@ import tomli_w
 import tyro
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from datetime import datetime
 from time import perf_counter
 
@@ -4034,6 +4035,124 @@ def _print_timing_summary(step: int, totals: Dict[str, float]) -> None:
     print(f"[timing up to step {step}] " + ", ".join(parts))
 
 
+@dataclass(frozen=True)
+class ImageWriteTiming:
+    path: str
+    seconds: float
+    writer: str
+
+
+@contextmanager
+def _capture_image_write_timings() -> Iterator[List[ImageWriteTiming]]:
+    timings: List[ImageWriteTiming] = []
+    original_savefig = Figure.savefig
+    original_image_save = Image.Image.save
+    in_matplotlib_save = 0
+
+    def _timed_savefig(fig: Figure, fname: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal in_matplotlib_save
+        start = perf_counter()
+        in_matplotlib_save += 1
+        try:
+            return original_savefig(fig, fname, *args, **kwargs)
+        finally:
+            in_matplotlib_save = max(in_matplotlib_save - 1, 0)
+            timings.append(
+                ImageWriteTiming(
+                    path=str(fname),
+                    seconds=max(perf_counter() - start, 0.0),
+                    writer="matplotlib",
+                )
+            )
+
+    def _timed_image_save(image: Image.Image, fp: Any, *args: Any, **kwargs: Any) -> Any:
+        if in_matplotlib_save > 0:
+            return original_image_save(image, fp, *args, **kwargs)
+        start = perf_counter()
+        try:
+            return original_image_save(image, fp, *args, **kwargs)
+        finally:
+            timings.append(
+                ImageWriteTiming(
+                    path=str(fp),
+                    seconds=max(perf_counter() - start, 0.0),
+                    writer="pillow",
+                )
+            )
+
+    Figure.savefig = _timed_savefig  # type: ignore[assignment]
+    Image.Image.save = _timed_image_save  # type: ignore[assignment]
+    try:
+        yield timings
+    finally:
+        Figure.savefig = original_savefig  # type: ignore[assignment]
+        Image.Image.save = original_image_save  # type: ignore[assignment]
+
+
+def _write_output_timing_rows(
+    csv_path: Path,
+    *,
+    section: str,
+    step: int,
+    image_timings: Sequence[ImageWriteTiming],
+    preprocess_seconds: float,
+    total_seconds: float,
+) -> None:
+    header = [
+        "step",
+        "section",
+        "output_path",
+        "writer",
+        "image_seconds",
+        "section_preprocess_seconds",
+        "section_total_seconds",
+    ]
+    for timing in image_timings:
+        append_csv_row(
+            csv_path,
+            header,
+            [
+                step,
+                section,
+                timing.path,
+                timing.writer,
+                timing.seconds,
+                preprocess_seconds,
+                total_seconds,
+            ],
+        )
+
+
+def _print_output_timing_summary(
+    *,
+    step: int,
+    section: str,
+    image_timings: Sequence[ImageWriteTiming],
+    preprocess_seconds: float,
+    total_seconds: float,
+    top_k: int = 8,
+) -> None:
+    image_total = max(total_seconds - preprocess_seconds, 0.0)
+    if not image_timings:
+        print(
+            f"[{section} timing step {step}] preprocess={preprocess_seconds:.2f}s, "
+            f"image_save={image_total:.2f}s, outputs=0"
+        )
+        return
+    output_totals: Dict[str, float] = defaultdict(float)
+    for timing in image_timings:
+        output_totals[timing.path] += timing.seconds
+    ranked = sorted(output_totals.items(), key=lambda item: item[1], reverse=True)
+    summary = ", ".join(
+        f"{Path(path).name}:{seconds:.2f}s"
+        for path, seconds in ranked[: max(top_k, 1)]
+    )
+    print(
+        f"[{section} timing step {step}] preprocess={preprocess_seconds:.2f}s, "
+        f"image_save={image_total:.2f}s, outputs={len(output_totals)} | {summary}"
+    )
+
+
 def _write_model_shape_summary(
     run_dir: Path,
     dataset: TrajectorySequenceDataset,
@@ -4704,59 +4823,99 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
             # --- Rollout/embedding/hard-sample visualizations ---
             if _should_run_schedule(global_step, cfg.vis_schedule):
                 vis_start = perf_counter()
-                run_diagnostics_step(
-                    diagnostics_cfg=cfg.diagnostics,
-                    vis_cfg=cfg.vis,
-                    hard_example_cfg=cfg.hard_example,
-                    vis_ctrl_cfg=cfg.vis_ctrl,
-                    graph_cfg=cfg.graph_diagnostics,
-                    planning_cfg=cfg.planning_diagnostics,
-                    planning_env=planning_env,
-                    grid_overlay_frames=grid_overlay_frames,
-                    model=model,
-                    decoder=decoder,
-                    device=device,
-                    weights=weights,
-                    global_step=global_step,
-                    fixed_batch_cpu=fixed_batch_cpu,
-                    fixed_selection=fixed_selection,
-                    rolling_batch_cpu=rolling_batch_cpu,
-                    off_manifold_batch_cpu=off_manifold_batch_cpu,
-                    off_manifold_steps=off_manifold_steps,
-                    embedding_batch_cpu=embedding_batch_cpu,
-                    diagnostics_batch_cpu=diagnostics_batch_cpu,
-                    vis_ctrl_batch_cpu=vis_ctrl_batch_cpu,
-                    graph_diag_batch_cpu=graph_diag_batch_cpu,
-                    hard_reservoir=hard_reservoir,
-                    hard_reservoir_val=hard_reservoir_val,
-                    dataset=dataset,
-                    self_distance_inputs=self_distance_inputs,
-                    diagnostics_generator=diagnostics_generator,
-                    vis_selection_generator=vis_selection_generator,
-                    run_dir=run_dir,
-                    render_mode=cfg.render_mode,
-                    force_h_zero=cfg.force_h_zero,
+                with _capture_image_write_timings() as vis_image_timings:
+                    run_diagnostics_step(
+                        diagnostics_cfg=cfg.diagnostics,
+                        vis_cfg=cfg.vis,
+                        hard_example_cfg=cfg.hard_example,
+                        vis_ctrl_cfg=cfg.vis_ctrl,
+                        graph_cfg=cfg.graph_diagnostics,
+                        planning_cfg=cfg.planning_diagnostics,
+                        planning_env=planning_env,
+                        grid_overlay_frames=grid_overlay_frames,
+                        model=model,
+                        decoder=decoder,
+                        device=device,
+                        weights=weights,
+                        global_step=global_step,
+                        fixed_batch_cpu=fixed_batch_cpu,
+                        fixed_selection=fixed_selection,
+                        rolling_batch_cpu=rolling_batch_cpu,
+                        off_manifold_batch_cpu=off_manifold_batch_cpu,
+                        off_manifold_steps=off_manifold_steps,
+                        embedding_batch_cpu=embedding_batch_cpu,
+                        diagnostics_batch_cpu=diagnostics_batch_cpu,
+                        vis_ctrl_batch_cpu=vis_ctrl_batch_cpu,
+                        graph_diag_batch_cpu=graph_diag_batch_cpu,
+                        hard_reservoir=hard_reservoir,
+                        hard_reservoir_val=hard_reservoir_val,
+                        dataset=dataset,
+                        self_distance_inputs=self_distance_inputs,
+                        diagnostics_generator=diagnostics_generator,
+                        vis_selection_generator=vis_selection_generator,
+                        run_dir=run_dir,
+                        render_mode=cfg.render_mode,
+                        force_h_zero=cfg.force_h_zero,
+                    )
+                vis_total = max(perf_counter() - vis_start, 0.0)
+                vis_image_total = sum(item.seconds for item in vis_image_timings)
+                vis_preprocess = max(vis_total - vis_image_total, 0.0)
+                timing_totals["vis"] += vis_total
+                _write_output_timing_rows(
+                    metrics_dir / "visualization_output_timing.csv",
+                    section="visualization",
+                    step=global_step,
+                    image_timings=vis_image_timings,
+                    preprocess_seconds=vis_preprocess,
+                    total_seconds=vis_total,
                 )
-                timing_totals["vis"] += perf_counter() - vis_start
+                if cfg.show_timing_breakdown:
+                    _print_output_timing_summary(
+                        step=global_step,
+                        section="visualization",
+                        image_timings=vis_image_timings,
+                        preprocess_seconds=vis_preprocess,
+                        total_seconds=vis_total,
+                    )
 
             if planning_batch_cpu is not None and _should_run_schedule(global_step, cfg.plan_schedule):
                 plan_start = perf_counter()
-                run_planning_diagnostics_step(
-                    planning_cfg=cfg.planning_diagnostics,
-                    hard_example_cfg=cfg.hard_example,
-                    graph_cfg=cfg.graph_diagnostics,
-                    model_cfg=model_cfg,
-                    model=model,
-                    device=device,
-                    weights=weights,
-                    global_step=global_step,
-                    planning_batch_cpu=planning_batch_cpu,
-                    planning_env=planning_env,
-                    grid_overlay_frames=grid_overlay_frames,
-                    run_dir=run_dir,
-                    force_h_zero=cfg.force_h_zero,
+                with _capture_image_write_timings() as planning_image_timings:
+                    run_planning_diagnostics_step(
+                        planning_cfg=cfg.planning_diagnostics,
+                        hard_example_cfg=cfg.hard_example,
+                        graph_cfg=cfg.graph_diagnostics,
+                        model_cfg=model_cfg,
+                        model=model,
+                        device=device,
+                        weights=weights,
+                        global_step=global_step,
+                        planning_batch_cpu=planning_batch_cpu,
+                        planning_env=planning_env,
+                        grid_overlay_frames=grid_overlay_frames,
+                        run_dir=run_dir,
+                        force_h_zero=cfg.force_h_zero,
+                    )
+                plan_total = max(perf_counter() - plan_start, 0.0)
+                plan_image_total = sum(item.seconds for item in planning_image_timings)
+                plan_preprocess = max(plan_total - plan_image_total, 0.0)
+                timing_totals["plan"] += plan_total
+                _write_output_timing_rows(
+                    metrics_dir / "planning_output_timing.csv",
+                    section="planning",
+                    step=global_step,
+                    image_timings=planning_image_timings,
+                    preprocess_seconds=plan_preprocess,
+                    total_seconds=plan_total,
                 )
-                timing_totals["plan"] += perf_counter() - plan_start
+                if cfg.show_timing_breakdown:
+                    _print_output_timing_summary(
+                        step=global_step,
+                        section="planning",
+                        image_timings=planning_image_timings,
+                        preprocess_seconds=plan_preprocess,
+                        total_seconds=plan_total,
+                    )
 
             if (
                 cfg.checkpoint_every_steps > 0

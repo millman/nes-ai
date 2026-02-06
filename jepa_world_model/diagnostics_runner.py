@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from contextlib import contextmanager
 import csv
 import json
 import random
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -1072,6 +1075,29 @@ def _write_planning_anchor_metrics_row(
     append_csv_row(path, header, row)
 
 
+@contextmanager
+def _timed_phase(phase_totals: Dict[str, float], phase: str):
+    start = perf_counter()
+    try:
+        yield
+    finally:
+        phase_totals[phase] += max(perf_counter() - start, 0.0)
+
+
+def _write_phase_timing_rows(
+    *,
+    metrics_dir: Path,
+    filename: str,
+    section: str,
+    step: int,
+    phase_totals: Dict[str, float],
+) -> None:
+    path = metrics_dir / filename
+    header = ["step", "section", "phase", "seconds"]
+    for phase, seconds in sorted(phase_totals.items()):
+        append_csv_row(path, header, [step, section, phase, seconds])
+
+
 def _select_straightline_ids(
     *,
     action_labels: Dict[int, str],
@@ -1515,6 +1541,7 @@ def run_diagnostics_step(
     render_mode: str,
     force_h_zero: bool = False,
 ) -> None:
+    phase_totals: Dict[str, float] = defaultdict(float)
     resolved_outputs = _resolve_outputs(
         weights=weights,
         model=model,
@@ -1545,15 +1572,16 @@ def run_diagnostics_step(
     if grid_overlay_needed:
         if grid_overlay_frames is None:
             raise AssertionError("Grid overlay requires precomputed frames.")
-        grid_overlay_embeddings = build_grid_overlay_embeddings(
-            model=model,
-            model_cfg=model.cfg,
-            device=device,
-            action_dim=model.cfg.action_dim,
-            use_z2h_init=should_use_z2h_init(weights),
-            force_h_zero=force_h_zero,
-            frames_data=grid_overlay_frames,
-        )
+        with _timed_phase(phase_totals, "grid_overlay_embeddings"):
+            grid_overlay_embeddings = build_grid_overlay_embeddings(
+                model=model,
+                model_cfg=model.cfg,
+                device=device,
+                action_dim=model.cfg.action_dim,
+                use_z2h_init=should_use_z2h_init(weights),
+                force_h_zero=force_h_zero,
+                frames_data=grid_overlay_frames,
+            )
 
     run_dir = Path(run_dir)
     metrics_dir = run_dir / "metrics"
@@ -1792,18 +1820,19 @@ def run_diagnostics_step(
     if resolved_outputs["vis_fixed_1"].enabled:
         fixed_indices.append(1)
     if fixed_indices:
-        sequences, grad_label = build_visualization_sequences(
-            batch_cpu=fixed_batch_cpu,
-            selection=fixed_selection,
-            model=model,
-            decoder=decoder,
-            device=device,
-            vis_cfg=vis_cfg,
-            vis_selection_generator=vis_selection_generator,
-            use_z2h_init=should_use_z2h_init(weights),
-            render_mode=render_mode,
-            force_h_zero=force_h_zero,
-        )
+        with _timed_phase(phase_totals, "fixed_rollout_build"):
+            sequences, grad_label = build_visualization_sequences(
+                batch_cpu=fixed_batch_cpu,
+                selection=fixed_selection,
+                model=model,
+                decoder=decoder,
+                device=device,
+                vis_cfg=vis_cfg,
+                vis_selection_generator=vis_selection_generator,
+                use_z2h_init=should_use_z2h_init(weights),
+                render_mode=render_mode,
+                force_h_zero=force_h_zero,
+            )
         save_rollout_sequence_batch(
             fixed_vis_dir,
             sequences,
@@ -1819,18 +1848,19 @@ def run_diagnostics_step(
     if resolved_outputs["vis_rolling_1"].enabled:
         rolling_indices.append(1)
     if rolling_indices:
-        sequences, grad_label = build_visualization_sequences(
-            batch_cpu=rolling_batch_cpu,
-            selection=None,
-            model=model,
-            decoder=decoder,
-            device=device,
-            vis_cfg=vis_cfg,
-            vis_selection_generator=vis_selection_generator,
-            use_z2h_init=should_use_z2h_init(weights),
-            render_mode=render_mode,
-            force_h_zero=force_h_zero,
-        )
+        with _timed_phase(phase_totals, "rolling_rollout_build"):
+            sequences, grad_label = build_visualization_sequences(
+                batch_cpu=rolling_batch_cpu,
+                selection=None,
+                model=model,
+                decoder=decoder,
+                device=device,
+                vis_cfg=vis_cfg,
+                vis_selection_generator=vis_selection_generator,
+                use_z2h_init=should_use_z2h_init(weights),
+                render_mode=render_mode,
+                force_h_zero=force_h_zero,
+            )
         save_rollout_sequence_batch(
             rolling_vis_dir,
             sequences,
@@ -1841,14 +1871,15 @@ def run_diagnostics_step(
         )
 
     if resolved_outputs["vis_off_manifold"].enabled and off_manifold_batch_cpu is not None:
-        with torch.no_grad():
-            step_indices, errors = compute_off_manifold_errors(
-                model=model,
-                decoder=decoder,
-                batch_cpu=off_manifold_batch_cpu,
-                device=device,
-                rollout_steps=off_manifold_steps,
-            )
+        with _timed_phase(phase_totals, "off_manifold_compute"):
+            with torch.no_grad():
+                step_indices, errors = compute_off_manifold_errors(
+                    model=model,
+                    decoder=decoder,
+                    batch_cpu=off_manifold_batch_cpu,
+                    device=device,
+                    rollout_steps=off_manifold_steps,
+                )
         save_off_manifold_visualization(
             vis_off_manifold_dir,
             step_indices,
@@ -1857,16 +1888,17 @@ def run_diagnostics_step(
         )
 
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["pca"]):
-        with torch.no_grad():
-            embed_frames = embedding_batch_cpu[0].to(device)
-            embed_actions = embedding_batch_cpu[1].to(device)
-            embed_outputs = model.encode_sequence(embed_frames)
-            _, _, h_states = rollout_teacher_forced(
-                model,
-                embed_outputs["embeddings"],
-                embed_actions,
-                use_z2h_init=should_use_z2h_init(weights),
-            )
+        with _timed_phase(phase_totals, "pca_latents_compute"):
+            with torch.no_grad():
+                embed_frames = embedding_batch_cpu[0].to(device)
+                embed_actions = embedding_batch_cpu[1].to(device)
+                embed_outputs = model.encode_sequence(embed_frames)
+                _, _, h_states = rollout_teacher_forced(
+                    model,
+                    embed_outputs["embeddings"],
+                    embed_actions,
+                    use_z2h_init=should_use_z2h_init(weights),
+                )
 
         if resolved_outputs["pca_z"].enabled:
             save_embedding_projection(
@@ -1891,12 +1923,13 @@ def run_diagnostics_step(
                 ),
             )
         if resolved_outputs["pca_p"].enabled:
-            _, p_embeddings, _ = rollout_pose(
-                model,
-                h_states,
-                embed_actions,
-                z_embeddings=embed_outputs["embeddings"],
-            )
+            with _timed_phase(phase_totals, "pca_pose_compute"):
+                _, p_embeddings, _ = rollout_pose(
+                    model,
+                    h_states,
+                    embed_actions,
+                    z_embeddings=embed_outputs["embeddings"],
+                )
             save_embedding_projection(
                 p_embeddings,
                 pca_p_dir / f"pca_p_{global_step:07d}.png",
@@ -1928,18 +1961,19 @@ def run_diagnostics_step(
         )
 
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["self_distance"]):
-        with torch.no_grad():
-            self_dist_frames = self_distance_inputs.frames.to(device)
-            self_dist_actions = torch.from_numpy(self_distance_inputs.actions).unsqueeze(0).to(device)
-            self_dist_embeddings_full = model.encode_sequence(self_dist_frames)["embeddings"]
-            self_dist_embeddings = self_dist_embeddings_full[0]
-            _, _, self_dist_h_states_batch = rollout_teacher_forced(
-                model,
-                self_dist_embeddings_full,
-                self_dist_actions,
-                use_z2h_init=should_use_z2h_init(weights),
-            )
-            self_dist_h_states = self_dist_h_states_batch[0]
+        with _timed_phase(phase_totals, "self_distance_latents_compute"):
+            with torch.no_grad():
+                self_dist_frames = self_distance_inputs.frames.to(device)
+                self_dist_actions = torch.from_numpy(self_distance_inputs.actions).unsqueeze(0).to(device)
+                self_dist_embeddings_full = model.encode_sequence(self_dist_frames)["embeddings"]
+                self_dist_embeddings = self_dist_embeddings_full[0]
+                _, _, self_dist_h_states_batch = rollout_teacher_forced(
+                    model,
+                    self_dist_embeddings_full,
+                    self_dist_actions,
+                    use_z2h_init=should_use_z2h_init(weights),
+                )
+                self_dist_h_states = self_dist_h_states_batch[0]
 
         if resolved_outputs["vis_self_distance_z"].enabled:
             write_self_distance_outputs(
@@ -1966,12 +2000,13 @@ def run_diagnostics_step(
                 cosine_prefix="self_distance_h_cosine",
             )
         if resolved_outputs["vis_self_distance_p"].enabled:
-            _, self_dist_p_batch, _ = rollout_pose(
-                model,
-                self_dist_h_states_batch,
-                self_dist_actions,
-                z_embeddings=self_dist_embeddings_full,
-            )
+            with _timed_phase(phase_totals, "self_distance_pose_compute"):
+                _, self_dist_p_batch, _ = rollout_pose(
+                    model,
+                    self_dist_h_states_batch,
+                    self_dist_actions,
+                    z_embeddings=self_dist_embeddings_full,
+                )
             self_dist_p = self_dist_p_batch[0]
 
             write_self_distance_outputs(
@@ -2020,14 +2055,15 @@ def run_diagnostics_step(
             )
 
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["diagnostics"]):
-        diag_state = prepare_diagnostics_batch_state(
-            model=model,
-            diagnostics_cfg=diagnostics_cfg,
-            weights=weights,
-            diagnostics_batch_cpu=diagnostics_batch_cpu,
-            device=device,
-            force_h_zero=force_h_zero,
-        )
+        with _timed_phase(phase_totals, "diagnostics_state_prepare"):
+            diag_state = prepare_diagnostics_batch_state(
+                model=model,
+                diagnostics_cfg=diagnostics_cfg,
+                weights=weights,
+                diagnostics_batch_cpu=diagnostics_batch_cpu,
+                device=device,
+                force_h_zero=force_h_zero,
+            )
 
         action_ids_flat = diag_state.action_metadata.action_ids_flat
         if (
@@ -2130,19 +2166,20 @@ def run_diagnostics_step(
                 .numpy()
                 .reshape(-1, diag_state.actions.shape[-1])
             )
-            h_stats_scale = compute_action_delta_stats(
-                h_flat,
-                h_tp1,
-                h_actions,
-                min_action_count=1,
-            )
-            h_scale = diagnostics_cfg.position_vector_scale / h_stats_scale.L_scale
-            motion_h = build_motion_subspace(
-                diag_state.h_states,
-                diag_state.actions,
-                planning_cfg.position_vector_pca_components,
-                diag_state.paths,
-            )
+            with _timed_phase(phase_totals, "action_vector_field_h_prepare"):
+                h_stats_scale = compute_action_delta_stats(
+                    h_flat,
+                    h_tp1,
+                    h_actions,
+                    min_action_count=1,
+                )
+                h_scale = diagnostics_cfg.position_vector_scale / h_stats_scale.L_scale
+                motion_h = build_motion_subspace(
+                    diag_state.h_states,
+                    diag_state.actions,
+                    planning_cfg.position_vector_pca_components,
+                    diag_state.paths,
+                )
             save_position_action_vector_field_from_motion(
                 motion=motion_h,
                 grid_rows=diagnostics_cfg.position_grid_rows,
@@ -2172,19 +2209,20 @@ def run_diagnostics_step(
                 .numpy()
                 .reshape(-1, diag_state.actions.shape[-1])
             )
-            p_stats_scale = compute_action_delta_stats(
-                p_flat,
-                p_tp1,
-                p_actions,
-                min_action_count=1,
-            )
-            p_scale = diagnostics_cfg.position_vector_scale / p_stats_scale.L_scale
-            motion_p = build_motion_subspace(
-                p_embed,
-                diag_state.actions,
-                planning_cfg.position_vector_pca_components,
-                diag_state.paths,
-            )
+            with _timed_phase(phase_totals, "action_vector_field_p_prepare"):
+                p_stats_scale = compute_action_delta_stats(
+                    p_flat,
+                    p_tp1,
+                    p_actions,
+                    min_action_count=1,
+                )
+                p_scale = diagnostics_cfg.position_vector_scale / p_stats_scale.L_scale
+                motion_p = build_motion_subspace(
+                    p_embed,
+                    diag_state.actions,
+                    planning_cfg.position_vector_pca_components,
+                    diag_state.paths,
+                )
             save_position_action_vector_field_from_motion(
                 motion=motion_p,
                 grid_rows=diagnostics_cfg.position_grid_rows,
@@ -2438,39 +2476,42 @@ def run_diagnostics_step(
                     pass
 
         if resolved_outputs["vis_straightline_z"].enabled:
-            trajectories = _build_straightline_trajectories(
-                diagnostics_cfg=diagnostics_cfg,
-                diag_state=diag_state,
-                model=model,
-                diagnostics_generator=diagnostics_generator,
-                space="z",
-            )
+            with _timed_phase(phase_totals, "straightline_z_build"):
+                trajectories = _build_straightline_trajectories(
+                    diagnostics_cfg=diagnostics_cfg,
+                    diag_state=diag_state,
+                    model=model,
+                    diagnostics_generator=diagnostics_generator,
+                    space="z",
+                )
             save_straightline_plot(
                 diagnostics_straightline_z_dir / f"straightline_z_{global_step:07d}.png",
                 trajectories,
                 title="Straight-line action rays (Z)",
             )
         if resolved_outputs["vis_straightline_h"].enabled:
-            trajectories = _build_straightline_trajectories(
-                diagnostics_cfg=diagnostics_cfg,
-                diag_state=diag_state,
-                model=model,
-                diagnostics_generator=diagnostics_generator,
-                space="h",
-            )
+            with _timed_phase(phase_totals, "straightline_h_build"):
+                trajectories = _build_straightline_trajectories(
+                    diagnostics_cfg=diagnostics_cfg,
+                    diag_state=diag_state,
+                    model=model,
+                    diagnostics_generator=diagnostics_generator,
+                    space="h",
+                )
             save_straightline_plot(
                 diagnostics_straightline_h_dir / f"straightline_h_{global_step:07d}.png",
                 trajectories,
                 title="Straight-line action rays (H)",
             )
         if resolved_outputs["vis_straightline_p"].enabled:
-            trajectories = _build_straightline_trajectories(
-                diagnostics_cfg=diagnostics_cfg,
-                diag_state=diag_state,
-                model=model,
-                diagnostics_generator=diagnostics_generator,
-                space="p",
-            )
+            with _timed_phase(phase_totals, "straightline_p_build"):
+                trajectories = _build_straightline_trajectories(
+                    diagnostics_cfg=diagnostics_cfg,
+                    diag_state=diag_state,
+                    model=model,
+                    diagnostics_generator=diagnostics_generator,
+                    space="p",
+                )
             save_straightline_plot(
                 diagnostics_straightline_p_dir / f"straightline_p_{global_step:07d}.png",
                 trajectories,
@@ -2486,21 +2527,22 @@ def run_diagnostics_step(
             for kind in ["z", "h", "p"]
         )
         if can_rollout and rollout_outputs_enabled:
-            horizons, pixel_mean, pixel_teacher_mean, z_mean, h_mean, p_mean = compute_rollout_divergence_metrics(
-                model=model,
-                decoder=decoder,
-                diag_embeddings=diag_state.embeddings,
-                diag_h_states=diag_state.h_states,
-                diag_p_embeddings=diag_state.p_embeddings,
-                diag_actions_device=diag_state.actions_device,
-                diag_frames_device=diag_state.frames_device,
-                rollout_horizon=rollout_horizon,
-                warmup_frames=diag_state.warmup_frames,
-                start_span=start_span,
-                rollout_divergence_samples=diagnostics_cfg.rollout_divergence_samples,
-                diagnostics_generator=diagnostics_generator,
-                force_h_zero=force_h_zero,
-            )
+            with _timed_phase(phase_totals, "rollout_divergence_compute"):
+                horizons, pixel_mean, pixel_teacher_mean, z_mean, h_mean, p_mean = compute_rollout_divergence_metrics(
+                    model=model,
+                    decoder=decoder,
+                    diag_embeddings=diag_state.embeddings,
+                    diag_h_states=diag_state.h_states,
+                    diag_p_embeddings=diag_state.p_embeddings,
+                    diag_actions_device=diag_state.actions_device,
+                    diag_frames_device=diag_state.frames_device,
+                    rollout_horizon=rollout_horizon,
+                    warmup_frames=diag_state.warmup_frames,
+                    start_span=start_span,
+                    rollout_divergence_samples=diagnostics_cfg.rollout_divergence_samples,
+                    diagnostics_generator=diagnostics_generator,
+                    force_h_zero=force_h_zero,
+                )
             pixel_excess = (np.maximum(np.asarray(pixel_mean) - np.asarray(pixel_teacher_mean), 0.0)).tolist()
 
             for kind in ["z", "h", "p"]:
@@ -2566,21 +2608,22 @@ def run_diagnostics_step(
             and diag_state.p_embeddings is not None
             and diag_state.p_embeddings.shape[1] >= 2
         ):
-            horizons, pixel_mean, pixel_zero_mean, latent_mean, latent_zero_mean = compute_h_ablation_divergence(
-                model=model,
-                decoder=decoder,
-                diag_embeddings=diag_state.embeddings,
-                diag_h_states=diag_state.h_states,
-                diag_p_embeddings=diag_state.p_embeddings,
-                diag_actions_device=diag_state.actions_device,
-                diag_frames_device=diag_state.frames_device,
-                rollout_horizon=rollout_horizon,
-                warmup_frames=diag_state.warmup_frames,
-                start_span=start_span,
-                rollout_divergence_samples=diagnostics_cfg.rollout_divergence_samples,
-                diagnostics_generator=diagnostics_generator,
-                force_h_zero=force_h_zero,
-            )
+            with _timed_phase(phase_totals, "h_ablation_compute"):
+                horizons, pixel_mean, pixel_zero_mean, latent_mean, latent_zero_mean = compute_h_ablation_divergence(
+                    model=model,
+                    decoder=decoder,
+                    diag_embeddings=diag_state.embeddings,
+                    diag_h_states=diag_state.h_states,
+                    diag_p_embeddings=diag_state.p_embeddings,
+                    diag_actions_device=diag_state.actions_device,
+                    diag_frames_device=diag_state.frames_device,
+                    rollout_horizon=rollout_horizon,
+                    warmup_frames=diag_state.warmup_frames,
+                    start_span=start_span,
+                    rollout_divergence_samples=diagnostics_cfg.rollout_divergence_samples,
+                    diagnostics_generator=diagnostics_generator,
+                    force_h_zero=force_h_zero,
+                )
             save_ablation_divergence_plot(
                 diagnostics_h_ablation_dir / f"h_ablation_{global_step:07d}.png",
                 horizons,
@@ -2601,13 +2644,14 @@ def run_diagnostics_step(
                 diagnostics_cfg.z_consistency_samples,
                 diag_state.frames.shape[0] * diag_state.frames.shape[1],
             )
-            distances, cosines = _compute_z_consistency_samples(
-                diagnostics_cfg=diagnostics_cfg,
-                diag_state=diag_state,
-                model=model,
-                diagnostics_generator=diagnostics_generator,
-                z_consistency_samples=z_consistency_samples,
-            )
+            with _timed_phase(phase_totals, "z_consistency_compute"):
+                distances, cosines = _compute_z_consistency_samples(
+                    diagnostics_cfg=diagnostics_cfg,
+                    diag_state=diag_state,
+                    model=model,
+                    diagnostics_generator=diagnostics_generator,
+                    z_consistency_samples=z_consistency_samples,
+                )
 
             save_z_consistency_plot(
                 diagnostics_z_consistency_dir / f"z_consistency_{global_step:07d}.png",
@@ -2628,13 +2672,14 @@ def run_diagnostics_step(
             )
 
             max_shift = max(1, diagnostics_cfg.z_monotonicity_max_shift)
-            shifts, distances = compute_z_monotonicity_distances(
-                model=model,
-                diag_frames_device=diag_state.frames_device,
-                max_shift=max_shift,
-                monotonicity_samples=monotonicity_samples,
-                diagnostics_generator=diagnostics_generator,
-            )
+            with _timed_phase(phase_totals, "z_monotonicity_compute"):
+                shifts, distances = compute_z_monotonicity_distances(
+                    model=model,
+                    diag_frames_device=diag_state.frames_device,
+                    max_shift=max_shift,
+                    monotonicity_samples=monotonicity_samples,
+                    diagnostics_generator=diagnostics_generator,
+                )
             save_monotonicity_plot(
                 diagnostics_z_monotonicity_dir / f"z_monotonicity_{global_step:07d}.png",
                 shifts,
@@ -2648,12 +2693,13 @@ def run_diagnostics_step(
             )
 
         if resolved_outputs["vis_path_independence"].enabled:
-            stats = _compute_path_independence_stats(
-                diagnostics_cfg=diagnostics_cfg,
-                diag_state=diag_state,
-                model=model,
-                diagnostics_generator=diagnostics_generator,
-            )
+            with _timed_phase(phase_totals, "path_independence_compute"):
+                stats = _compute_path_independence_stats(
+                    diagnostics_cfg=diagnostics_cfg,
+                    diag_state=diag_state,
+                    model=model,
+                    diagnostics_generator=diagnostics_generator,
+                )
 
             label, z_mean, p_mean = stats
             save_path_independence_plot(
@@ -2682,12 +2728,13 @@ def run_diagnostics_step(
             t_i = torch.tensor(pairs[:, 1], device=device, dtype=torch.long)
             b_j = torch.tensor(pairs[:, 2], device=device, dtype=torch.long)
             t_j = torch.tensor(pairs[:, 3], device=device, dtype=torch.long)
-            z_i = diag_state.embeddings[b_i, t_i]
-            z_j = diag_state.embeddings[b_j, t_j]
-            p_i = diag_state.p_embeddings[b_i, t_i]
-            p_j = diag_state.p_embeddings[b_j, t_j]
-            z_dist = (z_i - z_j).norm(dim=-1).detach().cpu().numpy()
-            p_dist = (p_i - p_j).norm(dim=-1).detach().cpu().numpy()
+            with _timed_phase(phase_totals, "zp_distance_compute"):
+                z_i = diag_state.embeddings[b_i, t_i]
+                z_j = diag_state.embeddings[b_j, t_j]
+                p_i = diag_state.p_embeddings[b_i, t_i]
+                p_j = diag_state.p_embeddings[b_j, t_j]
+                z_dist = (z_i - z_j).norm(dim=-1).detach().cpu().numpy()
+                p_dist = (p_i - p_j).norm(dim=-1).detach().cpu().numpy()
             save_zp_distance_scatter(
                 diagnostics_zp_distance_dir / f"zp_distance_scatter_{global_step:07d}.png",
                 z_dist,
@@ -2695,10 +2742,11 @@ def run_diagnostics_step(
             )
 
         if resolved_outputs["vis_h_drift_by_action"].enabled:
-            drift_stats = _compute_h_drift_stats(
-                diagnostics_cfg=diagnostics_cfg,
-                diag_state=diag_state,
-            )
+            with _timed_phase(phase_totals, "h_drift_by_action_compute"):
+                drift_stats = _compute_h_drift_stats(
+                    diagnostics_cfg=diagnostics_cfg,
+                    diag_state=diag_state,
+                )
 
             action_labels = diag_state.action_metadata.action_labels
             drift_items = []
@@ -2734,13 +2782,14 @@ def run_diagnostics_step(
             )
 
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["vis_ctrl"]):
-        vis_embeddings, vis_h_states, vis_actions, vis_p_embeddings = compute_vis_ctrl_state(
-            model=model,
-            weights=weights,
-            device=device,
-            vis_ctrl_batch_cpu=vis_ctrl_batch_cpu,
-            force_h_zero=force_h_zero,
-        )
+        with _timed_phase(phase_totals, "vis_ctrl_state_compute"):
+            vis_embeddings, vis_h_states, vis_actions, vis_p_embeddings = compute_vis_ctrl_state(
+                model=model,
+                weights=weights,
+                device=device,
+                vis_ctrl_batch_cpu=vis_ctrl_batch_cpu,
+                force_h_zero=force_h_zero,
+            )
 
         warmup_frames = max(model.cfg.warmup_frames_h, 0)
         vis_kind_inputs = {
@@ -2768,15 +2817,16 @@ def run_diagnostics_step(
                     continue
                 raise AssertionError(f"Vis-ctrl diagnostics for {kind} require embeddings.")
 
-            metrics = compute_vis_ctrl_metrics(
-                embeddings,
-                vis_actions,
-                vis_ctrl_cfg.knn_k_values,
-                warmup_frames,
-                vis_ctrl_cfg.min_action_count,
-                vis_ctrl_cfg.stability_delta,
-                vis_ctrl_cfg.knn_chunk_size,
-            )
+            with _timed_phase(phase_totals, f"vis_ctrl_metrics_{kind}"):
+                metrics = compute_vis_ctrl_metrics(
+                    embeddings,
+                    vis_actions,
+                    vis_ctrl_cfg.knn_k_values,
+                    warmup_frames,
+                    vis_ctrl_cfg.min_action_count,
+                    vis_ctrl_cfg.stability_delta,
+                    vis_ctrl_cfg.knn_chunk_size,
+                )
             if resolved_outputs[f"vis_ctrl_smoothness_{kind}"].enabled:
                 save_smoothness_knn_distance_eigenvalue_spectrum_plot(
                     vis_ctrl_dir / f"smoothness_{kind}_{global_step:07d}.png",
@@ -2809,15 +2859,16 @@ def run_diagnostics_step(
             )
 
     if _any_outputs_enabled(resolved_outputs, DIAGNOSTICS_OUTPUT_GROUPS["graph"]):
-        graph_diag = prepare_graph_diagnostics(
-            graph_frames=graph_diag_batch_cpu[0],
-            graph_actions=graph_diag_batch_cpu[1],
-            model=model,
-            graph_cfg=graph_cfg,
-            device=device,
-            use_z2h_init=should_use_z2h_init(weights),
-            force_h_zero=force_h_zero,
-        )
+        with _timed_phase(phase_totals, "graph_prepare"):
+            graph_diag = prepare_graph_diagnostics(
+                graph_frames=graph_diag_batch_cpu[0],
+                graph_actions=graph_diag_batch_cpu[1],
+                model=model,
+                graph_cfg=graph_cfg,
+                device=device,
+                use_z2h_init=should_use_z2h_init(weights),
+                force_h_zero=force_h_zero,
+            )
 
         graph_kinds = ["z", "h"]
         if model.p_action_delta_projector is not None:
@@ -2846,11 +2897,12 @@ def run_diagnostics_step(
             else:
                 graph_dir = graph_diagnostics_p_dir
 
-            z_flat, target_flat, zhat_full = _compute_graph_kind_latents(
-                kind=kind,
-                graph_diag=graph_diag,
-                model=model,
-            )
+            with _timed_phase(phase_totals, f"graph_kind_latents_{kind}"):
+                z_flat, target_flat, zhat_full = _compute_graph_kind_latents(
+                    kind=kind,
+                    graph_diag=graph_diag,
+                    model=model,
+                )
 
             if graph_cfg.normalize_latents:
                 z_flat = F.normalize(z_flat, dim=-1)
@@ -2858,16 +2910,17 @@ def run_diagnostics_step(
                 zhat_full = F.normalize(zhat_full, dim=-1)
 
             queries = zhat_full if graph_cfg.use_predictor_scores else z_flat
-            stats = compute_graph_diagnostics_stats(
-                queries,
-                target_flat,
-                zhat_full,
-                graph_diag.next_index,
-                graph_diag.next2_index,
-                graph_diag.chunk_ids,
-                graph_cfg,
-                global_step,
-            )
+            with _timed_phase(phase_totals, f"graph_stats_{kind}"):
+                stats = compute_graph_diagnostics_stats(
+                    queries,
+                    target_flat,
+                    zhat_full,
+                    graph_diag.next_index,
+                    graph_diag.next2_index,
+                    graph_diag.chunk_ids,
+                    graph_cfg,
+                    global_step,
+                )
 
             if resolved_outputs[f"graph_rank_cdf_{kind}"].enabled:
                 save_rank_cdf_plot(
@@ -2907,6 +2960,13 @@ def run_diagnostics_step(
                     metrics_dir / f"graph_diagnostics_{kind}.csv",
                 )
 
+    _write_phase_timing_rows(
+        metrics_dir=metrics_dir,
+        filename="visualization_preprocess_phase_timing.csv",
+        section="visualization",
+        step=global_step,
+        phase_totals=phase_totals,
+    )
     model.train()
 
 
@@ -2926,6 +2986,7 @@ def run_planning_diagnostics_step(
     run_dir: Path,
     force_h_zero: bool = False,
 ) -> None:
+    phase_totals: Dict[str, float] = defaultdict(float)
     resolved_outputs = _resolve_outputs(
         weights=weights,
         model=model,
@@ -2961,15 +3022,16 @@ def run_planning_diagnostics_step(
     if grid_overlay_needed:
         if grid_overlay_frames is None:
             raise AssertionError("Grid overlay requires precomputed frames.")
-        grid_overlay_embeddings = build_grid_overlay_embeddings(
-            model=model,
-            model_cfg=model_cfg,
-            device=device,
-            action_dim=plan_actions.shape[-1],
-            use_z2h_init=should_use_z2h_init(weights),
-            force_h_zero=force_h_zero,
-            frames_data=grid_overlay_frames,
-        )
+        with _timed_phase(phase_totals, "grid_overlay_embeddings"):
+            grid_overlay_embeddings = build_grid_overlay_embeddings(
+                model=model,
+                model_cfg=model_cfg,
+                device=device,
+                action_dim=plan_actions.shape[-1],
+                use_z2h_init=should_use_z2h_init(weights),
+                force_h_zero=force_h_zero,
+                frames_data=grid_overlay_frames,
+            )
 
     run_dir = Path(run_dir)
     metrics_dir = run_dir / "metrics"
@@ -3024,37 +3086,39 @@ def run_planning_diagnostics_step(
             "Set planning_diagnostics.latent_kind='h' or 'auto' to use h instead."
         )
     use_h = planning_kind in ("h", "auto")
-    (
-        p_t,
-        p_tp1,
-        h_t,
-        h_tp1,
-        actions_np,
-        action_labels,
-        deltas,
-        plan_h_states,
-        same_frame_mask,
-    ) = _extract_planning_latents(
-        model,
-        plan_frames,
-        plan_actions,
-        device,
-        use_z2h_init=should_use_z2h_init(weights),
-        force_h_zero=force_h_zero,
-        use_pose=use_p,
-    )
-    stats_p, stats_h, graph_h, graph_p, h_radii_diag = _compute_planning_graphs(
-        p_t,
-        p_tp1,
-        h_t,
-        h_tp1,
-        actions_np,
-        action_labels,
-        same_frame_mask,
-        metrics_dir,
-        min_action_count=planning_cfg.min_action_count,
-        planning_cfg=planning_cfg,
-    )
+    with _timed_phase(phase_totals, "extract_planning_latents"):
+        (
+            p_t,
+            p_tp1,
+            h_t,
+            h_tp1,
+            actions_np,
+            action_labels,
+            deltas,
+            plan_h_states,
+            same_frame_mask,
+        ) = _extract_planning_latents(
+            model,
+            plan_frames,
+            plan_actions,
+            device,
+            use_z2h_init=should_use_z2h_init(weights),
+            force_h_zero=force_h_zero,
+            use_pose=use_p,
+        )
+    with _timed_phase(phase_totals, "compute_planning_graphs"):
+        stats_p, stats_h, graph_h, graph_p, h_radii_diag = _compute_planning_graphs(
+            p_t,
+            p_tp1,
+            h_t,
+            h_tp1,
+            actions_np,
+            action_labels,
+            same_frame_mask,
+            metrics_dir,
+            min_action_count=planning_cfg.min_action_count,
+            planning_cfg=planning_cfg,
+        )
 
     deltas_p = None
     if p_t is not None and p_tp1 is not None:
@@ -3095,18 +3159,19 @@ def run_planning_diagnostics_step(
         )
 
     rng = random.Random(global_step)
-    h_reach = reachable_fractions(
-        graph_h,
-        sample_limit=planning_cfg.reachable_fraction_samples,
-        rng=rng,
-    )
-    p_reach = np.array([], dtype=np.float32)
-    if graph_p is not None:
-        p_reach = reachable_fractions(
-            graph_p,
+    with _timed_phase(phase_totals, "reachable_fraction_compute"):
+        h_reach = reachable_fractions(
+            graph_h,
             sample_limit=planning_cfg.reachable_fraction_samples,
             rng=rng,
         )
+        p_reach = np.array([], dtype=np.float32)
+        if graph_p is not None:
+            p_reach = reachable_fractions(
+                graph_p,
+                sample_limit=planning_cfg.reachable_fraction_samples,
+                rng=rng,
+            )
 
     if resolved_outputs["vis_planning_graph_h"].enabled:
         save_planning_graph_plot(
@@ -3172,14 +3237,15 @@ def run_planning_diagnostics_step(
 
     h_local_success = False
     if use_h:
-        h_local_success = _run_h_local_sanity(
-            graph_h,
-            plan_h_states,
-            h_radii_diag.r_add,
-            h_radii_diag.h_metric,
-            planning_cfg,
-            rng,
-        )
+        with _timed_phase(phase_totals, "h_local_sanity"):
+            h_local_success = _run_h_local_sanity(
+                graph_h,
+                plan_h_states,
+                h_radii_diag.r_add,
+                h_radii_diag.h_metric,
+                planning_cfg,
+                rng,
+            )
     test_cases = _build_planning_tests(planning_env, planning_cfg)
 
     test_results: Dict[str, PlanningTestResult] = {}
@@ -3196,30 +3262,32 @@ def run_planning_diagnostics_step(
         obs_start, _ = planning_env.reset(options={"start_tile": start_tile})
         obs_goal, _ = planning_env.reset(options={"start_tile": goal_tile})
         if use_p and stats_p is not None:
-            pose_seq = _pose_from_frames(
-                [obs_start, obs_goal],
-                model,
-                model_cfg,
-                device,
-                use_z2h_init=should_use_z2h_init(weights),
-                action_dim=action_dim,
-                force_h_zero=force_h_zero,
-            )
+            with _timed_phase(phase_totals, f"planning_test_{label}_pose_extract"):
+                pose_seq = _pose_from_frames(
+                    [obs_start, obs_goal],
+                    model,
+                    model_cfg,
+                    device,
+                    use_z2h_init=should_use_z2h_init(weights),
+                    action_dim=action_dim,
+                    force_h_zero=force_h_zero,
+                )
             p_start = pose_seq[0]
             p_goal = pose_seq[1]
             lattice_dump_p: Optional[Dict[str, np.ndarray]] = None
             if resolved_outputs["vis_planning_lattice_p"].enabled:
                 lattice_dump_p = {}
-            plan = delta_lattice_astar(
-                p_start,
-                p_goal,
-                stats_p.mu,
-                r_goal=stats_p.r_goal,
-                r_merge=stats_p.r_merge,
-                step_scale=stats_p.L_scale,
-                max_nodes=planning_cfg.astar_max_nodes,
-                lattice_dump=lattice_dump_p,
-            )
+            with _timed_phase(phase_totals, f"planning_test_{label}_astar_p"):
+                plan = delta_lattice_astar(
+                    p_start,
+                    p_goal,
+                    stats_p.mu,
+                    r_goal=stats_p.r_goal,
+                    r_merge=stats_p.r_merge,
+                    step_scale=stats_p.L_scale,
+                    max_nodes=planning_cfg.astar_max_nodes,
+                    lattice_dump=lattice_dump_p,
+                )
             visited: List[Tuple[int, int]] = [start_tile]
             final_frame = None
             if plan is None:
@@ -3232,24 +3300,26 @@ def run_planning_diagnostics_step(
                 )
                 plan_nodes_for_plot[label] = None
             else:
-                visited, final_frame = run_plan_in_env(
-                    planning_env,
-                    plan.actions,
-                    start_tile=start_tile,
-                )
+                with _timed_phase(phase_totals, f"planning_test_{label}_env_rollout_p"):
+                    visited, final_frame = run_plan_in_env(
+                        planning_env,
+                        plan.actions,
+                        start_tile=start_tile,
+                    )
                 final_cell = visited[-1] if visited else start_tile
                 success = final_cell == goal_tile
                 final_p_distance = float("inf")
                 if final_frame is not None:
-                    final_pose = _pose_from_frames(
-                        [obs_start, final_frame],
-                        model,
-                        model_cfg,
-                        device,
-                        use_z2h_init=should_use_z2h_init(weights),
-                        action_dim=action_dim,
-                        force_h_zero=force_h_zero,
-                    )
+                    with _timed_phase(phase_totals, f"planning_test_{label}_final_pose_extract"):
+                        final_pose = _pose_from_frames(
+                            [obs_start, final_frame],
+                            model,
+                            model_cfg,
+                            device,
+                            use_z2h_init=should_use_z2h_init(weights),
+                            action_dim=action_dim,
+                            force_h_zero=force_h_zero,
+                        )
                     final_p_distance = float(np.linalg.norm(final_pose[1] - p_goal))
                 test_results[label] = PlanningTestResult(
                     success=success,
@@ -3289,40 +3359,43 @@ def run_planning_diagnostics_step(
                 visited_cells=[start_tile],
             )
         if want_planning_h:
-            h_seq = _h_from_frames(
-                [obs_start, obs_goal],
-                model,
-                model_cfg,
-                device,
-                use_z2h_init=should_use_z2h_init(weights),
-                action_dim=action_dim,
-                force_h_zero=force_h_zero,
-            )
+            with _timed_phase(phase_totals, f"planning_test_{label}_h_extract"):
+                h_seq = _h_from_frames(
+                    [obs_start, obs_goal],
+                    model,
+                    model_cfg,
+                    device,
+                    use_z2h_init=should_use_z2h_init(weights),
+                    action_dim=action_dim,
+                    force_h_zero=force_h_zero,
+                )
             h_start = h_seq[0]
             h_goal = h_seq[1]
             lattice_dump_h: Optional[Dict[str, np.ndarray]] = None
             if resolved_outputs["vis_planning_lattice_h"].enabled:
                 lattice_dump_h = {}
-            plan_h = delta_lattice_astar(
-                h_start,
-                h_goal,
-                stats_h.mu,
-                r_goal=stats_h.r_goal,
-                r_merge=stats_h.r_merge,
-                step_scale=stats_h.L_scale,
-                max_nodes=planning_cfg.astar_max_nodes,
-                lattice_dump=lattice_dump_h,
-            )
+            with _timed_phase(phase_totals, f"planning_test_{label}_astar_h"):
+                plan_h = delta_lattice_astar(
+                    h_start,
+                    h_goal,
+                    stats_h.mu,
+                    r_goal=stats_h.r_goal,
+                    r_merge=stats_h.r_merge,
+                    step_scale=stats_h.L_scale,
+                    max_nodes=planning_cfg.astar_max_nodes,
+                    lattice_dump=lattice_dump_h,
+                )
             visited_h: List[Tuple[int, int]] = [start_tile]
             final_frame_h = None
             if plan_h is None:
                 plan_nodes_for_plot_h[label] = None
             else:
-                visited_h, final_frame_h = run_plan_in_env(
-                    planning_env,
-                    plan_h.actions,
-                    start_tile=start_tile,
-                )
+                with _timed_phase(phase_totals, f"planning_test_{label}_env_rollout_h"):
+                    visited_h, final_frame_h = run_plan_in_env(
+                        planning_env,
+                        plan_h.actions,
+                        start_tile=start_tile,
+                    )
                 plan_nodes_for_plot_h[label] = np.stack(plan_h.nodes, axis=0) if plan_h.nodes else None
             if lattice_dump_h is not None:
                 lattice_nodes = lattice_dump_h["nodes"]
@@ -3489,4 +3562,11 @@ def run_planning_diagnostics_step(
         global_step=global_step,
     )
 
+    _write_phase_timing_rows(
+        metrics_dir=metrics_dir,
+        filename="planning_preprocess_phase_timing.csv",
+        section="planning",
+        step=global_step,
+        phase_totals=phase_totals,
+    )
     model.train()
