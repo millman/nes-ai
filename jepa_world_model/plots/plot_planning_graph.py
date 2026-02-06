@@ -77,7 +77,17 @@ def save_planning_graph_plot(
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.scatter(proj_samples[:, 0], proj_samples[:, 1], s=6, alpha=0.2, label="samples")
-    ax.scatter(proj_centers[:, 0], proj_centers[:, 1], s=30, alpha=0.9, label="centers")
+    ax.scatter(
+        proj_centers[:, 0],
+        proj_centers[:, 1],
+        s=40,
+        alpha=0.95,
+        marker="D",
+        color="tab:purple",
+        edgecolors="white",
+        linewidths=0.5,
+        label="centers",
+    )
 
     if grid_overlay is not None:
         grid_proj = _project_with_pca(grid_overlay.points, pca)
