@@ -82,73 +82,74 @@ def compute_path_independence_diffs(
     perm = torch.randperm(diag_embeddings.shape[0], generator=diagnostics_generator)[:max_starts]
     z_diffs: List[float] = []
     p_diffs: List[float] = []
-    for b_idx in perm:
-        b = int(b_idx.item())
-        z_a = diag_embeddings[b, start_frame]
-        h_a = diag_h_states[b, start_frame]
-        z_b = diag_embeddings[b, start_frame]
-        h_b = diag_h_states[b, start_frame]
-        p_a = diag_p_embeddings[b, start_frame]
-        p_b = diag_p_embeddings[b, start_frame]
-        h_a_in = h_a.detach() if model.cfg.pose_delta_detach_h else h_a
-        h_b_in = h_b.detach() if model.cfg.pose_delta_detach_h else h_b
-        delta_a = model.p_action_delta_projector(
-            p_a.unsqueeze(0),
-            h_a_in.unsqueeze(0),
-            action_a.unsqueeze(0),
-        ).squeeze(0)
-        delta_b = model.p_action_delta_projector(
-            p_b.unsqueeze(0),
-            h_b_in.unsqueeze(0),
-            action_b_first.unsqueeze(0),
-        ).squeeze(0)
-        p_a = p_a + delta_a
-        p_b = p_b + delta_b
-        h_a_next = model.predictor(
-            z_a.unsqueeze(0),
-            h_a.unsqueeze(0),
-            action_a.unsqueeze(0),
-        )
-        h_b_next = model.predictor(
-            z_b.unsqueeze(0),
-            h_b.unsqueeze(0),
-            action_b_first.unsqueeze(0),
-        )
-        z_a = model.h_to_z(h_a_next).squeeze(0)
-        h_a = h_a_next.squeeze(0)
-        z_b = model.h_to_z(h_b_next).squeeze(0)
-        h_b = h_b_next.squeeze(0)
-        for _ in range(path_independence_steps):
+    with torch.no_grad():
+        for b_idx in perm:
+            b = int(b_idx.item())
+            z_a = diag_embeddings[b, start_frame]
+            h_a = diag_h_states[b, start_frame]
+            z_b = diag_embeddings[b, start_frame]
+            h_b = diag_h_states[b, start_frame]
+            p_a = diag_p_embeddings[b, start_frame]
+            p_b = diag_p_embeddings[b, start_frame]
             h_a_in = h_a.detach() if model.cfg.pose_delta_detach_h else h_a
             h_b_in = h_b.detach() if model.cfg.pose_delta_detach_h else h_b
             delta_a = model.p_action_delta_projector(
                 p_a.unsqueeze(0),
                 h_a_in.unsqueeze(0),
-                action_b.unsqueeze(0),
+                action_a.unsqueeze(0),
             ).squeeze(0)
             delta_b = model.p_action_delta_projector(
                 p_b.unsqueeze(0),
                 h_b_in.unsqueeze(0),
-                action_b_second.unsqueeze(0),
+                action_b_first.unsqueeze(0),
             ).squeeze(0)
             p_a = p_a + delta_a
             p_b = p_b + delta_b
             h_a_next = model.predictor(
                 z_a.unsqueeze(0),
                 h_a.unsqueeze(0),
-                action_b.unsqueeze(0),
+                action_a.unsqueeze(0),
             )
             h_b_next = model.predictor(
                 z_b.unsqueeze(0),
                 h_b.unsqueeze(0),
-                action_b_second.unsqueeze(0),
+                action_b_first.unsqueeze(0),
             )
             z_a = model.h_to_z(h_a_next).squeeze(0)
             h_a = h_a_next.squeeze(0)
             z_b = model.h_to_z(h_b_next).squeeze(0)
             h_b = h_b_next.squeeze(0)
-        z_diffs.append(float((z_a - z_b).norm().item()))
-        p_diffs.append(float((p_a - p_b).norm().item()))
+            for _ in range(path_independence_steps):
+                h_a_in = h_a.detach() if model.cfg.pose_delta_detach_h else h_a
+                h_b_in = h_b.detach() if model.cfg.pose_delta_detach_h else h_b
+                delta_a = model.p_action_delta_projector(
+                    p_a.unsqueeze(0),
+                    h_a_in.unsqueeze(0),
+                    action_b.unsqueeze(0),
+                ).squeeze(0)
+                delta_b = model.p_action_delta_projector(
+                    p_b.unsqueeze(0),
+                    h_b_in.unsqueeze(0),
+                    action_b_second.unsqueeze(0),
+                ).squeeze(0)
+                p_a = p_a + delta_a
+                p_b = p_b + delta_b
+                h_a_next = model.predictor(
+                    z_a.unsqueeze(0),
+                    h_a.unsqueeze(0),
+                    action_b.unsqueeze(0),
+                )
+                h_b_next = model.predictor(
+                    z_b.unsqueeze(0),
+                    h_b.unsqueeze(0),
+                    action_b_second.unsqueeze(0),
+                )
+                z_a = model.h_to_z(h_a_next).squeeze(0)
+                h_a = h_a_next.squeeze(0)
+                z_b = model.h_to_z(h_b_next).squeeze(0)
+                h_b = h_b_next.squeeze(0)
+            z_diffs.append(float((z_a - z_b).norm().item()))
+            p_diffs.append(float((p_a - p_b).norm().item()))
     return z_diffs, p_diffs
 
 
@@ -171,22 +172,23 @@ def run_z_consistency(
     perm = torch.randperm(frame_count, generator=diagnostics_generator)[:z_consistency_samples]
     distances: List[float] = []
     cosines: List[float] = []
-    for flat_idx in perm.tolist():
-        b = flat_idx // state.frames.shape[1]
-        t0 = flat_idx % state.frames.shape[1]
-        frame = state.frames_device[b, t0]
-        repeats = diagnostics_cfg.z_consistency_repeats
-        noise = torch.randn(
-            (repeats, *frame.shape),
-            device=frame.device,
-        ) * diagnostics_cfg.z_consistency_noise_std
-        noisy = (frame.unsqueeze(0) + noise).clamp(0, 1)
-        z_samples = model.encoder(noisy)
-        z_mean = z_samples.mean(dim=0, keepdim=True)
-        dist = (z_samples - z_mean).norm(dim=-1)
-        cos = F.cosine_similarity(z_samples, z_mean, dim=-1)
-        distances.extend(dist.detach().cpu().numpy().tolist())
-        cosines.extend(cos.detach().cpu().numpy().tolist())
+    with torch.no_grad():
+        for flat_idx in perm.tolist():
+            b = flat_idx // state.frames.shape[1]
+            t0 = flat_idx % state.frames.shape[1]
+            frame = state.frames_device[b, t0]
+            repeats = diagnostics_cfg.z_consistency_repeats
+            noise = torch.randn(
+                (repeats, *frame.shape),
+                device=frame.device,
+            ) * diagnostics_cfg.z_consistency_noise_std
+            noisy = (frame.unsqueeze(0) + noise).clamp(0, 1)
+            z_samples = model.encoder(noisy)
+            z_mean = z_samples.mean(dim=0, keepdim=True)
+            dist = (z_samples - z_mean).norm(dim=-1)
+            cos = F.cosine_similarity(z_samples, z_mean, dim=-1)
+            distances.extend(dist.detach().cpu().numpy().tolist())
+            cosines.extend(cos.detach().cpu().numpy().tolist())
     if distances and cosines:
         save_z_consistency_plot(
             diagnostics_z_consistency_dir / f"z_consistency_{global_step:07d}.png",

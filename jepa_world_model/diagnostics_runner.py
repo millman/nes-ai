@@ -1192,56 +1192,57 @@ def _build_straightline_trajectories(
     perm = torch.randperm(embeddings.shape[0], generator=diagnostics_generator)[:max_starts]
     trajectories: List[StraightLineTrajectory] = []
     palette = ["#4c72b0", "#55a868", "#c44e52", "#8172b3"]
-    for action_idx, action_id in enumerate(straightline_ids):
-        action_vec = action_vectors.get(action_id)
-        if action_vec is None:
-            continue
-        label = action_labels.get(action_id, f"action {action_id}")
-        color = palette[action_idx % len(palette)]
-        for row_offset, b_idx in enumerate(perm):
-            b = int(b_idx.item())
-            z_t = diag_state.embeddings[b, start_frame]
-            h_t = diag_state.h_states[b, start_frame]
-            if space == "p":
-                p_t = diag_state.p_embeddings[b, start_frame]
-                points = [p_t.detach().cpu().numpy()]
-            elif space == "h":
-                points = [h_t.detach().cpu().numpy()]
-            else:
-                points = [z_t.detach().cpu().numpy()]
-            for _ in range(diagnostics_cfg.straightline_steps):
+    with torch.no_grad():
+        for action_idx, action_id in enumerate(straightline_ids):
+            action_vec = action_vectors.get(action_id)
+            if action_vec is None:
+                continue
+            label = action_labels.get(action_id, f"action {action_id}")
+            color = palette[action_idx % len(palette)]
+            for row_offset, b_idx in enumerate(perm):
+                b = int(b_idx.item())
+                z_t = diag_state.embeddings[b, start_frame]
+                h_t = diag_state.h_states[b, start_frame]
                 if space == "p":
-                    h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
-                    delta = model.p_action_delta_projector(
-                        p_t.unsqueeze(0),
-                        h_in.unsqueeze(0),
-                        action_vec.unsqueeze(0),
-                    ).squeeze(0)
-                    p_t = p_t + delta
-                    h_next = model.predictor(
-                        z_t.unsqueeze(0),
-                        h_t.unsqueeze(0),
-                        action_vec.unsqueeze(0),
-                    )
-                    z_t = model.h_to_z(h_next).squeeze(0)
-                    h_t = h_next.squeeze(0)
-                    points.append(p_t.detach().cpu().numpy())
+                    p_t = diag_state.p_embeddings[b, start_frame]
+                    points = [p_t.detach().cpu().numpy()]
+                elif space == "h":
+                    points = [h_t.detach().cpu().numpy()]
                 else:
-                    h_next = model.predictor(
-                        z_t.unsqueeze(0),
-                        h_t.unsqueeze(0),
-                        action_vec.unsqueeze(0),
-                    )
-                    z_t = model.h_to_z(h_next).squeeze(0)
-                    h_t = h_next.squeeze(0)
-                    if space == "h":
-                        points.append(h_t.detach().cpu().numpy())
+                    points = [z_t.detach().cpu().numpy()]
+                for _ in range(diagnostics_cfg.straightline_steps):
+                    if space == "p":
+                        h_in = h_t.detach() if model.cfg.pose_delta_detach_h else h_t
+                        delta = model.p_action_delta_projector(
+                            p_t.unsqueeze(0),
+                            h_in.unsqueeze(0),
+                            action_vec.unsqueeze(0),
+                        ).squeeze(0)
+                        p_t = p_t + delta
+                        h_next = model.predictor(
+                            z_t.unsqueeze(0),
+                            h_t.unsqueeze(0),
+                            action_vec.unsqueeze(0),
+                        )
+                        z_t = model.h_to_z(h_next).squeeze(0)
+                        h_t = h_next.squeeze(0)
+                        points.append(p_t.detach().cpu().numpy())
                     else:
-                        points.append(z_t.detach().cpu().numpy())
-            points_np = np.stack(points, axis=0)
-            proj = (points_np - embed_center) @ projection
-            traj_label = f"{label} (start {row_offset + 1})"
-            trajectories.append(StraightLineTrajectory(points=proj, label=traj_label, color=color))
+                        h_next = model.predictor(
+                            z_t.unsqueeze(0),
+                            h_t.unsqueeze(0),
+                            action_vec.unsqueeze(0),
+                        )
+                        z_t = model.h_to_z(h_next).squeeze(0)
+                        h_t = h_next.squeeze(0)
+                        if space == "h":
+                            points.append(h_t.detach().cpu().numpy())
+                        else:
+                            points.append(z_t.detach().cpu().numpy())
+                points_np = np.stack(points, axis=0)
+                proj = (points_np - embed_center) @ projection
+                traj_label = f"{label} (start {row_offset + 1})"
+                trajectories.append(StraightLineTrajectory(points=proj, label=traj_label, color=color))
     return trajectories
 
 
@@ -1257,22 +1258,23 @@ def _compute_z_consistency_samples(
     perm = torch.randperm(frame_count, generator=diagnostics_generator)[:z_consistency_samples]
     distances: List[float] = []
     cosines: List[float] = []
-    for flat_idx in perm.tolist():
-        b = flat_idx // diag_state.frames.shape[1]
-        t0 = flat_idx % diag_state.frames.shape[1]
-        frame = diag_state.frames_device[b, t0]
-        repeats = diagnostics_cfg.z_consistency_repeats
-        noise = torch.randn(
-            (repeats, *frame.shape),
-            device=frame.device,
-        ) * diagnostics_cfg.z_consistency_noise_std
-        noisy = (frame.unsqueeze(0) + noise).clamp(0, 1)
-        z_samples = model.encoder(noisy)
-        z_mean = z_samples.mean(dim=0, keepdim=True)
-        dist = (z_samples - z_mean).norm(dim=-1)
-        cos = F.cosine_similarity(z_samples, z_mean, dim=-1)
-        distances.extend(dist.detach().cpu().numpy().tolist())
-        cosines.extend(cos.detach().cpu().numpy().tolist())
+    with torch.no_grad():
+        for flat_idx in perm.tolist():
+            b = flat_idx // diag_state.frames.shape[1]
+            t0 = flat_idx % diag_state.frames.shape[1]
+            frame = diag_state.frames_device[b, t0]
+            repeats = diagnostics_cfg.z_consistency_repeats
+            noise = torch.randn(
+                (repeats, *frame.shape),
+                device=frame.device,
+            ) * diagnostics_cfg.z_consistency_noise_std
+            noisy = (frame.unsqueeze(0) + noise).clamp(0, 1)
+            z_samples = model.encoder(noisy)
+            z_mean = z_samples.mean(dim=0, keepdim=True)
+            dist = (z_samples - z_mean).norm(dim=-1)
+            cos = F.cosine_similarity(z_samples, z_mean, dim=-1)
+            distances.extend(dist.detach().cpu().numpy().tolist())
+            cosines.extend(cos.detach().cpu().numpy().tolist())
     return distances, cosines
 
 

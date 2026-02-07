@@ -23,24 +23,25 @@ def compute_vis_ctrl_state(
     vis_ctrl_batch_cpu,
     force_h_zero: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    vis_frames = vis_ctrl_batch_cpu[0].to(device)
-    vis_actions = vis_ctrl_batch_cpu[1].to(device)
-    vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
-    _, _, vis_h_states = rollout_teacher_forced(
-        model,
-        vis_embeddings,
-        vis_actions,
-        use_z2h_init=should_use_z2h_init(weights),
-        force_h_zero=force_h_zero,
-    )
-    vis_p_embeddings = None
-    if model.p_action_delta_projector is not None:
-        _, vis_p_embeddings, _ = rollout_pose(
+    with torch.no_grad():
+        vis_frames = vis_ctrl_batch_cpu[0].to(device)
+        vis_actions = vis_ctrl_batch_cpu[1].to(device)
+        vis_embeddings = model.encode_sequence(vis_frames)["embeddings"]
+        _, _, vis_h_states = rollout_teacher_forced(
             model,
-            vis_h_states,
+            vis_embeddings,
             vis_actions,
-            z_embeddings=vis_embeddings,
+            use_z2h_init=should_use_z2h_init(weights),
+            force_h_zero=force_h_zero,
         )
+        vis_p_embeddings = None
+        if model.p_action_delta_projector is not None:
+            _, vis_p_embeddings, _ = rollout_pose(
+                model,
+                vis_h_states,
+                vis_actions,
+                z_embeddings=vis_embeddings,
+            )
     return vis_embeddings, vis_h_states, vis_actions, vis_p_embeddings
 
 

@@ -219,21 +219,22 @@ def compute_off_manifold_errors(
         raise AssertionError("Off-manifold batch does not include enough actions for the requested rollout.")
     start_frames = frames[:, 0]
     action_seq = actions[:, :rollout_steps]
-    z_t = model.encoder(start_frames)
-    h_t = z_t.new_zeros(z_t.shape[0], model.state_dim)
     step_indices: List[np.ndarray] = []
     errors: List[np.ndarray] = []
-    for step in range(rollout_steps + 1):
-        decoded = decoder(z_t).clamp(0, 1)
-        z_back = model.encoder(decoded)
-        err = (z_back - z_t).norm(dim=-1)
-        errors.append(err.detach().cpu().numpy())
-        step_indices.append(np.full(err.shape, step, dtype=np.int64))
-        if step < rollout_steps:
-            act = action_seq[:, step]
-            h_next = model.predictor(z_t, h_t, act)
-            z_t = model.h_to_z(h_next)
-            h_t = h_next
+    with torch.no_grad():
+        z_t = model.encoder(start_frames)
+        h_t = z_t.new_zeros(z_t.shape[0], model.state_dim)
+        for step in range(rollout_steps + 1):
+            decoded = decoder(z_t).clamp(0, 1)
+            z_back = model.encoder(decoded)
+            err = (z_back - z_t).norm(dim=-1)
+            errors.append(err.detach().cpu().numpy())
+            step_indices.append(np.full(err.shape, step, dtype=np.int64))
+            if step < rollout_steps:
+                act = action_seq[:, step]
+                h_next = model.predictor(z_t, h_t, act)
+                z_t = model.h_to_z(h_next)
+                h_t = h_next
     return np.concatenate(step_indices), np.concatenate(errors)
 
 
