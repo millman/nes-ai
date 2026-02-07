@@ -596,7 +596,6 @@ def _h_from_frames(
     device: torch.device,
     *,
     use_z2h_init: bool,
-    action_dim: int,
     force_h_zero: bool = False,
 ) -> np.ndarray:
     if len(frames) < 2:
@@ -606,16 +605,23 @@ def _h_from_frames(
         dim=0,
     ).unsqueeze(0)
     frames_tensor = frames_tensor.to(device)
-    actions_zero = torch.zeros((1, frames_tensor.shape[1] - 1, action_dim), device=device)
     with torch.no_grad():
         embeds = model.encode_sequence(frames_tensor)["embeddings"]
-        _, _, h_states = rollout_teacher_forced(
-            model,
-            embeds,
-            actions_zero,
-            use_z2h_init=use_z2h_init,
-            force_h_zero=force_h_zero,
-        )
+        if force_h_zero:
+            h_states = embeds.new_zeros((embeds.shape[0], embeds.shape[1], model.state_dim))
+        elif use_z2h_init:
+            # Extract per-frame hidden states directly; do not synthesize transitions with fake NOOP actions.
+            h_states = model.z_to_h(embeds.detach().flatten(0, 1)).view(
+                embeds.shape[0],
+                embeds.shape[1],
+                model.state_dim,
+            )
+        else:
+            raise AssertionError(
+                "Hidden-state extraction from standalone frames requires z_to_h mapping "
+                "(set weights.z2h, weights.z2h_init_zero, or weights.z2h_match_h > 0), "
+                "or force_h_zero=True."
+            )
     return h_states[0].detach().cpu().numpy()
 
 
@@ -3280,6 +3286,13 @@ def run_planning_diagnostics_step(
         or resolved_outputs["vis_planning_pca_test1_h"].enabled
         or resolved_outputs["vis_planning_pca_test2_h"].enabled
     )
+    use_z2h_init = should_use_z2h_init(weights)
+    if want_planning_h and not (use_z2h_init or force_h_zero):
+        raise AssertionError(
+            "H-planning diagnostics require frame->h extraction via z_to_h "
+            "(enable weights.z2h, weights.z2h_init_zero, or weights.z2h_match_h), "
+            "or set force_h_zero=True."
+        )
     action_dim = plan_actions.shape[-1]
     for label, start_tile, goal_tile in test_cases:
         obs_start, _ = planning_env.reset(options={"start_tile": start_tile})
@@ -3291,7 +3304,7 @@ def run_planning_diagnostics_step(
                     model,
                     model_cfg,
                     device,
-                    use_z2h_init=should_use_z2h_init(weights),
+                    use_z2h_init=use_z2h_init,
                     action_dim=action_dim,
                     force_h_zero=force_h_zero,
                 )
@@ -3340,7 +3353,7 @@ def run_planning_diagnostics_step(
                             model,
                             model_cfg,
                             device,
-                            use_z2h_init=should_use_z2h_init(weights),
+                            use_z2h_init=use_z2h_init,
                             action_dim=action_dim,
                             force_h_zero=force_h_zero,
                         )
@@ -3389,8 +3402,7 @@ def run_planning_diagnostics_step(
                     model,
                     model_cfg,
                     device,
-                    use_z2h_init=should_use_z2h_init(weights),
-                    action_dim=action_dim,
+                    use_z2h_init=use_z2h_init,
                     force_h_zero=force_h_zero,
                 )
             h_start = h_seq[0]
