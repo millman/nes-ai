@@ -17,7 +17,7 @@ def rollout_teacher_forced_z(
     """Teacher-forced rollout that returns z_hat (enc(x_t) used at each step)."""
     b, t, _ = embeddings.shape
     if t < 2:
-        return embeddings.new_zeros((b, 0, embeddings.shape[-1]))
+        raise AssertionError("rollout_teacher_forced_z requires at least two timesteps.")
     z_preds = []
     if force_h_zero:
         h_t = embeddings.new_zeros((b, model.state_dim))
@@ -53,7 +53,7 @@ def rollout_self_fed(
     """
     b, t, _ = embeddings.shape
     if t < 2:
-        return embeddings.new_zeros((b, 0, model.state_dim))
+        raise AssertionError("rollout_self_fed requires at least two timesteps.")
     if force_h_zero:
         h_t = embeddings.new_zeros((b, model.state_dim))
     elif use_z2h_init and t > 0:
@@ -94,16 +94,7 @@ def rollout_teacher_forced(
     elif use_z2h_init and t > 0:
         h0 = model.z_to_h(embeddings[:, 0].detach())
     if t < 2:
-        z_preds = embeddings.new_zeros((b, 0, embeddings.shape[-1]))
-        h_preds = embeddings.new_zeros((b, 0, model.state_dim))
-        h_states = embeddings.new_zeros((b, t, model.state_dim))
-        if h0 is not None and t > 0:
-            h_states[:, 0] = h0
-        return (
-            z_preds,
-            h_preds,
-            h_states,
-        )
+        raise AssertionError("rollout_teacher_forced requires at least two timesteps.")
     z_preds = []
     h_preds = []
     # h_preds holds the predicted next hidden states (length T-1); h_states includes h0 and all subsequent states (length T).
