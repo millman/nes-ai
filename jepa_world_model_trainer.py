@@ -364,9 +364,17 @@ class LossWeights:
     # NOOP should produce near-zero ΔH.
     noop_residual_dh: float = 0.1
     # Same-frame identity on h: ||h_{t+1} - h_t|| when consecutive frames are pixel-identical.
-    same_frame_h_identity: float = 0.1
+    same_frame_h_identity: float = 0.0
     # Orthogonality leak penalty: discourage NOOP mean delta from aligning with move-action mean deltas.
-    noop_move_orth_h: float = 0.1
+    noop_move_orth_h: float = 0.0
+
+    # Distribution-level scale anchor for non-NOOP h deltas.
+    scale_non_noop_dh: float = 0.1
+
+    # Action consistency in h deltas: same-action deltas cluster (compactness only).
+    action_consistency_h: float = 0.1
+    # Cross-action separation in h deltas: action means stay at least margin apart.
+    action_separation_h: float = 0.0
 
     # --- P ---
     # State-conditioned delta alignment (ΔP): Δp_t vs observed pose delta.
@@ -430,6 +438,16 @@ class LossDistanceCorrelationConfig:
 
 
 @dataclass
+class LossActionConsistencyHConfig:
+    pass
+
+
+@dataclass
+class LossActionSeparationHConfig:
+    margin: float = 0.1
+
+
+@dataclass
 class LossZTemporalSmoothConfig:
     delta: Annotated[
         float,
@@ -438,7 +456,7 @@ class LossZTemporalSmoothConfig:
                 "Huber threshold for z temporal smoothness; with cosine distance in [0,2], 0.3 treats small motions as smooth."
             )
         ),
-    ] = 0.3
+    ] = 1.0
 
 
 @dataclass
@@ -498,6 +516,14 @@ class ScaleDPConfig:
     mode: str = "median"
     target: float = 1.0
     trim: float = 0.2
+
+
+@dataclass
+class ScaleNonNoopDHConfig:
+    mode: str = "median"
+    target: float = 1.0
+    trim: float = 0.2
+
 
 @dataclass
 class VisConfig:
@@ -616,6 +642,8 @@ class TrainConfig:
     h_smooth: LossHTemporalSmoothConfig = field(default_factory=LossHTemporalSmoothConfig)
     loop_closure_p: LossLoopClosureConfig = field(default_factory=LossLoopClosureConfig)
     distance_corr_p: LossDistanceCorrelationConfig = field(default_factory=LossDistanceCorrelationConfig)
+    action_consistency_h: LossActionConsistencyHConfig = field(default_factory=LossActionConsistencyHConfig)
+    action_separation_h: LossActionSeparationHConfig = field(default_factory=LossActionSeparationHConfig)
     jepa_open_loop: LossJEPAOpenLoopConfig = field(default_factory=LossJEPAOpenLoopConfig)
     geometry: LossGeometryConfig = field(default_factory=LossGeometryConfig)
     patch_recon: LossReconPatchConfig = field(default_factory=LossReconPatchConfig)
@@ -624,6 +652,7 @@ class TrainConfig:
     recon_zhat_multi_box: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
     recon_multi_box_mse: LossMultiScaleBoxReconConfig = field(default_factory=LossMultiScaleBoxReconConfig)
     scale_dp: ScaleDPConfig = field(default_factory=ScaleDPConfig)
+    scale_non_noop_dh: ScaleNonNoopDHConfig = field(default_factory=ScaleNonNoopDHConfig)
 
     # Visualization
     vis: VisConfig = field(default_factory=VisConfig)
@@ -1561,6 +1590,77 @@ def h_smooth_huber_loss(
     return loss.mean()
 
 
+def action_consistency_h_loss(
+    dh: torch.Tensor,
+    action_ids: torch.Tensor,
+) -> torch.Tensor:
+    if dh.ndim != 3:
+        raise AssertionError("action_consistency_h_loss expects dh with shape (B, T, D).")
+    if action_ids.shape != dh.shape[:2]:
+        raise AssertionError("action_consistency_h_loss requires action_ids aligned with dh timesteps.")
+    if dh.numel() == 0:
+        raise AssertionError("action_consistency_h_loss requires non-empty dh.")
+    flat_dh = dh.reshape(-1, dh.shape[-1])
+    flat_actions = action_ids.reshape(-1)
+    unique_actions = torch.unique(flat_actions)
+    if unique_actions.numel() == 0:
+        raise AssertionError("action_consistency_h_loss requires at least one action id.")
+
+    within_total = dh.new_tensor(0.0)
+    within_groups = 0
+    for aid in unique_actions.tolist():
+        mask = flat_actions == aid
+        if not mask.any():
+            continue
+        group = flat_dh[mask]
+        if group.numel() == 0:
+            continue
+        mean = group.mean(dim=0)
+        centered = group - mean
+        within_total = within_total + centered.pow(2).sum(dim=-1).mean()
+        within_groups += 1
+    if within_groups <= 0:
+        raise AssertionError("action_consistency_h_loss found no valid action groups.")
+    return within_total / within_groups
+
+
+def action_separation_h_loss(
+    dh: torch.Tensor,
+    action_ids: torch.Tensor,
+    cfg: LossActionSeparationHConfig,
+) -> torch.Tensor:
+    if dh.ndim != 3:
+        raise AssertionError("action_separation_h_loss expects dh with shape (B, T, D).")
+    if action_ids.shape != dh.shape[:2]:
+        raise AssertionError("action_separation_h_loss requires action_ids aligned with dh timesteps.")
+    if dh.numel() == 0:
+        raise AssertionError("action_separation_h_loss requires non-empty dh.")
+    flat_dh = dh.reshape(-1, dh.shape[-1])
+    flat_actions = action_ids.reshape(-1)
+    unique_actions = torch.unique(flat_actions)
+    if unique_actions.numel() < 2:
+        return dh.new_tensor(0.0)
+
+    action_means: List[torch.Tensor] = []
+    for aid in unique_actions.tolist():
+        mask = flat_actions == aid
+        if not mask.any():
+            continue
+        group = flat_dh[mask]
+        if group.numel() == 0:
+            continue
+        action_means.append(group.mean(dim=0))
+    if len(action_means) < 2:
+        return dh.new_tensor(0.0)
+    means = torch.stack(action_means, dim=0)
+    dists = torch.cdist(means, means, p=2)
+    idx = torch.triu_indices(dists.shape[0], dists.shape[1], offset=1, device=dists.device)
+    pair_dists = dists[idx[0], idx[1]]
+    if pair_dists.numel() == 0:
+        return dh.new_tensor(0.0)
+    return F.relu(cfg.margin - pair_dists).pow(2).mean()
+
+
 def scale_dp_loss(pose: torch.Tensor, start: int, cfg: ScaleDPConfig) -> torch.Tensor:
     if pose.shape[1] <= start + 1:
         return pose.new_tensor(0.0)
@@ -1585,6 +1685,53 @@ def scale_dp_loss(pose: torch.Tensor, start: int, cfg: ScaleDPConfig) -> torch.T
             scale = norms.mean()
     else:
         raise ValueError(f"scale_dp.mode must be 'median' or 'trimmed_mean', got {cfg.mode!r}.")
+    return (scale - cfg.target) ** 2
+
+
+def scale_non_noop_dh_loss(
+    h_states: torch.Tensor,
+    action_ids: torch.Tensor,
+    start: int,
+    cfg: ScaleNonNoopDHConfig,
+) -> torch.Tensor:
+    if h_states.shape[1] <= start + 1:
+        return h_states.new_tensor(0.0)
+    if action_ids.ndim != 2 or action_ids.shape[0] != h_states.shape[0]:
+        raise AssertionError(
+            "scale_non_noop_dh_loss requires action_ids with shape "
+            f"(B, T_actions); got {tuple(action_ids.shape)} for B={h_states.shape[0]}."
+        )
+    h_steps = h_states.shape[1]
+    if action_ids.shape[1] not in (h_steps - 1, h_steps):
+        raise AssertionError(
+            "scale_non_noop_dh_loss requires action_ids length to match h_states timesteps "
+            f"or transitions; expected {h_steps - 1} or {h_steps}, got {action_ids.shape[1]}."
+        )
+    deltas = h_states[:, start + 1 :] - h_states[:, start:-1]
+    action_ids_slice = action_ids[:, start : start + deltas.shape[1]]
+    non_noop_mask = action_ids_slice != 0
+    if not non_noop_mask.any():
+        return h_states.new_tensor(0.0)
+    norms = deltas.norm(dim=-1)[non_noop_mask]
+    if norms.numel() == 0:
+        return h_states.new_tensor(0.0)
+    mode = cfg.mode.lower()
+    if mode == "median":
+        scale = norms.median()
+    elif mode == "trimmed_mean":
+        trim = min(max(cfg.trim, 0.0), 0.49)
+        if trim > 0.0:
+            sorted_norms, _ = norms.sort()
+            n = sorted_norms.numel()
+            k = int(math.floor(trim * n))
+            if k * 2 >= n:
+                scale = sorted_norms.mean()
+            else:
+                scale = sorted_norms[k : n - k].mean()
+        else:
+            scale = norms.mean()
+    else:
+        raise ValueError(f"scale_non_noop_dh.mode must be 'median' or 'trimmed_mean', got {cfg.mode!r}.")
     return (scale - cfg.target) ** 2
 
 
@@ -1842,6 +1989,8 @@ def _compute_losses_and_metrics(
     loss_inverse_cycle_h = x_frames.new_tensor(0.0)
     loss_inverse_cycle_dp = x_frames.new_tensor(0.0)
     loss_additivity_h = x_frames.new_tensor(0.0)
+    loss_action_consistency_h = x_frames.new_tensor(0.0)
+    loss_action_separation_h = x_frames.new_tensor(0.0)
     loss_action_delta_dp = x_frames.new_tensor(0.0)
     loss_dz_anchor_dp = x_frames.new_tensor(0.0)
     loss_loop_closure_p = x_frames.new_tensor(0.0)
@@ -1849,6 +1998,7 @@ def _compute_losses_and_metrics(
     loss_noop_residual_dh = x_frames.new_tensor(0.0)
     loss_same_frame_h_identity = x_frames.new_tensor(0.0)
     loss_noop_move_orth_h = x_frames.new_tensor(0.0)
+    loss_scale_non_noop_dh = x_frames.new_tensor(0.0)
     loss_additivity_dp = x_frames.new_tensor(0.0)
     loss_scale_dp = x_frames.new_tensor(0.0)
     loss_distance_corr_p = x_frames.new_tensor(0.0)
@@ -2229,6 +2379,19 @@ def _compute_losses_and_metrics(
         assert pose_pred.shape[1] >= start_frame + 2, "scale_dp requires at least two pose timesteps after start."
         loss_scale_dp = scale_dp_loss(pose_pred, start_frame, cfg.scale_dp)
 
+    if weights.scale_non_noop_dh > 0:
+        assert h_states.shape[1] >= start_frame + 2, "scale_non_noop_dh requires at least two h timesteps after start."
+        action_ids = compress_actions_to_ids(a_seq.detach().cpu().numpy())
+        if action_ids.shape != a_seq.shape:
+            action_ids = action_ids.reshape(a_seq.shape[0], a_seq.shape[1])
+        action_ids_t = torch.as_tensor(action_ids, device=h_states.device, dtype=torch.long)
+        loss_scale_non_noop_dh = scale_non_noop_dh_loss(
+            h_states,
+            action_ids_t,
+            start_frame,
+            cfg.scale_non_noop_dh,
+        )
+
     # Inverse dynamics
     if weights.inverse_dynamics_z > 0:
         if model.inverse_dynamics_z is None:
@@ -2458,6 +2621,18 @@ def _compute_losses_and_metrics(
         dh_add_target = h_states[:, start_frame + 2 :] - h_states[:, start_frame:-2]
         assert dh_add_pred.numel() > 0, "additivity_h requires non-empty delta tensors."
         loss_additivity_h = F.mse_loss(dh_add_pred, dh_add_target)
+    if weights.action_consistency_h > 0 or weights.action_separation_h > 0:
+        assert h_states.shape[1] >= start_frame + 2, "action_consistency_h/action_separation_h requires at least two h timesteps after warmup."
+        dh_slice = h_states[:, start_frame + 1 :] - h_states[:, start_frame:-1]
+        actions_slice = a_seq[:, start_frame : start_frame + dh_slice.shape[1]]
+        action_ids = compress_actions_to_ids(actions_slice.detach().cpu().numpy())
+        if action_ids.ndim == 1:
+            action_ids = action_ids.reshape(actions_slice.shape[0], actions_slice.shape[1])
+        action_ids_t = torch.as_tensor(action_ids, device=dh_slice.device, dtype=torch.long)
+        if weights.action_consistency_h > 0:
+            loss_action_consistency_h = action_consistency_h_loss(dh_slice, action_ids_t)
+        if weights.action_separation_h > 0:
+            loss_action_separation_h = action_separation_h_loss(dh_slice, action_ids_t, cfg.action_separation_h)
 
     def _scaled(name: str, loss_tensor: torch.Tensor) -> torch.Tensor:
         if not loss_norm_enabled:
@@ -2517,7 +2692,10 @@ def _compute_losses_and_metrics(
         + weights.inverse_cycle_h * _scaled("loss_inverse_cycle_h", loss_inverse_cycle_h)
         + weights.rollout_kstep_p * _scaled("loss_rollout_kstep_p", loss_rollout_kstep_p)
         + weights.additivity_h * _scaled("loss_additivity_h", loss_additivity_h)
+        + weights.action_consistency_h * _scaled("loss_action_consistency_h", loss_action_consistency_h)
+        + weights.action_separation_h * _scaled("loss_action_separation_h", loss_action_separation_h)
         + weights.h_smooth * _scaled("loss_h_smooth", loss_h_smooth)
+        + weights.scale_non_noop_dh * _scaled("loss_scale_non_noop_dh", loss_scale_non_noop_dh)
         + weights.scale_dp * _scaled("loss_scale_dp", loss_scale_dp)
         + weights.action_delta_dp * _scaled("loss_action_delta_dp", loss_action_delta_dp)
         + weights.dz_anchor_dp * _scaled("loss_dz_anchor_dp", loss_dz_anchor_dp)
@@ -2613,7 +2791,10 @@ def _compute_losses_and_metrics(
         "loss_inverse_cycle_h": loss_inverse_cycle_h.item(),
         "loss_rollout_kstep_p": loss_rollout_kstep_p.item(),
         "loss_additivity_h": loss_additivity_h.item(),
+        "loss_action_consistency_h": loss_action_consistency_h.item(),
+        "loss_action_separation_h": loss_action_separation_h.item(),
         "loss_h_smooth": loss_h_smooth.item(),
+        "loss_scale_non_noop_dh": loss_scale_non_noop_dh.item(),
         "loss_scale_dp": loss_scale_dp.item(),
         "loss_action_delta_dp": loss_action_delta_dp.item(),
         "loss_dz_anchor_dp": loss_dz_anchor_dp.item(),
@@ -3088,6 +3269,12 @@ def log_metrics(
         filtered.pop("loss_rollout_kstep_p", None)
     if weights.additivity_h <= 0:
         filtered.pop("loss_additivity_h", None)
+    if weights.action_consistency_h <= 0:
+        filtered.pop("loss_action_consistency_h", None)
+    if weights.action_separation_h <= 0:
+        filtered.pop("loss_action_separation_h", None)
+    if weights.scale_non_noop_dh <= 0:
+        filtered.pop("loss_scale_non_noop_dh", None)
     if weights.scale_dp <= 0:
         filtered.pop("loss_scale_dp", None)
     if weights.action_delta_dp <= 0:
@@ -3177,6 +3364,9 @@ LOSS_COLUMN_TO_HISTORY_ATTR: Dict[str, str] = {
     "loss_inverse_cycle_h": "inverse_cycle_h",
     "loss_rollout_kstep_p": "rollout_kstep_p",
     "loss_additivity_h": "additivity_h",
+    "loss_action_consistency_h": "action_consistency_h",
+    "loss_action_separation_h": "action_separation_h",
+    "loss_scale_non_noop_dh": "scale_non_noop_dh",
     "loss_scale_dp": "scale_dp",
     "loss_action_delta_dp": "action_delta_dp",
     "loss_dz_anchor_dp": "dz_anchor_dp",
@@ -3259,6 +3449,9 @@ class LossHistory:
     inverse_cycle_h: List[float] = field(default_factory=list)
     rollout_kstep_p: List[float] = field(default_factory=list)
     additivity_h: List[float] = field(default_factory=list)
+    action_consistency_h: List[float] = field(default_factory=list)
+    action_separation_h: List[float] = field(default_factory=list)
+    scale_non_noop_dh: List[float] = field(default_factory=list)
     scale_dp: List[float] = field(default_factory=list)
     action_delta_dp: List[float] = field(default_factory=list)
     dz_anchor_dp: List[float] = field(default_factory=list)
@@ -3337,6 +3530,9 @@ class LossHistory:
         self.inverse_cycle_h.append(metrics.get("loss_inverse_cycle_h", 0.0))
         self.rollout_kstep_p.append(metrics.get("loss_rollout_kstep_p", 0.0))
         self.additivity_h.append(metrics.get("loss_additivity_h", 0.0))
+        self.action_consistency_h.append(metrics.get("loss_action_consistency_h", 0.0))
+        self.action_separation_h.append(metrics.get("loss_action_separation_h", 0.0))
+        self.scale_non_noop_dh.append(metrics.get("loss_scale_non_noop_dh", 0.0))
         self.scale_dp.append(metrics.get("loss_scale_dp", 0.0))
         self.action_delta_dp.append(metrics.get("loss_action_delta_dp", 0.0))
         self.dz_anchor_dp.append(metrics.get("loss_dz_anchor_dp", 0.0))
@@ -3484,6 +3680,9 @@ def plot_loss_curves(history: LossHistory, out_dir: Path) -> None:
         ("loss_inverse_cycle_h", history.inverse_cycle_h),
         ("loss_rollout_kstep_p", history.rollout_kstep_p),
         ("loss_additivity_h", history.additivity_h),
+        ("loss_action_consistency_h", history.action_consistency_h),
+        ("loss_action_separation_h", history.action_separation_h),
+        ("loss_scale_non_noop_dh", history.scale_non_noop_dh),
         ("loss_additivity_dp", history.additivity_dp),
         ("loss_scale_dp", history.scale_dp),
         ("loss_inverse_cycle_dp", history.inverse_cycle_dp),
@@ -4249,6 +4448,9 @@ def run_training(cfg: TrainConfig, model_cfg: ModelConfig, weights: LossWeights,
                 "inverse_dynamics_h",
                 "action_delta_h",
                 "additivity_h",
+                "action_consistency_h",
+                "action_separation_h",
+                "scale_non_noop_dh",
                 "rollout_kstep_h",
                 "rollout_kstep_delta_h",
                 "rollout_recon_h",
