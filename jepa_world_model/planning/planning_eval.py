@@ -375,8 +375,9 @@ def delta_lattice_astar(
         _, g, _, current = heapq.heappop(open_heap)
         if bounds_lo is not None and bounds_hi is not None:
             if np.any(current < bounds_lo) or np.any(current > bounds_hi):
-                _finalize_lattice()
-                return None
+                # Keep bounds as a hard constraint, but do not abort search/lattice
+                # just because one queued state falls outside.
+                continue
         if np.linalg.norm(current - goal) <= r_goal:
             goal_idx = find_or_add(current)
             actions: List[str] = []
@@ -403,8 +404,8 @@ def delta_lattice_astar(
             nxt = current + mu[action]
             if bounds_lo is not None and bounds_hi is not None:
                 if np.any(nxt < bounds_lo) or np.any(nxt > bounds_hi):
-                    _finalize_lattice()
-                    return None
+                    # Skip out-of-bounds expansions without terminating the run.
+                    continue
             nxt_idx = find_or_add(nxt)
             if collect_lattice:
                 edges.append((current_idx, nxt_idx))
