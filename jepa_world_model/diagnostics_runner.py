@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import contextmanager
 import csv
-import json
 import random
 from pathlib import Path
 from dataclasses import dataclass
@@ -128,18 +127,11 @@ class DiagnosticsOutputSpec:
 
 @dataclass
 class PlanningHRadiiDiagnostics:
-    mode: str
     h_metric: str
     d_move: float
     d_noop_p90: float
     d_same_frame_p90: float
     d_noise_floor: float
-    anchor_h: float
-    c_add_before: float
-    c_add_after: float
-    c_merge: float
-    c_edge: float
-    c_goal: float
     r_add: float
     r_merge: float
     r_edge: float
@@ -725,25 +717,6 @@ def _extract_planning_latents(
     return p_t, p_tp1, h_t, h_tp1, actions_np, action_labels, deltas, plan_h_states, same_frame_mask
 
 
-def _planning_anchor_state_path(metrics_dir: Path) -> Path:
-    return metrics_dir / "planning_anchor_state.json"
-
-
-def _load_planning_anchor_c_add(metrics_dir: Path, cfg: PlanningDiagnosticsConfig) -> float:
-    default = float(cfg.h_anchor_c_add)
-    state_path = _planning_anchor_state_path(metrics_dir)
-    if not state_path.exists():
-        return default
-    payload = json.loads(state_path.read_text())
-    value = float(payload.get("c_add", default))
-    return float(np.clip(value, cfg.h_anchor_c_add_min, cfg.h_anchor_c_add_max))
-
-
-def _save_planning_anchor_c_add(metrics_dir: Path, c_add: float) -> None:
-    state_path = _planning_anchor_state_path(metrics_dir)
-    state_path.write_text(json.dumps({"c_add": float(c_add)}, indent=2, sort_keys=True))
-
-
 def _quantile_or_zero(values: np.ndarray, q: float) -> float:
     if values.size == 0:
         return 0.0
@@ -758,7 +731,6 @@ def _compute_planning_graphs(
     actions_np: np.ndarray,
     action_labels: Sequence[Optional[str]],
     same_frame_mask: np.ndarray,
-    metrics_dir: Path,
     *,
     min_action_count: int,
     planning_cfg: PlanningDiagnosticsConfig,
@@ -799,29 +771,10 @@ def _compute_planning_graphs(
     d_noop_p90 = _quantile_or_zero(h_step_dist[noop_mask], 0.90)
     d_same_frame_p90 = _quantile_or_zero(h_step_dist[same_frame_mask], 0.90)
     d_noise_floor = max(d_noop_p90, d_same_frame_p90)
-    c_add_before = float(planning_cfg.h_anchor_c_add)
-    c_merge = float(planning_cfg.h_anchor_c_merge)
-    c_edge = float(planning_cfg.h_anchor_c_edge)
-    c_goal = float(planning_cfg.h_anchor_c_goal)
-    r_edge = float("nan")
-    d_nn = d_move
-    mode = planning_cfg.h_distance_mode
-    if mode == "anchor_h":
-        c_add_before = _load_planning_anchor_c_add(metrics_dir, planning_cfg)
-        r_merge = max(planning_cfg.h_anchor_noise_multiplier * d_noise_floor, c_merge * d_move)
-        r_add = max(r_merge, c_add_before * d_move)
-        r_edge = max(r_add, c_edge * d_move)
-        r_goal = max(r_merge, c_goal * d_move)
-    elif mode == "legacy":
-        r_add = planning_cfg.h_merge_multiplier * d_nn
-        if planning_cfg.h_merge_min is not None:
-            r_add = max(r_add, planning_cfg.h_merge_min)
-        if planning_cfg.h_merge_max is not None:
-            r_add = min(r_add, planning_cfg.h_merge_max)
-        r_merge = stats_h.r_merge
-        r_goal = stats_h.r_goal
-    else:
-        raise AssertionError(f"Unsupported h_distance_mode={mode!r}.")
+    r_add = float(planning_cfg.h_move_step_radius_scale * d_move)
+    r_merge = float(planning_cfg.h_move_step_merge_scale * d_move)
+    r_edge = float(planning_cfg.h_move_step_edge_scale * d_move)
+    r_goal = float(planning_cfg.h_move_step_goal_scale * d_move)
     stats_h.r_merge = float(r_merge)
     stats_h.r_goal = float(r_goal)
     graph_h = build_dataset_graph(
@@ -843,18 +796,11 @@ def _compute_planning_graphs(
             metric="l2",
         )
     radii_diag = PlanningHRadiiDiagnostics(
-        mode=mode,
         h_metric=h_metric,
         d_move=float(d_move),
         d_noop_p90=float(d_noop_p90),
         d_same_frame_p90=float(d_same_frame_p90),
         d_noise_floor=float(d_noise_floor),
-        anchor_h=float(d_move),
-        c_add_before=float(c_add_before),
-        c_add_after=float(c_add_before),
-        c_merge=float(c_merge),
-        c_edge=float(c_edge),
-        c_goal=float(c_goal),
         r_add=float(r_add),
         r_merge=float(r_merge),
         r_edge=float(r_edge),
@@ -1004,28 +950,6 @@ def _write_planning_metrics_row(
     append_csv_row(planning_metrics_path, header, row)
 
 
-def _update_anchor_c_add(
-    *,
-    planning_cfg: PlanningDiagnosticsConfig,
-    radii_diag: PlanningHRadiiDiagnostics,
-    num_nodes_h: int,
-    h_reach: np.ndarray,
-) -> float:
-    if radii_diag.mode != "anchor_h":
-        return radii_diag.c_add_before
-    if not planning_cfg.h_anchor_adapt_c_add:
-        return radii_diag.c_add_before
-    c_add = radii_diag.c_add_before
-    reach_median = float(np.median(h_reach)) if h_reach.size else 0.0
-    if reach_median >= planning_cfg.h_anchor_reachability_target and num_nodes_h > planning_cfg.h_anchor_target_nodes_max:
-        c_add += planning_cfg.h_anchor_c_add_adjust
-    elif reach_median < planning_cfg.h_anchor_reachability_target:
-        c_add -= planning_cfg.h_anchor_c_add_adjust
-    elif num_nodes_h < planning_cfg.h_anchor_target_nodes_min:
-        c_add -= planning_cfg.h_anchor_c_add_adjust
-    return float(np.clip(c_add, planning_cfg.h_anchor_c_add_min, planning_cfg.h_anchor_c_add_max))
-
-
 def _write_planning_anchor_metrics_row(
     metrics_dir: Path,
     radii_diag: PlanningHRadiiDiagnostics,
@@ -1038,18 +962,11 @@ def _write_planning_anchor_metrics_row(
     reach_median = float(np.median(h_reach)) if h_reach.size else float("nan")
     header = [
         "step",
-        "mode",
         "h_metric",
-        "anchor_h",
         "d_move",
         "d_noop_p90",
         "d_same_frame_p90",
         "d_noise_floor",
-        "c_add_before",
-        "c_add_after",
-        "c_merge",
-        "c_edge",
-        "c_goal",
         "r_add",
         "r_merge",
         "r_edge",
@@ -1059,18 +976,11 @@ def _write_planning_anchor_metrics_row(
     ]
     row = [
         global_step,
-        radii_diag.mode,
         radii_diag.h_metric,
-        radii_diag.anchor_h,
         radii_diag.d_move,
         radii_diag.d_noop_p90,
         radii_diag.d_same_frame_p90,
         radii_diag.d_noise_floor,
-        radii_diag.c_add_before,
-        radii_diag.c_add_after,
-        radii_diag.c_merge,
-        radii_diag.c_edge,
-        radii_diag.c_goal,
         radii_diag.r_add,
         radii_diag.r_merge,
         radii_diag.r_edge,
@@ -3144,7 +3054,6 @@ def run_planning_diagnostics_step(
             actions_np,
             action_labels,
             same_frame_mask,
-            metrics_dir,
             min_action_count=planning_cfg.min_action_count,
             planning_cfg=planning_cfg,
         )
@@ -3248,14 +3157,6 @@ def run_planning_diagnostics_step(
             title="H to grid nearest cosine distance",
         )
 
-    h_radii_diag.c_add_after = _update_anchor_c_add(
-        planning_cfg=planning_cfg,
-        radii_diag=h_radii_diag,
-        num_nodes_h=graph_h.centers.shape[0],
-        h_reach=h_reach,
-    )
-    if h_radii_diag.mode == "anchor_h":
-        _save_planning_anchor_c_add(metrics_dir, h_radii_diag.c_add_after)
     _write_planning_anchor_metrics_row(
         metrics_dir,
         h_radii_diag,
