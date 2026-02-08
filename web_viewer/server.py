@@ -28,6 +28,7 @@ from flask import (
 from werkzeug.utils import safe_join
 
 from gridworldkey_env import create_env_with_theme
+from jepa_world_model.config_planning import PlanningDiagnosticsConfig
 from .config import ViewerConfig
 from .csv_utils import get_max_step
 from .experiments import DIAGNOSTICS_H_PATTERNS
@@ -2623,7 +2624,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if selected_id is None:
             selected_id = _latest_experiment_id()
         if selected_id is None:
-            planning_defaults = asdict(TrainConfig().planning_diagnostics)
+            planning_defaults = asdict(PlanningDiagnosticsConfig())
             return render_template(
                 "planning_page.html",
                 experiment=None,
@@ -2642,7 +2643,7 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         if selected is None:
             abort(404, f"Experiment {selected_id} not found.")
 
-        planning_defaults = asdict(TrainConfig().planning_diagnostics)
+        planning_defaults = asdict(PlanningDiagnosticsConfig())
         try:
             env = create_env_with_theme(
                 theme=planning_defaults.get("env_theme"),
