@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import logging
 import os
 import time
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import datetime, timedelta
 import csv
 from pathlib import Path
@@ -22,6 +27,7 @@ from flask import (
 )
 from werkzeug.utils import safe_join
 
+from gridworldkey_env import create_env_with_theme
 from .config import ViewerConfig
 from .csv_utils import get_max_step
 from .experiments import DIAGNOSTICS_H_PATTERNS
@@ -56,6 +62,7 @@ from .experiments import (
     get_image_folder_specs,
 )
 from .plots import build_overlay, build_ranking_accuracy_plot
+from .planning_eval import default_trace_specs, run_planning_eval
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 DEFAULT_PAGE_SIZE = 25
@@ -245,6 +252,133 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         field_text = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
         app.logger.info("profile:%s %.1fms %s", label, elapsed_ms, field_text)
+
+    planning_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="planning_eval")
+    planning_jobs: Dict[str, Dict[str, object]] = {}
+    planning_jobs_lock = threading.Lock()
+
+    def _latest_experiment_id() -> Optional[str]:
+        index_rows = build_experiment_index(cfg.output_dir)
+        if not index_rows:
+            return None
+        sorted_rows = sorted(
+            index_rows,
+            key=lambda row: row.last_modified or datetime.fromtimestamp(0),
+            reverse=True,
+        )
+        return sorted_rows[0].id if sorted_rows else None
+
+    def _latest_planning_run_dir(exp_path: Path) -> Optional[Path]:
+        root = exp_path / "planning_eval"
+        if not root.exists():
+            return None
+        candidates = sorted((p for p in root.iterdir() if p.is_dir()), reverse=True)
+        return candidates[0] if candidates else None
+
+    def _step_from_stem(stem: str) -> Optional[int]:
+        suffix = stem.split("_")[-1]
+        try:
+            return int(suffix)
+        except ValueError:
+            return None
+
+    def _url_for_asset(experiment: Experiment, path: Optional[Path]) -> Optional[str]:
+        if path is None:
+            return None
+        try:
+            rel = path.relative_to(experiment.path)
+        except ValueError:
+            return None
+        return url_for("serve_asset", relative_path=f"{experiment.id}/{rel}")
+
+    def _latest_checkpoint_info(experiment: Experiment) -> Dict[str, object]:
+        checkpoints_dir = experiment.path / "checkpoints"
+        if not checkpoints_dir.exists():
+            return {"name": None, "step": None}
+        step_ckpts = sorted(checkpoints_dir.glob("step_*.pt"))
+        candidate: Optional[Path] = None
+        if step_ckpts:
+            candidate = step_ckpts[-1]
+        elif (checkpoints_dir / "last.pt").exists():
+            candidate = checkpoints_dir / "last.pt"
+        elif (checkpoints_dir / "final.pt").exists():
+            candidate = checkpoints_dir / "final.pt"
+        if candidate is None:
+            return {"name": None, "step": None}
+        step = _step_from_stem(candidate.stem)
+        return {"name": candidate.name, "step": step}
+
+    def _build_planning_result_payload(experiment: Experiment, run_dir: Path) -> Dict[str, object]:
+        run_info_path = run_dir / "run_info.json"
+        run_info: Dict[str, object] = {}
+        if run_info_path.exists():
+            try:
+                run_info = json.loads(run_info_path.read_text())
+            except Exception:
+                run_info = {}
+
+        vis_graph = run_dir / "vis_planning_graph"
+        vis_h_grid_dist = run_dir / "vis_planning_h_grid_dist"
+        vis_lattice = run_dir / "vis_planning_lattice"
+        vis_exec = run_dir / "vis_planning_exec"
+        graph_h_images = sorted(vis_graph.glob("graph_h_*.png"))
+        h_grid_dist_images = sorted(vis_h_grid_dist.glob("h_grid_dist_*.png"))
+        graph_h = graph_h_images[-1] if graph_h_images else None
+        h_grid_dist = h_grid_dist_images[-1] if h_grid_dist_images else None
+        step = _step_from_stem(graph_h.stem) if graph_h is not None else None
+
+        traces_raw = run_info.get("traces")
+        traces: List[Dict[str, object]] = []
+        if isinstance(traces_raw, list):
+            for item in traces_raw:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label", ""))
+                if not label:
+                    continue
+                traces.append(
+                    {
+                        "label": label,
+                        "start": item.get("start"),
+                        "goal": item.get("goal"),
+                    }
+                )
+        if not traces:
+            for lattice_path in sorted(vis_lattice.glob("lattice_*_h_*.png")):
+                name = lattice_path.stem
+                if not name.startswith("lattice_") or "_h_" not in name:
+                    continue
+                label = name[len("lattice_") :].rsplit("_h_", 1)[0]
+                traces.append({"label": label, "start": None, "goal": None})
+        traces = traces[:3]
+
+        columns: List[Dict[str, object]] = []
+        for trace in traces:
+            label = str(trace["label"])
+            lattice_candidates = sorted(vis_lattice.glob(f"lattice_{label}_h_*.png"))
+            exec_candidates = sorted(vis_exec.glob(f"exec_{label}_h_*.png"))
+            lattice_image = lattice_candidates[-1] if lattice_candidates else None
+            exec_image = exec_candidates[-1] if exec_candidates else None
+            columns.append(
+                {
+                    "label": label,
+                    "start": trace.get("start"),
+                    "goal": trace.get("goal"),
+                    "execution_trace_url": _url_for_asset(experiment, exec_image),
+                    "planning_graph_h_url": _url_for_asset(experiment, graph_h),
+                    "h_grid_dist_url": _url_for_asset(experiment, h_grid_dist),
+                    "planning_lattice_url": _url_for_asset(experiment, lattice_image),
+                }
+            )
+
+        return {
+            "run_id": run_dir.name,
+            "checkpoint": run_info.get("checkpoint"),
+            "checkpoint_step": run_info.get("checkpoint_step", step),
+            "planning_config_url": _url_for_asset(experiment, run_dir / "planning_config.txt"),
+            "run_info_url": _url_for_asset(experiment, run_info_path),
+            "columns": columns,
+        }
 
     def _parse_graph_history_csv(path: Path) -> List[Dict[str, float]]:
         rows: List[Dict[str, float]] = []
@@ -2476,6 +2610,148 @@ def create_app(config: Optional[ViewerConfig] = None) -> Flask:
             active_experiment_id=selected.id,
             first_experiment_id=selected.id,
         )
+
+    @app.route("/planning", defaults={"exp_id": None})
+    @app.route("/planning/<exp_id>")
+    def planning(exp_id: Optional[str]):
+        requested = exp_id or request.args.get("id")
+        selected_id: Optional[str] = None
+        if requested:
+            requested_path = cfg.output_dir / requested
+            if requested_path.is_dir():
+                selected_id = requested
+        if selected_id is None:
+            selected_id = _latest_experiment_id()
+        if selected_id is None:
+            planning_defaults = asdict(TrainConfig().planning_diagnostics)
+            return render_template(
+                "planning_page.html",
+                experiment=None,
+                planning_defaults=planning_defaults,
+                default_traces=[],
+                latest_result=None,
+                latest_checkpoint={"name": None, "step": None},
+                cfg=cfg,
+                active_nav="planning",
+                active_experiment_id=None,
+                first_experiment_id=None,
+            )
+        if exp_id is None:
+            return redirect(url_for("planning", exp_id=selected_id))
+        selected = load_experiment(cfg.output_dir / selected_id)
+        if selected is None:
+            abort(404, f"Experiment {selected_id} not found.")
+
+        planning_defaults = asdict(TrainConfig().planning_diagnostics)
+        try:
+            env = create_env_with_theme(
+                theme=planning_defaults.get("env_theme"),
+                render_mode="rgb_array",
+                keyboard_override=False,
+                start_manual_control=False,
+            )
+            default_traces = default_trace_specs(env.grid_rows, env.grid_cols)
+        finally:
+            if "env" in locals():
+                env.close()
+        latest_run_dir = _latest_planning_run_dir(selected.path)
+        latest_result = _build_planning_result_payload(selected, latest_run_dir) if latest_run_dir else None
+        return render_template(
+            "planning_page.html",
+            experiment=selected,
+            planning_defaults=planning_defaults,
+            default_traces=default_traces,
+            latest_result=latest_result,
+            latest_checkpoint=_latest_checkpoint_info(selected),
+            cfg=cfg,
+            active_nav="planning",
+            active_experiment_id=selected.id,
+            first_experiment_id=selected.id,
+        )
+
+    @app.post("/api/planning/<exp_id>/run")
+    def planning_run(exp_id: str):
+        exp_path = cfg.output_dir / exp_id
+        if not exp_path.is_dir():
+            abort(404, f"Experiment {exp_id} not found.")
+        experiment = load_experiment(exp_path)
+        if experiment is None:
+            abort(404, f"Experiment {exp_id} not found.")
+        payload = request.get_json(silent=True) or {}
+        planning_config = payload.get("planning_config") or {}
+        traces_payload = payload.get("traces")
+        traces = traces_payload if isinstance(traces_payload, list) and traces_payload else None
+        checkpoint_name = payload.get("checkpoint_name")
+        checkpoint_path: Optional[Path] = None
+        if checkpoint_name:
+            candidate = experiment.path / "checkpoints" / str(checkpoint_name)
+            if not candidate.exists():
+                abort(400, f"Unknown checkpoint: {checkpoint_name}")
+            checkpoint_path = candidate
+
+        job_id = uuid.uuid4().hex
+        with planning_jobs_lock:
+            planning_jobs[job_id] = {
+                "id": job_id,
+                "status": "queued",
+                "exp_id": exp_id,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "error": None,
+                "result": None,
+            }
+
+        def _worker() -> None:
+            with planning_jobs_lock:
+                if job_id in planning_jobs:
+                    planning_jobs[job_id]["status"] = "running"
+            try:
+                run_info = run_planning_eval(
+                    experiment_dir=experiment.path,
+                    planning_overrides=planning_config,
+                    traces=traces,
+                    checkpoint_path=checkpoint_path,
+                    device="cpu",
+                )
+                result_payload = _build_planning_result_payload(experiment, Path(str(run_info["planning_eval_dir"])))
+                with planning_jobs_lock:
+                    if job_id in planning_jobs:
+                        planning_jobs[job_id]["status"] = "completed"
+                        planning_jobs[job_id]["result"] = result_payload
+            except Exception as exc:
+                with planning_jobs_lock:
+                    if job_id in planning_jobs:
+                        planning_jobs[job_id]["status"] = "failed"
+                        planning_jobs[job_id]["error"] = str(exc)
+
+        planning_executor.submit(_worker)
+        return jsonify(
+            {
+                "job_id": job_id,
+                "status": "queued",
+                "poll_url": url_for("planning_job_status", exp_id=exp_id, job_id=job_id),
+            }
+        )
+
+    @app.get("/api/planning/<exp_id>/job/<job_id>")
+    def planning_job_status(exp_id: str, job_id: str):
+        with planning_jobs_lock:
+            job = dict(planning_jobs.get(job_id, {}))
+        if not job or str(job.get("exp_id")) != exp_id:
+            abort(404, "Planning job not found.")
+        return jsonify(job)
+
+    @app.get("/api/planning/<exp_id>/latest")
+    def planning_latest(exp_id: str):
+        exp_path = cfg.output_dir / exp_id
+        if not exp_path.is_dir():
+            abort(404, f"Experiment {exp_id} not found.")
+        experiment = load_experiment(exp_path)
+        if experiment is None:
+            abort(404, f"Experiment {exp_id} not found.")
+        latest_run_dir = _latest_planning_run_dir(experiment.path)
+        if latest_run_dir is None:
+            return jsonify({"result": None})
+        return jsonify({"result": _build_planning_result_payload(experiment, latest_run_dir)})
 
     @app.route("/assessment", defaults={"exp_id": None})
     @app.route("/assessment/<exp_id>")

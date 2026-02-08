@@ -2905,6 +2905,8 @@ def run_planning_diagnostics_step(
     grid_overlay_frames: Optional[GridOverlayFrames],
     run_dir: Path,
     force_h_zero: bool = False,
+    planning_tests: Optional[Sequence[Tuple[str, Tuple[int, int], Tuple[int, int]]]] = None,
+    emit_exec_for_all_tests: bool = False,
 ) -> None:
     phase_totals: Dict[str, float] = defaultdict(float)
     resolved_outputs = _resolve_outputs(
@@ -3176,7 +3178,16 @@ def run_planning_diagnostics_step(
                 planning_cfg,
                 rng,
             )
-    test_cases = _build_planning_tests(planning_env, planning_cfg)
+    test_cases = (
+        _build_planning_tests(planning_env, planning_cfg)
+        if planning_tests is None
+        else list(planning_tests)
+    )
+    if not test_cases:
+        raise AssertionError("Planning diagnostics require at least one planning test case.")
+    labels = [label for label, _, _ in test_cases]
+    if len(set(labels)) != len(labels):
+        raise AssertionError("Planning diagnostics test labels must be unique.")
 
     test_results: Dict[str, PlanningTestResult] = {}
     plan_nodes_for_plot: Dict[str, Optional[np.ndarray]] = {}
@@ -3396,6 +3407,26 @@ def run_planning_diagnostics_step(
             and resolved_outputs["vis_planning_exec_test2_h"].enabled
             and want_planning_h
         ):
+            plot_grid_trace(
+                planning_exec_dir / f"exec_{label}_h_{global_step:07d}.png",
+                planning_env.grid_rows,
+                planning_env.grid_cols,
+                visited_h,
+                start_tile,
+                goal_tile,
+                title="Execution trace (h)",
+            )
+        if emit_exec_for_all_tests and use_p:
+            plot_grid_trace(
+                planning_exec_dir / f"exec_{label}_p_{global_step:07d}.png",
+                planning_env.grid_rows,
+                planning_env.grid_cols,
+                visited,
+                start_tile,
+                goal_tile,
+                title="Execution trace (p)",
+            )
+        if emit_exec_for_all_tests and want_planning_h:
             plot_grid_trace(
                 planning_exec_dir / f"exec_{label}_h_{global_step:07d}.png",
                 planning_env.grid_rows,

@@ -133,6 +133,16 @@
                     <li class="nav-item d-none d-lg-block text-white-50">|</li>
                     <li class="nav-item">
                         {% if active_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'planning' else '' }}" href="{{ url_for('planning', exp_id=active_experiment_id) }}">Planning</a>
+                        {% elif first_experiment_id %}
+                        <a class="nav-link {{ 'active' if current_nav == 'planning' else '' }}" href="{{ url_for('planning', exp_id=first_experiment_id) }}">Planning</a>
+                        {% else %}
+                        <span class="nav-link disabled text-secondary">Planning</span>
+                        {% endif %}
+                    </li>
+                    <li class="nav-item d-none d-lg-block text-white-50">|</li>
+                    <li class="nav-item">
+                        {% if active_experiment_id %}
                         <a class="nav-link {{ 'active' if current_nav == 'assessment' else '' }}" href="{{ url_for('assessment', exp_id=active_experiment_id) }}">Assessment</a>
                         {% elif first_experiment_id %}
                         <a class="nav-link {{ 'active' if current_nav == 'assessment' else '' }}" href="{{ url_for('assessment', exp_id=first_experiment_id) }}">Assessment</a>

@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+    <div>
+        <h3 class="mb-1">Planning</h3>
+        {% if experiment %}
+        <div class="text-muted small">Experiment: <span class="font-monospace">{{ experiment.id }}</span></div>
+        {% else %}
+        <div class="text-muted small">No experiment available.</div>
+        {% endif %}
+    </div>
+    {% if experiment %}
+    <div class="d-flex align-items-center gap-2">
+        <label class="form-label mb-0 small text-muted">Checkpoint</label>
+        <input id="planning-checkpoint" class="form-control form-control-sm font-monospace" style="width: 180px;" value="{{ latest_checkpoint.name or '' }}" placeholder="latest" />
+        <button id="planning-run-btn" class="btn btn-sm btn-primary">Run Planning Eval</button>
+    </div>
+    {% endif %}
+</div>
+
+{% if not experiment %}
+<div class="alert alert-info">No experiments found in {{ cfg.output_dir }}.</div>
+{% else %}
+<div class="card mb-3">
+    <div class="card-header py-2"><strong>Planning Config</strong></div>
+    <div class="card-body">
+        <div class="row g-2" id="planning-config-grid">
+            {% for key, value in planning_defaults.items() %}
+            <div class="col-12 col-md-6 col-xl-4">
+                <label class="form-label small mb-1 font-monospace">{{ key }}</label>
+                {% if value is boolean %}
+                <select class="form-select form-select-sm planning-config-input" data-key="{{ key }}">
+                    <option value="true" {{ 'selected' if value else '' }}>true</option>
+                    <option value="false" {{ 'selected' if not value else '' }}>false</option>
+                </select>
+                {% elif value is number %}
+                <input class="form-control form-control-sm planning-config-input" data-key="{{ key }}" value="{{ value }}" />
+                {% else %}
+                <input class="form-control form-control-sm planning-config-input" data-key="{{ key }}" value="{{ value if value is not none else '' }}" />
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <strong>Execution Traces</strong>
+        <span id="planning-status" class="small text-muted">Idle</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-3" id="planning-columns">
+            {% for trace in default_traces[:3] %}
+            <div class="col-12 col-lg-4 planning-column" data-label="{{ trace.label }}">
+                <div class="border rounded p-2 mb-2 bg-light-subtle">
+                    <div class="fw-semibold mb-2">{{ trace.label }}</div>
+                    <div class="row g-2">
+                        <div class="col-6">
+                            <label class="form-label small mb-1">Start (r,c)</label>
+                            <input class="form-control form-control-sm trace-start" value="{{ trace.start[0] }},{{ trace.start[1] }}" />
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small mb-1">Goal (r,c)</label>
+                            <input class="form-control form-control-sm trace-goal" value="{{ trace.goal[0] }},{{ trace.goal[1] }}" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mb-2">
+                    <div class="card-header py-1 small d-flex justify-content-between">
+                        <span>Execution Trace</span>
+                        <span class="text-muted checkpoint-step"></span>
+                    </div>
+                    <div class="card-body p-2 text-center">
+                        <img class="img-fluid border rounded planning-img execution-trace" alt="Execution trace" />
+                    </div>
+                </div>
+
+                <div class="card mb-2">
+                    <div class="card-header py-1 small d-flex justify-content-between">
+                        <span>Planning Graph (h)</span>
+                        <span class="text-muted checkpoint-step"></span>
+                    </div>
+                    <div class="card-body p-2 text-center">
+                        <img class="img-fluid border rounded planning-img planning-graph-h" alt="Planning graph h" />
+                    </div>
+                </div>
+
+                <div class="card mb-2">
+                    <div class="card-header py-1 small d-flex justify-content-between">
+                        <span>H Grid Distance</span>
+                        <span class="text-muted checkpoint-step"></span>
+                    </div>
+                    <div class="card-body p-2 text-center">
+                        <img class="img-fluid border rounded planning-img h-grid-dist" alt="H grid distance" />
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header py-1 small d-flex justify-content-between">
+                        <span>Planning Lattice</span>
+                        <span class="text-muted checkpoint-step"></span>
+                    </div>
+                    <div class="card-body p-2 text-center">
+                        <img class="img-fluid border rounded planning-img planning-lattice" alt="Planning lattice" />
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header py-2"><strong>Latest Result Metadata</strong></div>
+    <div class="card-body small">
+        <div>Run: <span id="planning-run-id" class="font-monospace text-muted">-</span></div>
+        <div>Checkpoint: <span id="planning-checkpoint-label" class="font-monospace text-muted">-</span></div>
+        <div>Config: <a id="planning-config-url" class="font-monospace" href="#" target="_blank" rel="noopener">-</a></div>
+        <div>Run info: <a id="planning-runinfo-url" class="font-monospace" href="#" target="_blank" rel="noopener">-</a></div>
+    </div>
+</div>
+
+<script>
+window.PLANNING_PAGE_DATA = {
+    expId: {{ experiment.id|tojson }},
+    latestResult: {{ latest_result|tojson }},
+};
+</script>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='planning_page.js') }}"></script>
+{% endblock %}
