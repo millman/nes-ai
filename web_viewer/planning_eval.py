@@ -93,7 +93,10 @@ def _load_from_metadata(run_dir: Path) -> Tuple[TrainConfig, ModelConfig, LossWe
     cfg = TrainConfig()
     cfg.data_root = Path(train_raw.get("data_root", cfg.data_root))
     cfg.seq_len = int(train_raw.get("seq_len", cfg.seq_len))
-    cfg.max_trajectories = train_raw.get("max_trajectories", cfg.max_trajectories)
+    max_traj_raw = train_raw.get("max_trajectories", cfg.max_trajectories)
+    if isinstance(max_traj_raw, str) and max_traj_raw.lower() == "null":
+        max_traj_raw = None
+    cfg.max_trajectories = None if max_traj_raw is None else int(max_traj_raw)
     cfg.val_fraction = float(train_raw.get("val_fraction", cfg.val_fraction))
     cfg.val_split_seed = int(train_raw.get("val_split_seed", cfg.val_split_seed))
     cfg.z_norm = str(train_raw.get("z_norm", cfg.z_norm))
